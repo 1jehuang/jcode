@@ -990,6 +990,10 @@ impl BashTool {
         let process = child
             .id()
             .map(crate::background::ToolHandoff::track_current_process);
+        // A timeout promotion adopts this call under its own handoff, so
+        // cancelling that task stops the shell's group too.
+        let promotion = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let promoted_process = child.id().map(|pid| promotion.track_process(pid));
 
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
@@ -1013,7 +1017,7 @@ impl BashTool {
         // the still-running task off to the background manager instead of killing it.
         let unguarded_work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
-                let _process = process;
+                let _process = (process, promoted_process);
                 let stdout_task = tokio::spawn(collect_output_reporting_progress(
                     stdout_handle,
                     stdout_progress,
@@ -1063,7 +1067,8 @@ impl BashTool {
                 let display_name =
                     summarize_background_command(params.intent.as_deref(), &params.command);
                 let info = crate::background::global()
-                    .adopt_with_options(
+                    .adopt_handoff(
+                        Some(promotion),
                         "bash",
                         Some(display_name.clone()),
                         &ctx.session_id,

@@ -87,14 +87,15 @@ impl ToolHandoff {
     /// Record a process group the running call owns until the returned guard
     /// drops, so cancelling the task that adopted the call stops it too.
     pub fn track_current_process(pid: u32) -> HandoffProcess {
-        HandoffProcess(
-            TOOL_HANDOFF
-                .try_with(|handoff| {
-                    lock_ignoring_poison(&handoff.pids).insert(pid);
-                    (Arc::clone(handoff), pid)
-                })
-                .ok(),
-        )
+        TOOL_HANDOFF
+            .try_with(|handoff| handoff.track_process(pid))
+            .unwrap_or(HandoffProcess(None))
+    }
+
+    /// Record a process group on this handoff until the returned guard drops.
+    pub fn track_process(self: &Arc<Self>, pid: u32) -> HandoffProcess {
+        lock_ignoring_poison(&self.pids).insert(pid);
+        HandoffProcess(Some((Arc::clone(self), pid)))
     }
 
     /// Record the file the running call's shell writes as it runs, so the

@@ -1377,7 +1377,15 @@ async fn handed_off_bash_records_a_nonzero_exit_as_failed() {
         }));
         let manager = crate::background::global();
         let info = manager
-            .adopt_handoff(Some(handoff), "bash", None, "handoff-exit", true, true, call)
+            .adopt_handoff(
+                Some(handoff),
+                "bash",
+                None,
+                "handoff-exit",
+                true,
+                true,
+                call,
+            )
             .await;
         let finished = manager
             .wait(&info.task_id, Duration::from_secs(10), false)
@@ -1386,4 +1394,49 @@ async fn handed_off_bash_records_a_nonzero_exit_as_failed() {
         assert_eq!(finished.task.status, BackgroundTaskStatus::Failed);
         assert_eq!(finished.task.exit_code, Some(7));
     }
+}
+
+/// Cancelling a timeout-promoted piped shell stops the children in its
+/// process group, not only the shell that `kill_on_drop` kills.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_timeout_promoted_shell_stops_its_children() {
+    let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let command = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+    let result = BashTool::new()
+        .execute(
+            json!({"command": command, "timeout": 300}),
+            make_ctx(Some(stdin_tx)),
+        )
+        .await
+        .unwrap();
+    let metadata = result.metadata.expect("expected background metadata");
+    assert_eq!(metadata["timeout_promoted"], true);
+    let task_id = metadata["task_id"].as_str().unwrap();
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    assert!(
+        crate::background::global()
+            .cancel_with_grace(task_id, Duration::from_millis(100))
+            .await
+            .unwrap()
+    );
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while alive() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert!(
+        stopped.is_ok(),
+        "cancel must stop the promoted shell's children"
+    );
 }
