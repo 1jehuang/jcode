@@ -5,11 +5,22 @@ The release workflow publishes releases with GitHub's built-in GITHUB_TOKEN.
 GitHub deliberately suppresses most follow-up events created by that token, so
 the publisher explicitly dispatches the same workflow used for external release
 events and manual backfills.
+
+Optional changelog/discord/<tag>.json files contain a nonempty JSON array of
+content strings, each at most 2000 UTF-16 code units. They are sent verbatim.
+Multipart delivery checkpoints each part in the release body. An unresolved
+`pending` checkpoint requires manual reconciliation: confirm whether Discord
+received that part, then replace its state with `sent:<message-id>` if delivered,
+or remove that checkpoint only after confirming no message was delivered.
+Never simply rerun or delete a pending checkpoint after an uncertain delivery.
+The workflow's per-tag concurrency group must serialize runs of this script.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+from pathlib import Path
 import json
 import os
 import re
@@ -62,6 +73,22 @@ def preview_commit_lines(notes: str) -> list[str]:
 
 
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
+    if match := re.fullmatch(r"selfdev-linux-([0-9a-f]{40})", tag):
+        lines = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
+        section = re.search(r"^## Highlights[ \t]*\n(.*?)(?=^#|^<!--|\Z)", body, re.M | re.S)
+        if section:
+            bullets = re.findall(r"^[-*] (\S[^\n]*)", section[1], re.M)
+            if bullets:
+                lines += ["", "**What changed**"]
+                for item in bullets[:4]:
+                    text = item.strip()
+                    lines.append("- " + (text if len(text) <= 160 else text[:159].rstrip() + "…"))
+        links = f"[Download & release notes](<{url}>)"
+        comparison = re.search(r"^\[View all ([0-9]+) commits\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$", body, re.M)
+        if comparison and comparison[3] == match[1]:
+            links += f" · [All {comparison[1]} commits](<https://github.com/1jehuang/jcode/compare/{comparison[2]}...{match[1]}>)"
+        lines += ["", links]
+        return "\n".join(lines)
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
         # An arbitrary URL cannot both fit Discord and remain intact. Fall back
         # to the project's downloads page instead of emitting a broken link.
@@ -180,6 +207,96 @@ def mark_release_announced(
     )
 
 
+ANNOUNCEMENT_DIR = Path(__file__).resolve().parent.parent / "changelog" / "discord"
+
+
+def load_announcement(tag: str) -> list[str] | None:
+    # Tags must never escape the checked-in announcement directory.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag):
+        return None
+    path = ANNOUNCEMENT_DIR / f"{tag}.json"
+    if not path.exists():
+        return None
+    try:
+        messages = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("expected a nonempty array of content strings")
+        for index, content in enumerate(messages):
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError(f"message {index + 1} must be a nonempty string")
+            if len(content.encode("utf-16-le")) // 2 > DISCORD_LIMIT:
+                raise ValueError(f"message {index + 1} exceeds 2000 UTF-16 units")
+    except (OSError, ValueError, UnicodeError) as error:
+        raise RuntimeError(f"Invalid Discord announcement {path}: {error}") from error
+    return messages
+
+
+def multipart_marker(tag: str, digest: str, index: int, state: str) -> str:
+    return f"<!-- jcode-discord-part:{tag}:{digest}:{index}:{state} -->"
+
+
+def announce_multipart(*, repository: str, tag: str, token: str,
+                       webhook_url: str, messages: list[str]) -> str | None:
+    digest = hashlib.sha256(json.dumps(messages, ensure_ascii=True).encode()).hexdigest()
+    last_id = None
+
+    def latest() -> dict[str, Any]:
+        release = fetch_release(repository=repository, tag=tag, token=token)
+        body = release.get("body") or ""
+        if release.get("draft"):
+            raise RuntimeError(f"Refusing to announce draft release {tag}")
+        parts = re.findall(r"<!-- jcode-discord-part:" + re.escape(tag)
+                           + r":([^:]+):(\d+):([^ ]+) -->", body)
+        for saved_digest, _, state in parts:
+            if saved_digest != digest:
+                raise RuntimeError("Announcement content changed after posting began")
+            if state == "pending":
+                raise RuntimeError("Unresolved Discord pending delivery. Reconcile manually before retrying")
+        return release
+
+    def persist(release: dict[str, Any], body: str) -> None:
+        github_request(
+            f"https://api.github.com/repos/{repository}/releases/{release['id']}",
+            token=token, method="PATCH", payload={"body": body},
+        )
+
+    for index, content in enumerate(messages, 1):
+        release = latest()
+        body = release.get("body") or ""
+        if already_announced(body, tag):
+            return last_id
+        receipt_prefix = multipart_marker(tag, digest, index, "sent:")[:-4]
+        if receipt_prefix in body:
+            continue
+        pending = multipart_marker(tag, digest, index, "pending")
+        # A durable intent checkpoint closes the lost-response duplicate window.
+        persist(release, f"{body.rstrip()}\n\n{pending}\n")
+        try:
+            message = post_to_discord(webhook_url=webhook_url, content=content)
+            last_id = str(message["id"])
+            # Fetch again to preserve edits made during webhook delivery.
+            release = fetch_release(repository=repository, tag=tag, token=token)
+            body = release.get("body") or ""
+            if pending not in body:
+                raise RuntimeError("Pending checkpoint disappeared during delivery")
+            receipt = multipart_marker(tag, digest, index, f"sent:{last_id}")
+            persist(release, body.replace(pending, receipt))
+        except Exception as error:
+            # Do not report a retryable workflow failure after a possible public
+            # side effect. The durable pending checkpoint blocks future sends.
+            print(f"::warning::Partial Discord announcement {tag}, part {index}/{len(messages)}: "
+                  f"delivery or receipt uncertain ({error}). STOP: manually reconcile the pending "
+                  "checkpoint with Discord before retrying.", file=sys.stderr)
+            return last_id
+    release = latest()
+    body = release.get("body") or ""
+    for index in range(1, len(messages) + 1):
+        if multipart_marker(tag, digest, index, "sent:")[:-4] not in body:
+            raise RuntimeError(f"Missing Discord receipt for part {index}; refusing final marker")
+    mark_release_announced(repository=repository, release=release, tag=tag, token=token)
+    return last_id
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", default=os.environ.get("GITHUB_REF_NAME"))
@@ -208,6 +325,11 @@ def announce_release(
         print(f"Discord announcement for {tag} is already recorded; skipping")
         return None
 
+    messages = load_announcement(tag)
+    if messages is not None:
+        return announce_multipart(repository=repository, tag=tag, token=token,
+                                  webhook_url=webhook_url, messages=messages)
+
     content = format_message(
         tag=tag,
         name=release.get("name") or tag,
@@ -220,8 +342,8 @@ def announce_release(
 
     # Re-fetch immediately before patching so an edit made while the Discord
     # request was in flight is not overwritten with the initially fetched body.
-    latest_release = fetch_release(repository=repository, tag=tag, token=token)
     try:
+        latest_release = fetch_release(repository=repository, tag=tag, token=token)
         mark_release_announced(
             repository=repository, release=latest_release, tag=tag, token=token
         )

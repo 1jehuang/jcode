@@ -41,7 +41,8 @@ use journal::{PersistVectorMode, SessionJournalMeta, SessionPersistState};
 pub use maintenance::prune_old_session_backups;
 pub use memory_profile::SessionMemoryProfileSnapshot;
 use memory_profile::{
-    ContentBlockMemoryStats, SessionMemoryProfileCache, summarize_blocks, summarize_message_content,
+    ContentBlockMemoryStats, SessionMemoryProfileCache, stored_message_json_bytes,
+    summarize_blocks, summarize_message_content,
 };
 use model::SESSION_CONTEXT_PREFIX;
 pub use model::{StoredReplayEvent, StoredReplayEventKind};
@@ -59,46 +60,12 @@ use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
 pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
-fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
-    messages.iter().map(StoredMessage::to_message).collect()
-}
-
-fn message_has_tool_image(content: &[ContentBlock]) -> bool {
-    content
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image { .. }))
-        && content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-}
-
-fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
-    message
-        .content
-        .iter()
-        .find_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.trim_start()),
-            _ => None,
-        })
-        .is_some_and(|text| text.starts_with("<system-reminder>"))
-}
-
-fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none()
-        && !is_internal_system_reminder_message(message)
-        && !is_scheduled_task_message(message)
-}
-
-/// Recognize scheduler prompts persisted before they received an explicit
-/// system display role. This keeps old sessions from treating them as user
-/// prompts after resume.
-pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
-    message.role == Role::User
-        && message.content.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text, .. } if text.trim_start().starts_with("[Scheduled task]\n"))
-        })
-}
-
+#[path = "session/message_helpers.rs"]
+mod message_helpers;
+pub use message_helpers::{derive_session_provider_key, is_scheduled_task_message};
+use message_helpers::{
+    is_visible_conversation_message, message_has_tool_image, stored_messages_to_messages,
+};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -310,48 +277,6 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
-    let normalized_name = provider_name.trim().to_ascii_lowercase();
-    if normalized_name == "jcode" {
-        return Some("jcode".to_string());
-    }
-
-    if let Ok(runtime_provider) = std::env::var("JCODE_RUNTIME_PROVIDER") {
-        let runtime_provider = runtime_provider.trim().to_ascii_lowercase();
-        if !runtime_provider.is_empty() && runtime_provider != "openai-compatible" {
-            return Some(runtime_provider);
-        }
-    }
-
-    if let Ok(namespace) = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE") {
-        let namespace = namespace.trim().to_ascii_lowercase();
-        if !namespace.is_empty() {
-            return Some(namespace);
-        }
-    }
-
-    if let Ok(active) = std::env::var("JCODE_ACTIVE_PROVIDER") {
-        let active = active.trim().to_ascii_lowercase();
-        if !active.is_empty() {
-            return Some(active);
-        }
-    }
-
-    let fallback = match normalized_name.as_str() {
-        "anthropic" | "claude" | "claude cli" => "claude",
-        "openai" => "openai",
-        "github copilot" | "copilot" => "copilot",
-        "openrouter" => "openrouter",
-        "cursor" => "cursor",
-        "gemini" => "gemini",
-        "antigravity" => "antigravity",
-        "" => return None,
-        other => other,
-    };
-
-    Some(fallback.to_string())
-}
-
 impl Session {
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
@@ -436,7 +361,8 @@ impl Session {
         let message_stats =
             summarize_message_content(self.messages.iter().map(|message| &*message.content));
 
-        let session_message_json_bytes: usize = self.messages.iter().map(estimate_json_bytes).sum();
+        let session_message_json_bytes: usize =
+            self.messages.iter().map(stored_message_json_bytes).sum();
         let provider_cache_stats = summarize_message_content(
             self.provider_messages_cache
                 .iter()
@@ -445,7 +371,7 @@ impl Session {
         let provider_messages_cache_json_bytes: usize = self
             .provider_messages_cache
             .iter()
-            .map(estimate_json_bytes)
+            .map(Message::serialized_json_bytes)
             .sum();
         let provider_cache_shared_content_count = self
             .provider_messages_cache
@@ -460,10 +386,9 @@ impl Session {
         let replay_events_json_bytes: usize =
             self.replay_events.iter().map(estimate_json_bytes).sum();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
         let compaction_summary_bytes = self
             .compaction
             .as_ref()
@@ -685,7 +610,7 @@ impl Session {
             .map(|prev| crate::message::extend_stable_hash(prev, message_hash))
             .unwrap_or(message_hash);
         self.memory_profile_cache.provider_cache_count += 1;
-        self.memory_profile_cache.provider_cache_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.provider_cache_json_bytes += message.serialized_json_bytes();
         self.memory_profile_cache
             .provider_cache_stats
             .merge_from(&summarize_blocks(&message.content));
@@ -707,8 +632,9 @@ impl Session {
         );
 
         self.memory_profile_cache = SessionMemoryProfileCache {
+            compaction_json_bytes: self.memory_profile_cache.compaction_json_bytes.clone(),
             messages_count: self.messages.len(),
-            messages_json_bytes: self.messages.iter().map(estimate_json_bytes).sum(),
+            messages_json_bytes: self.messages.iter().map(stored_message_json_bytes).sum(),
             message_stats,
             env_snapshots_count: self.env_snapshots.len(),
             env_snapshots_json_bytes: self.env_snapshots.iter().map(estimate_json_bytes).sum(),
@@ -724,7 +650,7 @@ impl Session {
             provider_cache_json_bytes: self
                 .provider_messages_cache
                 .iter()
-                .map(estimate_json_bytes)
+                .map(Message::serialized_json_bytes)
                 .sum(),
             provider_cache_stats,
         };
@@ -740,10 +666,9 @@ impl Session {
     pub fn memory_profile_snapshot(&mut self) -> SessionMemoryProfileSnapshot {
         self.ensure_memory_profile_cache();
         let compaction_json_bytes = self
-            .compaction
-            .as_ref()
-            .map(estimate_json_bytes)
-            .unwrap_or(0);
+            .memory_profile_cache
+            .compaction_json_bytes
+            .bytes(self.compaction.as_ref());
 
         SessionMemoryProfileSnapshot {
             message_count: self.memory_profile_cache.messages_count,
@@ -1425,7 +1350,7 @@ request in this new forked session, using the inherited conversation only as con
 
     pub fn append_stored_message(&mut self, message: StoredMessage) {
         self.memory_profile_cache.messages_count += 1;
-        self.memory_profile_cache.messages_json_bytes += estimate_json_bytes(&message);
+        self.memory_profile_cache.messages_json_bytes += stored_message_json_bytes(&message);
         self.memory_profile_cache
             .message_stats
             .merge_from(&summarize_blocks(&message.content));

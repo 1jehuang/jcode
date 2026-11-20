@@ -123,17 +123,13 @@ pub fn check_for_update_with_channel_blocking(
     match channel {
         crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
         crate::config::UpdateChannel::Stable if explicit_channel.is_some() => {
-            let release = fetch_latest_release_blocking()?;
-            if explicit_stable_is_update(
-                &release.tag_name,
-                current_update_semver(),
-                is_release_build(),
-            ) && platform_asset(&release).is_ok()
-            {
-                Ok(Some(release))
-            } else {
-                Ok(None)
-            }
+            super::update_stable::find_stable_update_with(|release| {
+                Ok(explicit_stable_is_update(
+                    &release.tag_name,
+                    current_update_semver(),
+                    is_release_build(),
+                ))
+            })
         }
         crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
         crate::config::UpdateChannel::Preview => match fetch_latest_preview_blocking()? {
@@ -144,31 +140,16 @@ pub fn check_for_update_with_channel_blocking(
 }
 
 pub(super) fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
-    let release = fetch_latest_release_blocking()?;
-    if !release_is_update(&release)? {
-        return Ok(PreparedUpdate::None {
+    match super::update_stable::find_stable_update_blocking()? {
+        Some(release) => prepare_release_update(release),
+        None => Ok(PreparedUpdate::None {
             current: jcode_build_meta::version().to_string(),
-        });
+        }),
     }
-    prepare_release_update(release)
 }
 
 fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
-    let release = fetch_latest_release_blocking()?;
-
-    if release_is_update(&release)? {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-
-        if has_asset {
-            return Ok(Some(release));
-        }
-    }
-
-    Ok(None)
+    super::update_stable::find_stable_update_blocking()
 }
 
 #[cfg(test)]

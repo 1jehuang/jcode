@@ -53,7 +53,10 @@ pub fn hot_restart(session_id: &str) -> Result<()> {
     if is_selfdev {
         cmd.arg("self-dev");
     }
-    cmd.arg("--resume").arg(session_id).current_dir(&cwd);
+    cmd.arg("--resume")
+        .arg(session_id)
+        .args(crate::tui::jarvis::reexec_args())
+        .current_dir(&cwd);
     let err = crate::platform::replace_process(&mut cmd);
 
     Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err))
@@ -71,6 +74,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
             let mut cmd = ProcessCommand::new(&binary_path);
             cmd.arg("--resume")
                 .arg(session_id)
+                .args(crate::tui::jarvis::reexec_args())
                 .arg("--no-update")
                 .env_remove("JCODE_MIGRATE_BINARY")
                 .current_dir(cwd);
@@ -120,6 +124,7 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
         }
         cmd.arg("--resume")
             .arg(session_id)
+            .args(crate::tui::jarvis::reexec_args())
             // The server has already completed its handoff before the client
             // re-execs. Let the replacement client paint and accept input from
             // its startup stub immediately; the authoritative History payload
@@ -187,6 +192,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                     }
                     cmd.arg("--resume")
                         .arg(session_id)
+                        .args(crate::tui::jarvis::reexec_args())
                         .arg("--no-update")
                         .current_dir(&cwd);
                     let err = crate::platform::replace_process(&mut cmd);
@@ -226,6 +232,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
     }
     cmd.arg("--resume")
         .arg(session_id)
+        .args(crate::tui::jarvis::reexec_args())
         .arg("--no-update")
         .current_dir(&cwd);
     let err = crate::platform::replace_process(&mut cmd);

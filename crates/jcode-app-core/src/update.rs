@@ -241,6 +241,8 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
 
 #[path = "update_preview.rs"]
 mod update_preview;
+#[path = "update_stable.rs"]
+mod update_stable;
 pub use update_preview::{check_for_update_with_channel_blocking, fetch_latest_preview_blocking};
 use update_preview::{
     prepare_preview_update_blocking, prepare_stable_update_blocking, preview_number,
@@ -654,16 +656,9 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::logging::info("Main channel: cargo not found, falling back to latest release");
     }
 
-    // Fallback: use latest stable release if available
-    if let Ok(release) = fetch_latest_release_blocking() {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-        if has_asset && release_is_update(&release)? {
-            return Ok(Some(release));
-        }
+    // Fallback: newest installable stable release, if any.
+    if let Ok(Some(release)) = update_stable::find_stable_update_blocking() {
+        return Ok(Some(release));
     }
 
     Ok(None)

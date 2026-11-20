@@ -123,6 +123,26 @@ swarm_panel_focus = "alt+n"
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
 
+[jarvis.speech]
+# Optional external OpenAI-compatible speech endpoint used by `jcode --jarvis`.
+# POST {model, voice, input, response_format: "wav"}; returns audio/wav.
+# Model and voice installation belong to the service, never the Jcode repo.
+# Overrides: JCODE_JARVIS_SPEECH_ENDPOINT. Omit endpoint to use local eSpeak.
+# endpoint = "http://127.0.0.1:8765/v1/audio/speech"
+# model = "piper-jarvis"
+# voice = "jarvis"
+# api_key_env = "MY_SPEECH_API_KEY"
+
+# Experimental `jcode --jarvis-always-on` uses local voice detection, Nari,
+# and a single-shot Jev request gate. Settings alone never open the microphone.
+# [jarvis.listening]
+# max_audio_seconds_per_hour = 600
+# max_classifications_per_hour = 120
+# max_agent_turns_per_hour = 20
+# action_probability = 0.97  # 0.5..1; Fn tap sends recent speech without the gate
+# trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
+# warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
+
 [dictation]
 # External speech-to-text command.
 # The command should record/transcribe speech and print the final transcript to stdout.
@@ -652,18 +672,6 @@ swarm_max_concurrent_agents = 32
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
 #
-# Max percentage (1-90) of the chat height the inline swarm gallery band may use.
-# Unset = built-in default (40%). Lower values keep more transcript visible; set
-# near the minimum to collapse the gallery to a thin strip.
-# swarm_gallery_max_pct = 40
-#
-# Layout of the inline swarm strip above the status line:
-#   "vertical"   - one agent per row (session icon + status + task), capped to
-#                  a few rows with a "+N more" overflow marker (default)
-#   "horizontal" - all agents packed as chips on a single row
-# Env override: JCODE_SWARM_STRIP_LAYOUT
-# swarm_strip_layout = "vertical"
-#
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
 # auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
@@ -895,6 +903,19 @@ voice_waveform = true
 # Desktop notifications for voice state. When off, recording still needs the
 # waveform to be shown in a Jcode CLI as its visible indicator.
 voice_notifications = true
+# Hold the laptop Fn key to talk to the running always-on Jarvis session
+# (`jcode --jarvis-always-on`) from any window, without changing focus. Needs
+# Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
+# laptops via a udev hwdb remap). Fn shortcuts never record.
+jarvis_fn_key = false
+# Key for that: "fn" or "rightshift" (when Fn never reaches Linux). A bare
+# tap sends what Jarvis just heard; Right Shift with another key types normally.
+jarvis_key = "fn"
+# With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
+# in a new terminal and sends what you said once it is ready.
+jarvis_fn_launch = true
+# Extra flags for that Jarvis, after --jarvis-always-on, e.g. ["--jarvis-screen"].
+jarvis_fn_launch_args = []
 # Open URLs and files for the server. Off: clients use their own opener.
 open = true
 # Open new terminal windows for the server. Off: clients launch locally.

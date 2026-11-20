@@ -32,7 +32,7 @@ fn inline_image_count(messages: &[StoredMessage]) -> usize {
 }
 
 #[test]
-fn computer_use_screenshots_stay_bounded_in_saved_transcript() -> Result<()> {
+fn small_screenshots_survive_append_save_and_load() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
         .prefix("jcode-tool-image-decay-")
@@ -42,14 +42,11 @@ fn computer_use_screenshots_stay_bounded_in_saved_transcript() -> Result<()> {
 
     let session_id = "session_tool_image_decay";
     let mut session = Session::create_with_id(session_id.to_string(), None, None);
-    let screenshots = 100;
+    let screenshots = 40;
     for index in 0..screenshots {
         add_screenshot(&mut session, index);
         session.save()?;
-        assert!(
-            inline_image_count(&session.messages)
-                <= jcode_compaction_core::TOOL_IMAGE_DECAY_TRIGGER_COUNT
-        );
+        assert_eq!(inline_image_count(&session.messages), index + 1);
     }
 
     // Every tool_result survives so tool_use pairing stays valid.
@@ -65,19 +62,7 @@ fn computer_use_screenshots_stay_bounded_in_saved_transcript() -> Result<()> {
 
     let loaded = Session::load(session_id)?;
     assert_eq!(loaded.messages.len(), screenshots);
-    let inline = inline_image_count(&loaded.messages);
-    assert!(inline >= jcode_compaction_core::TOOL_IMAGE_DECAY_KEEP_COUNT);
-    assert!(inline <= jcode_compaction_core::TOOL_IMAGE_DECAY_TRIGGER_COUNT);
-
-    let snapshot_bytes = std::fs::metadata(session_path(session_id)?)?.len() as usize;
-    let journal_bytes = std::fs::metadata(session_journal_path(session_id)?)
-        .map(|meta| meta.len() as usize)
-        .unwrap_or(0);
-    let on_disk = snapshot_bytes + journal_bytes;
-    assert!(
-        on_disk < (jcode_compaction_core::TOOL_IMAGE_DECAY_TRIGGER_COUNT + 2) * SCREENSHOT_CHARS,
-        "transcript grew to {on_disk} bytes for {screenshots} screenshots"
-    );
+    assert_eq!(inline_image_count(&loaded.messages), screenshots);
     Ok(())
 }
 
@@ -93,20 +78,23 @@ fn loading_legacy_transcript_decays_old_screenshots() -> Result<()> {
     // Simulate a transcript written before decay existed by appending the raw
     // messages without going through the decaying append path.
     let session_id = "session_tool_image_legacy";
-    let mut session = Session::create_with_id(session_id.to_string(), None, None);
-    let screenshots = 30;
-    for index in 0..screenshots {
-        add_screenshot(&mut session, index);
-    }
     let mut legacy = Session::create_with_id(session_id.to_string(), None, None);
-    legacy.messages = session.messages.clone();
+    let screenshots = 7;
+    let chars_per_image = 8 * 1024 * 1024;
+    for index in 0..screenshots {
+        add_screenshot(&mut legacy, index);
+    }
+    // Inflate the payload after append so load sees all 56 MiB intact.
     for message in &mut legacy.messages {
-        if let [ContentBlock::ToolResult { .. }, block] = message.content.as_mut_slice() {
-            *block = ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: "A".repeat(SCREENSHOT_CHARS),
-            };
-        }
+        let blocks = message.content.as_mut_slice();
+        let [
+            ContentBlock::ToolResult { .. },
+            ContentBlock::Image { data, .. },
+        ] = blocks
+        else {
+            panic!("expected a tool result with an inline screenshot");
+        };
+        *data = "A".repeat(chars_per_image);
     }
     assert_eq!(inline_image_count(&legacy.messages), screenshots);
     std::fs::create_dir_all(session_path(session_id)?.parent().unwrap())?;
@@ -116,7 +104,7 @@ fn loading_legacy_transcript_decays_old_screenshots() -> Result<()> {
     assert_eq!(loaded.messages.len(), screenshots);
     assert_eq!(
         inline_image_count(&loaded.messages),
-        jcode_compaction_core::TOOL_IMAGE_DECAY_KEEP_COUNT
+        jcode_compaction_core::TOOL_IMAGE_DECAY_KEEP_CHARS / chars_per_image
     );
     Ok(())
 }

@@ -1,6 +1,9 @@
 use super::*;
 
 impl RemoteEventState for RemoteConnection {
+    fn finish_local_tools_request(&mut self, id: u64, accepted: bool) -> bool {
+        Self::finish_local_tools_request(self, id, accepted)
+    }
     fn finish_runtime_command(&mut self, id: u64) -> bool {
         Self::finish_runtime_command(self, id)
     }

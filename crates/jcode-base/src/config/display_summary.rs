@@ -394,14 +394,13 @@ impl Config {
             .and_then(|desktop| desktop.get("voice"))
             .and_then(|voice| voice.get("global_devices"))
             .and_then(|devices| devices.as_array())
-            .map(|devices| {
-                devices
-                    .iter()
-                    .filter_map(|device| device.as_str())
-                    .filter(|device| !device.trim().is_empty())
-                    .map(std::path::PathBuf::from)
-                    .collect()
-            })
-            .unwrap_or_default()
+            // Missing legacy desktop devices means there are no configured
+            // devices, not a configuration read or parse failure.
+            .into_iter()
+            .flatten()
+            .filter_map(|device| device.as_str())
+            .filter(|device| !device.trim().is_empty())
+            .map(std::path::PathBuf::from)
+            .collect()
     }
 }

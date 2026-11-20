@@ -248,6 +248,61 @@ class QuickReleaseTests(unittest.TestCase):
         self.assertIn("HEAD changed during CI preflight", result.stderr)
         self.assert_no_tag()
 
+    def test_explicit_source_tags_verified_ancestor_not_newer_head(self):
+        manifest = self.repo / "Cargo.toml"
+        manifest.write_text(manifest.read_text().replace("1.2.3", "9.9.9"))
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-m", "Unrelated next release")
+        newer = self.git("rev-parse", "HEAD").stdout.strip()
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), newer)
+        self.assertIn(self.sha, self.git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}^{{}}").stdout)
+
+    def test_explicit_source_remains_immutable_when_head_moves_during_ci(self):
+        result = self.release("head_changed", "--source-commit", self.sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.sha)
+        self.assertEqual(self.git("rev-parse", f"{TAG}^{{commit}}").stdout.strip(), self.sha)
+
+    def test_explicit_source_still_requires_exact_green_ci(self):
+        for scenario in ("failure", "pending", "other_sha", "pull_request", "failed_job", "rerun"):
+            with self.subTest(scenario=scenario):
+                result = self.release(scenario, "--source-commit", self.sha)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+    def test_explicit_source_rejects_mutable_short_missing_and_non_commit_inputs(self):
+        self.git("tag", "-a", "source-fixture", "-m", "Annotated object")
+        tag_object = self.git("rev-parse", "source-fixture").stdout.strip()
+        for source in ("HEAD", self.sha[:12], "", "f" * 40, tag_object):
+            with self.subTest(source=source):
+                result = self.release("success", "--source-commit", source)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assert_no_tag()
+
+    def test_explicit_source_requires_remote_mode(self):
+        result = self.release("success", "--source-commit", self.sha, mode="--fast-local")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires --remote", result.stderr)
+        self.assert_no_tag()
+
+    def test_explicit_source_must_be_ancestor_of_current_branch(self):
+        self.git("checkout", "--orphan", "unrelated")
+        self.git("commit", "-m", "Unrelated source")
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be an ancestor", result.stderr)
+        self.assert_no_tag()
+
+    def test_explicit_source_rejects_conflicting_existing_tag(self):
+        self.git("tag", "-a", TAG, "HEAD^", "-m", TAG)
+        result = self.release("success", "--source-commit", self.sha)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different commit", result.stderr)
+        self.assertEqual(self.git("ls-remote", "--tags", "origin", f"refs/tags/{TAG}").stdout, "")
+
     def test_local_tag_change_during_ci_is_not_pushed(self):
         self.git("tag", "-a", TAG, "-m", TAG)
         result = self.release("local_tag_changed")

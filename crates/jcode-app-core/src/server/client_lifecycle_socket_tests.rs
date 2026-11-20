@@ -626,6 +626,14 @@ async fn sdk_socket_cancel_workflow(
             .unwrap();
         return;
     }
+    // A catalog/startup task can hold the Agent without an active turn. Tool
+    // registration must wait for that work, not return a spurious busy error.
+    let startup_agent = sessions.read().await.values().next().unwrap().clone();
+    let startup_guard = startup_agent.lock_owned().await;
+    let release_startup = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(startup_guard);
+    });
     send(&mut client_writer, json!({"type":"configure_tools","id":2,"tools":{"enabled":[],"custom":[{"name":"read","description":"SDK read callback","parameters":{"type":"object"}}]}})).await;
     let configured = until(&mut client_reader, |e| {
         matches!(
@@ -634,6 +642,7 @@ async fn sdk_socket_cancel_workflow(
         )
     })
     .await;
+    release_startup.await.unwrap();
     assert!(
         matches!(configured, ServerEvent::Ack { .. }),
         "{configured:?}"

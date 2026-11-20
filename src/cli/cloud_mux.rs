@@ -138,14 +138,22 @@ fn spawn_master(config: &[String], dir: &std::path::Path, deadline: Duration) ->
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
-            let _ = child.wait();
+            if let Err(error) = child.wait() {
+                crate::logging::warn(&format!("Cannot reap timed-out cloud SSH master: {error}"));
+            }
             bail!("shared cloud SSH connection timed out");
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     if !status.success() || !master_running(config) {
-        let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let detail = detail.lines().last().unwrap_or_default();
+        let detail = match std::fs::read_to_string(&log_path) {
+            Ok(log) => log,
+            Err(error) => format!("cannot read SSH master log: {error}"),
+        };
+        let detail = detail
+            .lines()
+            .last()
+            .unwrap_or("SSH master produced no diagnostic");
         bail!("shared cloud SSH connection failed ({status}): {detail}");
     }
     Ok(())
@@ -163,7 +171,11 @@ pub(crate) async fn ensure(host: &str, deadline: Duration) {
     let spawned = std::thread::Builder::new()
         .name("cloud-ssh-master".into())
         .spawn(move || {
-            let _ = done.send(ensure_master(deadline));
+            if let Err(Err(error)) = done.send(ensure_master(deadline)) {
+                crate::logging::debug(&format!(
+                    "Cloud SSH master completed after caller left: {error:#}"
+                ));
+            }
         });
     if spawned.is_err() {
         return;

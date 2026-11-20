@@ -1,3 +1,5 @@
+#[path = "debug_dm_fixture.rs"]
+mod dm_fixture;
 #[path = "debug_picker_state.rs"]
 mod picker_state;
 use super::*;
@@ -258,6 +260,8 @@ impl App {
                 provider: "openai".to_string(),
             });
             serde_json::json!({"ok": true, "fixture": "login-progress-exchange"}).to_string()
+        } else if cmd == "dm-fixture" {
+            self.show_debug_dm_fixture()
         } else if cmd == "expand-badge-fixture" {
             let old_string = (0..24)
                 .map(|idx| format!("old fixture line {idx}\n"))

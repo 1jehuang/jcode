@@ -195,64 +195,6 @@ impl TodoTool {
     }
 }
 
-/// Fold each incoming todo's confidence into its tool-maintained history.
-///
-/// The model reports `confidence` while working and `completion_confidence` at
-/// completion. Each todo-tool write contributes at most one observation so a
-/// single completion update cannot manufacture an apparent intermediate step.
-/// The append-only trail lets downstream consumers distinguish an
-/// evidence-driven rise (75 -> 85 -> 95 -> 100) from a bulk end-of-task stamp
-/// (75 -> 100). Model-supplied `confidence_history` is ignored: the tool owns
-/// this field.
-fn merge_confidence_history(previous: &[TodoItem], incoming: &mut [TodoItem]) {
-    let prior: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    for todo in incoming.iter_mut() {
-        let previous_todo = prior.get(todo.id.as_str()).copied();
-        let mut history = previous_todo
-            .map(|prev| prev.confidence_history.clone())
-            .unwrap_or_default();
-        if history.is_empty()
-            && let Some(value) = previous_todo.and_then(|prev| {
-                if prev.status == "completed" {
-                    prev.completion_confidence.or(prev.confidence)
-                } else {
-                    prev.confidence
-                }
-            })
-        {
-            history.push(value);
-        }
-        let observation = if todo.status == "completed" {
-            todo.completion_confidence.or(todo.confidence)
-        } else {
-            todo.confidence
-        };
-        if let Some(value) = observation
-            && history.last() != Some(&value)
-        {
-            history.push(value);
-        }
-        todo.confidence_history = history;
-        // `assigned_to` links a todo to the swarm worker running it. It is set
-        // by swarm dispatch, not the model (the schema does not expose it), so
-        // a model rewrite of the list must not silently unassign the worker.
-        if todo.assigned_to.is_none() {
-            todo.assigned_to = previous_todo.and_then(|prev| prev.assigned_to.clone());
-        }
-        // Only a new start claims local ownership. Merely rewriting an old
-        // unassigned in-progress item does not establish who is working on it.
-        if todo.assigned_to.is_none()
-            && todo.status == "in_progress"
-            && previous_todo.is_none_or(|prev| prev.status != "in_progress")
-        {
-            todo.assigned_to = Some("@self".to_string());
-        }
-    }
-}
-
 /// How a todo call wrote, for measuring whether agents use incremental edits
 /// instead of resending the list. Counted locally in
 /// `~/.jcode/stats/todo-write-modes.json`; nothing leaves the machine.
@@ -260,7 +202,7 @@ fn todo_write_mode(input: &Value) -> &'static str {
     let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
     match (
         has("todos") || has("phases"),
-        has("update") || has("add") || has("remove"),
+        has("update") || has("add") || has("remove") || has("cancel"),
     ) {
         (true, _) => "full",
         (false, true) => "patch",
@@ -284,8 +226,19 @@ fn record_todo_write_mode(input: &Value) {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     *counts.entry(mode.to_string()).or_default() += 1;
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = crate::storage::write_json_fast(&path, &counts);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        crate::logging::warn(&format!(
+            "Failed to create todo statistics directory {}: {error}",
+            dir.display()
+        ));
+        return;
+    }
+    if let Err(error) = crate::storage::write_json_fast(&path, &counts) {
+        crate::logging::warn(&format!(
+            "Failed to persist todo write statistics {}: {error}",
+            path.display()
+        ));
+    }
 }
 
 /// Every key an update may carry once names and pauses are normalized: the
@@ -320,9 +273,18 @@ const UPDATE_FIELDS: &[&str] = &[
 /// one path. `update` changes only the given fields of todos matched by `id`;
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
 /// drops ids. Full replacements and incremental edits are mutually exclusive.
-fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+#[cfg(test)]
+fn apply_todo_patch(input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    prepare_todo_patch(input, stored, &mut Vec::new())
+}
+
+fn prepare_todo_patch(
+    mut input: Value,
+    stored: impl FnOnce() -> Value,
+    cancellations: &mut Vec<crate::todo::store::TodoCancellation>,
+) -> Result<Value> {
     names::normalize_containers(&mut input);
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
     let named_replacement = ["phases", "todos"]
@@ -342,14 +304,14 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
     if !patching {
         return Ok(input);
     }
     if obj.get("todos").is_some_and(|value| !value.is_null()) {
-        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+        bail!("send either a full `todos` list or `update`/`add`/`cancel` edits, not both");
     }
     let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
         match value {
@@ -365,6 +327,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             Some(other) => bail!("expected a list, got {other}"),
         }
     };
+    let cancels = parse_list(obj.remove("cancel"))?;
     let updates = parse_list(obj.remove("update"))?;
     let adds = parse_list(obj.remove("add"))?;
     let removes: Vec<String> = parse_list(obj.remove("remove"))?
@@ -380,6 +343,35 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     };
     let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
 
+    let mut cancelled_ids = std::collections::HashSet::new();
+    for cancel in cancels {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            name: String,
+            reason: String,
+        }
+        let Cancel { name, reason } = serde_json::from_value(cancel)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("cancel requires a nonempty reason");
+        }
+        let id = names::resolve_name(&todos, &name)?;
+        if !cancelled_ids.insert(id.clone())
+            || removes.contains(&id)
+            || updates.iter().any(|u| u["id"].as_str() == Some(&id))
+        {
+            bail!("conflicting edits for cancelled todo {name:?}");
+        }
+        let original = todos
+            .iter()
+            .find(|t| t["id"].as_str() == Some(&id))
+            .ok_or_else(|| anyhow::anyhow!("resolved todo {name:?} no longer exists"))?;
+        cancellations.push(crate::todo::store::TodoCancellation::new(
+            serde_json::from_value(original.clone())?,
+            reason.to_owned(),
+        ));
+    }
     for update in updates {
         let Some(fields) = update.as_object() else {
             bail!("each update must be an object with an id");
@@ -504,6 +496,26 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
     }
 
+    if !cancelled_ids.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| cancelled_ids.contains(&id)));
+        for todo in &todos {
+            for (field, public_field) in [
+                ("lane_after", "lane_dependencies"),
+                ("blocked_by", "blocked_by"),
+            ] {
+                if todo[field].as_array().is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| cancelled_ids.contains(id))
+                }) {
+                    bail!(
+                        "cannot cancel a prerequisite of {}; redirect or clear its {public_field} in the same edit",
+                        todo["content"]
+                    );
+                }
+            }
+        }
+    }
     obj.insert("todos".to_string(), Value::Array(todos));
     Ok(input)
 }
@@ -535,7 +547,7 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
             .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
     }) {
         bail!(
-            "invalid todo status {:?}; expected one of: pending, in_progress, completed, cancelled",
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed; use cancel to withdraw work",
             todo.status
         );
     }
@@ -582,7 +594,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };
-    if ["todos", "update", "add", "remove"]
+    if ["todos", "update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
     {
@@ -700,132 +712,9 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
 /// to `None` (the implicit goal of an ungrouped list).
-fn goal_group_key(group: Option<&str>) -> Option<String> {
-    group
-        .map(str::trim)
-        .filter(|group| !group.is_empty())
-        .map(str::to_string)
-}
-
-fn todo_telemetry_update(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) -> crate::telemetry::TodoTelemetryUpdate {
-    let previous_by_id: HashMap<&str, &TodoItem> = previous
-        .iter()
-        .map(|todo| (todo.id.as_str(), todo))
-        .collect();
-    let current_by_id: HashMap<&str, &TodoItem> =
-        todos.iter().map(|todo| (todo.id.as_str(), todo)).collect();
-
-    let todos_created = current_by_id
-        .keys()
-        .filter(|id| !previous_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_completed = current_by_id
-        .iter()
-        .filter(|(id, todo)| {
-            todo.status == "completed"
-                && previous_by_id
-                    .get(**id)
-                    .is_none_or(|previous| previous.status != "completed")
-        })
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let todos_abandoned = previous_by_id
-        .iter()
-        .filter(|(id, todo)| todo.status != "completed" && !current_by_id.contains_key(**id))
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let current_incomplete = current_by_id
-        .values()
-        .filter(|todo| todo.status != "completed")
-        .count()
-        .min(u32::MAX as usize) as u32;
-
-    let mut group_completion: HashMap<Option<String>, bool> = HashMap::new();
-    for todo in current_by_id.values() {
-        let completed = todo.status == "completed";
-        group_completion
-            .entry(goal_group_key(todo.group.as_deref()))
-            .and_modify(|all_completed| *all_completed &= completed)
-            .or_insert(completed);
-    }
-
-    crate::telemetry::TodoTelemetryUpdate {
-        todos_created,
-        todos_completed,
-        todos_abandoned,
-        current_incomplete,
-        list_size: todos.len().min(u32::MAX as usize) as u32,
-        groups_completed: group_completion
-            .values()
-            .filter(|completed| **completed)
-            .count()
-            .min(u32::MAX as usize) as u32,
-        groups_total: group_completion.len().min(u32::MAX as usize) as u32,
-        confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.confidence.map(|state| state.legacy_score())),
-        ),
-        completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.completion_confidence.map(|state| state.legacy_score())),
-        ),
-        understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
-            plan.understands_user_intent
-                .map(|state| state.legacy_score()),
-        ),
-        closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.legacy_score())),
-        ),
-        feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_relevance
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        feedback_loop_coverage: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals.iter().filter_map(|goal| {
-                goal.feedback_loop_coverage
-                    .map(|state| state.legacy_score())
-            }),
-        ),
-        end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.delivery_state.map(|state| state.legacy_score())),
-        ),
-    }
-}
-
-fn record_todo_telemetry(
-    previous: &[TodoItem],
-    todos: &[TodoItem],
-    goals: &[TodoGoal],
-    plan: &TodoPlan,
-) {
-    crate::telemetry::record_todo_update(todo_telemetry_update(previous, todos, goals, plan));
-}
-
-/// Append `value` to `history` when it is a new observation.
-///
-/// One todo-tool write contributes at most one entry per score, so a single
-/// bulk update cannot manufacture an apparent gradual climb.
-fn record_score_observation<T: Copy + PartialEq>(history: &mut Vec<T>, value: Option<T>) {
-    if let Some(value) = value
-        && history.last() != Some(&value)
-    {
-        history.push(value);
-    }
-}
+#[path = "todo_telemetry.rs"]
+mod todo_telemetry;
+use todo_telemetry::*;
 
 /// Merge incoming goal assessments with the stored ones.
 ///
@@ -1285,113 +1174,9 @@ fn build_todo_output(
         .with_metadata(metadata))
 }
 
-/// Leniently normalize raw todo-tool arguments before strict deserialization.
-///
-/// Some providers (notably Claude tool calling) intermittently emit tool
-/// arguments as JSON *strings* instead of native types: the whole `todos`
-/// array as one stringified JSON blob, individual items as stringified
-/// objects, or numeric fields like `confidence` as `"90"`. Strict
-/// `serde_json::from_value` rejects these with `invalid type: string ...`,
-/// failing the entire call (issue #357; same provider quirk as #106).
-fn normalize_todo_input(mut input: Value) -> Value {
-    let Some(obj) = input.as_object_mut() else {
-        return input;
-    };
-    if let Some(plan) = obj.get_mut("plan") {
-        if let Value::String(raw) = plan {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *plan = Value::Null;
-            } else if let Ok(parsed @ (Value::Object(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *plan = parsed;
-            }
-        }
-        if let Some(fields) = plan.as_object_mut() {
-            for key in [
-                "alignment_score",
-                "user_intention_alignment",
-                "understands_user_intent",
-            ] {
-                if let Some(value) = fields.get_mut(key) {
-                    coerce_empty_string_to_null(value);
-                }
-            }
-        }
-    }
-    for key in ["todos", "goals"] {
-        let Some(entries) = obj.get_mut(key) else {
-            continue;
-        };
-
-        // Whole array sent as a stringified JSON blob.
-        if let Value::String(raw) = entries {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *entries = Value::Null;
-            } else if let Ok(parsed @ (Value::Array(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *entries = parsed;
-            }
-        }
-
-        if let Value::Array(items) = entries {
-            for item in items.iter_mut() {
-                // Individual item sent as a stringified JSON object.
-                if let Value::String(raw) = item
-                    && let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw.trim())
-                {
-                    *item = parsed;
-                }
-                let Some(fields) = item.as_object_mut() else {
-                    continue;
-                };
-                if key == "todos"
-                    && let Some(Value::String(status)) = fields.get_mut("status")
-                    && let Some(canonical) = crate::todo::canonical_todo_status(status)
-                {
-                    *status = canonical.to_string();
-                }
-                for key in [
-                    "confidence",
-                    "completion_confidence",
-                    "alignment_score",
-                    "user_intention_alignment",
-                    "closed_feedback_loop",
-                    // Pre-rename aliases; some prompts and replayed transcripts
-                    // still carry the old keys.
-                    "hill_climbability",
-                    "end_to_end_ownership",
-                    "delivery_state",
-                    "feedback_loop_relevance",
-                    "feedback_loop_coverage",
-                    "feedback_loop_traceability",
-                    "difficulty",
-                    "autonomy",
-                ] {
-                    if let Some(value) = fields.get_mut(key) {
-                        coerce_empty_string_to_null(value);
-                    }
-                }
-            }
-        }
-    }
-    input
-}
-
-/// Coerce an empty or whitespace-only string to `null` so an omitted-but-sent
-/// assessment reads as absent. Numeric legacy scores (ints, floats, numeric
-/// strings) are handled by the semantic-state deserializers themselves, so no
-/// numeric coercion is needed here anymore.
-fn coerce_empty_string_to_null(value: &mut Value) {
-    if let Value::String(raw) = value
-        && raw.trim().is_empty()
-    {
-        *value = Value::Null;
-    }
-}
+#[path = "todo_normalize.rs"]
+mod normalize;
+use normalize::normalize_todo_input;
 
 #[async_trait]
 impl Tool for TodoTool {
@@ -1431,10 +1216,9 @@ impl Tool for TodoTool {
                         "additionalProperties": true
                     }
                 },
-                "remove": {
-                    "type": "array",
-                    "description": "Delete by name; prefer cancelling.",
-                    "items": {"type": "string"}
+                "cancel": {
+                    "type": "array", "description": "Withdraw and archive why.",
+                    "items": {"type": "object", "additionalProperties": false, "required": ["name", "reason"], "properties": {"name": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
                 },
                 "todos": {
                     "type": "array",
@@ -1471,7 +1255,7 @@ impl Tool for TodoTool {
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"]
+                                "enum": ["pending", "in_progress", "completed"]
                             },
                             "priority": {
                                 "type": "string"
@@ -1622,7 +1406,7 @@ impl Tool for TodoTool {
         }
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/remove. Phases are sequential, lanes parallel, items ordered.",
+            "description": "Replace plan ([] clears). Then use update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
@@ -1652,10 +1436,15 @@ impl Tool for TodoTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let write_mode_input = input.clone();
-        let input = apply_todo_patch(input, || {
-            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
-                .unwrap_or(Value::Array(Vec::new()))
-        })?;
+        let mut cancellations = Vec::new();
+        let input = prepare_todo_patch(
+            input,
+            || {
+                serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                    .unwrap_or(Value::Array(Vec::new()))
+            },
+            &mut cancellations,
+        )?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -1663,6 +1452,17 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            if let Some(todo) = todos.iter().find(|todo| {
+                crate::todo::todo_status_is_cancelled(&todo.status)
+                    && !previous.iter().any(|old| {
+                        old.id == todo.id && crate::todo::todo_status_is_cancelled(&old.status)
+                    })
+            }) {
+                bail!(
+                    "use cancel with a name and reason to withdraw {:?}, not a cancelled status",
+                    todo.content
+                );
+            }
             crate::todo::stages::normalize_lane_owners(&mut todos);
             crate::todo::store::validate_session_lane_dependencies(
                 &crate::storage::jcode_dir()?,
@@ -1736,6 +1536,13 @@ impl Tool for TodoTool {
                 let concise_plan_change = assessment_only
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
+                if !cancellations.is_empty() {
+                    crate::todo::store::append_cancellations(
+                        &crate::storage::jcode_dir()?,
+                        &ctx.session_id,
+                        &cancellations,
+                    )?;
+                }
                 save_todos(&ctx.session_id, &todos)?;
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;

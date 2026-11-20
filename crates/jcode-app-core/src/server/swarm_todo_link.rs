@@ -272,7 +272,15 @@ pub(crate) fn assignment_brief(
     task_id: &str,
     content: &str,
 ) -> Option<String> {
-    let mut todos = crate::todo::load_todos(coordinator_session).ok()?;
+    let mut todos = match crate::todo::load_todos(coordinator_session) {
+        Ok(todos) => todos,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Failed to load assignment todos for {coordinator_session}: {error}"
+            ));
+            return None;
+        }
+    };
     if !is_lane_task(task_id) {
         return details_for(&mut todos, task_id, content);
     }
