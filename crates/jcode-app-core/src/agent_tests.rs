@@ -2531,6 +2531,33 @@ fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
 }
 
 #[tokio::test]
+async fn queued_jarvis_input_preempts_empty_post_tool_retry() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.queue_soft_interrupt(
+        "still speaking".into(),
+        vec![],
+        false,
+        SoftInterruptSource::JarvisUser,
+    );
+    let mut attempts = 0;
+    assert!(
+        !agent
+            .maybe_retry_streaming_empty_post_tool_response(true, true, None, &mut attempts)
+            .unwrap()
+    );
+    assert_eq!(attempts, 0);
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    assert!(
+        agent
+            .maybe_retry_streaming_empty_post_tool_response(true, true, None, &mut attempts)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn empty_post_tool_response_is_retried_in_shared_helper() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
