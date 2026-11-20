@@ -827,8 +827,9 @@ fn background_tasks_render_once_in_the_pinned_band_not_the_overview() {
 #[test]
 fn background_task_rows_retain_the_most_recently_active_tasks() {
     let mut app = create_test_app();
+    let done = crate::tui::BackgroundTaskRowStatus::Completed;
     for i in 0..10 {
-        app.upsert_running_background_task(format!("t{i}"), format!("task {i}"), None);
+        app.finish_background_task(format!("t{i}"), format!("task {i}"), done);
     }
     app.upsert_running_background_task("t0".to_string(), "task 0 again".to_string(), Some(50.0));
 
@@ -840,6 +841,26 @@ fn background_task_rows_retain_the_most_recently_active_tasks() {
     assert_eq!(ids.len(), 8);
     assert_eq!(ids.last(), Some(&"t0"));
     assert!(!ids.contains(&"t1") && !ids.contains(&"t2"));
+}
+
+#[test]
+fn background_task_rows_never_evict_running_tasks() {
+    let mut app = create_test_app();
+    for i in 0..9 {
+        app.upsert_running_background_task(format!("r{i}"), format!("sleep {i}"), None);
+    }
+    assert_eq!(app.background_task_rows_ref().len(), 9);
+    assert_eq!(app.background_task_rows_ref()[0].task_id, "r0");
+
+    // Finished rows past the cap go, oldest first.
+    let done = crate::tui::BackgroundTaskRowStatus::Completed;
+    app.finish_background_task("r0".to_string(), "sleep 0".to_string(), done);
+    let ids = app
+        .background_task_rows_ref()
+        .iter()
+        .map(|row| row.task_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]);
 }
 
 #[test]

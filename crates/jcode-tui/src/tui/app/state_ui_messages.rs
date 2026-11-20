@@ -363,12 +363,19 @@ impl App {
                 .all(|todo| self.todo_is_paused_for_auto_followup(todo))
     }
 
+    /// Drop the oldest finished rows past the cap; running rows always stay,
+    /// since the pill counts them and `/tasks` stops them.
     fn retain_latest_background_tasks(&mut self) {
         const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
-        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
-            self.background_task_rows.drain(..stale);
-        }
+        let mut excess = self
+            .background_task_rows
+            .len()
+            .saturating_sub(MAX_TRACKED_BACKGROUND_TASKS);
+        self.background_task_rows.retain(|row| {
+            let evict = excess > 0 && row.status != crate::tui::BackgroundTaskRowStatus::Running;
+            excess -= usize::from(evict);
+            !evict
+        });
     }
 
     pub(super) fn upsert_running_background_task(
@@ -452,6 +459,7 @@ impl App {
                 task.percent = Some(100.0);
             }
             self.background_task_rows.push(task);
+            self.retain_latest_background_tasks();
             return;
         }
         self.background_task_rows
