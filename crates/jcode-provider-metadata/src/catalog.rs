@@ -498,6 +498,17 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const TSUBASA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "tsubasa",
+    display_name: "Tsubasa",
+    api_base: "https://api.tsubasa.sh/v1",
+    api_key_env: "TSUBASA_API_KEY",
+    env_file: "tsubasa.env",
+    setup_url: "https://tsubasa.sh/docs",
+    default_model: Some("tsubasa-pro"),
+    requires_api_key: true,
+};
+
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "openai-compatible",
     display_name: "OpenAI-compatible",
@@ -552,6 +563,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     CELERIS_PROFILE,
     VENICE_PROFILE,
     YOLO_AUTO_PROFILE,
+    TSUBASA_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
     OPENAI_COMPAT_PROFILE,
@@ -1277,6 +1289,19 @@ pub const YOLO_AUTO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescr
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
+pub const TSUBASA_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "tsubasa",
+    display_name: "Tsubasa",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &[],
+    menu_detail: "API key, OpenAI-compatible Chat Completions",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(TSUBASA_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(40), Some(40), Some(40), Some(40), Some(40)),
+};
+
 pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "google",
     display_name: "Google/Gmail",
@@ -1339,6 +1364,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     CELERIS_LOGIN_PROVIDER,
     VENICE_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
+    TSUBASA_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,
     OPENAI_COMPAT_LOGIN_PROVIDER,
