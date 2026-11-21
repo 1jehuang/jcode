@@ -66,3 +66,41 @@ priority values. Older files without this object continue to load.
 API keys remain manual unless explicitly added to the pool. Antigravity is also
 manual by default. Exclusion takes precedence over membership if a file contains
 conflicting entries. Accounts remain available for explicit manual selection.
+
+## KCode account pool
+
+### Per-product pool files and enrolment
+
+The account pool file is per product. A `kcode` binary never reads jcode's
+pool, and jcode never reads kcode's pool. Keep each product's pool file under
+its own product home directory.
+
+OAuth accounts auto-enrol. Claude Max and OpenAI Pro/ProMax default to priority
+1; standard or unknown plans default to priority 2; known free plans and
+metered API keys default to priority 3. Manual overrides in kcode's own
+`account-pool.json` win over detection. API keys stay manual until explicitly
+added to the pool. Multiple keys for one provider are separate pool members and
+rotate independently.
+
+To enrol API keys from a dotenv-style `KEY=value` file, use the helper:
+
+```text
+python scripts/enroll_kcode_pool_keys.py <keys-file> --provider <provider> --out <outside-repo-output.json>
+```
+
+Use a descriptive, non-secret file name of your choosing for the input. The
+helper reads that file, emits one tier-3 member per distinct value with
+`enrolled=true`, and writes only to the caller-supplied output path. It refuses
+an output path inside the repository working tree, never prints key values, and
+stores only a short SHA-256 digest in each member id, never the key material.
+Keep both the input and output files outside the repository.
+
+### Routing and failover semantics
+
+`resolve_account` selects the highest available priority tier for a fresh
+session; it never pins a new session to the last login. Explicit CLI/environment
+provider selections still take precedence. Failover cycles through members in
+the current tier before considering a lower tier. An exhausted route is marked
+unavailable with `mark_unavailable`. A 429 rotates to the next member in the
+same tier by marking the exhausted id unavailable and calling `resolve_account`
+again. If no member remains available, `resolve_account` returns no selection.
