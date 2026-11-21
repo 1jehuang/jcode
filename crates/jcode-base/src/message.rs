@@ -333,7 +333,8 @@ pub fn push_reasoning_blocks(
     reasoning_signature: Option<&str>,
     store_replay_context: bool,
 ) {
-    if reasoning_content.is_empty() {
+    let has_signature = reasoning_signature.is_some_and(|s| !s.is_empty());
+    if reasoning_content.is_empty() && !has_signature {
         return;
     }
 
@@ -353,7 +354,7 @@ pub fn push_reasoning_blocks(
         } else if provider_name.eq_ignore_ascii_case("openai") {
             // OpenAI native reasoning items carry encrypted content, not readable
             // text, so a separate history trace is still required below.
-        } else {
+        } else if !reasoning_content.is_empty() {
             blocks.push(ContentBlock::Reasoning {
                 text: reasoning_content.to_string(),
             });
@@ -361,7 +362,7 @@ pub fn push_reasoning_blocks(
         }
     }
 
-    if !readable_replay_stored {
+    if !readable_replay_stored && !reasoning_content.is_empty() {
         blocks.push(ContentBlock::ReasoningTrace {
             text: reasoning_content.to_string(),
         });

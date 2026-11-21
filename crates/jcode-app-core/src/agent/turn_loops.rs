@@ -252,6 +252,7 @@ impl Agent {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
+            let mut reasoning_blocks: Vec<(String, String)> = Vec::new();
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
@@ -336,6 +337,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ThinkingEnd => {
+                        if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                            reasoning_blocks.push((
+                                std::mem::take(&mut reasoning_content),
+                                std::mem::take(&mut reasoning_signature),
+                            ));
+                        }
                         // Don't print here - ThinkingDone has accurate timing
                         _thinking_start = None;
                     }
@@ -624,6 +631,7 @@ impl Agent {
                         generated_image_contexts.clear();
                         reasoning_content.clear();
                         reasoning_signature.clear();
+                        reasoning_blocks.clear();
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
                         openai_native_compaction = None;
@@ -927,13 +935,21 @@ impl Agent {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                reasoning_blocks.push((
+                    std::mem::take(&mut reasoning_content),
+                    std::mem::take(&mut reasoning_signature),
+                ));
+            }
+            for (content, signature) in &reasoning_blocks {
+                crate::message::push_reasoning_blocks(
+                    &mut content_blocks,
+                    &provider_name,
+                    content,
+                    Some(signature),
+                    store_reasoning_content,
+                );
+            }
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
@@ -1012,10 +1028,12 @@ impl Agent {
                 }
                 // Surface silent guardrail/refusal stops instead of returning
                 // an empty final answer with no explanation.
+                let had_reasoning = !reasoning_content.trim().is_empty()
+                    || reasoning_blocks.iter().any(|(c, _)| !c.trim().is_empty());
                 if let Some(notice) = Self::provider_guardrail_notice(
                     stop_reason.as_deref(),
                     visible_text_is_empty,
-                    !reasoning_content.trim().is_empty(),
+                    had_reasoning,
                 ) {
                     logging::warn(&format!(
                         "{}: turn ended with no visible output (stop_reason={:?})",

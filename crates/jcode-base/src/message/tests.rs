@@ -1,5 +1,5 @@
 use super::*;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 
 #[test]
@@ -165,12 +165,10 @@ fn generated_image_rendered_image_uses_inline_tool_anchor() {
             id: "image_call_123".to_string(),
         })
     );
-    assert!(
-        !base64::engine::general_purpose::STANDARD
-            .decode(&image.data)
-            .expect("valid base64 image")
-            .is_empty()
-    );
+    assert!(!base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .expect("valid base64 image")
+        .is_empty());
 }
 
 #[test]
@@ -754,11 +752,8 @@ fn background_task_notifications_include_display_name_when_available() -> Result
         wake: false,
     });
 
-    assert!(
-        rendered.contains(
-            "**Background task** `abc123` · `Run integration tests` (`bash`) · ✓ completed"
-        )
-    );
+    assert!(rendered
+        .contains("**Background task** `abc123` · `Run integration tests` (`bash`) · ✓ completed"));
     let parsed = parse_background_task_notification_markdown(&rendered)
         .ok_or_else(|| anyhow!("named background task notification should parse"))?;
     assert_eq!(parsed.tool_name, "bash");
@@ -946,6 +941,50 @@ fn push_reasoning_blocks_claude_route_signed_replay() {
 }
 
 #[test]
+fn push_reasoning_blocks_claude_route_empty_signed_replay() {
+    let mut blocks = Vec::new();
+    push_reasoning_blocks(&mut blocks, "Claude", "", Some("sig-empty-claude"), true);
+    assert_eq!(blocks.len(), 1);
+    match &blocks[0] {
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => {
+            assert_eq!(thinking, "");
+            assert_eq!(signature, "sig-empty-claude");
+        }
+        other => {
+            panic!("expected AnthropicThinking for empty signed Claude thinking, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn push_reasoning_blocks_anthropic_empty_signed_replay() {
+    let mut blocks = Vec::new();
+    push_reasoning_blocks(
+        &mut blocks,
+        "anthropic",
+        "",
+        Some("sig-empty-anthropic"),
+        true,
+    );
+    assert_eq!(blocks.len(), 1);
+    match &blocks[0] {
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => {
+            assert_eq!(thinking, "");
+            assert_eq!(signature, "sig-empty-anthropic");
+        }
+        other => {
+            panic!("expected AnthropicThinking for empty signed Anthropic thinking, got {other:?}")
+        }
+    }
+}
+
+#[test]
 fn stores_reasoning_content_for_context_accepts_claude_route() {
     assert!(crate::provider::stores_reasoning_content_for_context(
         "Claude"
@@ -1002,6 +1041,10 @@ fn push_reasoning_blocks_openrouter_replay_is_readable() {
 fn push_reasoning_blocks_skips_empty() {
     let mut blocks = Vec::new();
     push_reasoning_blocks(&mut blocks, "anthropic", "", None, false);
+    assert!(blocks.is_empty());
+    push_reasoning_blocks(&mut blocks, "Claude", "", None, true);
+    assert!(blocks.is_empty());
+    push_reasoning_blocks(&mut blocks, "Claude", "", Some(""), true);
     assert!(blocks.is_empty());
 }
 

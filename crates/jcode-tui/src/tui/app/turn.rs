@@ -307,6 +307,7 @@ impl App {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
+            let mut reasoning_blocks: Vec<(String, String)> = Vec::new();
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
@@ -381,13 +382,21 @@ impl App {
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                                                reasoning_blocks.push((
+                                                    std::mem::take(&mut reasoning_content),
+                                                    std::mem::take(&mut reasoning_signature),
+                                                ));
+                                            }
+                                            for (content, signature) in &reasoning_blocks {
+                                                crate::message::push_reasoning_blocks(
+                                                    &mut content_blocks,
+                                                    &provider_name,
+                                                    content,
+                                                    Some(signature),
+                                                    store_reasoning_content,
+                                                );
+                                            }
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -444,13 +453,21 @@ impl App {
                                                     cache_control: None,
                                                 });
                                             }
-                                            crate::message::push_reasoning_blocks(
-                                                &mut content_blocks,
-                                                &provider_name,
-                                                &reasoning_content,
-                                                Some(&reasoning_signature),
-                                                store_reasoning_content,
-                                            );
+                                            if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                                                reasoning_blocks.push((
+                                                    std::mem::take(&mut reasoning_content),
+                                                    std::mem::take(&mut reasoning_signature),
+                                                ));
+                                            }
+                                            for (content, signature) in &reasoning_blocks {
+                                                crate::message::push_reasoning_blocks(
+                                                    &mut content_blocks,
+                                                    &provider_name,
+                                                    content,
+                                                    Some(signature),
+                                                    store_reasoning_content,
+                                                );
+                                            }
                                             if store_reasoning_content {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
@@ -497,6 +514,8 @@ impl App {
                                         self.streaming_tool_calls.clear();
                                         self.stream_buffer = StreamBuffer::new();
                                         reasoning_content.clear();
+                                        reasoning_signature.clear();
+                                        reasoning_blocks.clear();
                                         interleaved = true;
                                         // Continue to next iteration of outer loop (new API call)
                                         break;
@@ -845,6 +864,7 @@ impl App {
                                         sdk_tool_results.clear();
                                         reasoning_content.clear();
                                         reasoning_signature.clear();
+                                        reasoning_blocks.clear();
                                         openai_reasoning_items.clear();
                                         provider_native_items.clear();
                                         openai_native_compaction = None;
@@ -946,6 +966,12 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ThinkingEnd => {
+                                        if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                                            reasoning_blocks.push((
+                                                std::mem::take(&mut reasoning_content),
+                                                std::mem::take(&mut reasoning_signature),
+                                            ));
+                                        }
                                         self.pause_streaming_tps(true);
                                         self.thinking_start = None;
                                         self.thinking_buffer.clear();
@@ -1249,13 +1275,21 @@ impl App {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                reasoning_blocks.push((
+                    std::mem::take(&mut reasoning_content),
+                    std::mem::take(&mut reasoning_signature),
+                ));
+            }
+            for (content, signature) in &reasoning_blocks {
+                crate::message::push_reasoning_blocks(
+                    &mut content_blocks,
+                    &provider_name,
+                    content,
+                    Some(signature),
+                    store_reasoning_content,
+                );
+            }
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
