@@ -248,7 +248,27 @@ pub(super) struct RunningTask {
     pub(super) started_at: Instant,
     pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
+    pub(super) terminal: TerminalClaim,
     pub(super) handle: JoinHandle<Result<TaskResult>>,
+}
+
+/// One-shot right to perform an in-process task's terminal transition
+/// (status write + `BackgroundTaskCompleted`), shared by its wrapper and
+/// `cancel`. Claimed synchronously, so the wrapper never loses it to an abort
+/// landing between claim and publish: cancel only aborts after winning it.
+#[derive(Clone, Default)]
+pub(super) struct TerminalClaim(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl TerminalClaim {
+    /// True for exactly one caller.
+    pub(super) fn claim(&self) -> bool {
+        !self.0.swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_claimed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Result from a background task execution

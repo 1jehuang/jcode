@@ -5,6 +5,216 @@ use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
+async fn output_preview_is_bounded_and_handles_utf8_boundaries() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+
+    tokio::fs::write(&path, "small output").await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        "small output"
+    );
+
+    let exact = "x".repeat(500);
+    tokio::fs::write(&path, &exact).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        exact
+    );
+
+    let large = "x".repeat(3 * 1024 * 1024);
+    tokio::fs::write(&path, &large).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        format!("{}...", "x".repeat(500))
+    );
+
+    let crosses_boundary = format!("{}é{}", "x".repeat(499), "y".repeat(10));
+    tokio::fs::write(&path, crosses_boundary).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        format!("{}...", "x".repeat(499))
+    );
+
+    let crosses_read_window = format!("{}é", "x".repeat(503));
+    tokio::fs::write(&path, crosses_read_window).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        format!("{}...", "x".repeat(500))
+    );
+
+    let mut invalid_prefix = vec![b'x'; 503];
+    invalid_prefix.push(0xff);
+    tokio::fs::write(&path, invalid_prefix).await?;
+    assert_eq!(BackgroundTaskManager::read_output_preview(&path).await, "");
+
+    let mut invalid_after_window = vec![b'x'; 504];
+    invalid_after_window.push(0xff);
+    tokio::fs::write(&path, invalid_after_window).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&path).await,
+        format!("{}...", "x".repeat(500))
+    );
+
+    assert_eq!(
+        BackgroundTaskManager::read_output_preview(&tmp.path().join("missing")).await,
+        ""
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_preview_bounds_reads_from_an_infinite_device() {
+    let preview = tokio::time::timeout(
+        Duration::from_secs(5),
+        BackgroundTaskManager::read_output_preview(std::path::Path::new("/dev/zero")),
+    )
+    .await
+    .expect("preview reads must finish without reaching EOF");
+    assert_eq!(preview, format!("{}...", "\0".repeat(500)));
+}
+
+#[tokio::test]
+async fn detached_exit_code_handles_large_output_and_missing_marker() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let marker = "\n--- Command finished with exit code: 17 ---\n";
+
+    tokio::fs::write(&path, format!("{}{}", "x".repeat(3 * 1024 * 1024), marker)).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(17)
+    );
+
+    // The marker is near the beginning of the last chunk, which starts
+    // partway through the preceding long line.
+    let tail_prefix = "x".repeat(3 * 1024 * 1024);
+    let suffix = "y".repeat(64 * 1024 - marker.len() - 16);
+    let edge_output = format!("{}{}{}", tail_prefix, marker, suffix);
+    tokio::fs::write(&path, edge_output).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(17)
+    );
+
+    tokio::fs::write(&path, "x".repeat(3 * 1024 * 1024)).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_finds_markers_beyond_last_chunk() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let marker = "\n--- Command finished with exit code: 17 ---\n";
+
+    for suffix_len in [64 * 1024 + 1, 3 * 1024 * 1024] {
+        tokio::fs::write(&path, format!("{marker}{}", "y".repeat(suffix_len))).await?;
+        assert_eq!(
+            BackgroundTaskManager::read_output_exit_code(&path).await,
+            Some(17),
+            "marker with {suffix_len} bytes of later output"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_finds_markers_straddling_chunk_boundaries() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let marker = "--- Command finished with exit code: 17 ---\r\n";
+    let split = 10;
+
+    for boundary in [64 * 1024, 128 * 1024] {
+        let suffix = "y".repeat(boundary - (marker.len() - split));
+        let output = format!("x\n{marker}{suffix}");
+        assert_eq!(output.len() - boundary, "x\n".len() + split);
+        tokio::fs::write(&path, output).await?;
+        assert_eq!(
+            BackgroundTaskManager::read_output_exit_code(&path).await,
+            Some(17),
+            "marker straddling EOF minus {boundary} bytes"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_uses_latest_valid_complete_marker() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let older = "--- Command finished with exit code: 17 ---\n";
+    let latest = "--- Command finished with exit code: 0 ---\n";
+    let invalid = "--- Command finished with exit code: invalid ---\n";
+    let embedded = "--- Command finished with exit code: 123 ---\n";
+    // The last chunk starts at a marker-looking suffix of a long line.
+    let padding = "x".repeat(64 * 1024 - embedded.len() - invalid.len());
+    let output = format!(
+        "{older}\n{}{latest}{}{embedded}{invalid}{padding}",
+        "y\n".repeat(64 * 1024),
+        "z".repeat(128 * 1024),
+    );
+    tokio::fs::write(&path, output).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(0)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_handles_small_and_empty_output() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    // The EOF line need not end in a newline.
+    tokio::fs::write(&path, "--- Command finished with exit code: -17 ---").await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(-17)
+    );
+
+    tokio::fs::write(&path, b"").await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        None
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_preserves_marker_at_tail_line_boundary() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let marker = "--- Command finished with exit code: 17 ---\n";
+    let suffix = "y".repeat(64 * 1024 - marker.len());
+    tokio::fs::write(&path, format!("x\n{marker}{suffix}")).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(17)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_handles_invalid_utf8_tail() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let mut output = vec![0xff];
+    output.extend_from_slice(b"\n--- Command finished with exit code: 17 ---\n");
+    tokio::fs::write(&path, output).await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(17)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn silent_background_task_still_publishes_started_activity() {
     let mut events = Bus::global().subscribe();
     BackgroundTaskManager::publish_task_started_activity(
@@ -1039,5 +1249,363 @@ async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
     std::fs::remove_file(&info.status_file)?;
     assert_eq!(manager.sweep().await, 0);
     assert!(manager.settled.lock().await.is_empty());
+    Ok(())
+}
+
+/// Drain the bus for `task_id` completions until quiet, returning them all.
+///
+/// Uses the runtime subscription (unbounded mpsc) instead of the broadcast
+/// receiver: under a full-crate run, parallel tests can publish more than the
+/// broadcast capacity, and a `Lagged` receiver silently drops events, so a
+/// count assertion on it cannot be trusted.
+async fn collect_completions(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::bus::RuntimeBusDelivery>,
+    task_id: &str,
+) -> Vec<crate::bus::BackgroundTaskCompleted> {
+    let mut found = Vec::new();
+    // Cancel publishes before returning, so the first event is already queued;
+    // the quiet window only proves nothing else (e.g. a duplicate) follows.
+    while let Ok(Some(delivery)) =
+        tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+    {
+        if let BusEvent::BackgroundTaskCompleted(event) = &delivery.event
+            && event.task_id == task_id
+        {
+            found.push(event.clone());
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn cancel_in_process_task_publishes_single_silent_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    // Subscribed with notify+wake: cancel must still never wake the agent.
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-inproc",
+            true,
+            true,
+            |output_path| async move {
+                tokio::fs::write(&output_path, "partial output").await?;
+                sleep(Duration::from_secs(30)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.session_id, "session-cancel-inproc");
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert_eq!(event.exit_code, None);
+    assert!(!event.wake, "cancel must not wake the agent");
+    assert!(!event.notify, "cancel must be silent");
+    assert_eq!(event.output_file, info.output_file);
+    assert_eq!(event.output_preview, "partial output");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_detached_task_publishes_single_silent_completion() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    let mut command = std::process::Command::new("sleep");
+    command.arg("30");
+    // SAFETY: setsid is async-signal-safe, matching how detached bash tasks run.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "bash",
+            None,
+            "session-cancel-detached",
+            child.id(),
+            &Utc::now().to_rfc3339(),
+            true,
+            true,
+        )
+        .await;
+    tokio::fs::write(&info.output_file, "detached partial").await?;
+
+    assert!(manager.cancel(&info.task_id).await?);
+    // Reap so the killed child does not linger as a zombie.
+    let _ = child.wait();
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.session_id, "session-cancel-detached");
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert_eq!(event.exit_code, None);
+    assert!(!event.wake, "cancel must not wake the agent");
+    assert!(!event.notify, "cancel must be silent");
+    assert_eq!(event.output_file, info.output_file);
+    assert_eq!(event.output_preview, "detached partial");
+    Ok(())
+}
+
+/// Yield until the in-process task's wrapper has claimed its terminal
+/// transition. A condition wait, not a timed sleep.
+async fn wait_until_terminal_claimed(manager: &BackgroundTaskManager, task_id: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .tasks
+                .read()
+                .await
+                .get(task_id)
+                .is_some_and(|task| task.terminal.is_claimed())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wrapper claims its terminal transition");
+}
+
+#[tokio::test]
+async fn cancel_after_natural_completion_claimed_keeps_the_natural_event() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    // Hold the status lock so the wrapper parks right after claiming, before
+    // it can write status or publish: the window the old cancel raced into.
+    let guard = manager.progress_updates.lock().await;
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-natural-vs-cancel",
+            true,
+            true,
+            |output_path| async move {
+                tokio::fs::write(&output_path, "natural output").await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    wait_until_terminal_claimed(&manager, &info.task_id).await;
+
+    // Natural completion won: cancel must neither block on the held lock nor
+    // write a terminal status nor publish.
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), manager.cancel(&info.task_id))
+        .await
+        .expect("cancel must not wait for the claimed wrapper")?;
+    assert!(!cancelled, "cancel loses to a claimed natural completion");
+    drop(guard);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Completed);
+    assert_eq!(event.exit_code, Some(0));
+    assert!(event.notify && event.wake, "natural event keeps its flags");
+    assert_eq!(event.output_preview, "natural output");
+    let status = manager.status(&info.task_id).await.expect("status file");
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.error, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_wins_against_a_ready_natural_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-vs-ready",
+            true,
+            true,
+            |_| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    // Let the wrapper park on `finish_rx`, then make it ready. On this
+    // current-thread runtime it cannot run again until cancel yields, so
+    // cancel claims first and the ready completion must stay silent.
+    tokio::task::yield_now().await;
+    finish_tx.send(()).expect("task still waiting");
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert!(!event.notify && !event.wake, "only the silent cancel event");
+    let status = manager.status(&info.task_id).await.expect("status file");
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_detached_test_child(args: &[&str]) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(args[0]);
+    command
+        .args(&args[1..])
+        .stdout(std::process::Stdio::piped());
+    // SAFETY: setsid is async-signal-safe, matching how detached bash tasks run.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(unix)]
+async fn register_detached_test_task(
+    manager: &BackgroundTaskManager,
+    session_id: &str,
+    pid: u32,
+) -> BackgroundTaskInfo {
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "bash",
+            None,
+            session_id,
+            pid,
+            &Utc::now().to_rfc3339(),
+            true,
+            true,
+        )
+        .await;
+    info
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_status_reconciliation_during_cancel_publishes_once() -> Result<()> {
+    use std::io::Read;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let mut child = spawn_detached_test_child(&["sleep", "30"])?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let info = register_detached_test_task(&manager, "session-detached-race", child.id()).await;
+
+    // Cancel signals the process, then sleeps through its grace period. The
+    // child's stdout hits EOF exactly when it dies, so `status()` runs while
+    // cancel is mid-transition and the dead process is reapable: the old
+    // unlocked finalizer published a natural completion here, then cancel
+    // published its own.
+    let (cancelled, reconciled) = tokio::join!(
+        manager.cancel_with_grace(&info.task_id, Duration::from_secs(2)),
+        async {
+            tokio::task::spawn_blocking(move || stdout.read(&mut [0u8; 1]))
+                .await
+                .expect("reader joins")
+                .expect("read until EOF");
+            manager.status(&info.task_id).await
+        }
+    );
+    let _ = child.wait();
+    assert!(cancelled?);
+    let reconciled = reconciled.expect("status file");
+    assert_eq!(reconciled.error.as_deref(), Some("Cancelled by user"));
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert!(!event.notify && !event.wake, "only the silent cancel event");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_natural_exit_racing_cancel_keeps_the_natural_event() -> Result<()> {
+    use std::io::Read;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let mut child = spawn_detached_test_child(&["true"])?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    // EOF: the process exited on its own (left unreaped for the finalizer).
+    tokio::task::spawn_blocking(move || stdout.read(&mut [0u8; 1])).await??;
+    let info = register_detached_test_task(&manager, "session-detached-natural", child.id()).await;
+
+    // Both transitions queue on the status lock; whichever runs first
+    // finalizes the natural exit and the other must find it terminal.
+    let guard = manager.progress_updates.lock().await;
+    let (reconciled, cancelled, ()) = tokio::join!(
+        manager.status(&info.task_id),
+        manager.cancel(&info.task_id),
+        async move {
+            tokio::task::yield_now().await;
+            drop(guard);
+        }
+    );
+    assert!(!cancelled?, "cancel loses to the natural exit");
+    let reconciled = reconciled.expect("status file");
+    assert_eq!(reconciled.status, BackgroundTaskStatus::Completed);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Completed);
+    assert_eq!(event.exit_code, Some(0));
+    assert!(event.notify && event.wake, "natural event keeps its flags");
     Ok(())
 }

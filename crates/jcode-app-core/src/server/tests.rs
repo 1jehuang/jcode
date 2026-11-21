@@ -980,6 +980,91 @@ async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
 }
 
 #[tokio::test]
+async fn cancelled_background_task_clears_client_row_without_waking_session() {
+    // Shape published by `BackgroundTaskManager::cancel`: Failed, no exit code,
+    // notify=false, wake=false. The client must still get a completion so the
+    // `bg N` row retires, but the session must not start a turn or get a
+    // soft interrupt. The TUI half is
+    // `test_cancelled_background_task_notification_retires_remote_row`.
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("must not run".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let provider_dyn: Arc<dyn Provider> = provider;
+    let agent = test_agent(provider_dyn).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let initial_message_count = agent.lock().await.messages().len();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        queue.clone(),
+    )])));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, member_event_tx),
+    )])));
+    let task = BackgroundTaskCompleted {
+        task_id: "bgcancel".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: session_id.clone(),
+        status: BackgroundTaskStatus::Failed,
+        exit_code: None,
+        output_preview: "partial\n".to_string(),
+        output_file: std::env::temp_dir().join("bgcancel.output"),
+        duration_secs: 3.0,
+        notify: false,
+        wake: false,
+    };
+
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &soft_interrupt_queues,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let event = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("cancel completion should reach attached clients")
+        .expect("member stream should stay open");
+    match event {
+        ServerEvent::Notification {
+            notification_type: NotificationType::Message { scope, .. },
+            message,
+            ..
+        } => {
+            assert_eq!(scope.as_deref(), Some("background_activity"));
+            assert!(message.contains("**Background task** `bgcancel`"));
+        }
+        other => panic!("expected background_activity notification, got {other:?}"),
+    }
+
+    assert!(
+        timeout(Duration::from_millis(200), member_event_rx.recv())
+            .await
+            .is_err(),
+        "cancel must not wake or stream a turn"
+    );
+    assert_eq!(agent.lock().await.messages().len(), initial_message_count);
+    assert!(
+        queue.lock().expect("queue lock").is_empty(),
+        "cancel must not queue a soft interrupt"
+    );
+}
+
+#[tokio::test]
 async fn background_task_progress_notifies_attached_clients() {
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
     let agent = test_agent(provider).await;

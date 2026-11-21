@@ -85,6 +85,64 @@ fn test_silent_background_lifecycle_updates_local_and_remote_without_transcript(
 }
 
 #[test]
+fn test_cancelled_background_task_notification_retires_remote_row() {
+    // Server half: `cancelled_background_task_clears_client_row_without_waking_session`
+    // in jcode-app-core. It proves a cancel completion (Failed, exit None,
+    // notify=false, wake=false) is forwarded as a `background_activity`
+    // Notification. This feeds that same shape to the remote client.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let initial_message_count = app.session.messages.len();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let notification = |message: String| crate::protocol::ServerEvent::Notification {
+        from_session: "background_task".into(),
+        from_name: Some("background task".into()),
+        notification_type: crate::protocol::NotificationType::Message {
+            scope: Some("background_activity".into()),
+            channel: None,
+            tldr: None,
+        },
+        message,
+    };
+    app.handle_server_event(
+        notification("**Background task started** `bgcancel` · `sleep 30`".into()),
+        &mut remote,
+    );
+    assert_eq!(
+        app.background_task_rows_ref()[0].status,
+        crate::tui::BackgroundTaskRowStatus::Running
+    );
+
+    let cancelled = BackgroundTaskCompleted {
+        task_id: "bgcancel".into(),
+        tool_name: "bash".into(),
+        display_name: Some("sleep 30".into()),
+        session_id: app.session.id.clone(),
+        status: BackgroundTaskStatus::Failed,
+        exit_code: None,
+        output_preview: String::new(),
+        output_file: std::env::temp_dir().join("bgcancel.output"),
+        duration_secs: 3.0,
+        notify: false,
+        wake: false,
+    };
+    app.handle_server_event(
+        notification(crate::message::format_background_task_notification_markdown(&cancelled)),
+        &mut remote,
+    );
+
+    let rows = app.background_task_rows_ref();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].task_id, "bgcancel");
+    assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Failed);
+    assert!(app.display_messages().is_empty());
+    assert_eq!(app.session.messages.len(), initial_message_count);
+    assert!(!app.pending_turn);
+    assert!(!app.is_processing());
+}
+
+#[test]
 fn test_handle_background_task_completed_adds_delivery_transcript_card() {
     let mut app = create_test_app();
     let event = BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
