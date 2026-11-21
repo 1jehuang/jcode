@@ -1,0 +1,120 @@
+{
+  "created_at": "2026-11-14T15:57:54.260699100Z",
+  "updated_at": "2026-11-14T16:41:01.385677500Z",
+  "last_active_at": "2026-11-14T16:10:06.641435900Z",
+  "provider_key": "opencode-go",
+  "model": "deepseek-v4.1-flash",
+  "reasoning_effort": "low",
+  "env_snapshots": [
+    {
+      "captured_at": "2026-11-14T15:57:54.398181600Z",
+      "reason": "create",
+      "session_id": "session_mosquito_1794671874260_10867a3abffb9231",
+      "working_dir": "E:\\koosh\\Agents\\scratch\\civic-chat-export-20261114",
+      "provider": "OpenAI",
+      "model": "gpt-6.1-sol",
+      "jcode_version": "v0.99.1 (7206efd0c)",
+      "jcode_git_hash": null,
+      "jcode_git_dirty": null,
+      "os": "windows",
+      "arch": "x86_64",
+      "pid": 52672,
+      "is_selfdev": false,
+      "is_debug": false,
+      "is_canary": false,
+      "testing_build": null,
+      "working_git": null
+    },
+    {
+      "captured_at": "2026-11-14T15:57:54.413132100Z",
+      "reason": "set_model",
+      "session_id": "session_mosquito_1794671874260_10867a3abffb9231",
+      "working_dir": "E:\\koosh\\Agents\\scratch\\civic-chat-export-20261114",
+      "provider": "OpenRouter",
+      "model": "deepseek-v4.1-flash",
+      "jcode_version": "v0.99.1 (7206efd0c)",
+      "jcode_git_hash": null,
+      "jcode_git_dirty": null,
+      "os": "windows",
+      "arch": "x86_64",
+      "pid": 52672,
+      "is_selfdev": false,
+      "is_debug": false,
+      "is_canary": false,
+      "testing_build": null,
+      "working_git": null
+    },
+    {
+      "captured_at": "2026-11-14T15:57:54.415775300Z",
+      "reason": "set_reasoning_effort",
+      "session_id": "session_mosquito_1794671874260_10867a3abffb9231",
+      "working_dir": "E:\\koosh\\Agents\\scratch\\civic-chat-export-20261114",
+      "provider": "OpenRouter",
+      "model": "deepseek-v4.1-flash",
+      "jcode_version": "v0.99.1 (7206efd0c)",
+      "jcode_git_hash": null,
+      "jcode_git_dirty": null,
+      "os": "windows",
+      "arch": "x86_64",
+      "pid": 52672,
+      "is_selfdev": false,
+      "is_debug": false,
+      "is_canary": false,
+      "testing_build": null,
+      "working_git": null
+    },
+    {
+      "captured_at": "2026-11-14T16:10:06.653498Z",
+      "reason": "attach",
+      "session_id": "session_mosquito_1794671874260_10867a3abffb9231",
+      "working_dir": "E:\\koosh\\Agents\\scratch\\civic-chat-export-20261114",
+      "provider": "OpenRouter",
+      "model": "deepseek-v4.1-flash",
+      "jcode_version": "v0.99.1 (7206efd0c)",
+      "jcode_git_hash": null,
+      "jcode_git_dirty": null,
+      "os": "windows",
+      "arch": "x86_64",
+      "pid": 21836,
+      "is_selfdev": false,
+      "is_debug": true,
+      "is_canary": false,
+      "testing_build": null,
+      "working_git": null
+    }
+  ],
+  "id": "session_probe_1735689600000_0123456789abcdef",
+  "title": "probe fixture",
+  "short_name": "probe",
+  "parent_id": null,
+  "working_dir": null,
+  "is_debug": false,
+  "is_canary": false,
+  "saved": false,
+  "status": "Closed",
+  "messages": [
+    {
+      "id": "message_1794671874398_3841897249415407205",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Composer regression fixture: this session exists so a probe can resume it."
+        }
+      ],
+      "display_role": "system",
+      "timestamp": "2026-11-14T15:57:54.398103Z"
+    },
+    {
+      "id": "message_1794671874443_3343139261941869566",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Fixture loaded. The composer below is the surface under test."
+        }
+      ],
+      "timestamp": "2026-11-14T15:57:54.443145900Z"
+    }
+  ]
+}

@@ -810,6 +810,12 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 }
 
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
+    // Windows decodes keys with ReadConsoleInputW, so a host that reports kitty
+    // releases delivers `[119;1:3u` as ordinary characters. Remember the burst
+    // so a whole report can be removed below instead of landing in a prompt.
+    #[cfg(windows)]
+    crate::tui::keyboard_protocol::note_typed_text(text);
+
     if app.append_ssh_login_input(text) {
         return true;
     }
@@ -846,6 +852,8 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text_with_undo(app, text, true);
+    #[cfg(windows)]
+    app.scrub_leaked_report_after_input();
     // A key stream may still be receiving the rest of a multi-file drop. Do not
     // strip quoting from a verified non-image prefix until submission, otherwise
     // later paths make its now-unquoted spaces ambiguous.
@@ -3152,6 +3160,9 @@ impl App {
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
+        // A ConPTY host can keep the reported console rect while its pane
+        // shifts, so a resize is also the moment a stale row is most likely.
+        self.force_viewport_repaint_after_shift();
         // A paused viewport holds a wrapped line index; capture the reading
         // position in content coordinates before the rewrap, so the same
         // message stays under the reader (issue #1412, persistent half).

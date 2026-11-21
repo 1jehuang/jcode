@@ -14,6 +14,29 @@ use tokio::time::MissedTickBehavior;
 
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
 
+/// Draw one frame, honouring a pending full-repaint request.
+///
+/// The disconnect and reconnect paths draw directly rather than going through the
+/// main frame loop, so nothing else consumes `force_full_redraw`. A focus-in while
+/// disconnected sets it because a ConPTY host may have moved the pane meanwhile
+/// (#1812); ignoring it leaves every unchanged cell, including the composer row, on
+/// the row the host no longer shows.
+fn draw_frame<B: ratatui::backend::Backend>(
+    app: &mut App,
+    terminal: &mut ratatui::Terminal<B>,
+) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
+    if app.force_full_redraw {
+        terminal.clear()?;
+        app.force_full_redraw = false;
+    }
+    app.force_full_repaint = false;
+    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    Ok(())
+}
+
 #[derive(Default)]
 pub(in crate::tui::app) struct RemoteRunState {
     pub reconnect_attempts: u32,
@@ -291,7 +314,7 @@ async fn wait_for_reload_handoff_before_reconnect(
         .as_deref()
         .unwrap_or("server reload in progress");
     set_disconnect_status_message(app, state, reload_wait_status_message(app, state, detail));
-    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    draw_frame(app, terminal)?;
 
     let socket_path = crate::server::socket_path();
     match crate::server::inspect_reload_wait_status(
@@ -356,7 +379,7 @@ async fn wait_for_reload_handoff_before_reconnect(
                 tokio::select! {
                     _ = &mut wait => break,
                     _ = redraw.tick() => {
-                        terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                        draw_frame(app, terminal)?;
                     }
                     event = event_stream.next() => {
                         if handle_terminal_event_while_disconnected(app, terminal, event)? {
@@ -393,7 +416,7 @@ async fn recover_reloading_server(
         app.push_display_message(DisplayMessage::system(content));
         state.disconnect_msg_idx = Some(app.display_messages.len() - 1);
     }
-    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    draw_frame(app, terminal)?;
 
     crate::logging::warn(&format!(
         "Reload reconnect failed definitively ({}); spawning a replacement shared server",
@@ -443,7 +466,7 @@ async fn respawn_dead_server(
 
     let detail = "server is not running; starting a replacement server";
     set_disconnect_status_message(app, state, reconnect_status_message(app, state, detail));
-    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+    draw_frame(app, terminal)?;
     crate::logging::warn(&format!(
         "Reconnect: no live server after {} attempts; spawning a replacement shared server",
         state.reconnect_attempts
@@ -517,7 +540,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
         tokio::select! {
             result = &mut connect => break result,
             _ = redraw.tick() => {
-                terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                draw_frame(app, terminal)?;
             }
             event = event_stream.next() => {
                 if handle_terminal_event_while_disconnected(app, terminal, event)? {
@@ -586,7 +609,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
             };
 
             set_disconnect_status_message(app, state, msg_content);
-            terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+            draw_frame(app, terminal)?;
 
             if reload_handoff_active(state) {
                 let socket_path = crate::server::socket_path();
@@ -648,7 +671,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                             tokio::select! {
                                 _ = &mut wait => break,
                                 _ = redraw.tick() => {
-                                    terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                                    draw_frame(app, terminal)?;
                                 }
                                 event = event_stream.next() => {
                                     if handle_terminal_event_while_disconnected(
@@ -686,7 +709,7 @@ pub(in crate::tui::app) async fn connect_with_retry(
                 tokio::select! {
                     _ = &mut sleep => break,
                     _ = redraw.tick() => {
-                        terminal.draw(|frame| crate::tui::ui::draw(frame, app))?;
+                        draw_frame(app, terminal)?;
                     }
                     event = event_stream.next() => {
                         if handle_terminal_event_while_disconnected(

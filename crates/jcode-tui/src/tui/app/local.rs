@@ -454,9 +454,19 @@ fn apply_terminal_event(
     match event {
         Some(Ok(Event::FocusGained)) => {
             crate::tui::reapply_configured_terminal_modes_after_focus();
-            let redraw = app.set_client_focused(true);
+            let focused_changed = app.set_client_focused(true);
             app.note_client_focus(true);
-            Ok(redraw)
+            // A ConPTY host can repaint or move the pane while unfocused
+            // (#1812); repaint every row so the composer is not left on a
+            // stale one.
+            #[cfg(windows)]
+            let repaint_host_shift = {
+                app.force_viewport_repaint_after_shift();
+                true
+            };
+            #[cfg(not(windows))]
+            let repaint_host_shift = false;
+            Ok(focused_changed || repaint_host_shift)
         }
         Some(Ok(Event::FocusLost)) => {
             app.set_client_focused(false);
