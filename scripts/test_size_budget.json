@@ -3,7 +3,7 @@
   "tracked_files": {
     "crates/jcode-app-core/src/agent_tests.rs": 3270,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1613,
-    "crates/jcode-app-core/src/server/comm_session_tests.rs": 1306,
+    "crates/jcode-app-core/src/server/comm_session_tests.rs": 1309,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1310,
     "crates/jcode-app-core/src/tool/browser_fast_tests.rs": 1286,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1423,

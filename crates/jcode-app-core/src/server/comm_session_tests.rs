@@ -8,6 +8,7 @@ use super::{
 };
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
+use crate::prompt::PromptRole;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::{EventStream, Provider};
 use crate::server::{SwarmEventType, SwarmMember, VersionedPlan};
@@ -315,6 +316,8 @@ fn prepare_visible_spawn_session_persists_startup_before_launch() {
     .expect("visible spawn preparation should succeed");
 
     assert!(launched);
+    let spawned = crate::session::Session::load(&session_id).expect("spawned session is persisted");
+    assert_eq!(spawned.prompt_role, PromptRole::Subagent);
     let path = crate::storage::jcode_dir()
         .expect("jcode dir")
         .join(format!("client-input-{}", session_id));

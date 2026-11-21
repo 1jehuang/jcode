@@ -880,3 +880,31 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         }
     });
 }
+
+#[test]
+fn prompt_role_block_is_unconditional_for_subagents_only() {
+    let base = "existing instructions".to_string();
+
+    let coordinator = apply_prompt_role(base.clone(), PromptRole::Coordinator);
+    assert_eq!(coordinator, base);
+    assert!(!coordinator.contains(SUBAGENT_PROMPT_BLOCK));
+    assert_eq!(
+        serde_json::from_str::<PromptRole>("\"coordinator\"").expect("known role"),
+        PromptRole::Coordinator
+    );
+
+    let missing_role = serde_json::from_str::<PromptRole>("null").expect("missing role default");
+    assert_eq!(missing_role, PromptRole::Subagent);
+
+    let subagent = apply_prompt_role(base, missing_role);
+    assert!(subagent.contains(SUBAGENT_PROMPT_BLOCK));
+    assert_eq!(
+        subagent
+            .matches(crate::prompt::SUBAGENT_PROMPT_BLOCK)
+            .count(),
+        1
+    );
+    assert!(subagent.contains("Do not delegate, do not spawn"));
+    assert!(subagent.contains("`BROKEN` is reserved for a genuine tool"));
+    assert!(subagent.contains("`OPERATOR NEEDED` is reserved for a decision"));
+}

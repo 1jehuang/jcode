@@ -1,5 +1,6 @@
 //! System prompt management
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -33,6 +34,57 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
 
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
+
+/// Explicit role of a session in the prompt assembly pipeline.
+///
+/// This is set at spawn time on the child session, not inferred from parent
+/// transcript text. Coordinators keep the normal instruction set (including
+/// any operator-level delegation guidance); subagents receive an additional
+/// block that overrides delegation-style instructions with do-the-work rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptRole {
+    Coordinator,
+    #[serde(other)]
+    Subagent,
+}
+
+/// Deserializing missing/unrecognized persisted role state chooses the safe
+/// worker role: spurious worker guidance is harmless, while treating a worker
+/// as a coordinator reintroduces the delegation-only failure mode.
+impl Default for PromptRole {
+    fn default() -> Self {
+        Self::Subagent
+    }
+}
+
+impl PromptRole {
+    /// Used with `skip_serializing_if` so coordinator sessions keep their
+    /// existing on-disk representation.
+    pub fn is_coordinator(&self) -> bool {
+        *self == Self::Coordinator
+    }
+}
+
+#[path = "prompt/subagent_guidance.rs"]
+mod subagent_guidance;
+pub use subagent_guidance::SUBAGENT_PROMPT_BLOCK;
+
+/// Apply role-specific guidance to an assembled system prompt.
+///
+/// Pure and independent of any parent context: `Subagent` always gets the
+/// block, `Coordinator` is returned unchanged.
+pub fn apply_prompt_role(prompt: String, role: PromptRole) -> String {
+    if role != PromptRole::Subagent {
+        return prompt;
+    }
+    let mut prompt = prompt;
+    if !prompt.is_empty() {
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(SUBAGENT_PROMPT_BLOCK);
+    prompt
+}
 
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
