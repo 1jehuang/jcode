@@ -11,6 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkflowGuardTests(unittest.TestCase):
+    def test_unix_ci_enables_parallel_frontend_without_windows_inheritance(self):
+        ci = (ROOT / '.github/workflows/ci.yml').read_text()
+        build = ci.split('  build:\n', 1)[1].split('\n  windows-build-test:\n', 1)[0]
+        self.assertIn('env:\n      RUSTUP_TOOLCHAIN: stable\n', build)
+        self.assertIn('RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend', build)
+        self.assertIn('name: Build & Test (windows-latest)', ci)
+        self.assertNotIn('RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend',
+                         ci.split('\n  windows-build-test:\n', 1)[1])
+
     def test_npm_duplicate_upload_defers_only_exact_conflict_to_visibility_gate(self):
         workflow = (ROOT / '.github/workflows/publish-typescript-sdk.yml').read_text()
         block = workflow.split('      - name: Publish platform runtime packages\n', 1)[1]

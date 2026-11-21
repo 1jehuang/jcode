@@ -8,9 +8,6 @@ env:
   # create, upload to, edit, or publish a release.
   DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
   RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-  # CI builds without the local parallel-frontend rustc wrapper from
-  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
-  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   CARGO_INCREMENTAL: "0"
@@ -223,6 +220,9 @@ jobs:
     # Job id kept for history. Linux moved to build-linux-hosted.
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    env:
+      # This job builds only Linux and macOS release targets.
+      RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend
     needs: [create-release, recovery-preflight]
     if: ${{ always() && needs.create-release.result == 'success' && (needs.recovery-preflight.result == 'success' || needs.recovery-preflight.result == 'skipped') }}
     # Each matrix architecture is independent. A failed Linux or macOS target

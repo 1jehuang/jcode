@@ -42,7 +42,7 @@ concurrency:
 
 env:
   JCODE_CI: '1'
-  CARGO_BUILD_RUSTC_WRAPPER: ''
+  RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend
   CARGO_TERM_COLOR: always
   RUSTUP_TOOLCHAIN: stable
   JUSTRUST_TOOLCHAIN: system
