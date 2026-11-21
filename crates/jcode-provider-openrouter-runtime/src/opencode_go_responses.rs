@@ -53,9 +53,10 @@ pub(crate) fn build_request(
     model: &str,
     reasoning_effort: Option<&str>,
     max_output_tokens: Option<u32>,
+    allow_image_input: bool,
     sanitize_schema: impl Fn(&Value) -> Value,
 ) -> Value {
-    let input = build_input(messages);
+    let input = build_input(messages, allow_image_input);
     let mut request = serde_json::json!({
         "model": model,
         "input": input,
@@ -65,7 +66,9 @@ pub(crate) fn build_request(
     if !system.is_empty() {
         request["instructions"] = Value::String(system.to_string());
     }
-    if let Some(effort) = reasoning_effort.filter(|value| *value != "none") {
+    // The caller decides whether `none` is a real wire value (opted-in
+    // endpoints) or should be omitted, matching the Chat Completions path.
+    if let Some(effort) = reasoning_effort {
         request["reasoning"] = serde_json::json!({ "effort": effort });
     }
     if let Some(max_output_tokens) = max_output_tokens {
@@ -91,7 +94,7 @@ pub(crate) fn build_request(
     request
 }
 
-fn build_input(messages: &[Message]) -> Vec<Value> {
+fn build_input(messages: &[Message], allow_image_input: bool) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         match message.role {
@@ -106,10 +109,19 @@ fn build_input(messages: &[Message]) -> Vec<Value> {
                             }));
                         }
                         ContentBlock::Image { media_type, data } => {
-                            content.push(serde_json::json!({
-                                "type": "input_image",
-                                "image_url": format!("data:{media_type};base64,{data}"),
-                            }));
+                            if allow_image_input {
+                                content.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": format!("data:{media_type};base64,{data}"),
+                                }));
+                            } else {
+                                content.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": format!(
+                                        "[Image omitted: this provider/model does not support image input; media_type={media_type}]"
+                                    ),
+                                }));
+                            }
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -654,6 +666,7 @@ mod tests {
             "gpt-5.6-luna",
             Some("high"),
             Some(128),
+            true,
             Value::clone,
         );
         assert_eq!(request["model"], "gpt-5.6-luna");
@@ -661,6 +674,56 @@ mod tests {
         assert_eq!(request["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(request["reasoning"]["effort"], "high");
         assert_eq!(request["max_output_tokens"], 128);
+    }
+
+    #[test]
+    fn request_omits_images_for_text_only_models() {
+        let message =
+            Message::user_with_images("look", vec![("image/png".to_string(), "AAAA".to_string())]);
+        let allowed = build_request(
+            &[message.clone()],
+            &[],
+            "",
+            "gpt-5.6-luna",
+            None,
+            None,
+            true,
+            Value::clone,
+        );
+        assert_eq!(allowed["input"][0]["content"][0]["type"], "input_image");
+
+        let omitted = build_request(
+            &[message],
+            &[],
+            "",
+            "gpt-5.6-luna",
+            None,
+            None,
+            false,
+            Value::clone,
+        );
+        assert_eq!(omitted["input"][0]["content"][0]["type"], "input_text");
+        assert!(
+            omitted["input"][0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[Image omitted")
+        );
+    }
+
+    #[test]
+    fn request_sends_explicit_none_effort_when_asked() {
+        let request = build_request(
+            &[Message::user("hello")],
+            &[],
+            "",
+            "gpt-5.6-luna",
+            Some("none"),
+            None,
+            true,
+            Value::clone,
+        );
+        assert_eq!(request["reasoning"]["effort"], "none");
     }
 
     #[test]
@@ -682,6 +745,7 @@ mod tests {
             "muse-wonder-1.0",
             Some("high"),
             None,
+            true,
             Value::clone,
         );
         assert_eq!(request["input"].as_array().unwrap().len(), 3);
