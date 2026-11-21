@@ -923,6 +923,51 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
 }
 
 #[test]
+fn push_reasoning_blocks_claude_route_signed_replay() {
+    let mut blocks = Vec::new();
+    push_reasoning_blocks(
+        &mut blocks,
+        "Claude",
+        "signed thought from claude route",
+        Some("sig-claude"),
+        true,
+    );
+    assert_eq!(blocks.len(), 1);
+    match &blocks[0] {
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => {
+            assert_eq!(thinking, "signed thought from claude route");
+            assert_eq!(signature, "sig-claude");
+        }
+        other => panic!("expected AnthropicThinking for Claude provider name, got {other:?}"),
+    }
+}
+
+#[test]
+fn stores_reasoning_content_for_context_accepts_claude_route() {
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "Claude"
+    ));
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "claude"
+    ));
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "anthropic"
+    ));
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "openrouter"
+    ));
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "openai"
+    ));
+    assert!(!crate::provider::stores_reasoning_content_for_context(
+        "gemini"
+    ));
+}
+
+#[test]
 fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
     let mut blocks = Vec::new();
     // Replay requested but no signature: cannot replay, must still keep history.
