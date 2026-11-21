@@ -31,7 +31,7 @@ pub use model::{
     format_progress_summary, render_progress_bar,
 };
 use model::{
-    EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
+    EXIT_MARKER_PREFIX, RunningTask, TerminalClaim, normalize_delivery, progress_equivalent,
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
@@ -152,6 +152,25 @@ impl BackgroundTaskManager {
     }
 
     async fn finalize_detached_status_if_needed(
+        &self,
+        status: TaskStatusFile,
+        status_path: &std::path::Path,
+    ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running || !status.detached {
+            return status;
+        }
+        // Terminal transitions of detached tasks (natural exit here, or
+        // `cancel`) serialize on the status lock and re-read the file, so only
+        // the first writes a terminal status and publishes its completion.
+        let _status_guard = self.progress_updates.lock().await;
+        let status = self.read_status_file(status_path).await.unwrap_or(status);
+        self.finalize_detached_status_locked(status, status_path)
+            .await
+    }
+
+    /// [`Self::finalize_detached_status_if_needed`] for callers already
+    /// holding `progress_updates`, with `status` read under that lock.
+    async fn finalize_detached_status_locked(
         &self,
         mut status: TaskStatusFile,
         status_path: &std::path::Path,
@@ -501,10 +520,16 @@ impl BackgroundTaskManager {
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let terminal = TerminalClaim::default();
+        let terminal_for_task = terminal.clone();
 
         // Spawn the background task
         let handle = tokio::spawn(runtime_activity.scope(async move {
             let result = execute_fn(output_path_clone.clone()).await;
+            // A cancel that already won owns the status write and the event.
+            if !terminal_for_task.claim() {
+                return result;
+            }
 
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
@@ -620,6 +645,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
+            terminal,
             handle,
         };
 
@@ -724,9 +750,15 @@ impl BackgroundTaskManager {
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let terminal = TerminalClaim::default();
+        let terminal_for_task = terminal.clone();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
+            // A cancel that already won owns the status write and the event.
+            if !terminal_for_task.claim() {
+                return Ok(TaskResult::failed(None, "Cancelled by user"));
+            }
 
             let (status, exit_code, error, output_text) = match tool_result {
                 Ok(Ok(output)) => (
@@ -842,6 +874,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
+            terminal,
             handle: wrapper_handle,
         };
 
@@ -1252,6 +1285,35 @@ impl BackgroundTaskManager {
         Ok(Some(status))
     }
 
+    /// Publish the terminal event for a user/agent-initiated cancel.
+    ///
+    /// Clients only retire a `bg N` status row on a completion event, and the
+    /// status file alone never reaches them. Silent (`notify=false`,
+    /// `wake=false`): the canceller already knows, so no "task just finished"
+    /// turn may be started; `background_activity` delivery still clears the row.
+    async fn publish_cancelled(&self, status: &TaskStatusFile) {
+        let output_path = self.output_path_for(&status.task_id);
+        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let output_preview = if output.len() > 500 {
+            format!("{}...", crate::util::truncate_str(&output, 500))
+        } else {
+            output
+        };
+        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+            task_id: status.task_id.clone(),
+            tool_name: status.tool_name.clone(),
+            display_name: status.display_name.clone(),
+            session_id: status.session_id.clone(),
+            status: BackgroundTaskStatus::Failed,
+            exit_code: None,
+            output_preview,
+            output_file: output_path,
+            duration_secs: status.duration_secs.unwrap_or_default(),
+            notify: false,
+            wake: false,
+        }));
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))
@@ -1265,9 +1327,19 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
+        // Exactly one terminal transition per task: claim it from the wrapper
+        // before aborting. If the wrapper already claimed it, its natural
+        // completion (status + event with the original flags) stands.
+        let task = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get(task_id) {
+                Some(task) if task.terminal.claim() => tasks.remove(task_id),
+                Some(_) => return Ok(false),
+                None => None,
+            }
+        };
         // Never hold the map or status lock while awaiting the task: completion
         // needs both locks before it can exit.
-        let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
             task.handle.abort();
             let _ = (&mut task.handle).await;
@@ -1306,6 +1378,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
+            self.publish_cancelled(&final_status).await;
 
             Ok(true)
         } else {
@@ -1316,7 +1389,7 @@ impl BackgroundTaskManager {
                 return Ok(false);
             };
             status = self
-                .finalize_detached_status_if_needed(status, &status_path)
+                .finalize_detached_status_locked(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
@@ -1353,6 +1426,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            self.publish_cancelled(&status).await;
             Ok(true)
         }
     }

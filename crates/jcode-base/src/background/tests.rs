@@ -1041,3 +1041,361 @@ async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
     assert!(manager.settled.lock().await.is_empty());
     Ok(())
 }
+
+/// Drain the bus for `task_id` completions until quiet, returning them all.
+///
+/// Uses the runtime subscription (unbounded mpsc) instead of the broadcast
+/// receiver: under a full-crate run, parallel tests can publish more than the
+/// broadcast capacity, and a `Lagged` receiver silently drops events, so a
+/// count assertion on it cannot be trusted.
+async fn collect_completions(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::bus::RuntimeBusDelivery>,
+    task_id: &str,
+) -> Vec<crate::bus::BackgroundTaskCompleted> {
+    let mut found = Vec::new();
+    // Cancel publishes before returning, so the first event is already queued;
+    // the quiet window only proves nothing else (e.g. a duplicate) follows.
+    while let Ok(Some(delivery)) =
+        tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+    {
+        if let BusEvent::BackgroundTaskCompleted(event) = &delivery.event
+            && event.task_id == task_id
+        {
+            found.push(event.clone());
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn cancel_in_process_task_publishes_single_silent_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    // Subscribed with notify+wake: cancel must still never wake the agent.
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-inproc",
+            true,
+            true,
+            |output_path| async move {
+                tokio::fs::write(&output_path, "partial output").await?;
+                sleep(Duration::from_secs(30)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.session_id, "session-cancel-inproc");
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert_eq!(event.exit_code, None);
+    assert!(!event.wake, "cancel must not wake the agent");
+    assert!(!event.notify, "cancel must be silent");
+    assert_eq!(event.output_file, info.output_file);
+    assert_eq!(event.output_preview, "partial output");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_detached_task_publishes_single_silent_completion() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    let mut command = std::process::Command::new("sleep");
+    command.arg("30");
+    // SAFETY: setsid is async-signal-safe, matching how detached bash tasks run.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "bash",
+            None,
+            "session-cancel-detached",
+            child.id(),
+            &Utc::now().to_rfc3339(),
+            true,
+            true,
+        )
+        .await;
+    tokio::fs::write(&info.output_file, "detached partial").await?;
+
+    assert!(manager.cancel(&info.task_id).await?);
+    // Reap so the killed child does not linger as a zombie.
+    let _ = child.wait();
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.session_id, "session-cancel-detached");
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert_eq!(event.exit_code, None);
+    assert!(!event.wake, "cancel must not wake the agent");
+    assert!(!event.notify, "cancel must be silent");
+    assert_eq!(event.output_file, info.output_file);
+    assert_eq!(event.output_preview, "detached partial");
+    Ok(())
+}
+
+/// Yield until the in-process task's wrapper has claimed its terminal
+/// transition. A condition wait, not a timed sleep.
+async fn wait_until_terminal_claimed(manager: &BackgroundTaskManager, task_id: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if manager
+                .tasks
+                .read()
+                .await
+                .get(task_id)
+                .is_some_and(|task| task.terminal.is_claimed())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("wrapper claims its terminal transition");
+}
+
+#[tokio::test]
+async fn cancel_after_natural_completion_claimed_keeps_the_natural_event() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+
+    // Hold the status lock so the wrapper parks right after claiming, before
+    // it can write status or publish: the window the old cancel raced into.
+    let guard = manager.progress_updates.lock().await;
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-natural-vs-cancel",
+            true,
+            true,
+            |output_path| async move {
+                tokio::fs::write(&output_path, "natural output").await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    wait_until_terminal_claimed(&manager, &info.task_id).await;
+
+    // Natural completion won: cancel must neither block on the held lock nor
+    // write a terminal status nor publish.
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), manager.cancel(&info.task_id))
+        .await
+        .expect("cancel must not wait for the claimed wrapper")?;
+    assert!(!cancelled, "cancel loses to a claimed natural completion");
+    drop(guard);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Completed);
+    assert_eq!(event.exit_code, Some(0));
+    assert!(event.notify && event.wake, "natural event keeps its flags");
+    assert_eq!(event.output_preview, "natural output");
+    let status = manager.status(&info.task_id).await.expect("status file");
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.error, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_wins_against_a_ready_natural_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-vs-ready",
+            true,
+            true,
+            |_| async move {
+                finish_rx.await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    // Let the wrapper park on `finish_rx`, then make it ready. On this
+    // current-thread runtime it cannot run again until cancel yields, so
+    // cancel claims first and the ready completion must stay silent.
+    tokio::task::yield_now().await;
+    finish_tx.send(()).expect("task still waiting");
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert!(!event.notify && !event.wake, "only the silent cancel event");
+    let status = manager.status(&info.task_id).await.expect("status file");
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn spawn_detached_test_child(args: &[&str]) -> Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    let mut command = std::process::Command::new(args[0]);
+    command
+        .args(&args[1..])
+        .stdout(std::process::Stdio::piped());
+    // SAFETY: setsid is async-signal-safe, matching how detached bash tasks run.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    Ok(command.spawn()?)
+}
+
+#[cfg(unix)]
+async fn register_detached_test_task(
+    manager: &BackgroundTaskManager,
+    session_id: &str,
+    pid: u32,
+) -> BackgroundTaskInfo {
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "bash",
+            None,
+            session_id,
+            pid,
+            &Utc::now().to_rfc3339(),
+            true,
+            true,
+        )
+        .await;
+    info
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_status_reconciliation_during_cancel_publishes_once() -> Result<()> {
+    use std::io::Read;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let mut child = spawn_detached_test_child(&["sleep", "30"])?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let info = register_detached_test_task(&manager, "session-detached-race", child.id()).await;
+
+    // Cancel signals the process, then sleeps through its grace period. The
+    // child's stdout hits EOF exactly when it dies, so `status()` runs while
+    // cancel is mid-transition and the dead process is reapable: the old
+    // unlocked finalizer published a natural completion here, then cancel
+    // published its own.
+    let (cancelled, reconciled) = tokio::join!(
+        manager.cancel_with_grace(&info.task_id, Duration::from_secs(2)),
+        async {
+            tokio::task::spawn_blocking(move || stdout.read(&mut [0u8; 1]))
+                .await
+                .expect("reader joins")
+                .expect("read until EOF");
+            manager.status(&info.task_id).await
+        }
+    );
+    let _ = child.wait();
+    assert!(cancelled?);
+    let reconciled = reconciled.expect("status file");
+    assert_eq!(reconciled.error.as_deref(), Some("Cancelled by user"));
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Failed);
+    assert!(!event.notify && !event.wake, "only the silent cancel event");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_natural_exit_racing_cancel_keeps_the_natural_event() -> Result<()> {
+    use std::io::Read;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe_runtime();
+    let mut child = spawn_detached_test_child(&["true"])?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    // EOF: the process exited on its own (left unreaped for the finalizer).
+    tokio::task::spawn_blocking(move || stdout.read(&mut [0u8; 1])).await??;
+    let info = register_detached_test_task(&manager, "session-detached-natural", child.id()).await;
+
+    // Both transitions queue on the status lock; whichever runs first
+    // finalizes the natural exit and the other must find it terminal.
+    let guard = manager.progress_updates.lock().await;
+    let (reconciled, cancelled, ()) = tokio::join!(
+        manager.status(&info.task_id),
+        manager.cancel(&info.task_id),
+        async move {
+            tokio::task::yield_now().await;
+            drop(guard);
+        }
+    );
+    assert!(!cancelled?, "cancel loses to the natural exit");
+    let reconciled = reconciled.expect("status file");
+    assert_eq!(reconciled.status, BackgroundTaskStatus::Completed);
+
+    let completions = collect_completions(&mut events, &info.task_id).await;
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let event = &completions[0];
+    assert_eq!(event.status, BackgroundTaskStatus::Completed);
+    assert_eq!(event.exit_code, Some(0));
+    assert!(event.notify && event.wake, "natural event keeps its flags");
+    Ok(())
+}
