@@ -41,6 +41,12 @@ class JarvisReportTests(unittest.TestCase):
         self.assertEqual(turn['endpoint_to_first_send_ms'], -35)
         self.assertEqual(turn['endpoint_to_final_send_ms'], 15)
         self.assertEqual(turn['endpoint_to_first_speak_callback_ms'], 25)
+        self.assertEqual(turn['final_send_to_first_speak_callback_ms'], 10)
+
+    def test_synthesis_without_player_does_not_imply_playback(self):
+        [turn] = summarize([marker(65, 'PLAYBACK', 'enqueue'), marker(80, 'PLAYBACK', 'synthesis_started')])
+        self.assertEqual(turn['playback_boundary'], 'synthesis_started')
+        self.assertIsNone(turn['synthesis_to_player_ms'])
 
     def test_explicit_loss_vs_missing_across_sessions(self):
         rows = [marker(20, 'CAPTURE', 'manual_accepted', sid) for sid in ['a', 'b']]
