@@ -29,6 +29,34 @@ impl MultiProvider {
 }
 
 async fn await_stream_start(mut stream: EventStream) -> Result<EventStream> {
+    // A request that never starts (no headers, no acceptance event) must not
+    // hang the turn. The idle timeout only applies once bytes are flowing.
+    let timeout_secs = crate::config::config()
+        .provider
+        .stream_start_timeout_secs
+        .max(1);
+    await_stream_start_with_timeout(stream, std::time::Duration::from_secs(timeout_secs)).await
+}
+
+async fn await_stream_start_with_timeout(
+    mut stream: EventStream,
+    budget: std::time::Duration,
+) -> Result<EventStream> {
+    let startup_events = tokio::time::timeout(
+        budget,
+        collect_stream_start(&mut stream),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for provider stream to start"))??;
+    // Only transport startup is buffered. Once headers are accepted, keep
+    // streaming normally, including long silent reasoning and partial-output
+    // rollback behavior. Never replay content already delivered to the agent.
+    Ok(Box::pin(
+        futures::stream::iter(startup_events).chain(stream),
+    ))
+}
+
+async fn collect_stream_start(stream: &mut EventStream) -> Result<Vec<Result<StreamEvent>>> {
     let mut startup_events = Vec::new();
     while let Some(item) = stream.next().await {
         let event = item?;
@@ -57,17 +85,26 @@ async fn await_stream_start(mut stream: EventStream) -> Result<EventStream> {
             break;
         }
     }
-    // Only transport startup is buffered. Once headers are accepted, keep
-    // streaming normally, including long silent reasoning and partial-output
-    // rollback behavior. Never replay content already delivered to the agent.
-    Ok(Box::pin(
-        futures::stream::iter(startup_events).chain(stream),
-    ))
+    Ok(startup_events)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_start_errors_when_nothing_arrives() {
+        // A stream that accepts but emits no events at all must not hang.
+        let stream: EventStream = Box::pin(futures::stream::pending());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            await_stream_start_with_timeout(stream, std::time::Duration::from_millis(20)),
+        )
+        .await
+        .expect("stream_start must not hang when nothing arrives");
+        let err = result.err().expect("startup timeout error");
+        assert!(err.to_string().contains("Timed out waiting for provider stream to start"));
+    }
 
     #[tokio::test]
     async fn startup_channel_error_reaches_router_after_metadata() {

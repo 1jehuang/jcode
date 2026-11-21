@@ -1180,11 +1180,10 @@ pub struct ProviderConfig {
     /// "openai-compatible:myprofile", ...), or openai-compatible profile ids
     /// ("myprofile"). The active model's routes always stay visible.
     pub model_picker_providers: Option<Vec<String>>,
-    /// Max seconds to wait for streaming data before timing out a request with
-    /// no data received. Base budget only: high reasoning efforts scale it up
-    /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
-    /// Default: 180. Overridable via `JCODE_STREAM_IDLE_TIMEOUT_SECS`.
+    /// Max seconds between chunks; effort scales it up. Default: 180.
     pub stream_idle_timeout_secs: u64,
+    /// Turn deadline (1800s, heartbeat-proof) and stream-start timeout (30s).
+    pub turn_deadline_secs: u64, pub stream_start_timeout_secs: u64,
     /// Maximum request attempts for transient provider errors, including the
     /// initial attempt. Default: 8. Overridable via `JCODE_MAX_RETRIES`.
     pub max_retries: u32,
@@ -1224,6 +1223,7 @@ impl Default for ProviderConfig {
             gemini_project: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
+            turn_deadline_secs: 1800, stream_start_timeout_secs: 30,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
             request_compression: "auto".to_string(),
