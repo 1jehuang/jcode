@@ -126,6 +126,12 @@ pub fn simplified_model_routes_for_picker(
                         auth.cursor != AuthState::NotConfigured,
                         String::new(),
                     ),
+                    Some("antigravity") => (
+                        "Antigravity".to_string(),
+                        "https".to_string(),
+                        auth.antigravity != AuthState::NotConfigured,
+                        String::new(),
+                    ),
                     Some("openrouter") => (
                         "auto".to_string(),
                         "openrouter".to_string(),

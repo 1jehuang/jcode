@@ -6,12 +6,50 @@ use jcode_provider_antigravity::{
 use jcode_provider_core::Provider;
 use tokio_stream::StreamExt;
 
+const TEST_ENV_VARS: [&str; 4] = [
+    "JCODE_HOME",
+    "JCODE_ANTIGRAVITY_VERSION",
+    "JCODE_ANTIGRAVITY_ENDPOINT",
+    "JCODE_ANTIGRAVITY_MODEL",
+];
+
+pub(super) struct TestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    _home: tempfile::TempDir,
+    saved: [(&'static str, Option<std::ffi::OsString>); 4],
+}
+
+impl TestEnvGuard {
+    pub(super) fn acquire() -> Self {
+        let lock = jcode_base::storage::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temp JCODE_HOME");
+        let saved = TEST_ENV_VARS.map(|key| (key, std::env::var_os(key)));
+        jcode_base::env::set_var("JCODE_HOME", home.path());
+        jcode_base::env::remove_var("JCODE_ANTIGRAVITY_VERSION");
+        jcode_base::env::remove_var("JCODE_ANTIGRAVITY_ENDPOINT");
+        jcode_base::env::remove_var("JCODE_ANTIGRAVITY_MODEL");
+        Self {
+            _lock: lock,
+            _home: home,
+            saved,
+        }
+    }
+}
+
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(prev) => jcode_base::env::set_var(key, prev),
+                None => jcode_base::env::remove_var(key),
+            }
+        }
+    }
+}
+
 #[test]
 fn malformed_credentials_report_catalog_failure_without_losing_models() {
-    let _guard = jcode_base::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    let previous = std::env::var_os("JCODE_HOME");
-    jcode_base::env::set_var("JCODE_HOME", home.path());
+    let _env = TestEnvGuard::acquire();
     // An existing malformed credential file must fail before any network or
     // fallback to credentials from a locally installed third-party client.
     std::fs::write(
@@ -30,15 +68,11 @@ fn malformed_credentials_report_catalog_failure_without_losing_models() {
         assert_eq!(provider.available_models_display(), before);
         result
     });
-    match previous {
-        Some(value) => jcode_base::env::set_var("JCODE_HOME", value),
-        None => jcode_base::env::remove_var("JCODE_HOME"),
-    }
     assert!(result.is_err());
 }
 
 fn context_test_provider(model: &str, limit: Option<u64>) -> AntigravityProvider {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     provider.set_model(model).unwrap();
     *provider.backend_default_model.write().unwrap() = Some("gemini-3-flash".into());
     *provider.fetched_catalog.write().unwrap() = vec![CatalogModel {
@@ -174,7 +208,7 @@ fn client_metadata_uses_backend_accepted_platform() {
 
 #[test]
 fn available_models_display_includes_dynamic_cache_and_current_override() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     *provider.fetched_catalog.write().expect("catalog lock") = vec![
         CatalogModel {
             id: "claude-opus-4-6-thinking".to_string(),
@@ -214,10 +248,8 @@ fn available_models_display_includes_dynamic_cache_and_current_override() {
 
 #[test]
 fn available_models_display_seeds_from_persisted_catalog() {
-    let _guard = jcode_base::storage::lock_test_env();
-    let temp = tempfile::TempDir::new().expect("temp dir");
-    let previous = std::env::var_os("JCODE_HOME");
-    jcode_base::env::set_var("JCODE_HOME", temp.path());
+    let _env = TestEnvGuard::acquire();
+    jcode_base::env::set_var("JCODE_ANTIGRAVITY_VERSION", "1.5.5");
 
     let path = jcode_base::provider::antigravity::persisted_catalog_path().expect("catalog path");
     jcode_base::storage::write_json(
@@ -238,11 +270,13 @@ fn available_models_display_seeds_from_persisted_catalog() {
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
             default_model_id: Some("gemini-3-flash".to_string()),
             endpoint: None,
+            cli_version: Some("1.5.5".to_string()),
         },
     )
     .expect("write persisted catalog");
 
     let provider = AntigravityProvider::new();
+    assert!(!provider.model_capabilities_need_refresh());
     assert!(
         provider
             .available_models_display()
@@ -252,12 +286,6 @@ fn available_models_display_seeds_from_persisted_catalog() {
         provider.backend_default_model().as_deref(),
         Some("gemini-3-flash")
     );
-
-    if let Some(previous) = previous {
-        jcode_base::env::set_var("JCODE_HOME", previous);
-    } else {
-        jcode_base::env::remove_var("JCODE_HOME");
-    }
 }
 
 #[test]
@@ -287,7 +315,7 @@ fn catalog_stale_handles_invalid_timestamp() {
 
 #[test]
 fn resolve_model_for_request_maps_default_alias_to_real_model() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
 
     // With no backend default and no catalog, the alias resolves to the
     // hardcoded fallback rather than the literal "default" (which 404s).
@@ -332,15 +360,60 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("gemini-3.1-pro-low"),
         "gemini-3.1-pro-low"
     );
+    // Bare `gemini-4-carbon` and `gemini-4-argon` aliases (plus short aliases)
+    // resolve to the default medium tier served by the Cloud Code backend,
+    // while explicit tier variants pass through.
+    for (input, expected) in [
+        ("gemini-4-carbon", "gemini-4-carbon-medium"),
+        ("carbon", "gemini-4-carbon-medium"),
+        ("carbon-high", "gemini-4-carbon-high"),
+        ("carbon-medium", "gemini-4-carbon-medium"),
+        ("carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-carbon-high", "gemini-4-carbon-high"),
+        ("gemini-4-carbon-medium", "gemini-4-carbon-medium"),
+        ("gemini-4-carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-argon", "gemini-4-argon-medium"),
+        ("argon", "gemini-4-argon-medium"),
+        ("argon-high", "gemini-4-argon-high"),
+        ("argon-medium", "gemini-4-argon-medium"),
+        ("argon-low", "gemini-4-argon-low"),
+        ("gemini-4-argon-high", "gemini-4-argon-high"),
+        ("gemini-4-argon-medium", "gemini-4-argon-medium"),
+        ("gemini-4-argon-low", "gemini-4-argon-low"),
+        ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+    ] {
+        assert_eq!(provider.resolve_model_for_request(input), expected);
+    }
 }
 
 #[test]
-fn remap_unsupported_model_only_touches_broken_pro_high() {
-    assert_eq!(
-        remap_unsupported_model("gemini-3.1-pro-high"),
-        "gemini-pro-agent"
-    );
+fn remap_unsupported_model_handles_pro_high_and_gemini4_aliases() {
+    for (alias, canonical) in [
+        ("gemini-3.1-pro-high", "gemini-pro-agent"),
+        ("gemini-4-carbon", "gemini-4-carbon-medium"),
+        ("carbon", "gemini-4-carbon-medium"),
+        ("carbon-medium", "gemini-4-carbon-medium"),
+        ("carbon-high", "gemini-4-carbon-high"),
+        ("carbon-low", "gemini-4-carbon-low"),
+        ("gemini-4-argon", "gemini-4-argon-medium"),
+        ("argon", "gemini-4-argon-medium"),
+        ("argon-medium", "gemini-4-argon-medium"),
+        ("argon-high", "gemini-4-argon-high"),
+        ("argon-low", "gemini-4-argon-low"),
+        ("gemini-3.8-flash", "gemini-3.8-flash-medium"),
+    ] {
+        assert_eq!(remap_unsupported_model(alias), canonical);
+    }
     for model in [
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
         "gemini-3.1-pro-low",
         "gemini-pro-agent",
         "gemini-3-flash",
@@ -350,11 +423,56 @@ fn remap_unsupported_model_only_touches_broken_pro_high() {
     ] {
         assert_eq!(remap_unsupported_model(model), model);
     }
+    for alias in [
+        "gemini-4-carbon",
+        "carbon",
+        "carbon-medium",
+        "carbon-high",
+        "carbon-low",
+        "gemini-4-carbon-high",
+        "gemini-4-carbon-medium",
+        "gemini-4-carbon-low",
+        "gemini-4-argon",
+        "argon",
+        "argon-medium",
+        "argon-high",
+        "argon-low",
+        "gemini-4-argon-high",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-low",
+    ] {
+        assert!(jcode_provider_antigravity::is_known_model(alias));
+        assert!(jcode_provider_antigravity::is_antigravity_exclusive_model(
+            alias
+        ));
+        assert!(model_is_gemini(alias));
+    }
+    for flash_model in [
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-high",
+        "gemini-3.8-flash-medium",
+        "gemini-3.8-flash-low",
+    ] {
+        assert!(jcode_provider_antigravity::is_known_model(flash_model));
+        assert!(jcode_provider_antigravity::is_antigravity_exclusive_model(
+            flash_model
+        ));
+        assert!(model_is_gemini(flash_model));
+    }
+}
+
+#[test]
+fn antigravity_user_agent_uses_cli_product_prefix_required_for_gemini_4() {
+    let ua = antigravity_user_agent();
+    assert!(
+        ua.starts_with("antigravity/cli/"),
+        "expected antigravity/cli/<version> User-Agent, got: {ua}"
+    );
 }
 
 #[test]
 fn resolve_model_for_request_default_prefers_gemini_catalog_model() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     *provider
         .backend_default_model
         .write()
@@ -397,7 +515,7 @@ fn resolve_model_for_request_default_prefers_gemini_catalog_model() {
 
 #[test]
 fn resolve_model_for_request_default_falls_back_to_any_catalog_model_without_gemini() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     *provider
         .backend_default_model
         .write()
@@ -425,7 +543,7 @@ fn resolve_model_for_request_default_falls_back_to_any_catalog_model_without_gem
 
 #[tokio::test]
 async fn complete_uses_native_https_transport_not_cli_subprocess() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
     let mut stream = provider
         .complete(&[], &[], "say hello", None)
         .await
@@ -791,7 +909,7 @@ fn pseudo_tool_call_turn_only_matches_the_recovery_marker_as_a_call() {
 /// wire, so it must be the bare model name.
 #[test]
 fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
-    let provider = AntigravityProvider::new();
+    let provider = AntigravityProvider::empty_for_tests();
 
     provider
         .set_model("antigravity:gemini-3-flash")
