@@ -70,6 +70,7 @@ pub(crate) use redraw_schedule::{
     periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
     redraw_interval_with_policy,
 };
+mod ctrl_layout;
 mod remote_diff;
 pub mod screenshot;
 pub(crate) mod session_facts;
