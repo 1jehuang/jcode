@@ -185,6 +185,23 @@ fn ready_headless_member_with_report_stops_without_losing_report() {
 }
 
 #[test]
+fn clear_idle_worker_notes_keeps_operational_detail() {
+    let mut detail = Some(format!(
+        "rate limited ({}) ({})",
+        IDLE_WORKER_NOT_RESTORED_NOTE, OWNER_NOTIFIED_NOTE
+    ));
+    clear_idle_worker_notes(&mut detail);
+    assert_eq!(detail.as_deref(), Some("rate limited"));
+
+    let mut only_notes = Some(format!(
+        "{} ({})",
+        IDLE_WORKER_NOT_RESTORED_NOTE, OWNER_NOTIFIED_NOTE
+    ));
+    clear_idle_worker_notes(&mut only_notes);
+    assert_eq!(only_notes, None);
+}
+
+#[test]
 fn ready_detached_client_stops_on_reload_until_it_reattaches() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     let _env = test_env(&dir);

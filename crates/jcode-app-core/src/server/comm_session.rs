@@ -13,6 +13,7 @@ use super::{
     update_member_status_with_report,
 };
 use crate::config::SwarmSpawnMode;
+use crate::prompt::PromptRole;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
@@ -75,6 +76,7 @@ fn create_visible_spawn_session(
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let mut session = Session::create(None, None);
+    session.prompt_role = PromptRole::Subagent;
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = model_override {
         session.model = Some(model.to_string());
