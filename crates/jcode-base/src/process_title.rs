@@ -147,6 +147,10 @@ pub fn set_client_remote_display_title(server_name: &str, session_name: &str, is
     set_title(format!("{prefix}{server_name}/{session_name}"));
 }
 
+pub fn program_name() -> &'static str {
+    jcode_core::invoked_program_name()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
