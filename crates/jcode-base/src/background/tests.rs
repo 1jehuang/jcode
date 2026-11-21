@@ -4,6 +4,166 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+/// A cancellation arriving after a command finishes must preserve its result.
+#[tokio::test]
+async fn cooperative_cancellation_preserves_finished_command_result() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    for exit_code in [0, 7] {
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let info = manager
+            .spawn_with_notify_and_cancellation(
+                "test",
+                None,
+                "already-finished",
+                false,
+                false,
+                Some(cancel_tx),
+                move |_| async move {
+                    // The process is finished, but its task is still finalizing.
+                    cancel_rx.await?;
+                    Ok(if exit_code == 0 {
+                        TaskResult::completed(Some(exit_code))
+                    } else {
+                        TaskResult::failed(Some(exit_code), "command failed")
+                    })
+                },
+            )
+            .await;
+        assert!(
+            !manager.cancel(&info.task_id).await?,
+            "finished command was cancelled"
+        );
+        let status = manager
+            .status(&info.task_id)
+            .await
+            .expect("finished status");
+        assert_eq!(status.exit_code, Some(exit_code));
+        assert_eq!(
+            status.status,
+            if exit_code == 0 {
+                BackgroundTaskStatus::Completed
+            } else {
+                BackgroundTaskStatus::Failed
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Cooperative cancellation must not emit a normal completion notification.
+#[tokio::test]
+async fn cooperative_cancellation_does_not_publish_completion() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify_and_cancellation(
+            "test",
+            None,
+            "cancel-no-notify",
+            true,
+            true,
+            Some(cancel_tx),
+            move |_| async move {
+                cancel_rx.await?;
+                Ok(TaskResult::cancelled())
+            },
+        )
+        .await;
+    assert!(manager.cancel(&info.task_id).await?);
+    while let Ok(event) = events.try_recv() {
+        if let BusEvent::BackgroundTaskCompleted(completed) = event {
+            assert_ne!(completed.task_id, info.task_id);
+        }
+    }
+    Ok(())
+}
+
+/// A cancelled caller must not prevent the task from recording its final state.
+#[tokio::test]
+async fn cooperative_cancellation_finalizes_when_caller_is_aborted() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let (cleanup_started_tx, cleanup_started_rx) = tokio::sync::oneshot::channel();
+    let (cleanup_release_tx, cleanup_release_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify_and_cancellation(
+            "test",
+            None,
+            "cancel-caller-aborted",
+            false,
+            false,
+            Some(cancel_tx),
+            move |_| async move {
+                cancel_rx.await?;
+                let _ = cleanup_started_tx.send(());
+                cleanup_release_rx.await?;
+                Ok(TaskResult::cancelled())
+            },
+        )
+        .await;
+    let caller_manager = Arc::clone(&manager);
+    let task_id = info.task_id.clone();
+    let caller = tokio::spawn(async move { caller_manager.cancel(&task_id).await });
+    cleanup_started_rx.await?;
+    caller.abort();
+    assert!(
+        caller
+            .await
+            .expect_err("caller should be aborted")
+            .is_cancelled()
+    );
+    cleanup_release_tx.send(()).expect("cleanup still running");
+
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let status = manager.status(&info.task_id).await.expect("task status");
+            if status.status != BackgroundTaskStatus::Running {
+                break status;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled task stayed Running after cleanup finished");
+    assert_eq!(status.status, BackgroundTaskStatus::Failed);
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+    Ok(())
+}
+
+/// Cancellation must propagate a task's cleanup failure to its caller.
+#[tokio::test]
+async fn cooperative_cancellation_reports_cleanup_failure() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let info = manager
+        .spawn_with_notify_and_cancellation(
+            "test",
+            None,
+            "cancel-error",
+            false,
+            false,
+            Some(cancel_tx),
+            move |_| async move {
+                cancel_rx.await?;
+                Err(anyhow!("process cleanup failed"))
+            },
+        )
+        .await;
+    let error = manager
+        .cancel(&info.task_id)
+        .await
+        .expect_err("cleanup must fail");
+    assert!(error.to_string().contains("process cleanup failed"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn silent_background_task_still_publishes_started_activity() {
     let mut events = Bus::global().subscribe();

@@ -248,6 +248,7 @@ pub(super) struct RunningTask {
     pub(super) started_at: Instant,
     pub(super) started_at_rfc3339: String,
     pub(super) delivery_flags: watch::Sender<(bool, bool)>,
+    pub(super) cancellation: Option<tokio::sync::oneshot::Sender<()>>,
     pub(super) handle: JoinHandle<Result<TaskResult>>,
 }
 
@@ -256,6 +257,7 @@ pub struct TaskResult {
     pub exit_code: Option<i32>,
     pub error: Option<String>,
     pub status: Option<BackgroundTaskStatus>,
+    pub cancelled: bool,
 }
 
 impl TaskResult {
@@ -264,6 +266,7 @@ impl TaskResult {
             exit_code,
             error: None,
             status: Some(BackgroundTaskStatus::Completed),
+            cancelled: false,
         }
     }
 
@@ -272,6 +275,7 @@ impl TaskResult {
             exit_code,
             error: Some(error.into()),
             status: Some(BackgroundTaskStatus::Failed),
+            cancelled: false,
         }
     }
 
@@ -280,6 +284,17 @@ impl TaskResult {
             exit_code,
             error: Some(detail.into()),
             status: Some(BackgroundTaskStatus::Superseded),
+            cancelled: false,
+        }
+    }
+
+    /// Mark cooperative cleanup complete after the manager requested cancellation.
+    pub fn cancelled() -> Self {
+        Self {
+            exit_code: None,
+            error: Some("Cancelled by user".to_string()),
+            status: Some(BackgroundTaskStatus::Failed),
+            cancelled: true,
         }
     }
 }
