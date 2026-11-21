@@ -1559,6 +1559,13 @@ impl App {
             self.reset_tab_completion();
         }
 
+        // A mouse-up that ends a text-selection drag must never open a link,
+        // even with Ctrl held. The copy-selection handler below clears
+        // `copy_selection_dragging` while consuming the release, so snapshot
+        // that state before dispatching to it.
+        let link_drag_released = self.copy_selection_dragging
+            && matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left));
+
         if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {
             finish_mouse_event!(scroll_only, "copy_selection");
         }
@@ -1732,9 +1739,7 @@ impl App {
             finish_mouse_event!(false, "copy_badge_click");
         }
 
-        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
-            && self.try_open_link_at(mouse.column, mouse.row)
-        {
+        if self.handle_link_click_release(mouse, link_drag_released) {
             finish_mouse_event!(false, "open_link");
         }
 
