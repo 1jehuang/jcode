@@ -955,7 +955,7 @@ impl BedrockProvider {
             BedrockModelInfo {
                 context_tokens: DEFAULT_CONTEXT_LIMIT,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-                supports_tools: false,
+                supports_tools: id.starts_with("zai."),
                 supports_vision: false,
                 supports_reasoning: id.contains("thinking")
                     || id.contains("reason")
