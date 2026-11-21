@@ -350,12 +350,37 @@ fn test_remote_ctrl_enter_queues_while_processing() {
         .unwrap();
     rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::empty(), &mut remote))
         .unwrap();
+    // A person pressing the chord does not do it microseconds after the last
+    // character, so close the pasted-newline window the way real typing would.
+    input::paste_guard::clear_char_press();
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::CONTROL, &mut remote))
         .unwrap();
 
     assert!(app.input().is_empty());
     assert_eq!(app.queued_messages().len(), 1);
     assert_eq!(app.queued_messages()[0], "hi");
+}
+
+#[test]
+fn test_remote_ctrl_enter_right_after_a_character_is_a_pasted_line_break() {
+    // A terminal paste delivers one keystroke per character and every newline inside
+    // it as Ctrl+Enter. Sending that chord on would turn a pasted block into one
+    // prompt per line, so it has to become a line break in the composer.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    for key in ['h', 'i'] {
+        rt.block_on(app.handle_remote_key(KeyCode::Char(key), KeyModifiers::empty(), &mut remote))
+            .unwrap();
+    }
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(app.input(), "hi\n");
+    assert!(app.queued_messages().is_empty());
+    assert!(!app.is_processing);
 }
 
 #[test]
@@ -370,6 +395,7 @@ fn test_remote_cmd_enter_queues_while_processing() {
         .unwrap();
     rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::empty(), &mut remote))
         .unwrap();
+    input::paste_guard::clear_char_press();
     rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::SUPER, &mut remote))
         .unwrap();
 
