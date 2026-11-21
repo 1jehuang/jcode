@@ -1122,7 +1122,13 @@ impl MemoryManager {
     ) -> Result<MemoryRelevanceResult> {
         // Automatic recall is disabled for everyone, including existing configs.
         // Explicit memory-tool recall still uses memory_jev::recall directly.
+        let started_at = Instant::now();
         clear_pending_memory(session_id);
+        crate::logging::info(&format!(
+            "Automatic memory recall skipped: reason=globally_disabled provider=not_called \
+             batch_count=0 candidates=0 accepted=0 elapsed_ms={} outcome=skipped",
+            started_at.elapsed().as_millis()
+        ));
         Ok(MemoryRelevanceResult::default())
     }
 
