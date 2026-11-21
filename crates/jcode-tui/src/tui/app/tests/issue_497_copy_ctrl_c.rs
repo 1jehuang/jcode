@@ -97,3 +97,5 @@ fn test_remote_copy_mode_enter_and_y_copy_selection() {
     }
     crate::tui::app::helpers::stop_capturing_clipboard_for_tests();
 }
+
+include!("copy_last_response.rs");

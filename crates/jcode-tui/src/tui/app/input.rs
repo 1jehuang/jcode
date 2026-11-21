@@ -2374,10 +2374,10 @@ pub(super) fn handle_pre_control_shortcuts(
     if handle_account_shortcut(app, code, modifiers) {
         return true;
     }
-    // Plain Ctrl+K kills to end of line (emacs habit). Ctrl+Shift+K must fall
-    // through to the scroll handler: with the Kitty keyboard protocol enabled,
-    // terminals report Ctrl+Shift+K as Char('k') + CONTROL|SHIFT, so without the
-    // Shift guard this would swallow the scroll-up chord and wipe the draft.
+    if super::copy_last_response::handle_key(app, code, modifiers) {
+        return true;
+    }
+    // Ctrl+K kills to EOL; Ctrl+Shift+K (Kitty: CONTROL|SHIFT) must reach scroll.
     if modifiers.contains(KeyModifiers::CONTROL)
         && !modifiers.contains(KeyModifiers::SHIFT)
         && matches!(code, KeyCode::Char('k'))

@@ -359,6 +359,14 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         macos: PlatformDefault::dev("ctrl+space"),
         other: PlatformDefault::dev("ctrl+space"),
     },
+    KeybindingDefault {
+        id: "copy_last_response",
+        description: "Copy the last assistant answer to the clipboard",
+        // Unbound until a maintainer picks a default (#1929). Ctrl+X already
+        // cuts the input line, so the suggested "ctrl+x ctrl+y" chord is opt-in.
+        macos: PlatformDefault::unbound(KeybindingProvenance::Dev),
+        other: PlatformDefault::unbound(KeybindingProvenance::Dev),
+    },
 ];
 
 /// Look up a keybinding action by id.
@@ -655,5 +663,21 @@ mod tests {
             default_binding("does_not_exist", KeybindingPlatform::Other),
             None
         );
+    }
+
+    #[test]
+    fn copy_last_response_defaults_unbound_on_every_platform() {
+        for platform in [KeybindingPlatform::MacOs, KeybindingPlatform::Other] {
+            let binding = default_binding("copy_last_response", platform)
+                .expect("copy_last_response must be in KEYBINDING_DEFAULTS");
+            assert!(
+                !is_bound_value(binding),
+                "copy_last_response must default unbound on {}, got {binding:?}",
+                platform.label()
+            );
+        }
+        assert!(!is_bound_value(
+            &crate::KeybindingsConfig::default().copy_last_response
+        ));
     }
 }

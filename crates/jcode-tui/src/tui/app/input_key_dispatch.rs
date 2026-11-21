@@ -12,6 +12,9 @@ impl App {
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+        self.toggle_keys
+            .copy_last_response
+            .abandon_unless_continues(code, modifiers);
 
         if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
             return Ok(());
@@ -64,6 +67,11 @@ impl App {
         }
 
         if self.handle_key_during_provider_failover(code) {
+            return Ok(());
+        }
+
+        // A started copy sequence (e.g. Ctrl+X then Ctrl+Y) beats offer accept keys.
+        if crate::tui::app::copy_last_response::handle_key_if_pending(self, code, modifiers) {
             return Ok(());
         }
 
