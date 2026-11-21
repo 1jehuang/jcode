@@ -372,6 +372,7 @@ fn parse_niri(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use serde_json::json;
 
     #[test]
@@ -411,6 +412,7 @@ mod tests {
         assert_eq!(parse_tmux("yes no\n"), Visibility::Unknown);
     }
 
+    #[cfg(unix)]
     fn workspaces(shown: &[u64]) -> serde_json::Value {
         json!({"Ok": {"Workspaces": [
             {"id": 1, "is_active": shown.contains(&1)},
@@ -418,6 +420,7 @@ mod tests {
         ]}})
     }
 
+    #[cfg(unix)]
     fn windows(entries: &[(u64, u64, bool)]) -> serde_json::Value {
         let windows: Vec<_> = entries
             .iter()
@@ -428,6 +431,7 @@ mod tests {
         json!({"Ok": {"Windows": windows}})
     }
 
+    #[cfg(unix)]
     #[test]
     fn niri_window_on_a_workspace_that_is_not_shown_is_hidden() {
         let ancestors = [900, 500, 100];
@@ -447,6 +451,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn niri_single_instance_terminal_is_hidden_only_if_all_its_windows_are() {
         let ancestors = [900, 500];
@@ -468,6 +473,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn niri_answers_unknown_rather_than_guess() {
         let shown = workspaces(&[1]);
