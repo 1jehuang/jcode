@@ -1,8 +1,8 @@
 {
-  "total": 3854,
+  "total": 3858,
   "totals_by_pattern": {
-    "dot_ok": 1526,
-    "let_underscore": 1403,
+    "dot_ok": 1528,
+    "let_underscore": 1405,
     "unwrap_or_default": 925
   },
   "tracked_files": {
@@ -1401,6 +1401,11 @@
       "let_underscore": 5,
       "unwrap_or_default": 6
     },
+    "crates/jcode-build-support/src/linux_prerelease.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
     "crates/jcode-build-support/src/paths.rs": {
       "dot_ok": 18,
       "let_underscore": 0,
@@ -1430,6 +1435,11 @@
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 2
+    },
+    "crates/jcode-companion/src/jarvis_launch.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "crates/jcode-companion/src/screen.rs": {
       "dot_ok": 0,
@@ -2378,7 +2388,7 @@
     },
     "crates/jcode-tui/src/tui/app/jarvis_status.rs": {
       "dot_ok": 0,
-      "let_underscore": 3,
+      "let_underscore": 4,
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/local.rs": {
@@ -2868,6 +2878,11 @@
     },
     "crates/jcode-usage-types/src/lib.rs": {
       "dot_ok": 0,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-voice/src/continuous.rs": {
+      "dot_ok": 1,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },

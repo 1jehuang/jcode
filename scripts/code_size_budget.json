@@ -102,6 +102,7 @@
     "crates/jcode-tui/src/tui/ui_prepare.rs": 2646,
     "crates/jcode-tui/src/tui/ui_tools.rs": 1558,
     "crates/jcode-tui/src/tui/ui_viewport.rs": 1431,
+    "crates/jcode-voice/src/continuous.rs": 1691,
     "src/bin/memory_recall_bench.rs": 2667,
     "src/bin/tui_bench.rs": 1765,
     "src/cli/acp.rs": 2018,
