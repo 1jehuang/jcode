@@ -93,9 +93,10 @@ impl BackgroundTaskManager {
                 TASK_ID_ALPHABET[idx] as char
             })
             .collect();
+        let timestamp = timestamp.to_string();
         format!(
             "{}{}",
-            &timestamp.to_string()[timestamp.to_string().len().saturating_sub(6)..],
+            &timestamp[timestamp.len().saturating_sub(6)..],
             rand_part
         )
     }

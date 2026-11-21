@@ -71,7 +71,7 @@ fn corpus() -> Vec<Value> {
     ] {
         for count in [1, 31, 2048] {
             values.push(json!(text.repeat(count)));
-            values.push(json!({text: [text.repeat(count), null, 3.14159]}));
+            values.push(json!({text: [text.repeat(count), null, 2.375]}));
         }
     }
     values.push(Value::Object(
@@ -183,5 +183,95 @@ fn browser_size_observation_boundary() {
         assert_eq!(page.to_string().len(), size);
         let output = ToolOutput::new("").with_metadata(json!({"result":page}));
         assert_eq!(parse_observation(output).is_ok(), size <= MAX_OBSERVATION);
+    }
+}
+
+#[test]
+fn browser_size_typed_request_and_error_parity() {
+    for size in [MAX_REQUEST - 1, MAX_REQUEST, MAX_REQUEST + 1] {
+        let mut request = DecisionRequest {
+            goal: "quoted \"goal\" 東京".into(),
+            observation: json!({"padding":""}),
+            options: vec![],
+        };
+        let overhead = serde_json::to_vec(&request).unwrap().len();
+        request.observation["padding"] = json!("x".repeat(size - overhead));
+        assert_eq!(serde_json::to_vec(&request).unwrap().len(), size);
+        assert_eq!(
+            crate::process_memory::estimate_json_bytes(&request),
+            size
+        );
+    }
+    struct Fails;
+    impl serde::Serialize for Fails {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> std::result::Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("sizing fixture failure"))
+        }
+    }
+    assert!(serde_json::to_vec(&Fails).is_err());
+    assert_eq!(crate::process_memory::estimate_json_bytes(&Fails), 0);
+}
+
+/// Retain this probe for a rejected optimization, not an accepted CPU claim.
+/// A fallible wrapper of this same counter measured 38,086 -> 71,170 ns for
+/// the 160 KiB plain typed request on hosted release (2026-11-18). Therefore
+/// the production typed request guard deliberately keeps its serialized Vec.
+/// justrust test -p jcode-app-core --release --lib typed_request_cpu_probe -- --ignored --nocapture --test-threads=1
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "explicit optimized alternating thread-CPU probe"]
+fn typed_request_cpu_probe() {
+    fn cpu_ns() -> u128 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
+    }
+    for (name, observation) in [
+        ("small", json!({"url":"local", "elements":[]})),
+        (
+            "many",
+            json!(
+                (0..512)
+                    .map(|i| json!({"id":i,"text":"東京\n\""}))
+                    .collect::<Vec<_>>()
+            ),
+        ),
+        ("large", json!({"text":"x".repeat(160_000)})),
+    ] {
+        let request = DecisionRequest {
+            goal: "read state".into(),
+            observation,
+            options: vec![],
+        };
+        let mut samples = [vec![], vec![]];
+        for round in 0..12 {
+            for index in [round % 2, 1 - round % 2] {
+                let start = cpu_ns();
+                for _ in 0..128 {
+                    let count = if index == 0 {
+                        serde_json::to_vec(std::hint::black_box(&request))
+                            .unwrap()
+                            .len()
+                    } else {
+                        crate::process_memory::estimate_json_bytes(std::hint::black_box(&request))
+                    };
+                    std::hint::black_box(count);
+                }
+                samples[index].push((cpu_ns() - start) / 128);
+            }
+        }
+        for sample in &mut samples {
+            sample.sort_unstable();
+        }
+        eprintln!(
+            "TYPED_PREFLIGHT {name} cpu_ns_before={} cpu_ns_after={}",
+            samples[0][6], samples[1][6]
+        );
     }
 }
