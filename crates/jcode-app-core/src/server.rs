@@ -489,16 +489,17 @@ pub use self::reload_state::{
 use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_socket_ready};
 
 pub use self::lifecycle::configure_temporary_server;
+use self::socket::signal_ready_fd;
 #[cfg(unix)]
 pub use self::socket::spawn_server_notify;
 #[cfg(unix)]
 use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
-    cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
-    is_server_ready, is_shared_socket, reap_stale_socket_if_dead, set_socket_path, socket_path,
-    socket_path_is_custom, wait_for_server_ready,
+    cleanup_socket_pair, configure_serve_replace, connect_socket, debug_socket_path,
+    default_socket_path, has_live_listener, is_server_ready, is_shared_socket,
+    reap_stale_socket_if_dead, set_socket_path, socket_path, socket_path_is_custom,
+    wait_for_server_ready,
 };
-use self::socket::{signal_ready_fd, socket_has_live_listener};
 
 pub(crate) use self::util::server_has_newer_binary;
 pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
@@ -2035,19 +2036,19 @@ impl Server {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Settle the socket before taking the daemon lock: a live server is
+        // never stolen silently, and a stale socket left by a crashed server
+        // never blocks startup forever (see `claim_socket_for_serve`). Doing
+        // this first means a live owner is reported with its pid and the ways
+        // to replace it, rather than as a bare lock failure.
+        self::socket::claim_socket_for_serve(&self.socket_path).await?;
+
         #[cfg(unix)]
         let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
 
         // Reap zombies and stop orphaned MCP servers left by a previous image
         // of this PID (exec reload). Must run before this image spawns children.
         crate::inherited_children::start();
-
-        if socket_has_live_listener(&self.socket_path).await {
-            anyhow::bail!(
-                "Refusing to replace active server socket at {}",
-                self.socket_path.display()
-            );
-        }
 
         // Remove existing sockets (uses transport abstraction for cross-platform cleanup)
         crate::transport::remove_socket(&self.socket_path);
