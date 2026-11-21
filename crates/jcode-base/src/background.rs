@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
@@ -52,6 +52,64 @@ pub struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
+    const OUTPUT_PREVIEW_BYTES: usize = 500;
+
+    async fn read_output_preview(path: &std::path::Path) -> String {
+        let mut file = match File::open(path).await {
+            Ok(file) => file.take((Self::OUTPUT_PREVIEW_BYTES + 4) as u64),
+            Err(_) => return String::new(),
+        };
+        let mut bytes = Vec::with_capacity(Self::OUTPUT_PREVIEW_BYTES + 4);
+        if file.read_to_end(&mut bytes).await.is_err() {
+            return String::new();
+        }
+        let read = bytes.len();
+        let is_long = read > Self::OUTPUT_PREVIEW_BYTES;
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error) if error.error_len().is_none() => {
+                let Ok(text) = std::str::from_utf8(&bytes[..error.valid_up_to()]) else {
+                    return String::new();
+                };
+                text
+            }
+            Err(_) => return String::new(),
+        };
+        let preview = crate::util::truncate_str(valid, Self::OUTPUT_PREVIEW_BYTES);
+        if is_long {
+            format!("{preview}...")
+        } else {
+            preview.to_string()
+        }
+    }
+
+    async fn read_output_exit_code(path: &std::path::Path) -> Option<i32> {
+        // Markers more than 64 KiB from EOF are outside this bounded search.
+        const TAIL_BYTES: u64 = 64 * 1024;
+        let mut file = File::open(path).await.ok()?;
+        let len = file.metadata().await.ok()?.len();
+        let offset = len.saturating_sub(TAIL_BYTES);
+        file.seek(std::io::SeekFrom::Start(offset.saturating_sub(1)))
+            .await
+            .ok()?;
+        let starts_at_line_boundary = if offset == 0 {
+            true
+        } else {
+            let mut previous = [0];
+            file.read_exact(&mut previous).await.ok()?;
+            previous[0] == b'\n'
+        };
+        let mut bytes = Vec::with_capacity((len - offset) as usize);
+        file.take(len - offset).read_to_end(&mut bytes).await.ok()?;
+        let tail = if starts_at_line_boundary {
+            bytes.as_slice()
+        } else {
+            let newline = bytes.iter().position(|byte| *byte == b'\n')?;
+            &bytes[newline + 1..]
+        };
+        Self::parse_exit_code_from_output(&String::from_utf8_lossy(tail))
+    }
+
     /// Create a manager rooted at a specific output directory.
     ///
     /// Primarily for tests; production code should use [`global`].
@@ -190,8 +248,11 @@ impl BackgroundTaskManager {
         }
 
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
+        let exit_code = match reaped_exit {
+            Some(exit_code) => Some(exit_code),
+            None => Self::read_output_exit_code(&output_path).await,
+        };
+        let output_preview = Self::read_output_preview(&output_path).await;
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
         let final_status = if matches!(exit_code, Some(0)) {
@@ -221,11 +282,6 @@ impl BackgroundTaskManager {
 
         self.write_status_file(status_path, &status).await;
 
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
@@ -315,12 +371,7 @@ impl BackgroundTaskManager {
         self.write_status_file(status_path, &status).await;
 
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
+        let output_preview = Self::read_output_preview(&output_path).await;
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
@@ -606,16 +657,7 @@ impl BackgroundTaskManager {
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             // Read output preview for notification
-            let output_preview = tokio::fs::read_to_string(&output_path_clone)
-                .await
-                .map(|s| {
-                    if s.len() > 500 {
-                        format!("{}...", crate::util::truncate_str(&s, 500))
-                    } else {
-                        s
-                    }
-                })
-                .unwrap_or_default();
+            let output_preview = Self::read_output_preview(&output_path_clone).await;
 
             // Publish completion event to the bus
             Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
@@ -1293,12 +1335,7 @@ impl BackgroundTaskManager {
     /// turn may be started; `background_activity` delivery still clears the row.
     async fn publish_cancelled(&self, status: &TaskStatusFile) {
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
+        let output_preview = Self::read_output_preview(&output_path).await;
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
