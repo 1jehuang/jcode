@@ -76,7 +76,7 @@ async fn output_preview_bounds_reads_from_an_infinite_device() {
 }
 
 #[tokio::test]
-async fn detached_exit_code_reads_bounded_tail_and_ignores_missing_marker() -> Result<()> {
+async fn detached_exit_code_handles_large_output_and_missing_marker() -> Result<()> {
     let tmp = tempdir()?;
     let path = tmp.path().join("output");
     let marker = "\n--- Command finished with exit code: 17 ---\n";
@@ -87,9 +87,8 @@ async fn detached_exit_code_reads_bounded_tail_and_ignores_missing_marker() -> R
         Some(17)
     );
 
-    // Put the marker close to the lower edge of the EOF window. The read
-    // starts partway through the preceding long line, which must be discarded
-    // along with that partial line before parsing the marker.
+    // The marker is near the beginning of the last chunk, which starts
+    // partway through the preceding long line.
     let tail_prefix = "x".repeat(3 * 1024 * 1024);
     let suffix = "y".repeat(64 * 1024 - marker.len() - 16);
     let edge_output = format!("{}{}{}", tail_prefix, marker, suffix);
@@ -108,19 +107,78 @@ async fn detached_exit_code_reads_bounded_tail_and_ignores_missing_marker() -> R
 }
 
 #[tokio::test]
-async fn detached_exit_code_handles_small_output_and_markers_beyond_tail() -> Result<()> {
+async fn detached_exit_code_finds_markers_beyond_last_chunk() -> Result<()> {
     let tmp = tempdir()?;
     let path = tmp.path().join("output");
     let marker = "\n--- Command finished with exit code: 17 ---\n";
 
-    tokio::fs::write(&path, marker).await?;
+    for suffix_len in [64 * 1024 + 1, 3 * 1024 * 1024] {
+        tokio::fs::write(&path, format!("{marker}{}", "y".repeat(suffix_len))).await?;
+        assert_eq!(
+            BackgroundTaskManager::read_output_exit_code(&path).await,
+            Some(17),
+            "marker with {suffix_len} bytes of later output"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_finds_markers_straddling_chunk_boundaries() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let marker = "--- Command finished with exit code: 17 ---\r\n";
+    let split = 10;
+
+    for boundary in [64 * 1024, 128 * 1024] {
+        let suffix = "y".repeat(boundary - (marker.len() - split));
+        let output = format!("x\n{marker}{suffix}");
+        assert_eq!(output.len() - boundary, "x\n".len() + split);
+        tokio::fs::write(&path, output).await?;
+        assert_eq!(
+            BackgroundTaskManager::read_output_exit_code(&path).await,
+            Some(17),
+            "marker straddling EOF minus {boundary} bytes"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_uses_latest_valid_complete_marker() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    let older = "--- Command finished with exit code: 17 ---\n";
+    let latest = "--- Command finished with exit code: 0 ---\n";
+    let invalid = "--- Command finished with exit code: invalid ---\n";
+    let embedded = "--- Command finished with exit code: 123 ---\n";
+    // The last chunk starts at a marker-looking suffix of a long line.
+    let padding = "x".repeat(64 * 1024 - embedded.len() - invalid.len());
+    let output = format!(
+        "{older}\n{}{latest}{}{embedded}{invalid}{padding}",
+        "y\n".repeat(64 * 1024),
+        "z".repeat(128 * 1024),
+    );
+    tokio::fs::write(&path, output).await?;
     assert_eq!(
         BackgroundTaskManager::read_output_exit_code(&path).await,
-        Some(17)
+        Some(0)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_exit_code_handles_small_and_empty_output() -> Result<()> {
+    let tmp = tempdir()?;
+    let path = tmp.path().join("output");
+    // The EOF line need not end in a newline.
+    tokio::fs::write(&path, "--- Command finished with exit code: -17 ---").await?;
+    assert_eq!(
+        BackgroundTaskManager::read_output_exit_code(&path).await,
+        Some(-17)
     );
 
-    // Markers more than 64 KiB from EOF are outside the bounded search.
-    tokio::fs::write(&path, format!("{marker}{}", "y".repeat(64 * 1024 + 1))).await?;
+    tokio::fs::write(&path, b"").await?;
     assert_eq!(
         BackgroundTaskManager::read_output_exit_code(&path).await,
         None

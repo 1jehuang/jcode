@@ -84,30 +84,59 @@ impl BackgroundTaskManager {
     }
 
     async fn read_output_exit_code(path: &std::path::Path) -> Option<i32> {
-        // Markers more than 64 KiB from EOF are outside this bounded search.
-        const TAIL_BYTES: u64 = 64 * 1024;
+        const CHUNK_BYTES: usize = 64 * 1024;
         let mut file = File::open(path).await.ok()?;
-        let len = file.metadata().await.ok()?.len();
-        let offset = len.saturating_sub(TAIL_BYTES);
-        file.seek(std::io::SeekFrom::Start(offset.saturating_sub(1)))
-            .await
-            .ok()?;
-        let starts_at_line_boundary = if offset == 0 {
-            true
-        } else {
-            let mut previous = [0];
-            file.read_exact(&mut previous).await.ok()?;
-            previous[0] == b'\n'
-        };
-        let mut bytes = Vec::with_capacity((len - offset) as usize);
-        file.take(len - offset).read_to_end(&mut bytes).await.ok()?;
-        let tail = if starts_at_line_boundary {
-            bytes.as_slice()
-        } else {
-            let newline = bytes.iter().position(|byte| *byte == b'\n')?;
-            &bytes[newline + 1..]
-        };
-        Self::parse_exit_code_from_output(&String::from_utf8_lossy(tail))
+        let mut offset = file.metadata().await.ok()?.len();
+        if offset == 0 {
+            return None;
+        }
+
+        // Walk backward from the initial EOF. Read each chunk immediately
+        // before the unfinished line carried over from the chunk to its right.
+        let mut bytes = vec![0; 2 * CHUNK_BYTES];
+        let mut carry_len = 0;
+        let mut discarding_long_line = false;
+        while offset > 0 {
+            let size = offset.min(CHUNK_BYTES as u64) as usize;
+            offset -= size as u64;
+            let start = CHUNK_BYTES - size;
+            file.seek(std::io::SeekFrom::Start(offset)).await.ok()?;
+            file.read_exact(&mut bytes[start..CHUNK_BYTES]).await.ok()?;
+
+            let mut lines = bytes[start..CHUNK_BYTES + carry_len]
+                .rsplit(|&byte| byte == b'\n')
+                .peekable();
+            if discarding_long_line {
+                lines.next();
+                if lines.peek().is_none() {
+                    continue;
+                }
+                discarding_long_line = false;
+            }
+
+            while let Some(line) = lines.next() {
+                if offset != 0 && lines.peek().is_none() {
+                    // The generated marker fits in one chunk. For longer lines,
+                    // discard everything up to the preceding newline, not just
+                    // the carry, so a fragment can't look like a complete marker.
+                    if line.len() > CHUNK_BYTES {
+                        carry_len = 0;
+                        discarding_long_line = true;
+                    } else {
+                        carry_len = line.len();
+                        bytes.copy_within(start..start + carry_len, CHUNK_BYTES);
+                    }
+                    break;
+                }
+                if line.len() <= CHUNK_BYTES
+                    && let Some(code) =
+                        Self::parse_exit_code_from_output(&String::from_utf8_lossy(line))
+                {
+                    return Some(code);
+                }
+            }
+        }
+        None
     }
 
     /// Create a manager rooted at a specific output directory.
