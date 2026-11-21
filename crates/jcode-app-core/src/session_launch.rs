@@ -88,11 +88,11 @@ impl SessionSpawnContext {
         }
         env.extend([
             (
-                "JCODE_RUNTIME_DIR".to_string(),
+                crate::storage::runtime_dir_env_var(crate::storage::product_slug()),
                 crate::storage::runtime_dir().to_string_lossy().into_owned(),
             ),
             (
-                "JCODE_SOCKET".to_string(),
+                crate::server::socket_env_var_name(),
                 connected_socket.to_string_lossy().into_owned(),
             ),
         ]);

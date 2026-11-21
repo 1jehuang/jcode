@@ -4,8 +4,20 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Name of the environment variable that overrides the daemon socket for the
+/// running product (`JCODE_SOCKET`, `KCODE_SOCKET`, ...).
+///
+/// Product-scoped so an inherited variable cannot point a kcode binary at
+/// jcode's daemon socket (or the other way round).
+pub fn socket_env_var_name() -> String {
+    format!(
+        "{}_SOCKET",
+        crate::storage::product_slug().to_ascii_uppercase()
+    )
+}
+
 pub fn socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_SOCKET") {
+    if let Ok(custom) = std::env::var(socket_env_var_name()) {
         return PathBuf::from(custom);
     }
     default_socket_path()
@@ -14,7 +26,15 @@ pub fn socket_path() -> PathBuf {
 /// The shared-daemon socket for this runtime dir, ignoring any
 /// `--socket`/`JCODE_SOCKET` override.
 pub fn default_socket_path() -> PathBuf {
-    crate::storage::runtime_dir().join("jcode.sock")
+    default_socket_path_for(crate::storage::product_slug())
+}
+
+/// Shared-daemon socket path for an explicit product slug.
+///
+/// The filename and the runtime directory both carry the product, so a kcode
+/// binary and a jcode binary can never bind or probe each other's daemon.
+pub fn default_socket_path_for(product: &str) -> PathBuf {
+    crate::storage::runtime_dir_for_product(product).join(format!("{product}.sock"))
 }
 
 /// Resolve a socket path to a comparable identity: absolute, with its parent
@@ -217,6 +237,144 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
     socket_has_live_listener(path).await
 }
 
+/// True when this server process was started with `serve --replace`.
+static SERVE_REPLACE_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record that `serve --replace` was requested for this process.
+///
+/// Set by CLI dispatch before the server starts. Keeping it as process state
+/// avoids threading a flag through every server constructor and test fixture.
+pub fn configure_serve_replace(replace: bool) {
+    SERVE_REPLACE_REQUESTED.store(replace, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn serve_replace_requested() -> bool {
+    if SERVE_REPLACE_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return true;
+    }
+    let variable = format!(
+        "{}_SERVE_REPLACE",
+        crate::storage::product_slug().to_ascii_uppercase()
+    );
+    std::env::var(variable).is_ok_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
+/// Claim the daemon socket for a `serve` startup, or explain how to take it
+/// over.
+///
+/// Three states matter, and only one of them should stop an operator:
+///
+/// * no listener and no leftover path: nothing to do;
+/// * a leftover path with no listener, i.e. a socket a crashed daemon left
+///   behind: unlink it and start normally, with a one-line notice, instead of
+///   refusing to boot forever;
+/// * a live listener: never steal it silently. Name the owning pid and the
+///   remedies, unless the operator asked for a takeover with `serve --replace`.
+pub(super) async fn claim_socket_for_serve(path: &std::path::Path) -> Result<()> {
+    claim_socket_for_serve_with(path, serve_replace_requested()).await
+}
+
+/// [`claim_socket_for_serve`] with an explicit takeover decision.
+///
+/// Split out so tests can exercise the takeover path without mutating the
+/// process-wide `serve --replace` flag their sibling tests rely on.
+pub(super) async fn claim_socket_for_serve_with(
+    path: &std::path::Path,
+    replace_requested: bool,
+) -> Result<()> {
+    let product = crate::storage::product_slug();
+
+    if socket_has_live_listener(path).await {
+        let live_pid = crate::registry::find_server_by_socket_sync(path).map(|info| info.pid);
+
+        if !replace_requested {
+            let owner = match live_pid {
+                Some(pid) => format!("pid {pid}"),
+                None => "an unidentified process".to_string(),
+            };
+            anyhow::bail!(
+                "A live {product} server ({owner}) is already listening on {}.\n\
+                 Use `{product} server reload` to hand it to the newest binary, \
+                 `{product} server stop --force` to stop it, or re-run \
+                 `{product} serve --replace` to replace it deliberately.",
+                path.display()
+            );
+        }
+
+        let Some(pid) = live_pid else {
+            anyhow::bail!(
+                "A live {product} server is listening on {} but no registry entry names its pid, \
+                 so it cannot be replaced safely.\n\
+                 Use `{product} server stop --force`, then run `{product} serve` again.",
+                path.display()
+            );
+        };
+
+        if pid != std::process::id() {
+            terminate_live_server(pid, product).await?;
+        }
+        if socket_has_live_listener(path).await {
+            anyhow::bail!(
+                "`serve --replace` asked to take over {}, but the live {product} server \
+                 (pid {pid}) is still listening. Stop it with `{product} server stop --force` \
+                 and retry.",
+                path.display()
+            );
+        }
+        crate::logging::warn(&format!(
+            "Replaced live {product} server (pid {pid}) on {} (--replace)",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    if path.exists() {
+        crate::logging::warn(&format!(
+            "Removing stale {product} socket at {} left by a server that is no longer running",
+            path.display()
+        ));
+        cleanup_socket_pair(path);
+    }
+
+    Ok(())
+}
+
+/// Stop the live server that owns a socket so `serve --replace` can bind it.
+async fn terminate_live_server(pid: u32, product: &str) -> Result<()> {
+    if !crate::platform::is_process_running(pid) {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    let signal = libc::SIGTERM;
+    #[cfg(not(unix))]
+    let signal = 0;
+
+    crate::platform::signal_detached_process_group(pid, signal).map_err(|error| {
+        anyhow::anyhow!(
+            "Could not stop the live {product} server (pid {pid}) to replace it: {error}.\n\
+             Stop it with `{product} server stop --force`, then run `{product} serve`."
+        )
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    #[cfg(unix)]
+    let mut escalated = false;
+    while crate::platform::is_process_running(pid) && Instant::now() < deadline {
+        #[cfg(unix)]
+        if !escalated && Instant::now() + Duration::from_secs(2) >= deadline {
+            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+            escalated = true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
 /// Lock path that enforces "one daemon per socket".
 ///
 /// The shared socket keeps the historical runtime-dir-scoped name, so a daemon
@@ -230,7 +388,8 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
 #[cfg(unix)]
 pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
     if is_shared_socket(socket) {
-        return crate::storage::runtime_dir().join("jcode-daemon.lock");
+        return crate::storage::runtime_dir()
+            .join(format!("{}-daemon.lock", crate::storage::product_slug()));
     }
 
     // Derive the lock from the resolved identity, not the spelling: two
@@ -310,8 +469,15 @@ pub(super) fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<D
 pub(super) fn acquire_daemon_lock_for(socket: &std::path::Path) -> Result<DaemonLockGuard> {
     let path = daemon_lock_path_for(socket);
     let guard = try_acquire_daemon_lock(&path)?.ok_or_else(|| {
+        let product = crate::storage::product_slug();
+        let owner = crate::registry::find_server_by_socket_sync(socket)
+            .map(|info| format!("pid {}", info.pid))
+            .unwrap_or_else(|| "another process".to_string());
         anyhow::anyhow!(
-            "Another jcode server process is already running on socket {}",
+            "A live {product} server ({owner}) is already listening on {}.\n\
+             Use `{product} server reload` to hand it to the newest binary, \
+             `{product} server stop --force` to stop it, or re-run \
+             `{product} serve --replace` to replace it deliberately.",
             socket.display()
         )
     })?;
@@ -329,7 +495,8 @@ pub(super) fn mark_close_on_exec<T: std::os::fd::AsRawFd>(io: &T) {
 }
 
 pub fn set_socket_path(path: &str) {
-    crate::env::set_var("JCODE_SOCKET", path);
+    let variable = socket_env_var_name();
+    crate::env::set_var(&variable, path);
 }
 
 /// Spawn a server child process and wait until it signals readiness.
@@ -487,7 +654,10 @@ pub(super) fn take_server_start_stderr(child: &mut std::process::Child) -> Strin
 
 #[cfg(unix)]
 pub(super) fn server_start_matches_existing_server(stderr_output: &str) -> bool {
-    stderr_output.contains("Another jcode server process is already running")
+    // The last two patterns are the historical wording from older builds, kept
+    // so a mixed-version upgrade still recognises a refused takeover.
+    stderr_output.contains("is already listening on")
+        || stderr_output.contains("Another jcode server process is already running")
         || stderr_output.contains("Refusing to replace active server socket")
 }
 
