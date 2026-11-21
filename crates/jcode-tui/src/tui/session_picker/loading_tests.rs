@@ -66,13 +66,13 @@ use std::sync::{
     mpsc,
 };
 
-struct EnvVarGuard {
+pub(super) struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
 }
 
 impl EnvVarGuard {
-    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+    pub(super) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
         Self { key, prev }
