@@ -346,6 +346,12 @@ pub(super) async fn handle_remote_key_internal(
         app.toggle_typing_scroll_lock();
         return Ok(());
     }
+    // Keep the remote path aligned with the local dispatcher: a collapsed
+    // paste placeholder before the cursor expands on Alt+X instead of the
+    // todo-card toggle that shares the chord.
+    if input::try_expand_paste_on_alt_x(app, code, modifiers) {
+        return Ok(());
+    }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
         app.toggle_todo_card();
         if crate::tui::is_ssh_remote() {
@@ -409,6 +415,13 @@ pub(super) async fn handle_remote_key_internal(
             KeyCode::Char('e') => {
                 input::handle_alt_key(app, KeyCode::Char('e'));
                 return Ok(());
+            }
+            // Alt+X expands a collapsed paste block locally instead of being
+            // forwarded to the server as an unknown chord.
+            KeyCode::Char('x') => {
+                if input::expand_paste_at_cursor(app) {
+                    return Ok(());
+                }
             }
             _ => {}
         }
@@ -652,6 +665,19 @@ pub(super) async fn handle_remote_key_internal(
             }
             _ => {}
         }
+    }
+
+    // A terminal paste arrives as one Press/Release pair per character, and every
+    // newline inside it arrives as Ctrl+Enter (measured on a real ConPTY). That is a
+    // line break in the pasted text, so it has to be claimed before the Ctrl+Enter
+    // handlers below, which otherwise treat it as the deliberate chord and send the
+    // first line of the block on its own.
+    if code == KeyCode::Enter
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && input::pasted_newline_in_progress()
+    {
+        input::handle_text_input(app, "\n");
+        return Ok(());
     }
 
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {

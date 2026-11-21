@@ -60,7 +60,7 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
         app.is_remote = true;
         app.is_processing = true;
         app.queue_mode = queue_mode;
-        app.input = "Compare [image 1] [pasted 2 lines]".to_string();
+        app.input = "Compare [image 1] [Paste #1 - 2 lines]".to_string();
         app.pasted_contents = vec!["detail one\ndetail two".to_string()];
         app.cursor_pos = app.input.len();
         let expected = input::expand_paste_placeholders(&app, &app.input);

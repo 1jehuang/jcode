@@ -1,3 +1,5 @@
+include!("paste_block_tests.rs");
+
 #[test]
 fn test_handle_server_event_updates_status_detail() {
     let mut app = create_test_app();
