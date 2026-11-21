@@ -182,7 +182,7 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
     }
     matches!(
         provider_name.to_ascii_lowercase().as_str(),
-        "openrouter" | "anthropic" | "openai"
+        "openrouter" | "anthropic" | "claude" | "openai"
     )
 }
 
