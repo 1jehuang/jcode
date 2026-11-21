@@ -100,7 +100,7 @@ async fn auto_candidate_filter_excludes_foreign_client_attached_session() {
 
 // ----- turn-end completion -----
 
-use super::turn_end_should_auto_complete;
+use super::assignment_completion::turn_end_should_auto_complete;
 
 #[test]
 fn running_turn_auto_completes() {
