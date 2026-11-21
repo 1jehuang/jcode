@@ -237,6 +237,7 @@ pub use self::models::{
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
     populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
+    provider_quota_unavailability_detail_for_account_label,
     provider_unavailability_detail_for_account, provider_unavailability_detail_for_account_label,
     record_model_unavailable_for_account, record_provider_unavailable_for_account,
     record_provider_unavailable_for_account_label, refresh_openai_model_catalog_in_background,
@@ -532,18 +533,17 @@ impl MultiProvider {
                     bound_label
                 );
             }
-            if let Some(reason) =
-                models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
-                    .or_else(|| {
-                        account_failover::multi_account_provider_kind(active)
-                            .filter(|kind| {
-                                crate::usage::account_known_exhausted(*kind, &bound_label)
-                            })
-                            .map(|_| "OAuth usage exhausted".to_string())
-                    })
-                && !self
-                    .try_auto_banked_reset(active, &reason, messages, tools, mode)
-                    .await?
+            if let Some(reason) = models::provider_quota_unavailability_detail_for_account_label(
+                key,
+                Some(&bound_label),
+            )
+            .or_else(|| {
+                account_failover::multi_account_provider_kind(active)
+                    .filter(|kind| crate::usage::account_known_exhausted(*kind, &bound_label))
+                    .map(|_| "OAuth usage exhausted".to_string())
+            }) && !self
+                .try_auto_banked_reset(active, &reason, messages, tools, mode)
+                .await?
             {
                 self.try_same_provider_account_failover(
                     active,
