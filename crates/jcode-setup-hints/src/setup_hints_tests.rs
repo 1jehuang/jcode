@@ -32,6 +32,7 @@ fn first_three_launches_can_include_hotkey_notice_too() {
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 
@@ -291,6 +292,7 @@ fn macos_terminal_notice_silent_for_modern_terminals() {
         MacTerminalKind::WezTerm,
         MacTerminalKind::Warp,
         MacTerminalKind::Alacritty,
+        MacTerminalKind::Kitty,
         MacTerminalKind::Vscode,
         MacTerminalKind::Unknown,
     ] {
