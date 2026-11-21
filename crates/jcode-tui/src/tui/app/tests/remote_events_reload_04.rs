@@ -2581,3 +2581,6 @@ fn test_remote_model_changed_updates_reasoning_effort() {
 
 #[path = "remote_events_reload_04_additional_tests.rs"]
 mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;
+
+#[path = "remote_context_window.rs"]
+mod remote_context_window;
