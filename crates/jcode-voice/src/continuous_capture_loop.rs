@@ -108,7 +108,7 @@ pub(super) async fn run(
                                 trace_turn(id, "speech_onset");
                                 let token = Arc::new(AtomicBool::new(false));
                                 let gate = gate.clone();
-                                let threshold = config.action_probability;
+                                let threshold = config.live_action_probability.map(|read| read()).filter(|p| (0.5..=1.0).contains(p)).unwrap_or(config.action_probability);
                                 let require_jev = config.require_jev;
                                 let key = key.clone();
                                 let child = token.clone();

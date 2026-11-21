@@ -527,6 +527,7 @@ impl AlwaysListening {
                 max_audio_seconds_per_hour: cfg.max_audio_seconds_per_hour as u32,
                 max_classifications_per_hour: cfg.max_classifications_per_hour,
                 action_probability: cfg.action_probability,
+                live_action_probability: Some(|| crate::config::config().jarvis.listening.action_probability),
                 warm_nari: cfg.warm_nari,
             },
             self.capture_budget.clone(),

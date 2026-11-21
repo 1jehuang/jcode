@@ -37,6 +37,8 @@ pub struct ContinuousConfig {
     pub max_classifications_per_hour: u32,
     /// Minimum typed Jev probability for accepting a directed request (0.5..=1).
     pub action_probability: f64,
+    /// Read once per utterance so partial and final decisions share one cutoff.
+    pub live_action_probability: Option<fn() -> f64>,
     /// Keep one idle Nari session connected so speech onset skips the handshake.
     /// Idle sessions carry no audio. Audio is still sent only for detected speech.
     pub warm_nari: bool,
@@ -50,6 +52,7 @@ impl Default for ContinuousConfig {
             max_audio_seconds_per_hour: 600,
             max_classifications_per_hour: 120,
             action_probability: 0.95,
+            live_action_probability: None,
             warm_nari: false,
             #[cfg(test)]
             bypass_external_guards: false,
