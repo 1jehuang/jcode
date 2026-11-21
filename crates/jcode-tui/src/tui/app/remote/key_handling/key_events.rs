@@ -798,7 +798,7 @@ pub(super) async fn handle_remote_key_internal(
                 // follow-up recovery path sends it as the next turn. Auto-poke
                 // stays on: this is a redirect, not "stop everything".
                 remote
-                    .cancel_with_reason("keyboard_escape_redirect")
+                    .cancel_parent_only("keyboard_escape_redirect")
                     .await?;
                 app.remote_interrupt_ack_deadline =
                     Some(Instant::now() + std::time::Duration::from_secs(3));
@@ -812,7 +812,7 @@ pub(super) async fn handle_remote_key_internal(
                 // Esc without a redirect stops daemon-owned continuation too.
                 // Send the control before cancellation reaches a turn boundary.
                 remote.runtime_command("poke", vec!["off".into()]).await?;
-                remote.cancel_with_reason("keyboard_escape").await?;
+                remote.cancel_parent_only("keyboard_escape").await?;
                 if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);
                     app.set_status_notice("Interrupting... Auto-poke OFF");

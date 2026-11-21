@@ -1,5 +1,6 @@
 use crate::id::{extract_session_name, new_id, new_memorable_session_id_avoiding};
 use crate::message::{ContentBlock, Message, Role};
+use crate::prompt::PromptRole;
 pub use crate::storage::{
     SessionCounts, SessionPresence, active_session_ids, find_active_session_id_by_pid,
     mark_streaming, session_counts, session_presence, streaming_session_ids, unmark_streaming,
@@ -80,6 +81,9 @@ pub struct Session {
     /// Full assembled system prompt replacement, including an intentionally empty prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Explicit prompt role. Defaults to coordinator for legacy sessions.
+    #[serde(default, skip_serializing_if = "PromptRole::is_coordinator")]
+    pub prompt_role: PromptRole,
     /// Durable logical input turn identity for per-route usage deduplication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usage_turn_id: Option<String>,
@@ -197,6 +201,8 @@ struct SessionStartupStub {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    prompt_role: PromptRole,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -282,6 +288,7 @@ impl Session {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
         session.system_prompt = stub.system_prompt;
+        session.prompt_role = stub.prompt_role;
         session.created_at = stub.created_at;
         session.updated_at = stub.updated_at;
         session.compaction = stub.compaction;
@@ -322,6 +329,7 @@ impl Session {
         let mut session = Self::create_with_id(snapshot.id, snapshot.parent_id, snapshot.title);
         session.custom_title = snapshot.custom_title;
         session.system_prompt = snapshot.system_prompt;
+        session.prompt_role = snapshot.prompt_role;
         session.created_at = snapshot.created_at;
         session.updated_at = snapshot.updated_at;
         session.messages = snapshot.messages;
@@ -528,6 +536,7 @@ impl Session {
             title: self.title.clone(),
             custom_title: self.custom_title.clone(),
             system_prompt: self.system_prompt.clone(),
+            prompt_role: self.prompt_role,
             updated_at: self.updated_at,
             compaction: self.compaction.clone(),
             compaction_unchanged: false,
@@ -734,6 +743,7 @@ impl Session {
         self.title = meta.title;
         self.custom_title = meta.custom_title;
         self.system_prompt = meta.system_prompt;
+        self.prompt_role = meta.prompt_role;
         self.updated_at = meta.updated_at;
         if !meta.compaction_unchanged {
             self.compaction = meta.compaction;
@@ -784,6 +794,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            prompt_role: PromptRole::Coordinator,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -844,6 +855,7 @@ impl Session {
             updated_at: now,
             messages: Vec::new(),
             system_prompt: None,
+            prompt_role: PromptRole::Coordinator,
             model_usage_turn_id: None,
             compaction: None,
             provider_session_id: None,
@@ -1713,6 +1725,8 @@ struct RemoteStartupSessionSnapshot {
     custom_title: Option<String>,
     #[serde(default)]
     system_prompt: Option<String>,
+    #[serde(default)]
+    prompt_role: PromptRole,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     #[serde(default, deserialize_with = "parallel_messages::deserialize")]

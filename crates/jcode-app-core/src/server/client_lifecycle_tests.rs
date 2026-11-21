@@ -157,6 +157,7 @@ fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()>
             Some(1),
             None,
             None,
+            false,
         )
         .await;
 

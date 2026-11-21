@@ -486,6 +486,60 @@ async fn swarm_worker_report_does_not_revive_cancelled_root() {
 }
 
 #[tokio::test]
+async fn worker_report_after_parent_turn_interrupt_is_still_delivered() {
+    let _env_lock = crate::storage::lock_test_env();
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Integrating worker result.".into()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut member = attached_swarm_member(&session_id, tx);
+    // A parent-only interrupt stops the turn but leaves the member ready, so a
+    // child finishing later must still be able to deliver its report.
+    member.status = "ready".into();
+    let members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+    let (swarms, history, counter, events) = empty_swarm_status_state();
+    let report = crate::bus::SwarmWorkerReported {
+        session_id: session_id.clone(),
+        worker_session_id: "late-worker".into(),
+        notification: "Late worker report after Esc.".into(),
+    };
+
+    super::background_tasks::dispatch_swarm_worker_report(
+        &report,
+        &sessions,
+        &queues,
+        super::live_turn::LiveTurnSwarmContext::new(&members, &swarms, &history, &counter, &events),
+    )
+    .await;
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                rx.recv().await.map(unwrap_test_turn_event),
+                Some(ServerEvent::Done { .. })
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("late worker report must wake the interrupted parent");
+    let guard = agent.lock().await;
+    assert!(guard.messages().iter().any(|message| {
+        message.content.iter().any(|block| matches!(block,
+            crate::message::ContentBlock::Text { text, .. } if text.contains(&report.notification)))
+    }), "late worker report must reach the parent model context");
+}
+
+#[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
     let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());

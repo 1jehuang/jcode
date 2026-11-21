@@ -14,6 +14,7 @@ impl Server {
                     // continuation must still take priority over that status.
                     member.is_headless
                         && (headless_member_should_restore(&member.status, true)
+                            || member_has_idle_restart_note(member)
                             || reload_recovery::has_pending_for_session(&member.session_id))
                 })
                 .map(|member| member.session_id.clone())
@@ -44,6 +45,12 @@ impl Server {
         let mut swarms_to_persist = HashSet::new();
 
         for session_id in sessions_to_restore {
+            let was_stopped_idle_worker = {
+                let members = self.swarm_state.members.read().await;
+                members
+                    .get(&session_id)
+                    .is_some_and(member_has_idle_restart_note)
+            };
             let runtime_slot = self.sessions.reserve(&session_id).await;
             if runtime_slot.existing().await.is_some() {
                 continue;
@@ -131,14 +138,17 @@ impl Server {
                 .as_ref()
                 .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
                 .unwrap_or(false);
-            let should_resume = has_stored_recovery_intent || {
+            // A genuine idle worker was alive and ready before the restart.
+            // Its restored session metadata must not be mistaken for an
+            // interrupted turn merely because the agent loaded as Active.
+            let should_resume = has_stored_recovery_intent || (!was_stopped_idle_worker && {
                 let agent_guard = agent.lock().await;
                 self::client_session::restored_session_was_interrupted(
                     &session_id,
                     &previous_status,
                     &agent_guard,
                 )
-            };
+            });
             if let Some(record) = stored_recovery_record.as_ref() {
                 reload_trace::record_value(
                     &record.reload_id,
@@ -161,10 +171,18 @@ impl Server {
                     "restored session was not interrupted by reload",
                 );
                 stats.skipped += 1;
+                let ready_detail = {
+                    let members = self.swarm_state.members.read().await;
+                    members.get(&session_id).and_then(|member| {
+                        member.detail.as_ref().filter(|detail| {
+                            detail.contains(super::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
+                        })
+                    }).cloned()
+                };
                 update_member_status(
                     &session_id,
                     "ready",
-                    None,
+                    ready_detail,
                     &self.swarm_state.members,
                     &self.swarm_state.swarms_by_id,
                     Some(&self.event_history),
@@ -172,6 +190,15 @@ impl Server {
                     Some(&self.swarm_event_tx),
                 )
                 .await;
+                // A non-interrupted worker that was restored only because its
+                // snapshot carried the restart note must become an idle live
+                // member, not carry a note claiming the opposite.
+                {
+                    let mut members = self.swarm_state.members.write().await;
+                    if let Some(member) = members.get_mut(&session_id) {
+                        swarm_persistence::clear_idle_worker_notes(&mut member.detail);
+                    }
+                }
                 if let Some(swarm_id) = {
                     let members = self.swarm_state.members.read().await;
                     members
@@ -377,4 +404,10 @@ impl Server {
             recovery_started.elapsed().as_millis()
         ));
     }
+}
+
+fn member_has_idle_restart_note(member: &super::SwarmMember) -> bool {
+    member.detail.as_deref().is_some_and(|detail| {
+        detail.contains(super::swarm_persistence::IDLE_WORKER_NOT_RESTORED_NOTE)
+    })
 }

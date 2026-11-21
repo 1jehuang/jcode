@@ -105,6 +105,31 @@ pub(super) const IDLE_WORKER_NOT_RESTORED_NOTE: &str =
 /// acknowledgement, so a crash in between may repeat a notice rather than lose it.
 pub(super) const OWNER_NOTIFIED_NOTE: &str = "owner notified";
 
+/// Remove restart-only bookkeeping from a recovered member's detail.
+///
+/// A worker revived after a restart must not keep advertising that it was
+/// never restored. Keep real operational detail (rate limits, last error) so
+/// diagnostics do not lose it. Both recovery notes are removed because an
+/// earlier owner notice described the stopped state, not the revived one.
+pub(super) fn clear_idle_worker_notes(detail: &mut Option<String>) {
+    let Some(existing) = detail.take() else {
+        return;
+    };
+    let is_recovery_note = |segment: &str| {
+        let segment = segment.trim().trim_end_matches(')');
+        segment == IDLE_WORKER_NOT_RESTORED_NOTE || segment == OWNER_NOTIFIED_NOTE
+    };
+    let retained = existing
+        .split(" (")
+        .filter(|segment| !is_recovery_note(segment))
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join(" (");
+    if !retained.is_empty() {
+        *detail = Some(retained);
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSwarmState {
     pub swarm_id: String,

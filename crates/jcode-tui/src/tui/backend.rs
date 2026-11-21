@@ -1270,13 +1270,24 @@ impl RemoteConnection {
 
     /// Cancel the current generation on the server
     pub async fn cancel(&mut self) -> Result<()> {
-        self.cancel_with_reason("remote.cancel").await
+        self.cancel_with_scope("remote.cancel", false).await
     }
 
     /// Cancel the current generation on the server, tagging logs with the UI trigger.
     pub async fn cancel_with_reason(&mut self, reason: &'static str) -> Result<()> {
+        self.cancel_with_scope(reason, false).await
+    }
+
+    /// Cancel only the requesting session's turn, leaving spawned subagents
+    /// running. Used by Esc for a soft interrupt.
+    pub async fn cancel_parent_only(&mut self, reason: &'static str) -> Result<()> {
+        self.cancel_with_scope(reason, true).await
+    }
+
+    async fn cancel_with_scope(&mut self, reason: &'static str, parent_only: bool) -> Result<()> {
         let request = Request::Cancel {
             id: self.next_request_id,
+            parent_only,
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some(reason))

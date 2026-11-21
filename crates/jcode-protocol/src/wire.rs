@@ -77,7 +77,11 @@ pub enum Request {
 
     /// Cancel current generation
     #[serde(rename = "cancel")]
-    Cancel { id: u64 },
+    Cancel {
+        id: u64,
+        #[serde(default, skip_serializing_if = "is_false")]
+        parent_only: bool,
+    },
 
     /// Move the currently executing tool to background
     #[serde(rename = "background_tool")]
