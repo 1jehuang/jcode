@@ -32,9 +32,9 @@ AFTER_BADGE_FG = (120, 232, 168)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 FONT_CANDIDATES = (
-    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
     "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
     "/usr/share/fonts/TTF/JetBrainsMonoNLNerdFont-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
@@ -81,8 +81,8 @@ def render_text_frame(
 def render_cells_frame(
     data: dict,
     *,
-    font_size: int = 15,
-    padding: int = 14,
+    font_size: int = 26,
+    padding: int = 24,
 ) -> Image.Image:
     """Render a jcode `client:cells` JSON frame with exact RGB colors and styles."""
     width_cells = max(1, int(data.get("width", 80)))
@@ -91,9 +91,10 @@ def render_cells_frame(
 
     font = load_mono_font(font_size)
     bold_font = font
+    italic_font = font
     for candidate in (
-        "/usr/share/fonts/noto/NotoSansMono-Bold.ttf",
         "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
+        "/usr/share/fonts/noto/NotoSansMono-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
     ):
         if Path(candidate).is_file():
@@ -102,14 +103,24 @@ def render_cells_frame(
                 break
             except OSError:
                 continue
+    for candidate in (
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Italic.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMonoNLNerdFont-Italic.ttf",
+    ):
+        if Path(candidate).is_file():
+            try:
+                italic_font = ImageFont.truetype(candidate, size=font_size)
+                break
+            except OSError:
+                continue
 
     bbox = font.getbbox("M")
     cell_w = max(8, bbox[2] - bbox[0])
-    cell_h = max(font_size + 5, (bbox[3] - bbox[1]) + 6)
+    cell_h = max(font_size + 8, (bbox[3] - bbox[1]) + 10)
 
     img_w = width_cells * cell_w + padding * 2
     img_h = height_cells * cell_h + padding * 2
-    default_bg = CARD_BG
+    default_bg = (12, 13, 18)
     default_fg = TEXT_COLOR
 
     img = Image.new("RGB", (img_w, img_h), default_bg)
@@ -128,15 +139,20 @@ def render_cells_frame(
                 fg, bg = bg, fg
             if flags & 4:  # DIM
                 fg = tuple((c * 55 + b * 45) // 100 for c, b in zip(fg, bg))
-            run_font = bold_font if (flags & 1) else font
+            if flags & 1:
+                run_font = bold_font
+            elif flags & 2:
+                run_font = italic_font
+            else:
+                run_font = font
             x0 = padding + col * cell_w
             run_cols = len(text)
             if bg != default_bg and run_cols > 0:
                 draw.rectangle([x0, y, x0 + run_cols * cell_w, y + cell_h], fill=bg)
             if text.strip():
-                draw.text((x0, y + 1), text, fill=fg, font=run_font)
+                draw.text((x0, y + 2), text, fill=fg, font=run_font)
             if (flags & 8) and run_cols > 0:  # UNDERLINED
-                draw.line([x0, y + cell_h - 2, x0 + run_cols * cell_w, y + cell_h - 2], fill=fg, width=1)
+                draw.line([x0, y + cell_h - 3, x0 + run_cols * cell_w, y + cell_h - 3], fill=fg, width=2)
             col += run_cols
 
     return img
