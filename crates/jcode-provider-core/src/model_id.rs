@@ -37,6 +37,37 @@ pub fn canonical(model: &str) -> String {
     strip_long_context_suffix(&normalized).to_string()
 }
 
+/// Key that collapses provider spellings of one model for picker de-duplication:
+/// `anthropic.claude-opus-5-5`, `anthropic/claude-opus-5.5` and `claude-opus-5-5-20260101`
+/// all map to `claude-opus-5-5`; a `[1m]` suffix is kept.
+pub fn picker_key(model: &str) -> String {
+    let lower = model.trim().to_ascii_lowercase();
+    // `[1m]` is a separately selectable long-context row, so it stays in the key.
+    let (base, long) = split_long_context(&lower);
+    let id = slash_base(base);
+    let id = ["us.", "eu.", "au.", "jp.", "apac.", "global."]
+        .iter()
+        .find_map(|p| id.strip_prefix(p))
+        .unwrap_or(id);
+    let id = id.strip_prefix("anthropic.").unwrap_or(id);
+    // Bedrock version tag (`-v1:0`).
+    let id = match id.rsplit_once("-v") {
+        Some((head, tail)) if tail.contains(':') => head,
+        _ => id,
+    };
+    let id = strip_date_suffix(id);
+    let id = if id.starts_with("claude-") {
+        id.replace('.', "-")
+    } else {
+        id.to_string()
+    };
+    if long {
+        format!("{id}{LONG_CONTEXT_SUFFIX}")
+    } else {
+        id
+    }
+}
+
 /// Strip a trailing 8-digit `-YYYYMMDD` release date so dated ids
 /// (`claude-haiku-4-5-20251001`) match bare canonical ids
 /// (`claude-haiku-4-5`).
@@ -122,5 +153,23 @@ mod tests {
         // probe with [1m] matches the bare known id too
         assert!(matches_known_model("gpt-5.3-codex[1m]", &known));
         assert!(!matches_known_model("gpt-4o", &known));
+    }
+
+    #[test]
+    fn picker_key_collapses_provider_spellings() {
+        for id in [
+            "anthropic.claude-opus-5-5",
+            "anthropic/claude-opus-5.5",
+            "us.anthropic.claude-opus-5-5-v1:0",
+            "claude-opus-5-5",
+        ] {
+            assert_eq!(picker_key(id), "claude-opus-5-5", "{id}");
+        }
+        assert_eq!(
+            picker_key("claude-sonnet-4-5-20250929[1m]"),
+            "claude-sonnet-4-5[1m]"
+        );
+        assert_eq!(picker_key("models/gemini-3.5-flash"), "gemini-3.5-flash");
+        assert_eq!(picker_key("gpt-5.6"), "gpt-5.6");
     }
 }

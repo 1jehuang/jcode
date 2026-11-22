@@ -882,6 +882,12 @@ impl App {
             );
             return;
         }
+        // Locally refreshed catalog (~/.jcode/models-cache.json); never for SSH remotes (returned above).
+        let cached_only = cached_models_missing_from_routes(
+            routes,
+            remote_available_entries,
+            &read_models_cache(),
+        );
         let mut methods_by_model: std::collections::HashMap<&str, HashSet<&str>> =
             std::collections::HashMap::new();
         for route in routes.iter() {
@@ -914,6 +920,7 @@ impl App {
                 }
             })
             .cloned()
+            .chain(cached_only)
             .collect();
         if !missing.is_empty() {
             let existing: HashSet<(String, String, String)> = routes
@@ -1113,7 +1120,10 @@ impl App {
         crate::provider::simplified_model_routes_for_picker(
             self.provider.name(),
             current_model,
-            merge_cached_models(self.provider.available_models_display(), &read_models_cache()),
+            merge_cached_models(
+                self.provider.available_models_display(),
+                &read_models_cache(),
+            ),
         )
     }
 
@@ -4256,7 +4266,9 @@ mod cloud_resume_tests;
 const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 
 fn models_cache_path() -> Option<std::path::PathBuf> {
-    crate::storage::jcode_dir().ok().map(|d| d.join("models-cache.json"))
+    crate::storage::jcode_dir()
+        .ok()
+        .map(|d| d.join("models-cache.json"))
 }
 
 fn models_cache_stale() -> bool {
@@ -4267,6 +4279,10 @@ fn models_cache_stale() -> bool {
 }
 
 pub(super) fn read_models_cache() -> Vec<String> {
+    // Parallel tests swap JCODE_HOME, so a shared disk cache would leak routes into picker fixtures.
+    if cfg!(test) {
+        return Vec::new();
+    }
     models_cache_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -4280,27 +4296,93 @@ pub(super) fn write_models_cache(models: &[String]) {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |d| d.as_secs_f64());
-        let _ = std::fs::write(p, serde_json::json!({"models": models, "fetched_at": secs}).to_string());
+        let _ = std::fs::write(
+            p,
+            serde_json::json!({"models": models, "fetched_at": secs}).to_string(),
+        );
     }
 }
 
+/// Append cached models the live list does not already show under any spelling
+/// (`anthropic/claude-opus-5.5` is the same row as `claude-opus-5-5`).
 fn merge_cached_models(mut live: Vec<String>, cached: &[String]) -> Vec<String> {
+    let mut keys: HashSet<String> = live
+        .iter()
+        .map(|m| jcode_provider_core::model_id::picker_key(m))
+        .collect();
     for m in cached {
-        if !live.contains(m) {
+        if keys.insert(jcode_provider_core::model_id::picker_key(m)) {
             live.push(m.clone());
         }
     }
     live
 }
 
+/// Cached models with no route under any spelling; the picker gets fallback routes for these.
+fn cached_models_missing_from_routes(
+    routes: &[crate::provider::ModelRoute],
+    advertised: &[String],
+    cached: &[String],
+) -> Vec<String> {
+    let mut keys: HashSet<String> = routes
+        .iter()
+        .map(|r| r.model.as_str())
+        .chain(advertised.iter().map(String::as_str))
+        .map(jcode_provider_core::model_id::picker_key)
+        .collect();
+    cached
+        .iter()
+        .filter(|m| keys.insert(jcode_provider_core::model_id::picker_key(m)))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod models_cache_tests {
     #[test]
     fn merge_keeps_live_order_and_adds_unique_cached() {
-        let out = super::merge_cached_models(
-            vec!["a".into(), "b".into()],
-            &["b".into(), "c".into()],
-        );
+        let out =
+            super::merge_cached_models(vec!["a".into(), "b".into()], &["b".into(), "c".into()]);
         assert_eq!(out, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn merge_and_missing_dedupe_provider_spellings() {
+        let cached: Vec<String> = [
+            "anthropic/claude-opus-5.5",
+            "anthropic.claude-opus-5-5",
+            "claude-sonnet-4-5-20250929[1m]",
+            "new-model",
+        ]
+        .map(String::from)
+        .to_vec();
+        let out = super::merge_cached_models(
+            vec!["claude-opus-5-5".into(), "claude-sonnet-4-5".into()],
+            &cached,
+        );
+        assert_eq!(
+            out,
+            vec![
+                "claude-opus-5-5",
+                "claude-sonnet-4-5",
+                "claude-sonnet-4-5-20250929[1m]",
+                "new-model"
+            ]
+        );
+        let route = |m: &str| crate::provider::ModelRoute {
+            model: m.into(),
+            provider: "Anthropic".into(),
+            api_method: "claude-oauth".into(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        };
+        let missing = super::cached_models_missing_from_routes(
+            &[route("claude-opus-5-5")],
+            &["claude-sonnet-4-5-20250929".into()],
+            &cached,
+        );
+        assert_eq!(missing, vec!["claude-sonnet-4-5-20250929[1m]", "new-model"]);
     }
 }
