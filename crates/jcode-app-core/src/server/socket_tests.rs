@@ -2,6 +2,7 @@
 
 use super::reload_state::{ForeignMarkerPolicy, publish_reload_socket_ready};
 use super::socket::sibling_socket_path;
+use super::socket::{claim_socket_for_serve_with, default_socket_path_for};
 #[cfg(unix)]
 use super::socket::{
     daemon_lock_path_for, server_start_matches_existing_server, try_acquire_daemon_lock,
@@ -13,7 +14,6 @@ use super::{
 };
 #[cfg(unix)]
 use super::{connect_socket, reap_stale_socket_if_dead};
-#[cfg(unix)]
 use crate::transport::Listener;
 use std::time::Duration;
 
@@ -843,4 +843,207 @@ async fn await_reload_handoff_returns_failed_after_marker_transition() {
     } else {
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
+}
+
+// ---------------------------------------------------------------------------
+// serve socket recovery
+// ---------------------------------------------------------------------------
+
+/// Register a live server in `servers.json` so pid lookup can be exercised.
+fn register_live_server_for_socket(socket: &std::path::Path, pid: u32) {
+    let mut registry = crate::registry::ServerRegistry::default();
+    registry.register(crate::registry::ServerInfo {
+        id: "server_test_000".to_string(),
+        name: "test".to_string(),
+        icon: String::new(),
+        socket: socket.to_path_buf(),
+        debug_socket: socket.with_file_name("test-debug.sock"),
+        git_hash: "test".to_string(),
+        version: "test".to_string(),
+        pid,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        sessions: Vec::new(),
+    });
+    let path = crate::registry::registry_path().expect("registry path");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create registry dir");
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string(&registry).expect("serialize registry"),
+    )
+    .expect("write registry");
+}
+
+struct ScopedEnv {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnv {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => crate::env::set_var(self.key, value),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
+
+/// A stale socket left behind by a crashed daemon must not wedge startup.
+#[tokio::test]
+async fn stale_socket_file_does_not_block_serve_and_is_removed() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket = temp.path().join("jcode.sock");
+    let debug = temp.path().join("jcode-debug.sock");
+
+    // Post-crash state: socket nodes exist, nothing is listening on them.
+    std::fs::write(&socket, b"").expect("write stale socket");
+    std::fs::write(&debug, b"").expect("write stale debug socket");
+
+    claim_socket_for_serve_with(&socket, false)
+        .await
+        .expect("a stale socket must not block startup");
+
+    assert!(!socket.exists(), "stale socket should be removed");
+    assert!(!debug.exists(), "stale debug socket should be removed");
+}
+
+/// A live server must be reported with its pid and the way out.
+#[tokio::test]
+async fn live_socket_error_names_pid_and_replace_flag() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = ScopedEnv::set("JCODE_HOME", temp.path());
+    let socket = temp.path().join("live.sock");
+    let _listener = Listener::bind(&socket).expect("bind live socket");
+    let live_pid = std::process::id();
+    register_live_server_for_socket(&socket, live_pid);
+
+    let error = claim_socket_for_serve_with(&socket, false)
+        .await
+        .expect_err("a live server must not be replaced silently");
+    let message = format!("{error:#}");
+
+    assert!(
+        message.contains(&format!("pid {live_pid}")),
+        "error must name the live pid: {message}"
+    );
+    assert!(
+        message.contains("--replace"),
+        "error must name the takeover flag: {message}"
+    );
+    assert!(
+        message.contains("server stop --force") && message.contains("server reload"),
+        "error must name the other remedies: {message}"
+    );
+    assert!(
+        !message.contains("Refusing to replace"),
+        "error must not be a bare refusal: {message}"
+    );
+}
+
+/// `--replace` takes over a live socket held by another process.
+#[tokio::test]
+async fn replace_takes_over_live_socket() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = ScopedEnv::set("JCODE_HOME", temp.path());
+    let socket = temp.path().join("replace.sock");
+
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+        .args([
+            "--exact",
+            "server::socket_tests::serve_socket_holder_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("JCODE_TEST_HOLDER_SOCKET", &socket)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn socket holder child");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !super::has_live_listener(&socket).await && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        super::has_live_listener(&socket).await,
+        "holder child never bound the socket"
+    );
+    register_live_server_for_socket(&socket, child.id());
+
+    claim_socket_for_serve_with(&socket, true)
+        .await
+        .expect("--replace should take over a live socket");
+
+    let gone_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while super::has_live_listener(&socket).await && std::time::Instant::now() < gone_deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        !super::has_live_listener(&socket).await,
+        "the replaced server should no longer be listening"
+    );
+}
+
+/// Helper process for [`replace_takes_over_live_socket`]: owns the socket until
+/// the parent replaces it.
+#[test]
+#[ignore = "helper process, spawned by replace_takes_over_live_socket"]
+fn serve_socket_holder_child() {
+    let Ok(path) = std::env::var("JCODE_TEST_HOLDER_SOCKET") else {
+        return;
+    };
+    let listener = Listener::bind(std::path::Path::new(&path)).expect("bind holder socket");
+    println!("HOLDER_READY");
+    std::thread::sleep(Duration::from_secs(120));
+    drop(listener);
+}
+
+/// A kcode binary must never resolve jcode's daemon socket, and vice versa.
+#[test]
+fn socket_path_differs_between_jcode_and_kcode_binaries() {
+    let jcode = default_socket_path_for("jcode");
+    let kcode = default_socket_path_for("kcode");
+
+    assert_ne!(
+        jcode, kcode,
+        "jcode and kcode must not share a daemon socket"
+    );
+    assert_eq!(
+        jcode.file_name().and_then(|name| name.to_str()),
+        Some("jcode.sock")
+    );
+    assert_eq!(
+        kcode.file_name().and_then(|name| name.to_str()),
+        Some("kcode.sock")
+    );
+
+    assert_eq!(crate::storage::product_slug_from_program("jcode"), "jcode");
+    assert_eq!(
+        crate::storage::product_slug_from_program("kcode.exe"),
+        "kcode"
+    );
+    assert_eq!(
+        crate::storage::product_slug_from_program("kcode-dev"),
+        "kcode"
+    );
+    // Test and helper binaries are not kcode, so historical paths stay put.
+    assert_eq!(
+        crate::storage::product_slug_from_program("jcode_app_core-abc123"),
+        "jcode"
+    );
 }

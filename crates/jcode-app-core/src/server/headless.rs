@@ -154,10 +154,16 @@ pub(super) async fn create_headless_session(
             let detail = switch_error
                 .map(|error| format!(": {error}"))
                 .unwrap_or_else(|| " (the switch reported success)".to_string());
+            // Never name the model it would have run: the caller asked for
+            // `model`, and mentioning an unrelated fallback model is what made
+            // this failure unreadable in the field.
+            crate::logging::warn(&format!(
+                "Refused spawn on model '{model}': the session would have run '{resolved}' instead"
+            ));
             anyhow::bail!(
                 "Cannot spawn session on model '{model}' (request '{model_request}'){detail}. \
-                 It would run '{resolved}' instead; refusing to silently use a different \
-                 model. Check the model id and that its provider is authenticated."
+                 Refusing to silently substitute a different model. Check the model id and \
+                 that its provider is authenticated."
             );
         }
     }

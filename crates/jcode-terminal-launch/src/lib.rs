@@ -93,6 +93,9 @@ pub const RUNTIME_ENV_VARS: &[&str] = &[
     "JCODE_HOME",
     "JCODE_RUNTIME_DIR",
     "JCODE_SOCKET",
+    "KCODE_HOME",
+    "KCODE_RUNTIME_DIR",
+    "KCODE_SOCKET",
     "JCODE_API_SOCKET",
     "JCODE_NO_AUTO_UPDATE",
 ];

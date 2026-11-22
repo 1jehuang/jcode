@@ -382,6 +382,7 @@ pub(super) async fn spawn_swarm_agent(
     requested_model: Option<String>,
     requested_effort: Option<String>,
     label: Option<String>,
+    premium_opt_in: bool,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
     provider_template: &Arc<dyn Provider>,
@@ -397,9 +398,16 @@ pub(super) async fn spawn_swarm_agent(
     client_connections: &ClientConnections,
 ) -> anyhow::Result<String> {
     let agents_config = &crate::config::config().agents;
-    agents_config
-        .validate_swarm_model_request(requested_model.as_deref())
-        .map_err(anyhow::Error::msg)?;
+    // Resolve a bare id to its route before any session is created, so an
+    // unknown/ambiguous id fails here with the candidates instead of at the
+    // provider with a message about some other model.
+    let model_routes = provider_template.model_routes();
+    let requested_model = spawn_policy::resolve_spawn_requested_model(
+        agents_config,
+        requested_model.as_deref(),
+        &model_routes,
+        premium_opt_in,
+    )?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;
@@ -700,6 +708,7 @@ pub(super) async fn handle_comm_spawn(
     model: Option<String>,
     effort: Option<String>,
     label: Option<String>,
+    premium_opt_in: bool,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     global_session_id: &Arc<RwLock<String>>,
@@ -760,6 +769,7 @@ pub(super) async fn handle_comm_spawn(
             effort.clone().unwrap_or_default(),
             model.clone().unwrap_or_default(),
             label.clone().unwrap_or_default(),
+            premium_opt_in.to_string(),
         ],
     );
     let Some(mutation_state) = begin_or_replay(
@@ -785,6 +795,7 @@ pub(super) async fn handle_comm_spawn(
         model,
         effort,
         label,
+        premium_opt_in,
         sessions,
         global_session_id,
         provider_template,

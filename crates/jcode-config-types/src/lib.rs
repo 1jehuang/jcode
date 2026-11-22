@@ -513,10 +513,20 @@ pub struct AgentsConfig {
     /// agents inherit the spawning coordinator's model. Set to a concrete model
     /// string to change the worker default.
     pub swarm_model: Option<String>,
-    /// Opt in to agent-selected worker models, restricted to the exact allowlist.
+    /// Deprecated compatibility flag; no longer grants anything. The
+    /// whitelist (`swarm_model_allowlist`) is authoritative.
     pub swarm_model_selection: bool,
-    /// Exact model/route strings the agent may request. Empty denies all overrides.
+    /// Authoritative whitelist of exact model/route strings a spawn may
+    /// request. Anything not listed verbatim is refused, including cheap
+    /// models and near-miss spellings. Empty refuses every override; spawns
+    /// then use the deterministic default (coordinator model or `swarm_model`).
     pub swarm_model_allowlist: Vec<String>,
+    /// Whitelisted entries designated premium. Spawning one requires an
+    /// explicit per-spawn `premium_opt_in: true`. Must be a subset of
+    /// `swarm_model_allowlist`. This explicit operator designation, not a
+    /// price estimate, is the premium gate; the cost tier shown in the UI is
+    /// informational only.
+    pub swarm_premium_models: Vec<String>,
     /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.

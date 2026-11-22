@@ -240,6 +240,7 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         effort: None,
         label: None,
         lane_id: None,
+        premium_opt_in: params.premium_opt_in.unwrap_or(false),
     };
 
     match send_request(spawn_request).await {
@@ -425,6 +426,7 @@ fn format_swarm_model_list(
     current_model: Option<&str>,
     configured_swarm_model: Option<&str>,
     model_routes: &[jcode_provider_core::ModelRoute],
+    agents: &crate::config::AgentsConfig,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -443,7 +445,61 @@ fn format_swarm_model_list(
         out.push_str("\nNo model routes reported. Omit model to use the configured default.");
         return out;
     }
-    out.push_str("\nModel routes (informational only, overrides require agents.swarm_model_selection and an exact agents.swarm_model_allowlist entry):\n");
+    out.push_str(&format!(
+        "\nSwarm model whitelist (agents.swarm_model_allowlist): {}\n",
+        if agents.swarm_model_allowlist.is_empty() {
+            "empty - no model override is permitted; omit `model`.".to_string()
+        } else {
+            format!(
+                "{} entr{}",
+                agents.swarm_model_allowlist.len(),
+                if agents.swarm_model_allowlist.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            )
+        }
+    ));
+    for allowed in &agents.swarm_model_allowlist {
+        let route = model_routes
+            .iter()
+            .find(|route| route.model == *allowed || format!("{}:{}", route.api_method, route.model) == *allowed);
+        let cost = route
+            .and_then(jcode_provider_core::ModelRoute::estimated_reference_cost_micros)
+            .map(|micros| {
+                format!(
+                    " tier={} ~${:.2}/ref-task",
+                    cost_tier_label(micros),
+                    micros as f64 / 1_000_000.0
+                )
+            })
+            .unwrap_or_else(|| " tier=unknown (no route reported)".to_string());
+        let premium = if agents.swarm_model_premium(allowed) {
+            " [premium: needs premium_opt_in]"
+        } else {
+            ""
+        };
+        out.push_str(&format!("- {allowed}{premium}{cost}\n"));
+    }
+    let blocked: Vec<&str> = model_routes
+        .iter()
+        .map(|route| route.model.as_str())
+        .filter(|model| !agents.swarm_model_allowed(model))
+        .collect();
+    if !blocked.is_empty() && !agents.swarm_model_allowlist.is_empty() {
+        let mut blocked = blocked;
+        blocked.sort_unstable();
+        blocked.dedup();
+        out.push_str(&format!(
+            "Blocked by the whitelist (configured but not allowed): {}\n",
+            blocked.join(", ")
+        ));
+    }
+    out.push_str(
+        "Tier is informational only; the whitelist is the gate. Change it with `/subagent-model allow|deny|default|premium <route>`.\n",
+    );
+    out.push_str("\nModel routes (informational only; overrides require an exact agents.swarm_model_allowlist entry):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -465,6 +521,17 @@ fn format_swarm_model_list(
         ));
     }
     out
+}
+
+/// Informational cost band derived from the model registry's reference-task
+/// estimate. Never used as an admission gate.
+fn cost_tier_label(micros: u64) -> &'static str {
+    const CHEAP_LIMIT: u64 = 1_000_000;
+    match micros {
+        0 => "free",
+        m if m < CHEAP_LIMIT => "cheap",
+        _ => "premium",
+    }
 }
 
 pub struct CommunicateTool {
@@ -586,6 +653,10 @@ struct CommunicateInput {
     /// Optional model override, authorized by the user's opt-in and exact allowlist.
     #[serde(default)]
     model: Option<String>,
+    /// Explicit acknowledgement for a model the user designated premium in
+    /// `agents.swarm_premium_models`. Never widens the allowlist.
+    #[serde(default)]
+    premium_opt_in: Option<bool>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
@@ -773,7 +844,10 @@ impl Tool for CommunicateTool {
         let mut params: CommunicateInput = serde_json::from_value(input)?;
         crate::config::config()
             .agents
-            .validate_swarm_model_request(params.model.as_deref())
+            .validate_swarm_model_request(
+                params.model.as_deref(),
+                params.premium_opt_in.unwrap_or(false),
+            )
             .map_err(anyhow::Error::msg)?;
 
         // `to_session` and `target_session` both name a single session id. Historically
@@ -1268,6 +1342,7 @@ impl Tool for CommunicateTool {
                     effort: None,
                     label: Some(label),
                     lane_id: Some(lane_id.clone()),
+                    premium_opt_in: params.premium_opt_in.unwrap_or(false),
                 };
 
                 match send_request(request).await {
@@ -1306,6 +1381,7 @@ impl Tool for CommunicateTool {
                         current_model.as_deref(),
                         configured_swarm_model.as_deref(),
                         &model_routes,
+                        &crate::config::config().agents,
                     ))),
                     Ok(response) => {
                         ensure_success(&response)?;

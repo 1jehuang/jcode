@@ -78,6 +78,12 @@ impl Config {
         let mut config = toml::from_str::<Self>(&content).map_err(|e| {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
         })?;
+        // A broken swarm model policy is a hard load error: silently falling
+        // back to defaults would change which models workers may use.
+        config
+            .agents
+            .validate_swarm_model_policy()
+            .map_err(|e| anyhow::anyhow!("Config validation failed for {}: {e}", path.display()))?;
         config.display.apply_legacy_compat();
         // An explicit discovery opt-out is authoritative. Older saves wrote the
         // default endpoint too, so table shape cannot establish user intent.
@@ -117,7 +123,17 @@ impl Config {
             .map(str::to_string);
         let mut cfg = Self::load_for_update()?;
         match target {
-            "swarm" => cfg.agents.swarm_model = value,
+            "swarm" => {
+                // Setting the spawn default through the UI implies permitting
+                // it: otherwise the policy validator would reject the config it
+                // just wrote.
+                if let Some(model) = value.as_deref()
+                    && !cfg.agents.swarm_model_allowed(model)
+                {
+                    cfg.agents.swarm_model_allowlist.push(model.to_string());
+                }
+                cfg.agents.swarm_model = value;
+            }
             "review" => cfg.autoreview.model = value,
             "judge" => cfg.autojudge.model = value,
             "memory" => cfg.agents.memory_model = value,
@@ -125,6 +141,91 @@ impl Config {
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
         cfg.save()
+    }
+
+    /// Mutate the swarm model whitelist policy and persist it.
+    ///
+    /// The whole policy is re-validated before writing, so the UI cannot leave
+    /// an invalid default or a premium entry that is not whitelisted.
+    pub fn update_swarm_model_policy<T>(
+        f: impl FnOnce(&mut jcode_config_types::AgentsConfig) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut cfg = Self::load_for_update()?;
+        let result = f(&mut cfg.agents)?;
+        cfg.agents.validate_swarm_model_policy()?;
+        cfg.save()?;
+        crate::logging::info("Saved agents.swarm_model policy to config");
+        Ok(result)
+    }
+
+    /// Add an exact route to `agents.swarm_model_allowlist`.
+    pub fn allow_swarm_model(model: &str) -> anyhow::Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Swarm model route cannot be empty.");
+        }
+        Self::update_swarm_model_policy(|agents| {
+            if !agents.swarm_model_allowed(model) {
+                agents.swarm_model_allowlist.push(model.to_string());
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove a route from the whitelist. Returns `true` when the configured
+    /// default was also cleared because it pointed at the removed route.
+    pub fn deny_swarm_model(model: &str) -> anyhow::Result<bool> {
+        let model = model.trim();
+        Self::update_swarm_model_policy(|agents| {
+            agents.swarm_model_allowlist.retain(|entry| entry != model);
+            agents.swarm_premium_models.retain(|entry| entry != model);
+            let cleared_default = agents
+                .swarm_model
+                .as_deref()
+                .is_some_and(|default| default.trim() == model);
+            if cleared_default {
+                agents.swarm_model = None;
+            }
+            Ok(cleared_default)
+        })
+    }
+
+    /// Set the deterministic spawn default. Must already be whitelisted.
+    pub fn set_swarm_model_default(model: Option<&str>) -> anyhow::Result<()> {
+        let value = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("inherit"))
+            .map(str::to_string);
+        Self::update_swarm_model_policy(|agents| {
+            if let Some(value) = value.as_deref()
+                && !agents.swarm_model_allowed(value)
+            {
+                anyhow::bail!(
+                    "agents.swarm_model = {value:?} is not in agents.swarm_model_allowlist. \
+                     Run `/subagent-model allow {value}` first."
+                );
+            }
+            agents.swarm_model = value;
+            Ok(())
+        })
+    }
+
+    /// Mark or unmark a whitelisted route as premium (requires per-spawn opt-in).
+    pub fn set_swarm_model_premium(model: &str, premium: bool) -> anyhow::Result<()> {
+        let model = model.trim();
+        Self::update_swarm_model_policy(|agents| {
+            if premium && !agents.swarm_model_allowed(model) {
+                anyhow::bail!(
+                    "Cannot mark {model:?} premium: it is not in agents.swarm_model_allowlist. \
+                     Run `/subagent-model allow {model}` first."
+                );
+            }
+            agents.swarm_premium_models.retain(|entry| entry != model);
+            if premium {
+                agents.swarm_premium_models.push(model.to_string());
+            }
+            Ok(())
+        })
     }
 
     /// Persist the Anthropic cache duration for clients and the shared daemon.

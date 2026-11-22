@@ -37,7 +37,7 @@ impl Provider for TestProvider {
 }
 
 #[tokio::test]
-async fn server_run_refuses_to_replace_live_socket() {
+async fn server_run_reports_live_socket_with_remedies() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
@@ -52,11 +52,14 @@ async fn server_run_refuses_to_replace_live_socket() {
         .run()
         .await
         .expect_err("should refuse live socket takeover");
+    let message = format!("{error:#}");
     assert!(
-        error
-            .to_string()
-            .contains("Refusing to replace active server socket"),
-        "unexpected error: {error:#}"
+        message.contains("is already listening on"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("--replace") && message.contains("server stop --force"),
+        "error must tell the operator how to take over: {message}"
     );
 
     if let Some(prev_runtime) = prev_runtime {

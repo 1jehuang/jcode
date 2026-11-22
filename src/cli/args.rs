@@ -194,6 +194,15 @@ pub(crate) enum Command {
         /// `mount-cloud-fabian`. Unsafe characters are normalized before use.
         #[arg(long)]
         server_name: Option<String>,
+
+        /// Replace a live server that is already listening on this socket.
+        ///
+        /// Without this flag a live server is left alone and the error names
+        /// its pid plus the ways to take it over (`server reload`,
+        /// `server stop --force`, or this flag). Use it to deliberately swap a
+        /// wedged or unknown server for this one.
+        #[arg(long)]
+        replace: bool,
     },
 
     /// Run as an Agent Client Protocol (ACP) adapter backed by the Jcode daemon

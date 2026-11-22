@@ -225,11 +225,21 @@ pub(super) async fn execute(
             match args {
                 [] => {}
                 [arg] if matches!(arg.as_str(), "status" | "show") => {}
-                [model] => agent.set_subagent_model(if model == "default" {
-                    None
-                } else {
-                    Some(model.clone())
-                })?,
+                [model] => {
+                    if model != "default" {
+                        // Same whitelist policy as the spawn layer, so a pin
+                        // cannot bypass the model policy.
+                        config
+                            .agents
+                            .validate_swarm_model_request(Some(model), false)
+                            .map_err(anyhow::Error::msg)?;
+                    }
+                    agent.set_subagent_model(if model == "default" {
+                        None
+                    } else {
+                        Some(model.clone())
+                    })?
+                }
                 _ => bail!("Usage: /subagent-model [show|inherit|model]"),
             }
             json!({"model": agent.subagent_model(), "configured_default": config.agents.swarm_model, "inherit_model": agent.provider_model()})

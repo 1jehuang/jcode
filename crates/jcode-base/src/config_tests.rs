@@ -288,11 +288,12 @@ fn test_env_override_swarm_model() {
 }
 
 #[test]
-fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
+fn swarm_model_policy_defaults_to_refusing_every_override() {
     let agents = Config::default().agents;
     assert!(!agents.swarm_model_selection);
     assert!(agents.swarm_model_allowlist.is_empty());
-    assert!(agents.validate_swarm_model_request(None).is_ok());
+    assert!(agents.swarm_premium_models.is_empty());
+    assert!(agents.validate_swarm_model_request(None, false).is_ok());
     for model in [
         "inherit",
         "coordinator",
@@ -300,27 +301,32 @@ fn swarm_model_selection_defaults_off_even_with_an_allowlist() {
         "  ",
         "claude-api:claude-opus-4-8",
     ] {
-        assert!(agents.validate_swarm_model_request(Some(model)).is_err());
+        assert!(
+            agents
+                .validate_swarm_model_request(Some(model), false)
+                .is_err()
+        );
     }
     let cfg: Config =
         toml::from_str("[agents]\nswarm_model_allowlist = [\"claude-api:claude-opus-4-8\"]\n")
             .unwrap();
+    // The whitelist alone is authoritative: no separate opt-in flag is needed.
     assert!(
         cfg.agents
-            .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
-            .is_err()
+            .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"), false)
+            .is_ok()
     );
 }
 
 #[test]
-fn swarm_model_selection_requires_opt_in_and_exact_route_match() {
+fn swarm_model_whitelist_requires_exact_route_match() {
     let cfg: Config = toml::from_str(
-        "[agents]\nswarm_model_selection = true\nswarm_model_allowlist = [\"claude:claude-opus-4-8\"]\n"
+        "[agents]\nswarm_model_allowlist = [\"claude:claude-opus-4-8\"]\n"
     ).unwrap();
-    assert!(cfg.agents.validate_swarm_model_request(None).is_ok());
+    assert!(cfg.agents.validate_swarm_model_request(None, false).is_ok());
     assert!(
         cfg.agents
-            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"), false)
             .is_ok()
     );
     for model in [
@@ -334,17 +340,44 @@ fn swarm_model_selection_requires_opt_in_and_exact_route_match() {
     ] {
         assert!(
             cfg.agents
-                .validate_swarm_model_request(Some(model))
+                .validate_swarm_model_request(Some(model), false)
                 .is_err(),
             "{model:?}"
         );
     }
-    let cfg: Config = toml::from_str("[agents]\nswarm_model_selection = true\n").unwrap();
+    let cfg: Config = toml::from_str("[agents]\n").unwrap();
     assert!(
         cfg.agents
-            .validate_swarm_model_request(Some("claude:claude-opus-4-8"))
+            .validate_swarm_model_request(Some("claude:claude-opus-4-8"), false)
             .is_err()
     );
+}
+
+#[test]
+fn swarm_model_policy_rejects_unwhitelisted_default_at_load() {
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_model = \"openai-api:gpt-6-astra\"\nswarm_model_allowlist = [\"minimax:MiniMax-M3.1-Flash\"]\n",
+    )
+    .unwrap();
+    let error = cfg
+        .agents
+        .validate_swarm_model_policy()
+        .expect_err("default must be whitelisted");
+    assert!(error.contains("agents.swarm_model"), "{error}");
+    assert!(error.contains("agents.swarm_model_allowlist"), "{error}");
+}
+
+#[test]
+fn swarm_model_policy_rejects_premium_entry_that_is_not_whitelisted() {
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_premium_models = [\"openai-api:gpt-6-astra\"]\n",
+    )
+    .unwrap();
+    let error = cfg
+        .agents
+        .validate_swarm_model_policy()
+        .expect_err("premium entries must be whitelisted");
+    assert!(error.contains("agents.swarm_premium_models"), "{error}");
 }
 
 #[test]

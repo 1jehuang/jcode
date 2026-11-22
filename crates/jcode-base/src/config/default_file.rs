@@ -627,14 +627,25 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
-# Agent-selected worker models are disabled by default, even if an allowlist exists.
-# Enable explicitly and list exact model/route strings to permit selection.
-# A bare model does not authorize a provider-prefixed route (or vice versa).
-swarm_model_selection = false
+# Swarm model policy: a WHITELIST is authoritative.
+# `swarm_model_allowlist` lists the exact model/route strings a spawn may request.
+# Anything not listed verbatim is refused at spawn time; a bare model never
+# authorizes a provider-prefixed route (or vice versa). Empty = no override is
+# permitted, and spawns use `swarm_model` (or the coordinator's model).
+# If `swarm_model` is set it MUST also appear in the allowlist or config load fails.
+# `swarm_premium_models` names allowlisted entries that additionally require
+# `premium_opt_in: true` on the spawn call. Costs shown in the UI are informational;
+# this explicit designation, not a price heuristic, is the premium gate.
+# Edit from the TUI with: /subagent-model allow|deny|default|premium <route>
 swarm_model_allowlist = []
-# Example opt-in:
-# swarm_model_selection = true
-# swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
+swarm_premium_models = []
+# swarm_model = "openai-api:gpt-6-luna"
+# Example: allow a cheap route and a premium one, defaulting to the cheap route.
+# swarm_model_allowlist = ["minimax:MiniMax-M3.1-Flash", "openai-api:gpt-6-astra"]
+# swarm_premium_models = ["openai-api:gpt-6-astra"]
+# swarm_model = "minimax:MiniMax-M3.1-Flash"
+# Deprecated: retained for older configs, ignored. The allowlist is authoritative.
+swarm_model_selection = false
 #
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".

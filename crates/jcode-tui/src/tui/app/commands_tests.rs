@@ -425,3 +425,156 @@ fn cache_extend_saves_preference_and_reset_survives_reload() {
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
 }
+
+/// Behavioral tests for the `/subagent-model` whitelist policy surface. They
+/// drive the real dispatch path with an isolated `JCODE_HOME`, then assert that
+/// the change is what the spawn-time policy validator reads.
+mod swarm_model_policy {
+    use crate::tui::app::commands_dispatch::dispatch_local_command;
+    use crate::tui::app::tests::create_test_app;
+
+    struct IsolatedHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl IsolatedHome {
+        fn new() -> Self {
+            let lock = crate::storage::lock_test_env();
+            let temp = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", temp.path());
+            crate::config::Config::invalidate_cache();
+            Self {
+                _lock: lock,
+                _temp: temp,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+
+    fn last_message(app: &crate::tui::app::App) -> String {
+        app.display_messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn whitelist_add_and_remove_round_trips_through_the_command_surface() {
+        let _home = IsolatedHome::new();
+        let mut app = create_test_app();
+
+        assert!(dispatch_local_command(
+            &mut app,
+            "/subagent-model allow minimax:MiniMax-M3.1-Flash"
+        ));
+        let agents = crate::config::Config::load().agents;
+        assert_eq!(
+            agents.swarm_model_allowlist,
+            vec!["minimax:MiniMax-M3.1-Flash".to_string()]
+        );
+        // The change takes effect for the next spawn immediately.
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("minimax:MiniMax-M3.1-Flash"), false)
+                .is_ok()
+        );
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("openai-api:gpt-6-astra"), false)
+                .is_err()
+        );
+
+        assert!(dispatch_local_command(
+            &mut app,
+            "/subagent-model deny minimax:MiniMax-M3.1-Flash"
+        ));
+        let agents = crate::config::Config::load().agents;
+        assert!(agents.swarm_model_allowlist.is_empty());
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("minimax:MiniMax-M3.1-Flash"), false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn removing_the_default_warns_and_clears_it() {
+        let _home = IsolatedHome::new();
+        let mut app = create_test_app();
+
+        dispatch_local_command(&mut app, "/subagent-model allow cheap-model:small");
+        dispatch_local_command(&mut app, "/subagent-model default cheap-model:small");
+        assert_eq!(
+            crate::config::Config::load().agents.swarm_model.as_deref(),
+            Some("cheap-model:small")
+        );
+
+        assert!(dispatch_local_command(
+            &mut app,
+            "/subagent-model deny cheap-model:small"
+        ));
+        let message = last_message(&app);
+        assert!(message.contains("warning"), "{message}");
+        assert!(message.contains("default was cleared"), "{message}");
+        let agents = crate::config::Config::load().agents;
+        assert_eq!(agents.swarm_model, None);
+    }
+
+    #[test]
+    fn default_must_be_whitelisted_first() {
+        let _home = IsolatedHome::new();
+        let mut app = create_test_app();
+
+        assert!(dispatch_local_command(
+            &mut app,
+            "/subagent-model default expensive-model:large"
+        ));
+        let message = last_message(&app);
+        assert!(message.contains("Could not update"), "{message}");
+        assert!(message.contains("agents.swarm_model_allowlist"), "{message}");
+        assert_eq!(crate::config::Config::load().agents.swarm_model, None);
+    }
+
+    #[test]
+    fn premium_designation_round_trips_and_shows_in_the_policy_listing() {
+        let _home = IsolatedHome::new();
+        let mut app = create_test_app();
+
+        dispatch_local_command(&mut app, "/subagent-model allow expensive-model:large");
+        assert!(dispatch_local_command(
+            &mut app,
+            "/subagent-model premium expensive-model:large"
+        ));
+        let agents = crate::config::Config::load().agents;
+        assert_eq!(
+            agents.swarm_premium_models,
+            vec!["expensive-model:large".to_string()]
+        );
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("expensive-model:large"), false)
+                .is_err()
+        );
+        assert!(
+            agents
+                .validate_swarm_model_request(Some("expensive-model:large"), true)
+                .is_ok()
+        );
+
+        assert!(dispatch_local_command(&mut app, "/subagent-model"));
+        assert!(last_message(&app).contains("Swarm model whitelist"));
+    }
+}

@@ -761,6 +761,11 @@ pub enum Request {
         /// otherwise derived from the first line of `initial_message`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// Explicit acknowledgement for a model the user designated premium in
+        /// `agents.swarm_premium_models`. It never widens the allowlist: a
+        /// model that is not whitelisted is refused regardless.
+        #[serde(default)]
+        premium_opt_in: bool,
     },
 
     /// List models/routes available for spawning swarm agents

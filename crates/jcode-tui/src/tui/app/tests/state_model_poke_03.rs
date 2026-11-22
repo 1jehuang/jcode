@@ -2209,13 +2209,41 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
 
 #[test]
 fn test_subagent_model_command_sets_and_resets_session_preference() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = Restore(previous);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::invalidate_cache();
     let mut app = create_test_app();
+    // The whitelist is authoritative: an unlisted pin is refused.
+    crate::config::Config::allow_swarm_model("gpt-5.4").unwrap();
 
     assert!(super::commands::handle_session_command(
         &mut app,
         "/subagent-model gpt-5.4"
     ));
     assert_eq!(app.session.subagent_model.as_deref(), Some("gpt-5.4"));
+
+    assert!(super::commands::handle_session_command(
+        &mut app,
+        "/subagent-model gpt-unlisted"
+    ));
+    assert_eq!(
+        app.session.subagent_model.as_deref(),
+        Some("gpt-5.4"),
+        "a refused pin must not change the session preference"
+    );
 
     assert!(super::commands::handle_session_command(
         &mut app,

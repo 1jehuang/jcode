@@ -695,12 +695,78 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
         .unwrap_or_default()
         .trim();
 
-    if rest.is_empty() || matches!(rest, "show" | "status") {
-        app.push_display_message(DisplayMessage::system(format!(
-            "Subagent model for this session: {}\n\nUse /subagent-model <name> to pin a model, or /subagent-model inherit to use the current model.",
-            current_subagent_model_summary(app)
-        )));
+    if rest.is_empty() || matches!(rest, "show" | "status" | "policy") {
+        let agents = crate::config::Config::load().agents;
+        app.push_display_message(DisplayMessage::system(
+            format_subagent_model_policy(app, &agents),
+        ));
         return true;
+    }
+
+    let (verb, argument) = match rest.split_once(char::is_whitespace) {
+        Some((verb, argument)) => (verb, argument.trim()),
+        None => (rest, ""),
+    };
+
+    match verb {
+        "allow" | "deny" | "default" | "premium" | "unpremium" => {
+            // Inner result carries whether the configured default was cleared.
+            let result: anyhow::Result<bool> = match verb {
+                "allow" if !argument.is_empty() => {
+                    // Bare ids are qualified at add time when the catalog can
+                    // tell us the route, so the whitelist never stores an
+                    // under-specified entry.
+                    resolve_policy_route_argument(app, argument).and_then(|route| {
+                        crate::config::Config::allow_swarm_model(&route).map(|()| false)
+                    })
+                }
+                "deny" if !argument.is_empty() => {
+                    crate::config::Config::deny_swarm_model(argument)
+                }
+                "default" => crate::config::Config::set_swarm_model_default(
+                    if argument.is_empty() || argument.eq_ignore_ascii_case("inherit") {
+                        None
+                    } else {
+                        Some(argument)
+                    },
+                )
+                .map(|()| false),
+                "premium" if !argument.is_empty() => {
+                    crate::config::Config::set_swarm_model_premium(argument, true).map(|()| false)
+                }
+                "unpremium" if !argument.is_empty() => {
+                    crate::config::Config::set_swarm_model_premium(argument, false).map(|()| false)
+                }
+                _ => {
+                    app.push_display_message(DisplayMessage::error(
+                        "Usage: /subagent-model allow|deny|premium|unpremium <route>, or /subagent-model default <route|inherit>."
+                            .to_string(),
+                    ));
+                    return true;
+                }
+            };
+
+            match result {
+                Ok(cleared_default) => {
+                    let agents = crate::config::Config::load().agents;
+                    let warning = if cleared_default {
+                        " (warning: that route was the configured default, so the default was cleared)"
+                    } else {
+                        ""
+                    };
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Saved swarm model policy: {verb} {argument}{warning}\n\n{}",
+                        format_subagent_model_policy(app, &agents)
+                    )));
+                    app.set_status_notice(format!("Swarm model policy: {verb} {argument}"));
+                }
+                Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                    "Could not update the swarm model policy: {error}"
+                ))),
+            }
+            return true;
+        }
+        _ => {}
     }
 
     if matches!(rest, "inherit" | "reset" | "clear") {
@@ -714,6 +780,14 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    // Reject an unlisted session pin up front with the same policy message the
+    // spawn layer would produce, instead of failing at the provider later.
+    let agents = crate::config::Config::load().agents;
+    if let Err(error) = agents.validate_swarm_model_request(Some(rest), false) {
+        app.push_display_message(DisplayMessage::error(error));
+        return true;
+    }
+
     app.session.subagent_model = Some(rest.to_string());
     let _ = app.session.save();
     app.push_display_message(DisplayMessage::system(format!(
@@ -722,6 +796,125 @@ fn handle_subagent_model_command(app: &mut App, trimmed: &str) -> bool {
     )));
     app.set_status_notice(format!("Subagent model → {}", rest));
     true
+}
+
+fn format_subagent_model_policy(app: &App, agents: &crate::config::AgentsConfig) -> String {
+    let routes = app.provider.model_routes();
+    let tier_for = |model: &str| {
+        routes
+            .iter()
+            .find(|route| {
+                route.model == model
+                    || format!("{}:{}", route.api_method, route.model) == model
+            })
+            .and_then(crate::provider::ModelRoute::estimated_reference_cost_micros)
+    };
+    let mut out = format!(
+        "Subagent model for this session: {}\nConfigured spawn default (agents.swarm_model): {}\n",
+        current_subagent_model_summary(app),
+        agents
+            .swarm_model
+            .as_deref()
+            .unwrap_or("none (workers inherit the coordinator's model)")
+    );
+    if agents.swarm_model_allowlist.is_empty() {
+        out.push_str(
+            "Swarm model whitelist (agents.swarm_model_allowlist): empty - no model override is permitted.\n",
+        );
+    } else {
+        out.push_str("Swarm model whitelist (agents.swarm_model_allowlist):\n");
+        for model in &agents.swarm_model_allowlist {
+            let cost = tier_for(model)
+                .map(|micros| {
+                    format!(
+                        " tier={} ~${:.2}/ref-task",
+                        subagent_cost_tier(micros),
+                        micros as f64 / 1_000_000.0
+                    )
+                })
+                .unwrap_or_else(|| " tier=unknown".to_string());
+            let premium = if agents.swarm_model_premium(model) {
+                " [premium: spawn needs premium_opt_in]"
+            } else {
+                ""
+            };
+            let default = agents
+                .swarm_model
+                .as_deref()
+                .is_some_and(|value| value == model);
+            out.push_str(&format!(
+                "- {model}{}{}{}\n",
+                if default { " (default)" } else { "" },
+                premium,
+                cost
+            ));
+        }
+        let mut blocked: Vec<&str> = routes
+            .iter()
+            .map(|route| route.model.as_str())
+            .filter(|model| !agents.swarm_model_allowed(model))
+            .collect();
+        blocked.sort_unstable();
+        blocked.dedup();
+        if !blocked.is_empty() {
+            out.push_str(&format!(
+                "Blocked (configured routes not on the whitelist): {}\n",
+                blocked.join(", ")
+            ));
+        }
+    }
+    out.push_str(
+        "\nCommands:\n\
+         /subagent-model allow <route>       add an exact route to the whitelist\n\
+         /subagent-model deny <route>        remove it (clears the default if it points there)\n\
+         /subagent-model default <route>     set the deterministic spawn default (must be whitelisted)\n\
+         /subagent-model premium <route>     require premium_opt_in: true for this route\n\
+         /subagent-model unpremium <route>   drop that acknowledgement\n\
+         /subagent-model <route>             pin this session's subagent model\n\
+         /subagent-model inherit             clear the session pin",
+    );
+    out
+}
+
+/// Informational cost band only; the whitelist is the admission gate.
+fn subagent_cost_tier(micros: u64) -> &'static str {
+    const CHEAP_LIMIT: u64 = 1_000_000;
+    match micros {
+        0 => "free",
+        m if m < CHEAP_LIMIT => "cheap",
+        _ => "premium",
+    }
+}
+
+/// Turn a whitelist argument into a route-qualified id.
+///
+/// Qualified ids pass through. A bare id is qualified only when exactly one
+/// configured route serves it; ambiguous ids are refused with the candidates so
+/// the operator can choose, and unknown ids are refused (with an empty catalog
+/// the argument is passed through unchanged because nothing can be checked).
+fn resolve_policy_route_argument(app: &App, argument: &str) -> anyhow::Result<String> {
+    let argument = argument.trim();
+    if argument.contains(':') {
+        return Ok(argument.to_string());
+    }
+    let routes = app.provider.model_routes();
+    if routes.is_empty() {
+        return Ok(argument.to_string());
+    }
+    match jcode_provider_core::spawn_model_candidates(&routes, argument) {
+        jcode_provider_core::SpawnModelCandidates::Qualifiable(route) => Ok(route),
+        jcode_provider_core::SpawnModelCandidates::Ambiguous(candidates) => anyhow::bail!(
+            "`{argument}` matches {} configured routes: {}. Qualify it with a route prefix, \
+             for example `{}`.",
+            candidates.len(),
+            candidates.join(", "),
+            candidates.first().cloned().unwrap_or_default()
+        ),
+        jcode_provider_core::SpawnModelCandidates::Unknown => anyhow::bail!(
+            "`{argument}` is not a configured route. Use `/model` to see available routes, \
+             then `/subagent-model allow <prefix>:{argument}`."
+        ),
+    }
 }
 
 fn handle_subagent_command(app: &mut App, trimmed: &str) -> bool {

@@ -1385,6 +1385,97 @@ impl ModelRoute {
             .as_ref()
             .and_then(|estimate| estimate.estimated_reference_cost_micros)
     }
+
+    /// The canonical route prefix for this route, used to qualify a model id
+    /// unambiguously (for example `opencode-go:hy4-flash-free`).
+    ///
+    /// A bare model id can legitimately exist on more than one configured
+    /// provider, so route-qualified ids are what spawn policy and whitelists
+    /// should carry.
+    pub fn route_qualifier(&self) -> String {
+        match ModelRouteApiMethod::parse(&self.api_method) {
+            ModelRouteApiMethod::OpenAiCompatible {
+                profile_id: Some(profile_id),
+            } => profile_id,
+            ModelRouteApiMethod::OpenAiCompatible { profile_id: None } => {
+                "openai-compatible".to_string()
+            }
+            ModelRouteApiMethod::JcodeSubscription => "jcode-subscription".to_string(),
+            ModelRouteApiMethod::GrokBuild => "grok-build".to_string(),
+            ModelRouteApiMethod::ClaudeOAuth => "claude-oauth".to_string(),
+            ModelRouteApiMethod::AnthropicApiKey => "claude-api".to_string(),
+            ModelRouteApiMethod::OpenAIOAuth => "openai-oauth".to_string(),
+            ModelRouteApiMethod::OpenAIApiKey => "openai-api".to_string(),
+            ModelRouteApiMethod::OpenRouter => "openrouter".to_string(),
+            ModelRouteApiMethod::Copilot => "copilot".to_string(),
+            ModelRouteApiMethod::Cursor => "cursor".to_string(),
+            ModelRouteApiMethod::Bedrock => "bedrock".to_string(),
+            ModelRouteApiMethod::AntigravityHttps => "antigravity".to_string(),
+            ModelRouteApiMethod::CodeAssistOAuth => "code-assist-oauth".to_string(),
+            ModelRouteApiMethod::RemoteCatalog => "remote-catalog".to_string(),
+            ModelRouteApiMethod::Current => "current".to_string(),
+            ModelRouteApiMethod::Other(method) => method,
+        }
+    }
+
+    /// This route's fully qualified id (`<qualifier>:<model>`).
+    pub fn qualified_id(&self) -> String {
+        format!("{}:{}", self.route_qualifier(), self.model)
+    }
+}
+
+/// Outcome of mapping a requested model id onto the configured route catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnModelCandidates {
+    /// Exactly one configured route serves this bare id; the value is its
+    /// fully qualified id. Using it is the same model, not a substitution.
+    Qualifiable(String),
+    /// No configured route serves this id.
+    Unknown,
+    /// More than one configured route serves this bare id. The caller must
+    /// choose one by prefixing it; resolution never guesses.
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve a *bare* model id against the configured routes.
+///
+/// Route-qualified ids (`prefix:model`) are returned as-is because the caller
+/// already chose a route. Bare ids are resolved only when unique; ambiguity is
+/// reported with the candidate qualified ids so the caller can qualify.
+pub fn spawn_model_candidates(routes: &[ModelRoute], requested: &str) -> SpawnModelCandidates {
+    let requested = requested.trim();
+    let mut candidates: Vec<String> = routes
+        .iter()
+        .filter(|route| route.model == requested)
+        .map(ModelRoute::qualified_id)
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.len() {
+        0 => SpawnModelCandidates::Unknown,
+        1 => SpawnModelCandidates::Qualifiable(candidates.remove(0)),
+        _ => SpawnModelCandidates::Ambiguous(candidates),
+    }
+}
+
+/// Bare whitelist entries that match more than one configured route, with the
+/// candidate qualified ids. Such entries are under-specified and must be
+/// rewritten as a qualified route rather than resolved by guessing.
+pub fn ambiguous_bare_whitelist_entries(
+    routes: &[ModelRoute],
+    entries: &[String],
+) -> Vec<(String, Vec<String>)> {
+    let mut ambiguous = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.contains(':') {
+            continue;
+        }
+        if let SpawnModelCandidates::Ambiguous(candidates) = spawn_model_candidates(routes, entry) {
+            ambiguous.push((entry.to_string(), candidates));
+        }
+    }
+    ambiguous
 }
 
 /// Canonical snapshot of a provider's model catalog at a point in time.

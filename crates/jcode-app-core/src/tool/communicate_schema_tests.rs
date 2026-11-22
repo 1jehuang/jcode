@@ -73,28 +73,33 @@ fn schema_hides_model_override_by_default_and_keeps_effort_user_configured() {
 }
 
 #[test]
-fn schema_only_exposes_exact_allowlisted_worker_models_when_enabled() {
+fn schema_only_exposes_exact_allowlisted_worker_models() {
     let mut schema = CommunicateTool::new().parameters_schema();
     let mut agents = crate::config::AgentsConfig {
         swarm_model_allowlist: vec!["openai:gpt-5.5".to_string()],
         ..Default::default()
     };
     super::super::apply_swarm_model_policy(&mut schema, &agents);
-    assert!(schema["properties"].get("model").is_none());
-    agents.swarm_model_selection = true;
-    super::super::apply_swarm_model_policy(&mut schema, &agents);
     assert_eq!(
         schema["properties"]["model"]["enum"],
         json!(["openai:gpt-5.5"])
     );
+    // The whitelist alone is authoritative; the deprecated selection flag is
+    // not needed.
+    assert!(!agents.swarm_model_selection);
+    agents.swarm_premium_models = vec!["openai:gpt-5.5".to_string()];
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    assert_eq!(schema["properties"]["premium_opt_in"]["type"], json!("boolean"));
     agents.swarm_model_allowlist.clear();
+    agents.swarm_premium_models.clear();
     super::super::apply_swarm_model_policy(&mut schema, &agents);
     assert!(schema["properties"].get("model").is_none());
+    assert!(schema["properties"].get("premium_opt_in").is_none());
 }
 
 #[test]
 fn spawning_actions_cannot_bypass_worker_model_policy() {
-    let mut agents = crate::config::AgentsConfig {
+    let agents = crate::config::AgentsConfig {
         swarm_model_allowlist: vec!["claude:claude-opus-4-8".to_string()],
         ..Default::default()
     };
@@ -105,21 +110,15 @@ fn spawning_actions_cannot_bypass_worker_model_policy() {
         .unwrap();
         assert!(
             agents
-                .validate_swarm_model_request(input.model.as_deref())
-                .is_err()
-        );
-        agents.swarm_model_selection = true;
-        assert!(
-            agents
-                .validate_swarm_model_request(input.model.as_deref())
+                .validate_swarm_model_request(input.model.as_deref(), false)
                 .is_ok()
         );
+        // A bare model never authorizes another provider's route.
         assert!(
             agents
-                .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"))
+                .validate_swarm_model_request(Some("claude-api:claude-opus-4-8"), false)
                 .is_err()
         );
-        agents.swarm_model_selection = false;
     }
 }
 
@@ -141,10 +140,99 @@ async fn stale_worker_model_override_is_rejected_before_server_dispatch() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
     let error = result.unwrap_err().to_string();
+    assert!(error.contains("agents.swarm_model_allowlist"), "{error}");
+    assert!(error.contains("claude-api:claude-opus-4-8"), "{error}");
+}
+
+#[test]
+fn spawn_rejects_model_not_on_the_whitelist_and_names_the_config_key() {
+    let agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["minimax:MiniMax-M3.1-Flash".to_string()],
+        ..Default::default()
+    };
+    let error = agents
+        .validate_swarm_model_request(Some("openai-api:gpt-6-astra"), false)
+        .expect_err("unlisted model must be refused");
+    assert!(error.contains("`openai-api:gpt-6-astra`"), "{error}");
+    assert!(error.contains("agents.swarm_model_allowlist"), "{error}");
+    assert!(error.contains("minimax:MiniMax-M3.1-Flash"), "{error}");
+    assert!(error.contains("/subagent-model allow"), "{error}");
+}
+
+#[test]
+fn spawn_accepts_a_whitelisted_cheap_model() {
+    let agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["minimax:MiniMax-M3.1-Flash".to_string()],
+        ..Default::default()
+    };
     assert!(
-        error.contains("Agent-selected swarm models are disabled"),
-        "{error}"
+        agents
+            .validate_swarm_model_request(Some("minimax:MiniMax-M3.1-Flash"), false)
+            .is_ok()
     );
+}
+
+#[test]
+fn spawn_rejects_a_bare_unknown_model_id_instead_of_passing_it_through() {
+    // This exact shape reached the provider and produced a confusing provider
+    // error: a bare `MiniMax-M3.1-Flash` that matches no configured route.
+    let agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["minimax:MiniMax-M3.1-Flash".to_string()],
+        ..Default::default()
+    };
+    let error = agents
+        .validate_swarm_model_request(Some("MiniMax-M3.1-Flash"), false)
+        .expect_err("bare model id must be refused before dispatch");
+    assert!(error.contains("not in agents.swarm_model_allowlist"), "{error}");
+}
+
+#[test]
+fn empty_whitelist_refuses_every_override_and_says_so() {
+    let agents = crate::config::AgentsConfig::default();
+    assert!(agents.validate_swarm_model_request(None, false).is_ok());
+    let error = agents
+        .validate_swarm_model_request(Some("openai-api:gpt-6-luna"), false)
+        .expect_err("empty whitelist must refuse overrides");
+    assert!(error.contains("is empty"), "{error}");
+    assert!(error.contains("agents.swarm_model_allowlist"), "{error}");
+}
+
+#[test]
+fn premium_model_requires_explicit_opt_in_and_opt_in_never_widens_the_whitelist() {
+    let agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["openai-api:gpt-6-astra".to_string()],
+        swarm_premium_models: vec!["openai-api:gpt-6-astra".to_string()],
+        ..Default::default()
+    };
+    let error = agents
+        .validate_swarm_model_request(Some("openai-api:gpt-6-astra"), false)
+        .expect_err("premium model needs acknowledgement");
+    assert!(error.contains("premium_opt_in"), "{error}");
+    assert!(error.contains("agents.swarm_premium_models"), "{error}");
+    assert!(
+        agents
+            .validate_swarm_model_request(Some("openai-api:gpt-6-astra"), true)
+            .is_ok()
+    );
+    // Opt-in cannot authorize a non-whitelisted model.
+    assert!(
+        agents
+            .validate_swarm_model_request(Some("openai-api:gpt-6-luna"), true)
+            .is_err()
+    );
+}
+
+#[test]
+fn config_default_model_not_on_the_whitelist_is_rejected_at_load() {
+    let agents: crate::config::AgentsConfig = toml::from_str(
+        "[agents]\nswarm_model = \"openai-api:gpt-6-astra\"\nswarm_model_allowlist = [\"minimax:MiniMax-M3.1-Flash\"]\n",
+    )
+    .unwrap();
+    let error = agents
+        .validate_swarm_model_policy()
+        .expect_err("default must be whitelisted");
+    assert!(error.contains("agents.swarm_model"), "{error}");
+    assert!(error.contains("agents.swarm_model_allowlist"), "{error}");
 }
 
 #[test]
@@ -344,10 +432,22 @@ fn format_swarm_model_list_renders_routes_and_default() {
             cheapness: None,
         },
     ];
-    let output =
-        format_swarm_model_list(Some("claude-fable-5"), Some("openai-api:gpt-5.5"), &routes);
+    let agents = crate::config::AgentsConfig {
+        swarm_model_allowlist: vec!["openai-api:gpt-5.5".to_string()],
+        swarm_premium_models: vec!["openai-api:gpt-5.5".to_string()],
+        ..Default::default()
+    };
+    let output = format_swarm_model_list(
+        Some("claude-fable-5"),
+        Some("openai-api:gpt-5.5"),
+        &routes,
+        &agents,
+    );
     assert!(output.contains("Current coordinator model: claude-fable-5"));
     assert!(output.contains("Configured agents.swarm_model default: openai-api:gpt-5.5"));
+    assert!(output.contains("Swarm model whitelist (agents.swarm_model_allowlist): 1 entry"));
+    assert!(output.contains("[premium: needs premium_opt_in]"));
+    assert!(output.contains("Blocked by the whitelist"));
     assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
     assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
     assert!(!output.contains("pass effort"));
@@ -355,7 +455,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
 
 #[test]
 fn format_swarm_model_list_handles_empty_catalog() {
-    let output = format_swarm_model_list(None, None, &[]);
+    let output = format_swarm_model_list(None, None, &[], &crate::config::AgentsConfig::default());
     assert!(output.contains("Current coordinator model: unknown"));
     assert!(output.contains("No agents.swarm_model default configured"));
     assert!(!output.contains("unless model is passed"));
