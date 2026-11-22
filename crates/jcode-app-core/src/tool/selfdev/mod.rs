@@ -28,6 +28,7 @@ mod setup;
 mod status;
 #[cfg(test)]
 mod tests;
+mod ui_diff;
 
 pub use launch::{enter_selfdev_session, schedule_selfdev_prompt_delivery};
 pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
@@ -68,6 +69,45 @@ struct SelfDevInput {
     /// Background task id for actions like cancel-build.
     #[serde(default)]
     task_id: Option<String>,
+    /// Terminal cell size for action=screenshot/before-after (default "64x34").
+    #[serde(default)]
+    size: Option<String>,
+    /// Short name/slug for action=screenshot output file.
+    #[serde(default)]
+    label: Option<String>,
+    /// Optional 0-based start:end row crop for action=screenshot.
+    #[serde(default)]
+    crop_rows: Option<String>,
+    /// Path to before cells JSON or PNG for action=before-after.
+    #[serde(default)]
+    before: Option<String>,
+    /// Optional path to after cells JSON or PNG for action=before-after (defaults to live capture).
+    #[serde(default)]
+    after: Option<String>,
+    /// Optional 0-based start:end row crop for before cells in action=before-after.
+    #[serde(default)]
+    before_crop_rows: Option<String>,
+    /// Optional 0-based start:end row crop for after cells in action=before-after.
+    #[serde(default)]
+    after_crop_rows: Option<String>,
+    /// Badge label for before panel in action=before-after.
+    #[serde(default)]
+    before_label: Option<String>,
+    /// Badge label for after panel in action=before-after.
+    #[serde(default)]
+    after_label: Option<String>,
+    /// Title above both panels in action=before-after.
+    #[serde(default)]
+    title: Option<String>,
+    /// Output PNG path for action=screenshot or action=before-after.
+    #[serde(default)]
+    output: Option<String>,
+    /// Draw automatic red/green diff highlight boxes (default true; set false for layout/size changes).
+    #[serde(default)]
+    highlight_diff: Option<bool>,
+    /// Auto-crop around changed pixels in action=before-after.
+    #[serde(default)]
+    auto_crop: Option<bool>,
 }
 
 /// Context saved before reload, restored after restart
@@ -543,9 +583,11 @@ impl SelfDevTool {
                             "status",
                             "find-config",
                             "socket-info",
-                            "socket-help"
+                            "socket-help",
+                            "screenshot",
+                            "before-after"
                         ],
-                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash."
+                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash. `screenshot` captures the live TUI as a half-width (default 64x34) cells JSON + HiDPI PNG. `before-after` composes a saved `before` capture with `after` (or a fresh live capture) into a side-by-side PNG."
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
@@ -561,7 +603,20 @@ impl SelfDevTool {
                         "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
                     },
                     "request_id": { "type": "string" },
-                    "task_id": { "type": "string" }
+                    "task_id": { "type": "string" },
+                    "size": { "type": "string", "description": "Terminal WxH cells for screenshot/before-after (default 64x34)." },
+                    "label": { "type": "string", "description": "Slug for screenshot output filename." },
+                    "crop_rows": { "type": "string", "description": "0-based start:end row crop for screenshot." },
+                    "before": { "type": "string", "description": "Before cells JSON or PNG path for action=before-after." },
+                    "after": { "type": "string", "description": "After cells JSON or PNG path for action=before-after; omit to capture live TUI now." },
+                    "before_crop_rows": { "type": "string", "description": "0-based start:end row crop for before panel." },
+                    "after_crop_rows": { "type": "string", "description": "0-based start:end row crop for after panel." },
+                    "before_label": { "type": "string", "description": "Before badge text." },
+                    "after_label": { "type": "string", "description": "After badge text." },
+                    "title": { "type": "string", "description": "Header title for action=before-after." },
+                    "output": { "type": "string", "description": "Output PNG path for screenshot/before-after." },
+                    "highlight_diff": { "type": "boolean", "description": "Draw red/green diff highlight boxes (default true; false for whole-widget size/layout changes)." },
+                    "auto_crop": { "type": "boolean", "description": "Auto-crop both panels around the diff bounding box." }
                 },
                 "required": ["action"]
             })
@@ -731,10 +786,55 @@ impl Tool for SelfDevTool {
                     )))
                 }
             }
+            "screenshot" => {
+                if is_selfdev {
+                    ui_diff::do_screenshot(
+                        ui_diff::ScreenshotArgs {
+                            size: params.size,
+                            label: params.label,
+                            crop_rows: params.crop_rows,
+                            output: params.output,
+                        },
+                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        &ctx,
+                    )
+                    .await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "screenshot",
+                    )))
+                }
+            }
+            "before-after" | "before_after" => {
+                if is_selfdev {
+                    ui_diff::do_before_after(
+                        ui_diff::BeforeAfterArgs {
+                            before: params.before,
+                            after: params.after,
+                            size: params.size,
+                            before_crop_rows: params.before_crop_rows,
+                            after_crop_rows: params.after_crop_rows,
+                            before_label: params.before_label,
+                            after_label: params.after_label,
+                            title: params.title,
+                            output: params.output,
+                            highlight_diff: params.highlight_diff,
+                            auto_crop: params.auto_crop,
+                        },
+                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        &ctx,
+                    )
+                    .await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "before-after",
+                    )))
+                }
+            }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
                  'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'logs', 'status', 'find-config', \
-                 'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
+                 'socket-info', 'socket-help', 'screenshot', or 'before-after'. Outside self-dev mode use 'enter', 'setup', \
                  'reload', 'status', or 'find-config'.",
                 action
             ))),

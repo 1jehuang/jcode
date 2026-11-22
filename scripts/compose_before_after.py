@@ -407,6 +407,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--after-cells", type=Path, help="Path to after `client:cells` JSON")
     parser.add_argument("--before-crop-rows", default=None, help="Optional 0-based start:end row slice for before cells")
     parser.add_argument("--after-crop-rows", default=None, help="Optional 0-based start:end row slice for after cells")
+    parser.add_argument("--crop-rows", default=None, help="Optional 0-based start:end row slice for --cells")
     parser.add_argument("--cells", type=Path, help="Render a single `client:cells` JSON to PNG")
     parser.add_argument("--before-label", default="Before", help="Badge label for before panel")
     parser.add_argument("--after-label", default="After", help="Badge label for after panel")
@@ -428,7 +429,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.cells:
-        data = json.loads(args.cells.read_text(encoding="utf-8"))
+        data = crop_cells_rows(
+            json.loads(args.cells.read_text(encoding="utf-8")),
+            args.crop_rows,
+        )
         rendered = render_cells_frame(data)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         rendered.save(args.output, format="PNG")

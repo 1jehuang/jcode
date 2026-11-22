@@ -202,9 +202,8 @@ impl App {
             let mut unconfigured_hidden_entries = Vec::new();
             let mut openai_entry = None;
             let mut claude_entry = None;
-            let mut auto_import_entry = None;
-            let mut copilot_entry = None;
             let mut gemini_entry = None;
+            let mut auto_import_entry = None;
 
             for entry in models {
                 match entry.action {
@@ -215,16 +214,16 @@ impl App {
                         crate::provider_catalog::LoginProviderTarget::Claude => {
                             claude_entry = Some(entry);
                         }
-                        crate::provider_catalog::LoginProviderTarget::AutoImport
-                            if entry.is_current =>
-                        {
+                        crate::provider_catalog::LoginProviderTarget::Antigravity
+                        | crate::provider_catalog::LoginProviderTarget::Gemini => {
+                            if gemini_entry.is_none() {
+                                gemini_entry = Some(entry);
+                            } else {
+                                unconfigured_hidden_entries.push(entry);
+                            }
+                        }
+                        crate::provider_catalog::LoginProviderTarget::AutoImport => {
                             auto_import_entry = Some(entry);
-                        }
-                        crate::provider_catalog::LoginProviderTarget::Copilot => {
-                            copilot_entry = Some(entry);
-                        }
-                        crate::provider_catalog::LoginProviderTarget::Gemini => {
-                            gemini_entry = Some(entry);
                         }
                         _ => {
                             let is_configured_or_attention = entry.is_current
@@ -249,14 +248,11 @@ impl App {
             if let Some(entry) = claude_entry {
                 starter_entries.push(entry);
             }
+            if let Some(entry) = gemini_entry {
+                starter_entries.push(entry);
+            }
             starter_entries.push(auto_api_key_entry);
             if let Some(entry) = auto_import_entry {
-                starter_entries.push(entry);
-            }
-            if let Some(entry) = copilot_entry {
-                starter_entries.push(entry);
-            }
-            if let Some(entry) = gemini_entry {
                 starter_entries.push(entry);
             }
 

@@ -2240,6 +2240,27 @@ fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter()
         )),
         "Paste an API key should be in starter view"
     );
+    let starter_names: Vec<&str> = picker
+        .filtered
+        .iter()
+        .map(|&i| picker.entries[i].name.as_str())
+        .collect();
+    assert_eq!(
+        &starter_names[..5],
+        &[
+            "OpenAI",
+            "Anthropic/Claude",
+            "Google (Antigravity)",
+            "Paste an API key",
+            "Auto Import",
+        ],
+        "starter view should list OpenAI, Anthropic/Claude, Google (Antigravity), Paste an API key, Auto Import first; got {:?}",
+        starter_names
+    );
+    assert!(
+        !starter_names.contains(&"GitHub Copilot"),
+        "GitHub Copilot should be collapsed under More providers"
+    );
     assert!(
         !picker.filtered.iter().any(|&i| picker.entries[i].name == "Z.AI"),
         "non-starter unconfigured provider should be collapsed by default"

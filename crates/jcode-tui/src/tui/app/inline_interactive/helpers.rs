@@ -264,9 +264,9 @@ impl App {
             crate::tui::PickerAction::Login(provider) => match provider.target {
                 crate::provider_catalog::LoginProviderTarget::OpenAi
                 | crate::provider_catalog::LoginProviderTarget::Claude
-                | crate::provider_catalog::LoginProviderTarget::Copilot
-                | crate::provider_catalog::LoginProviderTarget::Gemini => true,
-                crate::provider_catalog::LoginProviderTarget::AutoImport => entry.is_current,
+                | crate::provider_catalog::LoginProviderTarget::Antigravity
+                | crate::provider_catalog::LoginProviderTarget::Gemini
+                | crate::provider_catalog::LoginProviderTarget::AutoImport => true,
                 _ => false,
             },
             crate::tui::PickerAction::Account(_) => false,
