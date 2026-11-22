@@ -27,9 +27,8 @@ use jcode_provider_gemini::stream::{
     decode_sse_chunk,
 };
 use jcode_provider_gemini::{
-    CodeAssistGenerateRequest, GeminiFunctionCallingConfig, GeminiToolConfig,
-    VertexGenerateContentRequest, build_generation_config_for_thoughts,
-    is_thinking_config_rejected_error,
+    CodeAssistGenerateRequest, GeminiFunctionCallingConfig, GeminiThinkingRequestMode,
+    GeminiToolConfig, VertexGenerateContentRequest, build_generation_config_for_thoughts_with_mode,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
@@ -353,7 +352,7 @@ impl AntigravityProvider {
         system: &str,
         resume_session_id: Option<&str>,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-        include_thoughts: bool,
+        thinking_mode: GeminiThinkingRequestMode,
     ) -> Option<Result<reqwest::Response>> {
         let resolved = self.resolve_model_for_request(model);
         let dialect = jcode_provider_antigravity::antigravity_dialect(&resolved);
@@ -374,7 +373,7 @@ impl AntigravityProvider {
                         resume_session_id,
                         false,
                         signature_policy,
-                        include_thoughts,
+                        thinking_mode,
                     )
                     .await,
                 )
@@ -395,7 +394,7 @@ impl AntigravityProvider {
         resume_session_id: Option<&str>,
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-        include_thoughts: bool,
+        thinking_mode: GeminiThinkingRequestMode,
     ) -> Result<reqwest::Response> {
         let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
         let project = match tokens
@@ -432,9 +431,8 @@ impl AntigravityProvider {
                 }
             }
         }
-        let generation_config = include_thoughts
-            .then(|| build_generation_config_for_thoughts(&resolved_model))
-            .flatten();
+        let generation_config =
+            build_generation_config_for_thoughts_with_mode(&resolved_model, thinking_mode);
         let request = CodeAssistGenerateRequest {
             model: resolved_model,
             project,
@@ -788,7 +786,7 @@ impl Provider for AntigravityProvider {
             // downgraded to plain text. Content is preserved, the turn completes,
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
-            let mut include_thoughts = true;
+            let mut thinking_mode = GeminiThinkingRequestMode::Full;
             let mut force_function_call = false;
             let mut malformed_retries = 0u8;
             let mut pseudo_retried = false;
@@ -806,37 +804,22 @@ impl Provider for AntigravityProvider {
                             resume_session_id.as_deref(),
                             false,
                             signature_policy,
-                            include_thoughts,
+                            thinking_mode,
                         )
                         .await
                     {
                         Ok(response) => response,
                         Err(err) => {
                             let err_str = format!("{err:#}");
-                            if include_thoughts && is_thinking_config_rejected_error(&err_str) {
-                                jcode_base::logging::warn(
-                                    "Antigravity rejected thinkingConfig.includeThoughts; retrying without thought summaries",
-                                );
-                                include_thoughts = false;
-                                match provider
-                                    .stream_generate_content(
-                                        &model,
-                                        &messages,
-                                        &tools,
-                                        &system,
-                                        resume_session_id.as_deref(),
-                                        false,
-                                        signature_policy,
-                                        false,
-                                    )
-                                    .await
-                                {
-                                    Ok(response) => response,
-                                    Err(retry_err) => {
-                                        let _ = tx.send(Err(retry_err)).await;
-                                        return;
-                                    }
-                                }
+                            let resolved_for_downgrade = provider.resolve_model_for_request(&model);
+                            if let Some(next_mode) =
+                                thinking_mode.downgrade_for_error(&resolved_for_downgrade, &err_str)
+                            {
+                                jcode_base::logging::warn(&format!(
+                                    "Antigravity rejected thinkingConfig ({thinking_mode:?}); retrying with {next_mode:?}"
+                                ));
+                                thinking_mode = next_mode;
+                                continue;
                             } else if let Some(retried) = provider
                                 .retry_after_schema_rejection(
                                     &err_str,
@@ -846,7 +829,7 @@ impl Provider for AntigravityProvider {
                                     &system,
                                     resume_session_id.as_deref(),
                                     signature_policy,
-                                    include_thoughts,
+                                    thinking_mode,
                                 )
                                 .await
                             {
@@ -877,7 +860,7 @@ impl Provider for AntigravityProvider {
                                         resume_session_id.as_deref(),
                                         false,
                                         signature_policy,
-                                        include_thoughts,
+                                        thinking_mode,
                                     )
                                     .await
                                 {
@@ -900,7 +883,7 @@ impl Provider for AntigravityProvider {
                             resume_session_id.as_deref(),
                             true,
                             signature_policy,
-                            include_thoughts,
+                            thinking_mode,
                         )
                         .await
                     {

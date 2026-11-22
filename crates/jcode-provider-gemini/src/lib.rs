@@ -160,6 +160,87 @@ pub struct GeminiGenerationConfig {
 pub struct GeminiThinkingConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_thoughts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
+/// Progressive fallback level for requesting Gemini thought summaries.
+///
+/// On Antigravity (Cloud Code), Gemini 2.5/3.x Flash models default their
+/// thinking budget to `0` when `thinkingConfig` sets only `includeThoughts`,
+/// emitting empty thought parts and zero thought tokens unless a dynamic
+/// budget (`thinkingBudget: -1`) or explicit `thinkingLevel` is supplied.
+/// If a backend rejects `thinkingBudget`/`thinkingLevel`, callers downgrade to
+/// `IncludeThoughtsOnly`, and finally to `Disabled` if `thinkingConfig` itself
+/// is unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeminiThinkingRequestMode {
+    Full,
+    IncludeThoughtsOnly,
+    Disabled,
+}
+
+impl GeminiThinkingRequestMode {
+    /// Step down to a less strict thinking configuration after a backend 400
+    /// rejecting the current `thinkingConfig` for `model`.
+    ///
+    /// When the backend specifically rejects `thinkingBudget` or
+    /// `thinkingLevel`, downgrade from `Full` to `IncludeThoughtsOnly` so
+    /// thought summaries remain enabled. When the backend rejects
+    /// `thinkingConfig` / `includeThoughts` / thinking as a whole, jump
+    /// straight to `Disabled` without an extra round-trip.
+    pub fn downgrade_for_error(self, model: &str, error_message: &str) -> Option<Self> {
+        if !is_thinking_config_rejected_error(error_message) {
+            return None;
+        }
+        let lowered = error_message.to_ascii_lowercase();
+        let budget_or_level_only = (lowered.contains("thinking_budget")
+            || lowered.contains("thinkingbudget")
+            || lowered.contains("thinking_level")
+            || lowered.contains("thinkinglevel"))
+            && !lowered.contains("thinking_config")
+            && !lowered.contains("thinkingconfig")
+            && !lowered.contains("include_thoughts")
+            && !lowered.contains("includethoughts")
+            && !lowered.contains("thinking is not supported")
+            && !lowered.contains("thinking mode is not supported");
+        match self {
+            Self::Full => {
+                if budget_or_level_only {
+                    let full = build_generation_config_for_thoughts_with_mode(model, Self::Full);
+                    let only = build_generation_config_for_thoughts_with_mode(
+                        model,
+                        Self::IncludeThoughtsOnly,
+                    );
+                    if full == only {
+                        Some(Self::Disabled)
+                    } else {
+                        Some(Self::IncludeThoughtsOnly)
+                    }
+                } else {
+                    Some(Self::Disabled)
+                }
+            }
+            Self::IncludeThoughtsOnly => Some(Self::Disabled),
+            Self::Disabled => None,
+        }
+    }
+}
+
+fn explicit_gemini_thinking_level(lower_model: &str) -> Option<&'static str> {
+    if lower_model.ends_with("-minimal") {
+        Some("MINIMAL")
+    } else if lower_model.ends_with("-low") {
+        Some("LOW")
+    } else if lower_model.ends_with("-medium") {
+        Some("MEDIUM")
+    } else if lower_model.ends_with("-high") {
+        Some("HIGH")
+    } else {
+        None
+    }
 }
 
 /// Whether `model` accepts `generationConfig.thinkingConfig.includeThoughts`.
@@ -201,28 +282,68 @@ pub fn model_supports_thought_summaries(model: &str) -> bool {
     true
 }
 
-/// Build `generationConfig` requesting thought summaries when supported by
-/// `model`, or `None` when the model does not support `thinkingConfig`.
-pub fn build_generation_config_for_thoughts(model: &str) -> Option<GeminiGenerationConfig> {
-    if !model_supports_thought_summaries(model) {
+/// Build `generationConfig` requesting thought summaries for `model` at the
+/// given fallback `mode`, or `None` when disabled/unsupported.
+pub fn build_generation_config_for_thoughts_with_mode(
+    model: &str,
+    mode: GeminiThinkingRequestMode,
+) -> Option<GeminiGenerationConfig> {
+    if mode == GeminiThinkingRequestMode::Disabled || !model_supports_thought_summaries(model) {
         return None;
     }
+    let lower = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    let thinking_config = match mode {
+        GeminiThinkingRequestMode::Full if lower.starts_with("gemini-") => {
+            if let Some(level) = explicit_gemini_thinking_level(&lower) {
+                GeminiThinkingConfig {
+                    include_thoughts: Some(true),
+                    thinking_budget: None,
+                    thinking_level: Some(level.to_string()),
+                }
+            } else {
+                GeminiThinkingConfig {
+                    include_thoughts: Some(true),
+                    thinking_budget: Some(-1),
+                    thinking_level: None,
+                }
+            }
+        }
+        GeminiThinkingRequestMode::Full | GeminiThinkingRequestMode::IncludeThoughtsOnly => {
+            GeminiThinkingConfig {
+                include_thoughts: Some(true),
+                thinking_budget: None,
+                thinking_level: None,
+            }
+        }
+        GeminiThinkingRequestMode::Disabled => unreachable!(),
+    };
     Some(GeminiGenerationConfig {
-        thinking_config: Some(GeminiThinkingConfig {
-            include_thoughts: Some(true),
-        }),
+        thinking_config: Some(thinking_config),
     })
 }
 
+/// Build `generationConfig` requesting thought summaries when supported by
+/// `model`, or `None` when the model does not support `thinkingConfig`.
+pub fn build_generation_config_for_thoughts(model: &str) -> Option<GeminiGenerationConfig> {
+    build_generation_config_for_thoughts_with_mode(model, GeminiThinkingRequestMode::Full)
+}
+
 /// Whether an HTTP error indicates the backend rejected `thinkingConfig` /
-/// `includeThoughts` for this model, so the caller can safely retry once
-/// without `generationConfig`.
+/// `includeThoughts` / `thinkingBudget` / `thinkingLevel` for this model, so
+/// the caller can safely downgrade or omit `generationConfig`.
 pub fn is_thinking_config_rejected_error(message: &str) -> bool {
     let lowered = message.to_ascii_lowercase();
     lowered.contains("thinking_config")
         || lowered.contains("thinkingconfig")
         || lowered.contains("include_thoughts")
         || lowered.contains("includethoughts")
+        || lowered.contains("thinking_budget")
+        || lowered.contains("thinkingbudget")
+        || lowered.contains("thinking_level")
+        || lowered.contains("thinkinglevel")
         || lowered.contains("thinking is not supported")
         || lowered.contains("thinking mode is not supported")
 }

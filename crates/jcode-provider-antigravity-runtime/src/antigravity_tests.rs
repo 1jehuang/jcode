@@ -439,6 +439,7 @@ fn resolve_model_for_request_default_falls_back_to_any_catalog_model_without_gem
 
 #[tokio::test]
 async fn complete_uses_native_https_transport_not_cli_subprocess() {
+    let _guard = jcode_base::storage::lock_test_env();
     let provider = AntigravityProvider::new();
     let mut stream = provider
         .complete(&[], &[], "say hello", None)
@@ -1193,6 +1194,7 @@ fn antigravity_retries_malformed_function_call_after_thought_only_turn() {
                         .unwrap();
                 }
                 stream.flush().await.unwrap();
+                let _ = stream.shutdown().await;
             }
         });
 

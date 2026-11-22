@@ -22,15 +22,16 @@ pub use jcode_provider_gemini::{
     GEMINI_API_VERSION, GeminiCandidate, GeminiContent, GeminiFunctionCall,
     GeminiFunctionCallingConfig, GeminiFunctionDeclaration, GeminiFunctionResponse,
     GeminiGenerationConfig, GeminiPart, GeminiPromptFeedback, GeminiRuntimeState,
-    GeminiThinkingConfig, GeminiTool, GeminiToolConfig, GeminiUsageMetadata, GeminiUserTier,
-    IneligibleTier, InlineData, LoadCodeAssistRequest, LoadCodeAssistResponse,
-    LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse, ProjectRef,
-    USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse, build_contents,
-    build_generation_config_for_thoughts, build_system_instruction_with_tool_guard, build_tools,
-    choose_onboard_tier, client_metadata, extract_gemini_model_ids, google_cloud_project_from_env,
-    ineligible_or_project_error, is_gemini_model_id, is_thinking_config_rejected_error,
-    load_code_assist_request, merge_gemini_model_lists, retired_individual_tier_error,
-    validate_load_code_assist_response,
+    GeminiThinkingConfig, GeminiThinkingRequestMode, GeminiTool, GeminiToolConfig,
+    GeminiUsageMetadata, GeminiUserTier, IneligibleTier, InlineData, LoadCodeAssistRequest,
+    LoadCodeAssistResponse, LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse,
+    ProjectRef, USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse,
+    build_contents, build_generation_config_for_thoughts,
+    build_generation_config_for_thoughts_with_mode, build_system_instruction_with_tool_guard,
+    build_tools, choose_onboard_tier, client_metadata, extract_gemini_model_ids,
+    google_cloud_project_from_env, ineligible_or_project_error, is_gemini_model_id,
+    is_thinking_config_rejected_error, load_code_assist_request, merge_gemini_model_lists,
+    retired_individual_tier_error, validate_load_code_assist_response,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -581,7 +582,7 @@ impl GeminiProvider {
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
-        include_thoughts: bool,
+        thinking_mode: GeminiThinkingRequestMode,
     ) -> Option<Result<(reqwest::Response, GeminiSseEnvelope)>> {
         let dialect = &jcode_schema_dialect::registry::GEMINI;
         match jcode_schema_dialect::recover_from_error(error, dialect) {
@@ -600,7 +601,7 @@ impl GeminiProvider {
                         tools,
                         system,
                         resume_session_id,
-                        include_thoughts,
+                        thinking_mode,
                     )
                     .await,
                 )
@@ -620,11 +621,10 @@ impl GeminiProvider {
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
-        include_thoughts: bool,
+        thinking_mode: GeminiThinkingRequestMode,
     ) -> Result<(reqwest::Response, GeminiSseEnvelope)> {
-        let generation_config = include_thoughts
-            .then(|| build_generation_config_for_thoughts(model))
-            .flatten();
+        let generation_config =
+            build_generation_config_for_thoughts_with_mode(model, thinking_mode);
         let request = CodeAssistGenerateRequest {
             model: model.to_string(),
             project: state.project_id.clone(),

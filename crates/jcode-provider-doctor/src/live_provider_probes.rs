@@ -1878,7 +1878,7 @@ mod live_gemini_thought_tests {
     #[ignore = "requires live Antigravity OAuth credentials and network access"]
     async fn live_antigravity_gemini_streams_thoughts() {
         let model = std::env::var("JCODE_LIVE_ANTIGRAVITY_MODEL")
-            .unwrap_or_else(|_| "gemini-3.1-pro-high".to_string());
+            .unwrap_or_else(|_| "gemini-3-flash".to_string());
         let stage = run_live_antigravity_native_reasoning_smoke(&model)
             .await
             .expect("live Antigravity reasoning smoke should succeed");

@@ -341,12 +341,12 @@ impl GeminiStreamAccumulator {
                     .cloned();
 
                 if part.is_thought() {
-                    if !self.thinking_open {
-                        self.thinking_open = true;
-                        self.thinking_started_at = Some(Instant::now());
-                        events.push(StreamEvent::ThinkingStart);
-                    }
-                    if let Some(text) = part.text {
+                    if let Some(text) = part.text.filter(|text| !text.is_empty()) {
+                        if !self.thinking_open {
+                            self.thinking_open = true;
+                            self.thinking_started_at = Some(Instant::now());
+                            events.push(StreamEvent::ThinkingStart);
+                        }
                         events.push(StreamEvent::ThinkingDelta(text));
                     }
                     if let Some(signature) = part_signature {
@@ -779,5 +779,118 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Internal upstream error"));
+    }
+
+    #[test]
+    fn empty_thought_part_with_signature_does_not_emit_empty_thinking_delta() {
+        let mut acc = GeminiStreamAccumulator::new("Gemini", false, false);
+        let mut next_id = || "call_1".to_string();
+
+        let r1 = acc.push_response(
+            serde_json::from_value(serde_json::json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"thought": true, "text": "", "thoughtSignature": "sig-only"},
+                            {"text": "Final answer"}
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }))
+            .unwrap(),
+            &mut next_id,
+        );
+
+        assert!(
+            !r1.events.iter().any(|e| matches!(
+                e,
+                StreamEvent::ThinkingStart
+                    | StreamEvent::ThinkingDelta(_)
+                    | StreamEvent::ThinkingEnd
+            )),
+            "empty thought part must not emit ThinkingStart/ThinkingDelta: {:?}",
+            r1.events
+        );
+        assert!(matches!(
+            r1.events.as_slice(),
+            [StreamEvent::TextDelta(t)] if t == "Final answer"
+        ));
+
+        let finish = acc.finish();
+        let GeminiStreamFinish::Completed { events, .. } = finish else {
+            panic!("expected Completed, got {finish:?}");
+        };
+        assert!(
+            events.iter().any(
+                |e| matches!(e, StreamEvent::ThinkingSignatureDelta(sig) if sig == "sig-only")
+            ),
+            "signature from empty thought part must still be preserved: {events:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_request_mode_sets_dynamic_budget_or_level_and_downgrades() {
+        use crate::{GeminiThinkingRequestMode, build_generation_config_for_thoughts_with_mode};
+
+        let flash_full = build_generation_config_for_thoughts_with_mode(
+            "gemini-3-flash",
+            GeminiThinkingRequestMode::Full,
+        )
+        .unwrap()
+        .thinking_config
+        .unwrap();
+        assert_eq!(flash_full.include_thoughts, Some(true));
+        assert_eq!(flash_full.thinking_budget, Some(-1));
+        assert_eq!(flash_full.thinking_level, None);
+
+        let pro_high = build_generation_config_for_thoughts_with_mode(
+            "gemini-3.1-pro-high",
+            GeminiThinkingRequestMode::Full,
+        )
+        .unwrap()
+        .thinking_config
+        .unwrap();
+        assert_eq!(pro_high.include_thoughts, Some(true));
+        assert_eq!(pro_high.thinking_budget, None);
+        assert_eq!(pro_high.thinking_level.as_deref(), Some("HIGH"));
+
+        let claude_full = build_generation_config_for_thoughts_with_mode(
+            "claude-opus-5-5-high",
+            GeminiThinkingRequestMode::Full,
+        )
+        .unwrap()
+        .thinking_config
+        .unwrap();
+        assert_eq!(claude_full.include_thoughts, Some(true));
+        assert_eq!(claude_full.thinking_budget, None);
+        assert_eq!(claude_full.thinking_level, None);
+
+        assert_eq!(
+            GeminiThinkingRequestMode::Full
+                .downgrade_for_error("gemini-3-flash", "Unknown field thinkingBudget"),
+            Some(GeminiThinkingRequestMode::IncludeThoughtsOnly)
+        );
+        assert_eq!(
+            GeminiThinkingRequestMode::Full
+                .downgrade_for_error("gemini-3-flash", "Unknown name thinkingConfig"),
+            Some(GeminiThinkingRequestMode::Disabled)
+        );
+        assert_eq!(
+            GeminiThinkingRequestMode::IncludeThoughtsOnly
+                .downgrade_for_error("gemini-3-flash", "Unknown name thinkingConfig"),
+            Some(GeminiThinkingRequestMode::Disabled)
+        );
+        assert_eq!(
+            GeminiThinkingRequestMode::Full
+                .downgrade_for_error("claude-opus-5-5-high", "Unknown field thinkingBudget"),
+            Some(GeminiThinkingRequestMode::Disabled)
+        );
+        assert_eq!(
+            GeminiThinkingRequestMode::Full
+                .downgrade_for_error("gemini-3-flash", "HTTP 429 rate limited"),
+            None
+        );
     }
 }

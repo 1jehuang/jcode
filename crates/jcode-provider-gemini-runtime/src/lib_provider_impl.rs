@@ -253,50 +253,37 @@ impl Provider for GeminiProvider {
                 return;
             }
 
-            let (response, envelope) = match provider
-                .stream_generate_content(
-                    &state,
-                    &model,
-                    &messages,
-                    &tools,
-                    &system,
-                    resume_session_id.as_deref(),
-                    true,
-                )
-                .await
-            {
-                Ok(pair) => pair,
-                Err(err) if is_gemini_model_not_found_error(&err) => {
-                    let _ = tx.send(Err(err.context(format!(
-                        "Gemini could not serve selected model '{model}' for this account. Choose an available model with /model"
-                    )))).await;
-                    return;
-                }
-                Err(err) => {
-                    let err_str = format!("{err:#}");
-                    if is_thinking_config_rejected_error(&err_str) {
-                        jcode_base::logging::warn(
-                            "Gemini rejected thinkingConfig.includeThoughts; retrying without thought summaries",
-                        );
-                        match provider
-                            .stream_generate_content(
-                                &state,
-                                &model,
-                                &messages,
-                                &tools,
-                                &system,
-                                resume_session_id.as_deref(),
-                                false,
-                            )
-                            .await
+            let mut thinking_mode = GeminiThinkingRequestMode::Full;
+            let (response, envelope) = loop {
+                match provider
+                    .stream_generate_content(
+                        &state,
+                        &model,
+                        &messages,
+                        &tools,
+                        &system,
+                        resume_session_id.as_deref(),
+                        thinking_mode,
+                    )
+                    .await
+                {
+                    Ok(pair) => break pair,
+                    Err(err) if is_gemini_model_not_found_error(&err) => {
+                        let _ = tx.send(Err(err.context(format!(
+                            "Gemini could not serve selected model '{model}' for this account. Choose an available model with /model"
+                        )))).await;
+                        return;
+                    }
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        if let Some(next_mode) = thinking_mode.downgrade_for_error(&model, &err_str)
                         {
-                            Ok(pair) => pair,
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
-                                return;
-                            }
+                            jcode_base::logging::warn(&format!(
+                                "Gemini rejected thinkingConfig ({thinking_mode:?}); retrying with {next_mode:?}"
+                            ));
+                            thinking_mode = next_mode;
+                            continue;
                         }
-                    } else {
                         // A tool schema `streamGenerateContent` rejects 400s
                         // every turn, so the provider is unusable until jcode
                         // ships a new keyword. Learn the rejected construct
@@ -311,11 +298,11 @@ impl Provider for GeminiProvider {
                                 &tools,
                                 &system,
                                 resume_session_id.as_deref(),
-                                true,
+                                thinking_mode,
                             )
                             .await
                         {
-                            Some(Ok(pair)) => pair,
+                            Some(Ok(pair)) => break pair,
                             Some(Err(retry_err)) => {
                                 let _ = tx.send(Err(retry_err)).await;
                                 return;
