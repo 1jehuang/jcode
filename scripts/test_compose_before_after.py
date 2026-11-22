@@ -38,6 +38,22 @@ class ComposeBeforeAfterTests(unittest.TestCase):
         self.assertGreater(composed.width, 400)
         self.assertGreater(composed.height, 150)
 
+    def test_highlight_diff_and_auto_crop(self) -> None:
+        before = Image.new("RGB", (300, 200), (16, 18, 24))
+        after = Image.new("RGB", (300, 200), (16, 18, 24))
+        for x in range(100, 160):
+            for y in range(80, 120):
+                after.putpixel((x, y), (200, 220, 255))
+
+        bbox = MODULE.compute_diff_bbox(before, after)
+        self.assertEqual(bbox, (100, 80, 160, 120))
+
+        cropped = MODULE.compose_before_after(
+            before, after, highlight_diff=True, auto_crop=True, crop_pad=20
+        )
+        self.assertLess(cropped.width, 400)
+        self.assertLess(cropped.height, 200)
+
     def test_cli_renders_ansi_text_frames_to_png(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

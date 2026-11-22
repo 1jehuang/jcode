@@ -14,7 +14,7 @@ import re
 import sys
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageChops, ImageDraw, ImageFont
 except ImportError as error:  # pragma: no cover - Pillow is installed in CI/dev
     raise SystemExit(f"Pillow is required for compose_before_after.py: {error}") from error
 
@@ -77,6 +77,24 @@ def render_text_frame(
     return img
 
 
+def compute_diff_bbox(
+    before: Image.Image,
+    after: Image.Image,
+    *,
+    threshold: int = 18,
+) -> tuple[int, int, int, int] | None:
+    """Return the (x0, y0, x1, y1) bounding box where before and after differ."""
+    w = min(before.width, after.width)
+    h = min(before.height, after.height)
+    if w <= 0 or h <= 0:
+        return None
+    b = before.crop((0, 0, w, h)).convert("RGB")
+    a = after.crop((0, 0, w, h)).convert("RGB")
+    diff = ImageChops.difference(b, a).convert("L")
+    mask = diff.point(lambda v: 255 if v >= threshold else 0)
+    return mask.getbbox()
+
+
 def compose_before_after(
     before_img: Image.Image,
     after_img: Image.Image,
@@ -84,6 +102,9 @@ def compose_before_after(
     before_label: str = "Before",
     after_label: str = "After",
     title: str | None = None,
+    highlight_diff: bool = True,
+    auto_crop: bool = False,
+    crop_pad: int = 48,
 ) -> Image.Image:
     before = before_img.convert("RGB")
     after = after_img.convert("RGB")
@@ -96,6 +117,18 @@ def compose_before_after(
     if after.height != target_h:
         scaled_w = max(1, round(after.width * (target_h / after.height)))
         after = after.resize((scaled_w, target_h), Image.Resampling.LANCZOS)
+
+    diff_bbox = compute_diff_bbox(before, after) if (highlight_diff or auto_crop) else None
+    if auto_crop and diff_bbox is not None:
+        x0, y0, x1, y1 = diff_bbox
+        cx0 = max(0, x0 - crop_pad)
+        cy0 = max(0, y0 - crop_pad)
+        cx1 = min(min(before.width, after.width), x1 + crop_pad)
+        cy1 = min(min(before.height, after.height), y1 + crop_pad)
+        before = before.crop((cx0, cy0, cx1, cy1))
+        after = after.crop((cx0, cy0, cx1, cy1))
+        target_h = max(before.height, after.height)
+        diff_bbox = (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)
 
     outer_pad = 24
     gap = 20
@@ -146,7 +179,23 @@ def compose_before_after(
             fill=badge_bg,
         )
         draw.text((pill_x0 + 9, pill_y0 + 3), label, fill=badge_fg, font=badge_font)
-        canvas.paste(img, (x + card_pad, top_y + badge_h + card_pad))
+        img_x0 = x + card_pad
+        img_y0 = top_y + badge_h + card_pad
+        canvas.paste(img, (img_x0, img_y0))
+        if highlight_diff and diff_bbox is not None:
+            dx0, dy0, dx1, dy1 = diff_bbox
+            pad = 6
+            bx0 = img_x0 + max(0, dx0 - pad)
+            by0 = img_y0 + max(0, dy0 - pad)
+            bx1 = img_x0 + min(img.width - 1, dx1 + pad)
+            by1 = img_y0 + min(img.height - 1, dy1 + pad)
+            box_width = max(2, min(4, target_h // 250 + 2))
+            draw.rounded_rectangle(
+                [bx0, by0, bx1, by1],
+                radius=6,
+                outline=badge_fg,
+                width=box_width,
+            )
 
     draw_panel(
         outer_pad,
@@ -176,6 +225,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--before-label", default="Before", help="Badge label for before panel")
     parser.add_argument("--after-label", default="After", help="Badge label for after panel")
     parser.add_argument("--title", default=None, help="Optional header title above both panels")
+    parser.add_argument(
+        "--no-highlight-diff",
+        action="store_true",
+        help="Disable drawing red/green highlight boxes around the changed region",
+    )
+    parser.add_argument(
+        "--auto-crop",
+        action="store_true",
+        help="Auto-crop both panels around the changed region with padding",
+    )
     parser.add_argument("--output", type=Path, required=True, help="Output PNG path")
     return parser.parse_args(argv)
 
@@ -201,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
         before_label=args.before_label,
         after_label=args.after_label,
         title=args.title,
+        highlight_diff=not args.no_highlight_diff,
+        auto_crop=args.auto_crop,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     composed.save(args.output, format="PNG")
