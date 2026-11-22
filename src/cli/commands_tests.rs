@@ -1918,8 +1918,7 @@ async fn run_answers_a_background_completion_that_lands_during_the_final_respons
     crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
 
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let provider: Arc<dyn Provider> =
-        Arc::new(BackgroundThenSlowFinalProvider(Arc::clone(&calls)));
+    let provider: Arc<dyn Provider> = Arc::new(BackgroundThenSlowFinalProvider(Arc::clone(&calls)));
     let registry = Registry::new(provider.clone()).await;
     let mut agent = crate::agent::Agent::new(provider.clone(), registry);
     run_single_message_with_agent(&mut agent, provider, "go", false, false)
@@ -1951,11 +1950,19 @@ async fn captured_run_keeps_the_final_answer_when_a_late_completion_continues_it
     let provider: Arc<dyn Provider> = Arc::new(BackgroundThenSlowFinalProvider(Arc::default()));
     let registry = Registry::new(provider.clone()).await;
     let mut agent = crate::agent::Agent::new(provider, registry);
-    let completions =
-        forward_background_completions(agent.session_id().to_string(), agent.soft_interrupt_queue());
+    let completions = forward_background_completions(
+        agent.session_id().to_string(),
+        agent.soft_interrupt_queue(),
+    );
     let text = agent.run_once_capture("go").await.unwrap();
     completions.abort();
 
-    assert!(text.contains("REPORT_TEXT"), "the original answer is kept: {text:?}");
-    assert!(text.contains("ACK_TEXT"), "the answer to the completion follows: {text:?}");
+    assert!(
+        text.contains("REPORT_TEXT"),
+        "the original answer is kept: {text:?}"
+    );
+    assert!(
+        text.contains("ACK_TEXT"),
+        "the answer to the completion follows: {text:?}"
+    );
 }
