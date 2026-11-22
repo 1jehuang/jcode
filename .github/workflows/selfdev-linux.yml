@@ -136,7 +136,8 @@ jobs:
           cd dist
           sha256sum --check SHA256SUMS
           tag="selfdev-linux-$SHA"
-          title="jcode Linux prerelease · ${SHA:0:9}"
+          version=$(git show "$SHA:Cargo.toml" 2>/dev/null | python3 -c 'import sys, tomllib; raw = sys.stdin.read(); v = tomllib.loads(raw).get("package", {}).get("version", "") if raw.strip() else ""; print(f"v{v}-dev" if v else "")' || true)
+          title="jcode${version:+ $version} · Linux prerelease · ${SHA:0:9}"
           notes="$RUNNER_TEMP/highlights.md"
           tags="$RUNNER_TEMP/releases.txt"
           existing=false

@@ -155,9 +155,37 @@ def preview_commit_lines(notes: str) -> list[str]:
     return lines
 
 
+def resolve_selfdev_version(*, sha: str, name: str) -> str | None:
+    if match := re.search(r"\bv\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b", name):
+        return match.group(0)
+    try:
+        raw = subprocess.check_output(
+            ["git", "show", f"{sha}:Cargo.toml"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    in_package = False
+    for line in raw.splitlines():
+        trimmed = line.strip()
+        if trimmed.startswith("["):
+            in_package = trimmed == "[package]"
+            continue
+        if in_package and (ver := re.match(r'^version\s*=\s*"([^"]+)"', trimmed)):
+            return f"v{ver.group(1)}-dev"
+    return None
+
+
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     if match := re.fullmatch(r"selfdev-linux-([0-9a-f]{40})", tag):
-        header = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
+        version = resolve_selfdev_version(sha=match[1], name=name)
+        heading = (
+            f"## jcode {version} · Linux prerelease"
+            if version
+            else "## jcode · Linux prerelease"
+        )
+        header = [heading, f"Linux x86_64 · Build `{match[1][:9]}`"]
         links = f"[Download & release notes](<{url}>)"
         comparison = re.search(
             r"^\[View all ([0-9]+) commits?\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$",

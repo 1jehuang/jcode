@@ -590,6 +590,32 @@ Fast startup.
         self.assertEqual(legacy, "providers (`https`…")
         self.assertEqual(legacy.count("`") % 2, 0)
 
+    def test_selfdev_header_includes_version_from_title_or_cargo_toml(self) -> None:
+        sha = "1" * 40
+        tag = f"selfdev-linux-{sha}"
+        url = f"https://github.com/1jehuang/jcode/releases/tag/{tag}"
+        msg = MODULE.format_message(
+            tag=tag,
+            name=f"jcode v1.0.3-dev · Linux prerelease · {sha[:9]}",
+            body="## Highlights\n- Stream thoughts live\n",
+            url=url,
+        )
+        self.assertEqual(msg.splitlines()[0], "## jcode v1.0.3-dev · Linux prerelease")
+
+        # When title has no version, fall back to Cargo.toml at the commit SHA.
+        head_sha = MODULE.subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        head_tag = f"selfdev-linux-{head_sha}"
+        head_msg = MODULE.format_message(
+            tag=head_tag,
+            name=f"jcode Linux prerelease · {head_sha[:9]}",
+            body="## Highlights\n- Stream thoughts live\n",
+            url=f"https://github.com/1jehuang/jcode/releases/tag/{head_tag}",
+        )
+        self.assertRegex(
+            head_msg.splitlines()[0],
+            r"^## jcode v\d+\.\d+\.\d+-dev · Linux prerelease$",
+        )
+
     def test_long_stable_release_auto_splits_via_multipart(self) -> None:
         url = "https://github.com/1jehuang/jcode/releases/tag/v0.96.0"
         body = (
