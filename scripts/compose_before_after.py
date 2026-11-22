@@ -78,6 +78,22 @@ def render_text_frame(
     return img
 
 
+def crop_cells_rows(data: dict, spec: str | None) -> dict:
+    """Slice a `client:cells` payload to a 0-based `start:end` row range."""
+    if not spec:
+        return data
+    start_s, _, end_s = spec.partition(":")
+    rows = data.get("rows") or []
+    start = max(0, int(start_s)) if start_s.strip() else 0
+    end = min(len(rows), int(end_s)) if end_s.strip() else len(rows)
+    sliced = rows[start:end]
+    return {
+        "width": data.get("width", 80),
+        "height": len(sliced),
+        "rows": sliced,
+    }
+
+
 def render_cells_frame(
     data: dict,
     *,
@@ -265,14 +281,17 @@ def compose_before_after(
     before = before_img.convert("RGB")
     after = after_img.convert("RGB")
 
-    # Normalize heights if they differ slightly while preserving aspect ratio.
+    # Preserve identical 1:1 scale when heights differ by padding the shorter
+    # panel vertically (top-aligned) instead of distorting font sizes.
     target_h = max(before.height, after.height)
     if before.height != target_h:
-        scaled_w = max(1, round(before.width * (target_h / before.height)))
-        before = before.resize((scaled_w, target_h), Image.Resampling.LANCZOS)
+        padded = Image.new("RGB", (before.width, target_h), before.getpixel((0, 0)))
+        padded.paste(before, (0, 0))
+        before = padded
     if after.height != target_h:
-        scaled_w = max(1, round(after.width * (target_h / after.height)))
-        after = after.resize((scaled_w, target_h), Image.Resampling.LANCZOS)
+        padded = Image.new("RGB", (after.width, target_h), after.getpixel((0, 0)))
+        padded.paste(after, (0, 0))
+        after = padded
 
     diff_bbox = compute_diff_bbox(before, after) if (highlight_diff or auto_crop) else None
     if auto_crop and diff_bbox is not None:
@@ -386,6 +405,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--after-text", type=Path, help="Path to after TUI frame text")
     parser.add_argument("--before-cells", type=Path, help="Path to before `client:cells` JSON")
     parser.add_argument("--after-cells", type=Path, help="Path to after `client:cells` JSON")
+    parser.add_argument("--before-crop-rows", default=None, help="Optional 0-based start:end row slice for before cells")
+    parser.add_argument("--after-crop-rows", default=None, help="Optional 0-based start:end row slice for after cells")
     parser.add_argument("--cells", type=Path, help="Render a single `client:cells` JSON to PNG")
     parser.add_argument("--before-label", default="Before", help="Badge label for before panel")
     parser.add_argument("--after-label", default="After", help="Badge label for after panel")
@@ -417,8 +438,16 @@ def main(argv: list[str] | None = None) -> int:
         before_img = Image.open(args.before)
         after_img = Image.open(args.after)
     elif args.before_cells and args.after_cells:
-        before_img = render_cells_frame(json.loads(args.before_cells.read_text(encoding="utf-8")))
-        after_img = render_cells_frame(json.loads(args.after_cells.read_text(encoding="utf-8")))
+        before_data = crop_cells_rows(
+            json.loads(args.before_cells.read_text(encoding="utf-8")),
+            args.before_crop_rows,
+        )
+        after_data = crop_cells_rows(
+            json.loads(args.after_cells.read_text(encoding="utf-8")),
+            args.after_crop_rows,
+        )
+        before_img = render_cells_frame(before_data)
+        after_img = render_cells_frame(after_data)
     elif args.before_text and args.after_text:
         before_img = render_text_frame(args.before_text.read_text(encoding="utf-8"))
         after_img = render_text_frame(args.after_text.read_text(encoding="utf-8"))
