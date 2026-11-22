@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import mimetypes
 from pathlib import Path
 import json
 import os
@@ -30,6 +31,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -68,7 +70,21 @@ COMMIT_LINE = re.compile(r"^- \[[0-9a-f]{4,40}\]\([^)]*\) (.+)$")
 ESCAPED_MARKDOWN = re.compile(r"\\([\\`*_{}\[\]()<>#~|+=.-])")
 RAW_URL = re.compile(r"(?<!<)https?://[^\s<>()]+")
 MORE_COMMITS_BULLET = re.compile(r"^…\s+and\s+\d+\s+more\s+commits?\b", re.I)
+VISUAL_CHANGE_RE = re.compile(
+    r"\b("
+    r"tui|ui|ux|visual|design|layout|theme|palette|color|render(?:ing|er|ed)?|"
+    r"banner|header|footer|sidebar|widget|status\s+bar|picker|modal|overlay|"
+    r"card|markdown|mermaid|spacing|align(?:ment)?|wrap(?:ping)?|truncat(?:e|ion)|"
+    r"animation|spinner|onboarding|progress\s+card|scroll(?:bar|ing)?|diff\s+view|"
+    r"pane|border|font|icon|glyph|screenshot"
+    r")\b",
+    re.I,
+)
 MAX_AUTO_MULTIPART = 4
+
+
+def is_visual_change(bullet: str) -> bool:
+    return bool(VISUAL_CHANGE_RE.search(bullet))
 
 
 def utf16_len(text: str) -> int:
@@ -227,13 +243,18 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
         def remaining_units() -> int:
             return DISCORD_LIMIT - utf16_len("\n".join(lines)) - footer_units
 
-        if highlights:
-            lines += ["", "**What changed**"]
-            omitted_highlights = 0
-            for idx, item in enumerate(highlights):
+        def append_highlight_section(title: str, items: list[str]) -> None:
+            if not items:
+                return
+            section_overhead = utf16_len(f"\n\n{title}")
+            if remaining_units() <= section_overhead + 16:
+                return
+            lines.extend(["", title])
+            omitted = 0
+            for idx, item in enumerate(items):
                 text = truncate_utf16(item, 360)
                 bullet = f"- {text}"
-                more_left = len(highlights) - idx - 1
+                more_left = len(items) - idx - 1
                 reserve = (
                     utf16_len(f"\n- … and {more_left} more")
                     if more_left > 0
@@ -245,13 +266,24 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
                         if avail > 10:
                             lines.append("- " + truncate_utf16(text, avail))
                             continue
-                    omitted_highlights = len(highlights) - idx
+                    omitted = len(items) - idx
                     break
                 lines.append(bullet)
-            if omitted_highlights > 0:
-                more_line = f"- … and {omitted_highlights} more"
+            if omitted > 0:
+                more_line = f"- … and {omitted} more"
                 if utf16_len(more_line) + 1 <= remaining_units():
                     lines.append(more_line)
+
+        if highlights:
+            visual_highlights = [item for item in highlights if is_visual_change(item)]
+            other_highlights = [item for item in highlights if not is_visual_change(item)]
+            if visual_highlights and other_highlights:
+                append_highlight_section("**Visual & UI**", visual_highlights)
+                append_highlight_section("**What changed**", other_highlights)
+            elif visual_highlights:
+                append_highlight_section("**Visual & UI**", visual_highlights)
+            else:
+                append_highlight_section("**What changed**", other_highlights)
 
         if bundled:
             heading = (
@@ -453,19 +485,57 @@ def discord_webhook_url(webhook_url: str) -> str:
     )
 
 
-def post_to_discord(*, webhook_url: str, content: str) -> dict[str, Any]:
+def build_discord_multipart(
+    *, payload: dict[str, Any], attachments: list[Path]
+) -> tuple[bytes, str]:
+    boundary = f"----jcode-discord-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    chunks.extend([
+        f"--{boundary}\r\n".encode("ascii"),
+        b'Content-Disposition: form-data; name="payload_json"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        payload_bytes,
+        b"\r\n",
+    ])
+    for index, file_path in enumerate(attachments):
+        mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        filename = file_path.name.replace('"', "")
+        chunks.extend([
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                f'Content-Disposition: form-data; name="files[{index}]"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8"),
+            f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"),
+            file_path.read_bytes(),
+            b"\r\n",
+        ])
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def post_to_discord(
+    *, webhook_url: str, content: str, attachments: list[Path] | None = None
+) -> dict[str, Any]:
+    payload = {
+        "content": content,
+        # Release notes are generated from commit subjects. Never let
+        # them turn @everyone or user-looking text into real mentions.
+        "allowed_mentions": {"parse": []},
+    }
+    if attachments:
+        data, content_type = build_discord_multipart(
+            payload=payload, attachments=attachments
+        )
+    else:
+        data = json.dumps(payload).encode("utf-8")
+        content_type = "application/json"
     request = urllib.request.Request(
         discord_webhook_url(webhook_url),
-        data=json.dumps(
-            {
-                "content": content,
-                # Release notes are generated from commit subjects. Never let
-                # them turn @everyone or user-looking text into real mentions.
-                "allowed_mentions": {"parse": []},
-            }
-        ).encode("utf-8"),
+        data=data,
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "User-Agent": "jcode-release-bot/2.0",
         },
     )
@@ -545,7 +615,28 @@ def is_git_stale_announcement(discord_path: Path, changelog_path: Path) -> bool:
     return ancestor.returncode == 0
 
 
-def load_announcement(tag: str) -> list[str] | None:
+def _resolve_attachment_paths(raw_list: Any) -> list[Path]:
+    if raw_list is None:
+        return []
+    if not isinstance(raw_list, list):
+        raise ValueError("attachments must be an array of relative file paths")
+    base = ANNOUNCEMENT_DIR.resolve()
+    resolved: list[Path] = []
+    for item in raw_list:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("each attachment must be a nonempty relative path string")
+        candidate = (base / item).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError as error:
+            raise ValueError(f"attachment {item!r} escapes {ANNOUNCEMENT_DIR}") from error
+        if not candidate.is_file():
+            raise ValueError(f"attachment {item!r} does not exist")
+        resolved.append(candidate)
+    return resolved
+
+
+def load_announcement_parts(tag: str) -> list[tuple[str, list[Path]]] | None:
     # Tags must never escape the checked-in announcement directory.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag):
         return None
@@ -553,6 +644,8 @@ def load_announcement(tag: str) -> list[str] | None:
     if not path.exists():
         return None
     expected_changelog_sha: str | None = None
+    top_attachments: list[Path] = []
+    parts: list[tuple[str, list[Path]]] = []
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(parsed, dict):
@@ -562,15 +655,26 @@ def load_announcement(tag: str) -> list[str] | None:
                 if not isinstance(sha_value, str) or not re.fullmatch(r"[0-9a-f]{64}", sha_value):
                     raise ValueError("changelog_sha256 must be a 64-char lowercase hex sha256")
                 expected_changelog_sha = sha_value
+            top_attachments = _resolve_attachment_paths(parsed.get("attachments"))
         else:
             messages = parsed
         if not isinstance(messages, list) or not messages:
             raise ValueError("expected a nonempty array of content strings")
-        for index, content in enumerate(messages):
+        for index, entry in enumerate(messages):
+            if isinstance(entry, str):
+                content = entry
+                entry_attachments: list[Path] = []
+            elif isinstance(entry, dict):
+                content = entry.get("content")
+                entry_attachments = _resolve_attachment_paths(entry.get("attachments"))
+            else:
+                raise ValueError(f"message {index + 1} must be a string or object")
             if not isinstance(content, str) or not content.strip():
                 raise ValueError(f"message {index + 1} must be a nonempty string")
             if utf16_len(content) > DISCORD_LIMIT:
                 raise ValueError(f"message {index + 1} exceeds 2000 UTF-16 units")
+            combined_attachments = (top_attachments if index == 0 else []) + entry_attachments
+            parts.append((content, combined_attachments))
     except (OSError, ValueError, UnicodeError) as error:
         raise RuntimeError(f"Invalid Discord announcement {path}: {error}") from error
 
@@ -594,15 +698,27 @@ def load_announcement(tag: str) -> list[str] | None:
                 file=sys.stderr,
             )
             return None
-    return messages
+    return parts
+
+
+def load_announcement(tag: str) -> list[str] | None:
+    parts = load_announcement_parts(tag)
+    return None if parts is None else [content for content, _ in parts]
 
 
 def multipart_marker(tag: str, digest: str, index: int, state: str) -> str:
     return f"<!-- jcode-discord-part:{tag}:{digest}:{index}:{state} -->"
 
 
-def announce_multipart(*, repository: str, tag: str, token: str,
-                       webhook_url: str, messages: list[str]) -> str | None:
+def announce_multipart(
+    *,
+    repository: str,
+    tag: str,
+    token: str,
+    webhook_url: str,
+    messages: list[str],
+    attachments_per_part: list[list[Path]] | None = None,
+) -> str | None:
     digest = hashlib.sha256(json.dumps(messages, ensure_ascii=True).encode()).hexdigest()
     last_id = None
 
@@ -637,8 +753,17 @@ def announce_multipart(*, repository: str, tag: str, token: str,
         pending = multipart_marker(tag, digest, index, "pending")
         # A durable intent checkpoint closes the lost-response duplicate window.
         persist(release, f"{body.rstrip()}\n\n{pending}\n")
+        part_attachments = (
+            attachments_per_part[index - 1]
+            if attachments_per_part and index - 1 < len(attachments_per_part)
+            else None
+        )
         try:
-            message = post_to_discord(webhook_url=webhook_url, content=content)
+            message = post_to_discord(
+                webhook_url=webhook_url,
+                content=content,
+                attachments=part_attachments or None,
+            )
             last_id = str(message["id"])
             # Fetch again to preserve edits made during webhook delivery.
             release = fetch_release(repository=repository, tag=tag, token=token)
@@ -693,8 +818,20 @@ def announce_release(
 
     messages = load_announcement(tag)
     if messages is not None:
-        return announce_multipart(repository=repository, tag=tag, token=token,
-                                  webhook_url=webhook_url, messages=messages)
+        parts = load_announcement_parts(tag)
+        attachments_per_part = (
+            [atts for _, atts in parts]
+            if parts is not None and [content for content, _ in parts] == messages
+            else None
+        )
+        return announce_multipart(
+            repository=repository,
+            tag=tag,
+            token=token,
+            webhook_url=webhook_url,
+            messages=messages,
+            attachments_per_part=attachments_per_part,
+        )
 
     formatted_messages = format_messages(
         tag=tag,

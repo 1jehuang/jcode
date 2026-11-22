@@ -616,6 +616,68 @@ Fast startup.
             r"^## jcode v\d+\.\d+\.\d+-dev · Linux prerelease$",
         )
 
+    def test_selfdev_splits_visual_and_non_visual_highlights(self) -> None:
+        sha = "2" * 40
+        tag = f"selfdev-linux-{sha}"
+        msg = MODULE.format_message(
+            tag=tag,
+            name=f"jcode v1.0.3-dev · Linux prerelease · {sha[:9]}",
+            body=(
+                "## Highlights\n"
+                "- Unify collapsible OAuth progress card in the TUI onboarding flow\n"
+                "- Stream Gemini thought summaries live over SSE\n"
+            ),
+            url=f"https://github.com/1jehuang/jcode/releases/tag/{tag}",
+        )
+        self.assertIn("**Visual & UI**\n- Unify collapsible OAuth progress card", msg)
+        self.assertIn("**What changed**\n- Stream Gemini thought summaries live over SSE", msg)
+
+    def test_announcement_supports_multipart_image_attachments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            discord_dir = root / "discord"
+            discord_dir.mkdir()
+            png_path = discord_dir / "v1.0.4-before-after.png"
+            png_bytes = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+            png_path.write_bytes(png_bytes)
+            (discord_dir / "v1.0.4.json").write_text(
+                json.dumps(
+                    {
+                        "messages": [
+                            {
+                                "content": "## v1.0.4\n\n**Visual & UI**\n- Cleaner header",
+                                "attachments": ["v1.0.4-before-after.png"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                parts = MODULE.load_announcement_parts("v1.0.4")
+            self.assertIsNotNone(parts)
+            assert parts is not None
+            self.assertEqual(len(parts), 1)
+            self.assertEqual(parts[0][1], [png_path.resolve()])
+
+            body, content_type = MODULE.build_discord_multipart(
+                payload={"content": parts[0][0], "allowed_mentions": {"parse": []}},
+                attachments=parts[0][1],
+            )
+            self.assertTrue(content_type.startswith("multipart/form-data; boundary="))
+            self.assertIn(b'name="payload_json"', body)
+            self.assertIn(b'name="files[0]"; filename="v1.0.4-before-after.png"', body)
+            self.assertIn(png_bytes, body)
+
+            # Reject attachment paths that escape changelog/discord/.
+            (discord_dir / "v1.0.5.json").write_text(
+                json.dumps({"messages": ["hi"], "attachments": ["../escape.png"]}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                with self.assertRaisesRegex(RuntimeError, "escapes"):
+                    MODULE.load_announcement_parts("v1.0.5")
+
     def test_long_stable_release_auto_splits_via_multipart(self) -> None:
         url = "https://github.com/1jehuang/jcode/releases/tag/v0.96.0"
         body = (
