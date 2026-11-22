@@ -11,22 +11,30 @@ use jcode_message_types::{ConnectionPhase, Message, StreamEvent, ToolDefinition}
 use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL, PersistedCatalog,
     X_GOOG_API_CLIENT, antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale,
-    catalog_model_detail, client_metadata_header, generate_content_api_url,
-    is_retryable_empty_turn, merge_antigravity_model_ids, remap_unsupported_model,
+    catalog_model_detail, client_metadata_header, merge_antigravity_model_ids,
+    remap_unsupported_model, stream_generate_content_api_url,
 };
 #[cfg(test)]
 use jcode_provider_antigravity::{
-    flatten_schema_combiners, metadata_platform, model_is_claude, model_is_gemini,
-    strip_numeric_schema_bounds,
+    flatten_schema_combiners, generate_content_api_url, is_retryable_empty_turn, metadata_platform,
+    model_is_claude, model_is_gemini, strip_numeric_schema_bounds,
 };
 use jcode_provider_core::{EventStream, Provider};
+#[cfg(test)]
+use jcode_provider_gemini::CodeAssistGenerateResponse;
+use jcode_provider_gemini::stream::{
+    GeminiSseEnvelope, GeminiSseParser, GeminiStreamAccumulator, GeminiStreamFinish,
+    decode_sse_chunk,
+};
 use jcode_provider_gemini::{
-    CodeAssistGenerateRequest, CodeAssistGenerateResponse, GeminiFunctionCallingConfig,
-    GeminiToolConfig, VertexGenerateContentRequest,
+    CodeAssistGenerateRequest, GeminiFunctionCallingConfig, GeminiToolConfig,
+    VertexGenerateContentRequest, build_generation_config_for_thoughts,
+    is_thinking_config_rejected_error,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -334,7 +342,7 @@ impl AntigravityProvider {
     /// this to a single retry per distinct construct.
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors generate_content's explicit per-request settings so the retry re-sends an identical turn"
+        reason = "mirrors stream_generate_content's explicit per-request settings so the retry re-sends an identical turn"
     )]
     async fn retry_after_schema_rejection(
         &self,
@@ -345,7 +353,8 @@ impl AntigravityProvider {
         system: &str,
         resume_session_id: Option<&str>,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-    ) -> Option<Result<CodeAssistGenerateResponse>> {
+        include_thoughts: bool,
+    ) -> Option<Result<reqwest::Response>> {
         let resolved = self.resolve_model_for_request(model);
         let dialect = jcode_provider_antigravity::antigravity_dialect(&resolved);
         match jcode_schema_dialect::recover_from_error(error, dialect) {
@@ -357,7 +366,7 @@ impl AntigravityProvider {
             jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
                 jcode_base::logging::warn(&format!("Antigravity {description}"));
                 Some(
-                    self.generate_content(
+                    self.stream_generate_content(
                         model,
                         messages,
                         tools,
@@ -365,6 +374,7 @@ impl AntigravityProvider {
                         resume_session_id,
                         false,
                         signature_policy,
+                        include_thoughts,
                     )
                     .await,
                 )
@@ -374,9 +384,9 @@ impl AntigravityProvider {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "the Code Assist call threads explicit per-request settings, including the signature policy, without hidden state"
+        reason = "the Code Assist call threads explicit per-request settings, including signature and thought policies, without hidden state"
     )]
-    async fn generate_content(
+    async fn stream_generate_content(
         &self,
         model: &str,
         messages: &[Message],
@@ -385,7 +395,8 @@ impl AntigravityProvider {
         resume_session_id: Option<&str>,
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-    ) -> Result<CodeAssistGenerateResponse> {
+        include_thoughts: bool,
+    ) -> Result<reqwest::Response> {
         let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
         let project = match tokens
             .project_id
@@ -421,6 +432,9 @@ impl AntigravityProvider {
                 }
             }
         }
+        let generation_config = include_thoughts
+            .then(|| build_generation_config_for_thoughts(&resolved_model))
+            .flatten();
         let request = CodeAssistGenerateRequest {
             model: resolved_model,
             project,
@@ -449,6 +463,7 @@ impl AntigravityProvider {
                         },
                     })
                 },
+                generation_config,
                 session_id: resume_session_id
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string),
@@ -459,9 +474,10 @@ impl AntigravityProvider {
 
         let response = self
             .client
-            .post(generate_content_api_url())
+            .post(stream_generate_content_api_url())
             .bearer_auth(&tokens.access_token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
             .header(reqwest::header::USER_AGENT, antigravity_user_agent())
             .header("x-goog-api-client", X_GOOG_API_CLIENT)
             .header(
@@ -472,22 +488,19 @@ impl AntigravityProvider {
             .json(&request)
             .send()
             .await
-            .context("Failed to send Antigravity generateContent request")?;
+            .context("Failed to send Antigravity streamGenerateContent request")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = jcode_base::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!(
-                "Antigravity generateContent failed (HTTP {}): {}",
+                "Antigravity streamGenerateContent failed (HTTP {}): {}",
                 status,
                 body.trim()
             );
         }
 
-        response
-            .json()
-            .await
-            .context("Failed to decode Antigravity generateContent response")
+        Ok(response)
     }
 }
 
@@ -588,6 +601,7 @@ mod canonical_input_tests {
                     tool_config: (variant > 0).then_some(GeminiToolConfig {
                         function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
                     }),
+                    generation_config: None,
                     session_id: Some("session".into()),
                 },
             };
@@ -659,6 +673,58 @@ fn ensure_account_model(model: &str, ids: &[String]) -> Result<()> {
     Ok(())
 }
 
+async fn consume_antigravity_sse_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<GeminiStreamFinish> {
+    let mut byte_stream = response.bytes_stream();
+    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
+    let mut sse = GeminiSseParser::new();
+    let mut acc = GeminiStreamAccumulator::new("Antigravity", false, true);
+    let mut next_call_id = || Uuid::new_v4().to_string();
+
+    while let Some(chunk_res) = byte_stream.next().await {
+        let bytes = chunk_res.context("Failed reading Antigravity SSE stream")?;
+        let text = utf8.decode(&bytes);
+        for data in sse.push(&text) {
+            let Some(resp) = decode_sse_chunk(GeminiSseEnvelope::CodeAssist, &data)
+                .context("Failed to decode Antigravity SSE chunk")?
+            else {
+                continue;
+            };
+            let result = acc.push_response(resp, &mut next_call_id);
+            for event in result.events {
+                if tx.send(Ok(event)).await.is_err() {
+                    return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+                }
+            }
+            if result.pseudo_tool_call_detected {
+                return Ok(GeminiStreamFinish::PseudoToolCall { events: Vec::new() });
+            }
+        }
+    }
+
+    let trailing = utf8.flush();
+    for data in sse.push(&trailing).into_iter().chain(sse.finish()) {
+        let Some(resp) = decode_sse_chunk(GeminiSseEnvelope::CodeAssist, &data)
+            .context("Failed to decode trailing Antigravity SSE chunk")?
+        else {
+            continue;
+        };
+        let result = acc.push_response(resp, &mut next_call_id);
+        for event in result.events {
+            if tx.send(Ok(event)).await.is_err() {
+                return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+            }
+        }
+        if result.pseudo_tool_call_detected {
+            return Ok(GeminiStreamFinish::PseudoToolCall { events: Vec::new() });
+        }
+    }
+
+    Ok(acc.finish())
+}
+
 #[async_trait]
 impl Provider for AntigravityProvider {
     async fn complete(
@@ -722,281 +788,206 @@ impl Provider for AntigravityProvider {
             // downgraded to plain text. Content is preserved, the turn completes,
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
-            let response = match provider
-                .generate_content(
-                    &model,
-                    &messages,
-                    &tools,
-                    &system,
-                    resume_session_id.as_deref(),
-                    false,
-                    signature_policy,
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    // A tool schema the backend rejects 400s every single turn,
-                    // so the provider is unusable until jcode ships a new
-                    // deny-list entry. Instead, learn the rejected construct
-                    // from the error, persist it, and retry the same turn
-                    // without it. See `jcode-schema-dialect`.
-                    if let Some(retried) = provider
-                        .retry_after_schema_rejection(
-                            &err.to_string(),
+            let mut include_thoughts = true;
+            let mut force_function_call = false;
+            let mut malformed_retries = 0u8;
+            let mut pseudo_retried = false;
+            const MAX_MALFORMED_RETRIES: u8 = 2;
+            let mut emitted_streaming_phase = false;
+
+            loop {
+                let response = if !force_function_call {
+                    match provider
+                        .stream_generate_content(
                             &model,
                             &messages,
                             &tools,
                             &system,
                             resume_session_id.as_deref(),
+                            false,
                             signature_policy,
+                            include_thoughts,
                         )
                         .await
                     {
-                        match retried {
-                            Ok(response) => response,
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
+                        Ok(response) => response,
+                        Err(err) => {
+                            let err_str = format!("{err:#}");
+                            if include_thoughts && is_thinking_config_rejected_error(&err_str) {
+                                jcode_base::logging::warn(
+                                    "Antigravity rejected thinkingConfig.includeThoughts; retrying without thought summaries",
+                                );
+                                include_thoughts = false;
+                                match provider
+                                    .stream_generate_content(
+                                        &model,
+                                        &messages,
+                                        &tools,
+                                        &system,
+                                        resume_session_id.as_deref(),
+                                        false,
+                                        signature_policy,
+                                        false,
+                                    )
+                                    .await
+                                {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let _ = tx.send(Err(retry_err)).await;
+                                        return;
+                                    }
+                                }
+                            } else if let Some(retried) = provider
+                                .retry_after_schema_rejection(
+                                    &err_str,
+                                    &model,
+                                    &messages,
+                                    &tools,
+                                    &system,
+                                    resume_session_id.as_deref(),
+                                    signature_policy,
+                                    include_thoughts,
+                                )
+                                .await
+                            {
+                                match retried {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let _ = tx.send(Err(retry_err)).await;
+                                        return;
+                                    }
+                                }
+                            } else if !jcode_provider_gemini::is_missing_thought_signature_error(
+                                &err_str,
+                            ) {
+                                let _ = tx.send(Err(err)).await;
                                 return;
-                            }
-                        }
-                    } else if !jcode_provider_gemini::is_missing_thought_signature_error(
-                        &err.to_string(),
-                    ) {
-                        let _ = tx.send(Err(err)).await;
-                        return;
-                    } else {
-                        jcode_base::logging::warn(
-                            "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
-                        );
-                        signature_policy =
-                            jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
-                        match provider
-                            .generate_content(
-                                &model,
-                                &messages,
-                                &tools,
-                                &system,
-                                resume_session_id.as_deref(),
-                                false,
-                                signature_policy,
-                            )
-                            .await
-                        {
-                            Ok(response) => response,
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
-                                return;
+                            } else {
+                                jcode_base::logging::warn(
+                                    "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
+                                );
+                                signature_policy =
+                                    jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
+                                match provider
+                                    .stream_generate_content(
+                                        &model,
+                                        &messages,
+                                        &tools,
+                                        &system,
+                                        resume_session_id.as_deref(),
+                                        false,
+                                        signature_policy,
+                                        include_thoughts,
+                                    )
+                                    .await
+                                {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let _ = tx.send(Err(retry_err)).await;
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            };
-            // Gemini-3 thinking models intermittently return an empty
-            // `MALFORMED_FUNCTION_CALL` turn (pseudo-code instead of a clean
-            // functionCall). It is transient, so transparently re-request a few
-            // times before surfacing it; this turns a frequent hard failure into a
-            // near-always-successful turn without the agent loop seeing the blip.
-            // The retries force function-calling mode `ANY` so the model must emit
-            // a real functionCall rather than the pseudo-code that failed.
-            let mut response = response;
-            let mut malformed_retries = 0u8;
-            const MAX_MALFORMED_RETRIES: u8 = 2;
-            while is_retryable_empty_turn(&response) && malformed_retries < MAX_MALFORMED_RETRIES {
-                malformed_retries += 1;
-                match provider
-                    .generate_content(
-                        &model,
-                        &messages,
-                        &tools,
-                        &system,
-                        resume_session_id.as_deref(),
-                        true,
-                        signature_policy,
-                    )
-                    .await
-                {
-                    Ok(retried) => response = retried,
-                    Err(err) => {
-                        let _ = tx.send(Err(err)).await;
-                        return;
+                } else {
+                    match provider
+                        .stream_generate_content(
+                            &model,
+                            &messages,
+                            &tools,
+                            &system,
+                            resume_session_id.as_deref(),
+                            true,
+                            signature_policy,
+                            include_thoughts,
+                        )
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(err) => {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
                     }
-                }
-            }
+                };
 
-            // The unsigned-history fallback contains a deliberately distinctive
-            // marker. Gemini 3 Flash can imitate it as fresh assistant text,
-            // making the session look productive while no tool is dispatched
-            // (#845). Never execute or render that pseudo-call. Retry exactly
-            // once with native function calling forced, then fail clearly.
-            if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
-                response = match provider
-                    .generate_content(
-                        &model,
-                        &messages,
-                        &tools,
-                        &system,
-                        resume_session_id.as_deref(),
-                        true,
-                        signature_policy,
-                    )
-                    .await
-                {
-                    Ok(retried) => retried,
+                if !emitted_streaming_phase {
+                    emitted_streaming_phase = true;
+                    let _ = tx
+                        .send(Ok(StreamEvent::ConnectionPhase {
+                            phase: ConnectionPhase::Streaming,
+                        }))
+                        .await;
+                }
+
+                let finish = match consume_antigravity_sse_stream(response, &tx).await {
+                    Ok(finish) => finish,
                     Err(err) => {
                         let _ = tx.send(Err(err)).await;
                         return;
                     }
                 };
-                if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Antigravity returned a textual pseudo-tool call after a forced native-call retry; start a new turn or choose another model"
-                        )))
-                        .await;
-                    return;
-                }
-            }
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: ConnectionPhase::Streaming,
-                }))
-                .await;
-            if let Some(event) = response.resolved_model_event() {
-                let _ = tx.send(Ok(event)).await;
-            }
-            if let Some(usage) = response
-                .response
-                .as_ref()
-                .and_then(|r| r.usage_metadata.as_ref())
-            {
-                let _ = tx
-                    .send(Ok(StreamEvent::TokenUsage {
-                        input_tokens: usage.input_token_count(),
-                        output_tokens: usage.output_token_count(),
-                        cache_read_input_tokens: usage.cached_content_token_count,
-                        cache_creation_input_tokens: None,
-                    }))
-                    .await;
-            }
-            let Some(candidate) = response
-                .response
-                .and_then(|r| r.candidates)
-                .and_then(|mut c| c.drain(..).next())
-            else {
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "Antigravity returned no candidates for generateContent"
-                    )))
-                    .await;
-                return;
-            };
-            // Track whether this candidate produced any usable output (text or a
-            // tool call). Gemini-3 thinking models intermittently emit Python-style
-            // pseudo-code instead of a clean functionCall and finish with
-            // `MALFORMED_FUNCTION_CALL` (or a bare `OTHER`) and empty content. If we
-            // silently end the turn the agent loop looks like it stalled with no
-            // answer, so we surface an actionable error below instead.
-            let mut produced_output = false;
-            if let Some(content) = candidate.content {
-                // Gemini 3 attaches a `thoughtSignature` to function-call parts
-                // (and occasionally to a standalone preceding part). Emit tool
-                // calls through the standard ToolUseStart/End path so jcode
-                // drives the multi-turn loop, and replay the signature via a
-                // dedicated ToolUseSignature event so it can be persisted on the
-                // ToolUse block and resent on later turns (required by the
-                // Cloud Code backend, which rejects function calls missing it).
-                let mut pending_signature: Option<String> = None;
-                for part in content.parts {
-                    let part_signature = part
-                        .thought_signature
-                        .as_ref()
-                        .filter(|sig| !sig.is_empty())
-                        .cloned();
-                    if let Some(text) = part.text.filter(|text| !text.is_empty()) {
-                        produced_output = true;
-                        let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+
+                match finish {
+                    GeminiStreamFinish::Completed { events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        return;
                     }
-                    if let Some(function_call) = part.function_call {
-                        produced_output = true;
-                        let signature = part_signature.clone().or_else(|| pending_signature.take());
-                        let raw_call_id = function_call
-                            .id
-                            .clone()
-                            .unwrap_or_else(|| Uuid::new_v4().to_string());
-                        let call_id = jcode_message_types::sanitize_tool_id(&raw_call_id);
+                    GeminiStreamFinish::RetryableEmpty {
+                        finish_reason,
+                        finish_message,
+                        events,
+                    } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        if malformed_retries < MAX_MALFORMED_RETRIES {
+                            malformed_retries += 1;
+                            force_function_call = true;
+                            continue;
+                        }
+                        let detail = finish_message
+                            .as_deref()
+                            .filter(|msg| !msg.trim().is_empty())
+                            .map(|msg| {
+                                format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300))
+                            })
+                            .unwrap_or_default();
                         let _ = tx
-                            .send(Ok(StreamEvent::ToolUseStart {
-                                id: call_id,
-                                name: function_call.name,
-                            }))
-                            .await;
-                        let _ = tx
-                            .send(Ok(StreamEvent::ToolInputDelta(
-                                function_call.args.to_string(),
+                            .send(Err(anyhow::anyhow!(
+                                "Antigravity returned no usable output (finish_reason={finish_reason}){detail}"
                             )))
                             .await;
-                        let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                        if let Some(signature) = signature {
-                            let _ = tx.send(Ok(StreamEvent::ToolUseSignature(signature))).await;
+                        return;
+                    }
+                    GeminiStreamFinish::PseudoToolCall { events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
                         }
-                    } else if let Some(signature) = part_signature {
-                        // Standalone signature part; remember it for the next
-                        // function call in this candidate.
-                        pending_signature = Some(signature);
+                        if !pseudo_retried {
+                            pseudo_retried = true;
+                            force_function_call = true;
+                            continue;
+                        }
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "Antigravity returned a textual pseudo-tool call after a forced native-call retry; start a new turn or choose another model"
+                            )))
+                            .await;
+                        return;
+                    }
+                    GeminiStreamFinish::Error { message, events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        let _ = tx.send(Err(anyhow::anyhow!(message))).await;
+                        return;
                     }
                 }
-                // A thought signature that was never consumed by a following
-                // function call (e.g. a pure-text reasoning turn) is still an
-                // opaque reasoning signal. Surface it as a ThinkingSignatureDelta
-                // rather than dropping it, so reasoning-aware consumers (and the
-                // provider-doctor reasoning probe) can see the model reasoned.
-                if let Some(signature) = pending_signature.take() {
-                    let _ = tx
-                        .send(Ok(StreamEvent::ThinkingSignatureDelta(signature)))
-                        .await;
-                }
             }
-
-            // An abnormal finish (typically Gemini-3's intermittent
-            // `MALFORMED_FUNCTION_CALL`, where the model writes pseudo-code rather
-            // than a valid functionCall) that yielded no text and no tool call is a
-            // dead turn: surface it as a retryable error instead of a silent empty
-            // `MessageEnd` that looks like the agent gave up. `STOP`/`MAX_TOKENS`
-            // are normal terminal reasons and are left to flow through as usual.
-            if !produced_output {
-                let abnormal = candidate
-                    .finish_reason
-                    .as_deref()
-                    .map(|reason| {
-                        !matches!(
-                            reason.to_ascii_uppercase().as_str(),
-                            "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED" | ""
-                        )
-                    })
-                    .unwrap_or(false);
-                if abnormal {
-                    let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
-                    let detail = candidate
-                        .finish_message
-                        .as_deref()
-                        .filter(|msg| !msg.trim().is_empty())
-                        .map(|msg| format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300)))
-                        .unwrap_or_default();
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Antigravity returned no usable output (finish_reason={reason}){detail}"
-                        )))
-                        .await;
-                    return;
-                }
-            }
-
-            let _ = tx
-                .send(Ok(StreamEvent::MessageEnd {
-                    stop_reason: candidate.finish_reason.clone(),
-                }))
-                .await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))

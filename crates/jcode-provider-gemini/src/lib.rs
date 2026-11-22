@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub mod interactions;
+pub mod stream;
 
 // Non-dated server-side alias: always resolves to the newest stable pro
 // model, so the default can never go stale or 404 into a downgrade chain
@@ -147,6 +148,85 @@ pub struct CodeAssistGenerateRequest {
     pub request: VertexGenerateContentRequest,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiThinkingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+}
+
+/// Whether `model` accepts `generationConfig.thinkingConfig.includeThoughts`.
+///
+/// Gemini 2.5+ (including 3.x, 4.x, future generations, and `-latest` aliases)
+/// and Antigravity's hosted Claude / GPT-OSS routes accept `includeThoughts`
+/// and stream `thought: true` parts when enabled. Older Gemini 1.x / 2.0
+/// non-thinking models and non-text media/embedding models reject
+/// `thinkingConfig` with HTTP 400.
+pub fn model_supports_thought_summaries(model: &str) -> bool {
+    let lower = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    if lower.contains("embedding")
+        || lower.contains("-tts")
+        || lower.contains("-image")
+        || lower.starts_with("imagen")
+        || lower.starts_with("veo")
+        || lower.starts_with("aqa")
+    {
+        return false;
+    }
+    if lower.starts_with("gemini-") {
+        if lower.contains("thinking") {
+            return true;
+        }
+        if lower.starts_with("gemini-1.")
+            || lower.starts_with("gemini-1-")
+            || lower.starts_with("gemini-2.0")
+        {
+            return false;
+        }
+        return true;
+    }
+    true
+}
+
+/// Build `generationConfig` requesting thought summaries when supported by
+/// `model`, or `None` when the model does not support `thinkingConfig`.
+pub fn build_generation_config_for_thoughts(model: &str) -> Option<GeminiGenerationConfig> {
+    if !model_supports_thought_summaries(model) {
+        return None;
+    }
+    Some(GeminiGenerationConfig {
+        thinking_config: Some(GeminiThinkingConfig {
+            include_thoughts: Some(true),
+        }),
+    })
+}
+
+/// Whether an HTTP error indicates the backend rejected `thinkingConfig` /
+/// `includeThoughts` for this model, so the caller can safely retry once
+/// without `generationConfig`.
+pub fn is_thinking_config_rejected_error(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("thinking_config")
+        || lowered.contains("thinkingconfig")
+        || lowered.contains("include_thoughts")
+        || lowered.contains("includethoughts")
+        || lowered.contains("thinking is not supported")
+        || lowered.contains("thinking mode is not supported")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VertexGenerateContentRequest {
@@ -157,6 +237,8 @@ pub struct VertexGenerateContentRequest {
     pub tools: Option<Vec<GeminiTool>>,
     #[serde(rename = "toolConfig", skip_serializing_if = "Option::is_none")]
     pub tool_config: Option<GeminiToolConfig>,
+    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GeminiGenerationConfig>,
     #[serde(rename = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
@@ -179,6 +261,10 @@ pub struct GeminiContent {
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Whether this part contains model thought summaries rather than answer text.
+    /// Returned when `generationConfig.thinkingConfig.includeThoughts` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_data: Option<InlineData>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,6 +276,12 @@ pub struct GeminiPart {
     /// the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+}
+
+impl GeminiPart {
+    pub fn is_thought(&self) -> bool {
+        self.thought == Some(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

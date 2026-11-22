@@ -95,6 +95,15 @@ pub fn generate_content_api_url() -> String {
     format!("{}/v1internal:generateContent", antigravity_endpoint())
 }
 
+/// Full URL for the SSE streaming `streamGenerateContent` RPC against the
+/// resolved endpoint.
+pub fn stream_generate_content_api_url() -> String {
+    format!(
+        "{}/v1internal:streamGenerateContent?alt=sse",
+        antigravity_endpoint()
+    )
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PersistedCatalog {
     pub models: Vec<CatalogModel>,
@@ -491,7 +500,8 @@ pub fn is_retryable_empty_turn(response: &CodeAssistGenerateResponse) -> bool {
         .map(|content| {
             content.parts.iter().any(|part| {
                 part.function_call.is_some()
-                    || part.text.as_deref().is_some_and(|text| !text.is_empty())
+                    || (!part.is_thought()
+                        && part.text.as_deref().is_some_and(|text| !text.is_empty()))
             })
         })
         .unwrap_or(false);
@@ -522,19 +532,11 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
         .and_then(|candidate| candidate.content.as_ref())
         .is_some_and(|content| {
             content.parts.iter().any(|part| {
-                let Some(text) = part.text.as_deref() else {
-                    return false;
-                };
-                let Some(call) = text.trim_start().strip_prefix("[previous tool call]") else {
-                    return false;
-                };
-                let call = call.trim_start();
-                let name_len = call
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
-                    .map(char::len_utf8)
-                    .sum::<usize>();
-                name_len > 0 && call[name_len..].trim_start().starts_with('(')
+                !part.is_thought()
+                    && part
+                        .text
+                        .as_deref()
+                        .is_some_and(jcode_provider_gemini::stream::is_pseudo_tool_call_text)
             })
         })
 }
