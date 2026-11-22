@@ -1607,6 +1607,7 @@ pub struct App {
     /// provider snapshot has not reached this client yet. While set, `/model`
     /// shows a loading state instead of reusing the pre-login catalog.
     auth_catalog_refresh_pending: bool,
+    model_cache_refresh_started: bool,
     pending_model_picker_load: Option<PendingModelPickerLoad>,
     model_picker_load_request_id: u64,
     // Pending model switch from picker (for remote mode async processing)

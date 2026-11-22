@@ -2113,6 +2113,11 @@ impl App {
         }
         match completed.result {
             Ok(summary) => {
+                if !self.is_remote {
+                    super::inline_interactive::write_models_cache(
+                        &self.provider.available_models_display(),
+                    );
+                }
                 self.invalidate_model_picker_cache();
                 self.finish_background_task(
                     "refresh-model-list".to_string(),

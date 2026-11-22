@@ -1113,7 +1113,7 @@ impl App {
         crate::provider::simplified_model_routes_for_picker(
             self.provider.name(),
             current_model,
-            self.provider.available_models_display(),
+            merge_cached_models(self.provider.available_models_display(), &read_models_cache()),
         )
     }
 
@@ -1159,6 +1159,11 @@ impl App {
     }
 
     fn open_model_picker_inner(&mut self, preserve_input: bool) {
+        if !self.is_remote && models_cache_stale() && !self.model_cache_refresh_started {
+            // Non-blocking: reuses the /refresh-model-list background path, which rewrites the cache.
+            self.model_cache_refresh_started = true;
+            super::model_context::handle_model_command(self, "/refresh-model-list");
+        }
         let picker_started = std::time::Instant::now();
         const RECENT_AUTH_BOOST_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
         if self
@@ -4247,3 +4252,55 @@ mod tests;
 #[cfg(test)]
 #[path = "inline_interactive/cloud_resume_tests.rs"]
 mod cloud_resume_tests;
+
+const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+fn models_cache_path() -> Option<std::path::PathBuf> {
+    crate::storage::jcode_dir().ok().map(|d| d.join("models-cache.json"))
+}
+
+fn models_cache_stale() -> bool {
+    models_cache_path()
+        .and_then(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .is_none_or(|age| age > MODELS_CACHE_TTL)
+}
+
+pub(super) fn read_models_cache() -> Vec<String> {
+    models_cache_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| serde_json::from_value(v.get("models")?.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Write the live list back so other tools (harness_resilience.py) see the same models.
+pub(super) fn write_models_cache(models: &[String]) {
+    if let Some(p) = models_cache_path() {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
+        let _ = std::fs::write(p, serde_json::json!({"models": models, "fetched_at": secs}).to_string());
+    }
+}
+
+fn merge_cached_models(mut live: Vec<String>, cached: &[String]) -> Vec<String> {
+    for m in cached {
+        if !live.contains(m) {
+            live.push(m.clone());
+        }
+    }
+    live
+}
+
+#[cfg(test)]
+mod models_cache_tests {
+    #[test]
+    fn merge_keeps_live_order_and_adds_unique_cached() {
+        let out = super::merge_cached_models(
+            vec!["a".into(), "b".into()],
+            &["b".into(), "c".into()],
+        );
+        assert_eq!(out, vec!["a", "b", "c"]);
+    }
+}
