@@ -31,6 +31,9 @@ AFTER_BADGE_FG = (120, 232, 168)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 FONT_CANDIDATES = (
+    "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
+    "/usr/share/fonts/TTF/JetBrainsMonoNLNerdFont-Regular.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
