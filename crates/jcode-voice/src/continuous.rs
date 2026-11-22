@@ -51,7 +51,7 @@ impl Default for ContinuousConfig {
             require_jev: false,
             max_audio_seconds_per_hour: 600,
             max_classifications_per_hour: 120,
-            action_probability: 0.95,
+            action_probability: 0.5,
             live_action_probability: None,
             warm_nari: false,
             #[cfg(test)]

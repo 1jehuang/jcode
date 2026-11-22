@@ -139,7 +139,7 @@ session_picker_enter = "current-terminal"
 # max_audio_seconds_per_hour = 600
 # max_classifications_per_hour = 120
 # max_agent_turns_per_hour = 0 # 0 disables the agent-turn cap
-# action_probability = 0.97  # 0.5..1; Fn tap sends recent speech without the gate
+# action_probability = 0.5  # 0.5..1; Fn tap sends recent speech without the gate
 # trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
 # warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
 
