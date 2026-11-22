@@ -163,9 +163,10 @@ pub(super) fn inventory_lines(
         })
         .collect();
     if lines.is_empty() {
-        lines.push(Line::raw(
+        lines.push(Line::from(Span::styled(
             "No auto-routing accounts · /login to add credential",
-        ));
+            Style::default().fg(dim_color()),
+        )));
     }
     lines
 }
