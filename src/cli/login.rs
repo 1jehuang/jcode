@@ -1102,18 +1102,34 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
     // / piped invocations preserve the historical OAuth-only behavior.
     if io::stdin().is_terminal() {
         eprintln!("Gemini login. Choose an authentication method:");
-        eprintln!("  [1] Google account OAuth (free Code Assist tier, default)");
+        eprintln!(
+            "  [1] Personal Google account / Google AI Pro or Ultra (via Antigravity, default)"
+        );
         eprintln!(
             "  [2] Gemini Developer API key (Google AI Studio, generativelanguage.googleapis.com)"
         );
+        eprintln!(
+            "  [3] Paid Gemini Code Assist (Standard/Enterprise, needs GOOGLE_CLOUD_PROJECT)"
+        );
         eprintln!();
-        let choice = read_line_trimmed("Enter 1-2 [1]: ")?;
-        if choice == "2" {
-            return login_gemini_api_key_flow();
+        let choice = read_line_trimmed("Enter 1-3 [1]: ")?;
+        match choice.as_str() {
+            "2" => return login_gemini_api_key_flow(),
+            "3" => {}
+            _ => {
+                eprintln!(
+                    "Google retired Code Assist for individuals in third-party clients; using Antigravity."
+                );
+                eprintln!();
+                return login_antigravity_flow(no_browser).await;
+            }
         }
     }
 
-    eprintln!("Starting native Gemini login...");
+    eprintln!("Starting native Gemini Code Assist login...");
+    eprintln!(
+        "Note: Code Assist for individuals is retired. Personal accounts should use `jcode login --provider antigravity`."
+    );
     eprintln!(
         "If your student/education plan is attached to your Google account, use that account in the browser flow."
     );

@@ -24,7 +24,7 @@ pub use jcode_provider_gemini::{
     build_system_instruction_with_tool_guard, build_tools, choose_onboard_tier, client_metadata,
     extract_gemini_model_ids, google_cloud_project_from_env, ineligible_or_project_error,
     is_gemini_model_id, load_code_assist_request, merge_gemini_model_lists,
-    validate_load_code_assist_response,
+    retired_individual_tier_error, validate_load_code_assist_response,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -183,6 +183,9 @@ impl GeminiProvider {
             };
 
         validate_load_code_assist_response(&load_res)?;
+        if let Some(err) = retired_individual_tier_error(&load_res, project_id_env.is_some()) {
+            return Err(err);
+        }
 
         let project_id = if load_res.current_tier.is_some() {
             if let Some(project_id) = load_res.cloudaicompanion_project.clone() {

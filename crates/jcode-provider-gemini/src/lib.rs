@@ -699,6 +699,34 @@ pub fn validate_load_code_assist_response(res: &LoadCodeAssistResponse) -> Resul
     Ok(())
 }
 
+/// Message shown when Google refuses Code Assist for individuals and points the
+/// user at Antigravity instead.
+pub const CODE_ASSIST_INDIVIDUALS_RETIRED_HINT: &str = "Google no longer serves Gemini Code Assist for individuals to third-party clients. Personal Google accounts (including Google AI Pro/Ultra) should run `jcode login --provider antigravity`. For Gemini API access, run `jcode login --provider gemini` and choose the API key option. Paid Code Assist (Standard/Enterprise) users can set GOOGLE_CLOUD_PROJECT.";
+
+/// Detects the `UNSUPPORTED_CLIENT` rejection of the individuals free tier.
+/// Without an explicit Cloud project, the remaining paid tier cannot be
+/// onboarded, so fail early with a helpful hint instead of an opaque error.
+pub fn retired_individual_tier_error(
+    res: &LoadCodeAssistResponse,
+    has_cloud_project: bool,
+) -> Option<anyhow::Error> {
+    if res.current_tier.is_some() || has_cloud_project {
+        return None;
+    }
+    let tier = res
+        .ineligible_tiers
+        .as_ref()?
+        .iter()
+        .find(|tier| tier.reason_code.as_deref() == Some("UNSUPPORTED_CLIENT"))?;
+    let reason = tier
+        .reason_message
+        .as_deref()
+        .unwrap_or("This client is no longer supported for Gemini Code Assist for individuals");
+    Some(anyhow::anyhow!(
+        "{reason}\n{CODE_ASSIST_INDIVIDUALS_RETIRED_HINT}"
+    ))
+}
+
 pub fn ineligible_or_project_error(res: &LoadCodeAssistResponse) -> anyhow::Error {
     if let Some(reasons) = res
         .ineligible_tiers
@@ -737,6 +765,32 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_client_individual_tier_points_to_antigravity() {
+        // Shape observed live from cloudcode-pa on 2026-11-21.
+        let res: super::LoadCodeAssistResponse = serde_json::from_value(serde_json::json!({
+            "allowedTiers": [{"id": "standard-tier", "isDefault": true}],
+            "ineligibleTiers": [{
+                "reasonCode": "UNSUPPORTED_CLIENT",
+                "reasonMessage": "This client is no longer supported.",
+                "tierId": "free-tier"
+            }]
+        }))
+        .unwrap();
+        let err = super::retired_individual_tier_error(&res, false)
+            .expect("retired tier detected")
+            .to_string();
+        assert!(err.contains("no longer supported"));
+        assert!(err.contains("--provider antigravity"));
+        assert!(super::retired_individual_tier_error(&res, true).is_none());
+
+        let onboarded: super::LoadCodeAssistResponse = serde_json::from_value(
+            serde_json::json!({"currentTier": {"id": "standard-tier"}, "ineligibleTiers": [{"reasonCode": "UNSUPPORTED_CLIENT"}]}),
+        )
+        .unwrap();
+        assert!(super::retired_individual_tier_error(&onboarded, false).is_none());
+    }
+
     #[test]
     fn resolved_model_only_uses_returned_model_version() {
         use jcode_message_types::StreamEvent;
