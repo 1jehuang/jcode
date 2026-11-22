@@ -3017,6 +3017,8 @@ fn handle_server_event_inner(
                         DisplayMessage::system(shown).with_title("Context notification"),
                     );
                 }
+            } else if role == jcode_tui_messages::jarvis::JARVIS_USER_ROLE {
+                app.push_display_message(DisplayMessage::jarvis_user(content.clone()));
             } else {
                 // Do not coalesce repeated system injections: each delivery is
                 // its own event in the conversation timeline.
