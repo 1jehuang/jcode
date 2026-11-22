@@ -24,10 +24,20 @@ pub const MIN_MISSED_TOKENS: u64 = 1_024;
 /// 1024; treating them as misses produced constant false alarms.
 pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
 
+/// Gemini implicit caching (direct and via Antigravity OAuth) leaves roughly
+/// the last ~2K tokens of the previous request uncached. Byte-identical
+/// appends with verified unchanged prefixes showed shortfalls of 826-2057
+/// tokens (clustered at 2049), which surfaced as constant false `low_read`
+/// alarms under the generic 1024 floor.
+pub const GEMINI_MIN_MISSED_TOKENS: u64 = 3_072;
+
 /// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
 pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
-    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.starts_with("openai") {
         OPENAI_MIN_MISSED_TOKENS
+    } else if provider.starts_with("antigravity") || provider.starts_with("gemini") {
+        GEMINI_MIN_MISSED_TOKENS
     } else {
         MIN_MISSED_TOKENS
     }
@@ -847,6 +857,14 @@ mod tests {
             OPENAI_MIN_MISSED_TOKENS
         );
         assert_eq!(min_missed_tokens_for_provider("claude"), MIN_MISSED_TOKENS);
+        assert_eq!(
+            min_missed_tokens_for_provider("Antigravity"),
+            GEMINI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("gemini"),
+            GEMINI_MIN_MISSED_TOKENS
+        );
     }
 
     #[test]
