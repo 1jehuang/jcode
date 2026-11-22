@@ -2983,6 +2983,15 @@ impl App {
                     }
                 };
 
+                if selected.is_empty() {
+                    self.push_display_message(DisplayMessage::system(
+                        "Skipped external login import. Run `/login` anytime to choose a provider."
+                            .to_string(),
+                    ));
+                    self.set_status_notice("Login: auto import skipped");
+                    return;
+                }
+
                 self.set_status_notice("Login: importing approved sources...");
                 tokio::spawn(async move {
                     match crate::external_auth::run_external_auth_auto_import_candidates(
@@ -2999,8 +3008,18 @@ impl App {
                             for (provider, method) in &outcome.imported_auth_labels {
                                 crate::telemetry::record_auth_success(provider, method);
                             }
+                            let imported_provider = if outcome.imported > 0 {
+                                crate::auth::lifecycle::preferred_frontier_auth_provider(
+                                    &crate::auth::AuthStatus::check_fast(),
+                                )
+                                .or_else(|| outcome.preferred_activation_provider())
+                                .unwrap_or("auto-import")
+                                .to_string()
+                            } else {
+                                "auto-import".to_string()
+                            };
                             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                                provider: "auto-import".to_string(),
+                                provider: imported_provider,
                                 success: outcome.imported > 0,
                                 message: outcome.render_markdown(),
                             }));
