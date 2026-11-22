@@ -146,6 +146,7 @@ struct Capture {
     live: String,
     next_tick: Instant,
     pending_final: Option<Result<String, VoiceError>>,
+    _suppress: Option<std::fs::File>,
 }
 
 fn run(mut listener: Listener, indicators: VoiceIndicators) {
@@ -330,6 +331,7 @@ fn start(source: Source, session: Option<String>, indicators: VoiceIndicators) -
         return None;
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let suppress = crate::jarvis_target::acquire_dictation_suppress();
     let recorder = jcode_base::config::config().dictation.recorder.clone();
     match NariRecording::start_auto(cancel.clone(), &key, &recorder) {
         Ok(recording) => Some(Capture {
@@ -346,6 +348,7 @@ fn start(source: Source, session: Option<String>, indicators: VoiceIndicators) -
             live: String::new(),
             next_tick: Instant::now(),
             pending_final: None,
+            _suppress: suppress,
         }),
         Err(error) => {
             indicator.show(&failure_label(&error));

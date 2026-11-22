@@ -659,7 +659,10 @@ impl App {
         let external_capture = self.external_voice.as_ref().is_some_and(|(activity, at)| {
             matches!(activity, crate::protocol::VoiceActivity::Recording { .. })
                 && at.elapsed() <= Duration::from_secs(3)
-        });
+        }) || listener
+            .status
+            .as_ref()
+            .is_some_and(CaptureStatus::external_dictation_active);
         let mut indicator_failed = false;
         let recording = listener.recording.take();
         if listener.failed

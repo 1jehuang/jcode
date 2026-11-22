@@ -140,6 +140,33 @@ impl CaptureStatus {
         fs::remove_file(&self.wake).is_ok()
     }
 
+    /// True while another process (e.g. `jcode companion` global push-to-talk)
+    /// holds a shared advisory lock on `dictation.lock` in the Jarvis runtime dir.
+    pub(super) fn external_dictation_active(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let Ok(file) = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(self.directory.join("dictation.lock"))
+            else {
+                return false;
+            };
+            match file.try_lock() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    false
+                }
+                Err(std::fs::TryLockError::WouldBlock) => true,
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     pub(super) fn paused(&self) -> bool {
         self.pause.exists()
     }
