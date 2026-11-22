@@ -1593,12 +1593,20 @@ async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Re
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}
-            ServerEvent::ReasoningEffortChanged { id, effort, error } if id == request_id => {
+            ServerEvent::ReasoningEffortChanged {
+                id,
+                effort,
+                model,
+                error,
+            } if id == request_id => {
                 if let Some(error) = error {
                     anyhow::bail!(error);
                 }
                 let mut state = session.ui_state.lock().await;
                 state.reasoning_effort = effort;
+                if let Some(model) = model {
+                    state.model = Some(model);
+                }
                 return Ok(());
             }
             ServerEvent::Error { id, message, .. } if id == request_id => {

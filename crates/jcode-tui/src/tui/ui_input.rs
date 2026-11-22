@@ -1354,6 +1354,7 @@ fn overscroll_fact_spans(
         )];
         if levels.model == 0
             && let Some(effort) = &facts.effort
+            && !overscroll_model_already_includes_effort(model, effort)
         {
             group.push(Span::styled(format!(" {effort}"), muted));
         }
@@ -1361,6 +1362,15 @@ fn overscroll_fact_spans(
     }
 
     out
+}
+
+fn overscroll_model_already_includes_effort(model: &str, effort: &str) -> bool {
+    let effort = effort.trim();
+    !effort.is_empty()
+        && model
+            .split_whitespace()
+            .last()
+            .is_some_and(|word| word.eq_ignore_ascii_case(effort))
 }
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns

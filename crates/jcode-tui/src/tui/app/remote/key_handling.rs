@@ -645,11 +645,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             let label = current
                 .map(app_mod::effort_display_label)
                 .unwrap_or("default");
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.is_empty() {
                 app.push_display_message(DisplayMessage::system(
                     "Reasoning effort not available for this provider.".to_string(),
@@ -681,11 +677,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                 return Ok(());
             }
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.contains(&level) {
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();

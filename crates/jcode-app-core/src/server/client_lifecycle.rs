@@ -2059,6 +2059,7 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
+                            model: None,
                             error: Some(format!("target session not found: {target_session_id}")),
                         });
                     }

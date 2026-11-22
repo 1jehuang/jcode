@@ -344,9 +344,20 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
+        let prev_model = self.provider.model();
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
+        let new_model = self.provider.model();
+        if new_model != prev_model {
+            self.session.model = Some(self.provider_model());
+            let event = crate::provider::ProviderStateEvent::selected_model(
+                crate::provider::ProviderModelSelectionSource::User,
+                new_model,
+            );
+            self.provider_runtime_state.apply(event);
+            self.refresh_compaction_budget();
+        }
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");

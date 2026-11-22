@@ -963,8 +963,7 @@ impl App {
         // stand-in. Local sessions read the real provider. This keeps the cycle
         // and the picker consistent (both expose swarm).
         let efforts = if self.is_remote {
-            let (provider_name, provider_model) = self.remote_effort_identity();
-            inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+            self.remote_available_efforts()
         } else {
             self.provider.available_efforts()
         };
@@ -1007,8 +1006,15 @@ impl App {
             return;
         }
 
+        let prev_model = self.provider.model();
         match self.provider.set_reasoning_effort(next_effort) {
             Ok(()) => {
+                let new_model = self.provider.model();
+                if new_model != prev_model {
+                    self.session.model = Some(new_model);
+                    self.invalidate_model_picker_cache();
+                    crate::tui::ui::prepare::invalidate_header_prep_cache();
+                }
                 let label = effort_display_label(next_effort);
                 let bar = effort_bar(next_index, len);
                 self.set_status_notice(format!("Effort: {} {}", label, bar));

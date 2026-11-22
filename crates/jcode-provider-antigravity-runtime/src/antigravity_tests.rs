@@ -881,3 +881,91 @@ fn resolve_model_for_request_default_prefers_gemini_4_neon_low_when_advertised()
         "gemini-4-neon-low"
     );
 }
+
+#[test]
+fn antigravity_reasoning_effort_switches_sibling_models_and_supports_swarm() {
+    let provider = AntigravityProvider::new();
+    *provider.fetched_catalog.write().unwrap() = vec![
+        "gemini-4-neon-low",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-high",
+        "gemini-4-neon-xhigh",
+        "gemini-4-hydrogen-tiered-high",
+        "gemini-4-hydrogen-tiered-xhigh",
+        "claude-opus-5-5-low",
+        "claude-opus-5-5-medium",
+        "claude-opus-5-5-high",
+        "gpt-oss-120b-medium",
+        "gemini-3-flash",
+        "gemini-5-future-low",
+        "gemini-5-future-xhigh",
+    ]
+    .into_iter()
+    .map(|id| CatalogModel {
+        id: id.to_string(),
+        display_name: None,
+        reset_time: None,
+        tag_title: None,
+        model_provider: None,
+        max_tokens: Some(1_048_576),
+        max_output_tokens: Some(65_536),
+        recommended: true,
+        available: true,
+        remaining_fraction_milli: Some(1000),
+    })
+    .collect();
+
+    provider.set_model("gemini-4-neon-low").unwrap();
+    assert_eq!(
+        provider.available_efforts(),
+        vec!["low", "medium", "high", "xhigh", "swarm"]
+    );
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    provider.set_reasoning_effort("high").unwrap();
+    assert_eq!(provider.model(), "gemini-4-neon-high");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+
+    provider.set_reasoning_effort("xhigh").unwrap();
+    assert_eq!(provider.model(), "gemini-4-neon-xhigh");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
+
+    // Swarm mode preserves sentinel in reasoning_effort() and routes requests
+    // to the configured root effort sibling.
+    provider.set_reasoning_effort("swarm").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
+    assert_eq!(provider.model(), "gemini-4-neon-xhigh");
+    assert_eq!(
+        provider.resolve_model_for_request(&provider.model()),
+        "gemini-4-neon-low"
+    );
+
+    // Forking inherits swarm state independently.
+    let forked = provider.fork();
+    assert_eq!(forked.reasoning_effort().as_deref(), Some("swarm"));
+    forked.set_reasoning_effort("medium").unwrap();
+    assert_eq!(forked.model(), "gemini-4-neon-medium");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
+
+    // Explicit set_model clears swarm mode and reflects the chosen tier.
+    provider.set_model("gemini-4-hydrogen-tiered-high").unwrap();
+    assert_eq!(provider.available_efforts(), vec!["high", "xhigh", "swarm"]);
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+    assert!(provider.set_reasoning_effort("low").is_err());
+
+    // Discovered future models absent from fallback arrays still get dynamic effort switching.
+    provider.set_model("gemini-5-future-low").unwrap();
+    assert_eq!(provider.available_efforts(), vec!["low", "xhigh", "swarm"]);
+    provider.set_reasoning_effort("xhigh").unwrap();
+    assert_eq!(provider.model(), "gemini-5-future-xhigh");
+
+    // Non-effort and single-variant models do not advertise bogus effort ladders.
+    provider.set_model("gemini-3-flash").unwrap();
+    assert!(provider.available_efforts().is_empty());
+    assert_eq!(provider.reasoning_effort(), None);
+    assert!(provider.set_reasoning_effort("high").is_err());
+
+    provider.set_model("gpt-oss-120b-medium").unwrap();
+    assert!(provider.available_efforts().is_empty());
+    assert_eq!(provider.reasoning_effort(), None);
+}

@@ -39,6 +39,11 @@ pub struct AntigravityProvider {
     /// Backend-advertised default agent model id (from `fetchAvailableModels`).
     /// Used to resolve the `"default"` alias to a real model for inference.
     backend_default_model: Arc<RwLock<Option<String>>>,
+    /// Whether Jcode's `swarm` orchestration sentinel is active. Antigravity
+    /// encodes real reasoning effort in sibling model IDs (`-low`, `-medium`,
+    /// `-high`, `-xhigh`), while `swarm` retains the sentinel in UI/session
+    /// state and routes requests to the configured swarm root effort sibling.
+    swarm_mode: Arc<RwLock<bool>>,
 }
 
 impl Clone for AntigravityProvider {
@@ -48,6 +53,7 @@ impl Clone for AntigravityProvider {
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            swarm_mode: self.swarm_mode.clone(),
         }
     }
 }
@@ -89,6 +95,7 @@ impl AntigravityProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
             backend_default_model: Arc::new(RwLock::new(None)),
+            swarm_mode: Arc::new(RwLock::new(false)),
         };
         provider.seed_cached_catalog();
         provider
@@ -106,6 +113,65 @@ impl AntigravityProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn is_swarm_mode(&self) -> bool {
+        *self
+            .swarm_mode
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn catalog_effort_candidates(&self) -> Vec<String> {
+        let catalog = self.fetched_catalog();
+        if !catalog.is_empty() {
+            return catalog
+                .into_iter()
+                .filter(|entry| entry.available)
+                .map(|entry| entry.id)
+                .collect();
+        }
+        AVAILABLE_MODELS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect()
+    }
+
+    fn resolve_sibling_model_for_effort(
+        &self,
+        effective_model: &str,
+        target_effort: &str,
+    ) -> Option<String> {
+        let (base, _) = jcode_provider_core::split_antigravity_model_effort(effective_model)?;
+        self.catalog_effort_candidates()
+            .into_iter()
+            .find(|candidate| {
+                jcode_provider_core::split_antigravity_model_effort(candidate).is_some_and(
+                    |(candidate_base, effort)| {
+                        candidate_base.eq_ignore_ascii_case(base)
+                            && effort.eq_ignore_ascii_case(target_effort)
+                    },
+                )
+            })
+    }
+
+    fn resolve_swarm_request_model(&self, effective_model: &str) -> String {
+        let root_effort = jcode_base::config::config().agents.root_effort_for_swarm();
+        let preference: &[&str] = match root_effort {
+            "none" | "minimal" | "low" => &["low", "medium", "high", "xhigh"],
+            "medium" => &["medium", "low", "high", "xhigh"],
+            "high" => &["high", "medium", "xhigh", "low"],
+            "xhigh" | "max" => &["xhigh", "high", "medium", "low"],
+            _ => &["low", "medium", "high", "xhigh"],
+        };
+        for &candidate_effort in preference {
+            if let Some(sibling) =
+                self.resolve_sibling_model_for_effort(effective_model, candidate_effort)
+            {
+                return sibling;
+            }
+        }
+        effective_model.to_string()
     }
 
     /// Resolve the live OAuth credential the runtime would use, for the
@@ -175,20 +241,12 @@ impl AntigravityProvider {
         Ok(snapshot)
     }
 
-    /// Resolve a requested model id into a real backend model id. The literal
-    /// alias `"default"` (and the empty string) is rejected by the
-    /// `generateContent` endpoint with HTTP 404, so it is mapped to the
-    /// backend-advertised default, then to a known-good catalog model, and
-    /// finally to a hardcoded fallback.
-    ///
-    /// Note: this only resolves the `"default"` alias / empty input. An
-    /// explicit model id from the user is honoured verbatim, except for ids
-    /// the backend advertises but cannot actually service, which are remapped
-    /// to an equivalent working id via [`remap_unsupported_model`].
-    fn resolve_model_for_request(&self, model: &str) -> String {
+    /// Resolve `"default"` / empty to a concrete model id without applying
+    /// request-time remaps or swarm-mode root overrides.
+    fn effective_selected_model_for(&self, model: &str) -> String {
         let trimmed = model.trim();
         if !trimmed.is_empty() && trimmed != DEFAULT_MODEL {
-            return remap_unsupported_model(trimmed).to_string();
+            return trimmed.to_string();
         }
 
         let catalog = self.fetched_catalog();
@@ -232,6 +290,28 @@ impl AntigravityProvider {
         }
 
         DEFAULT_FALLBACK_MODEL.to_string()
+    }
+
+    /// Resolve a requested model id into a real backend model id. The literal
+    /// alias `"default"` (and the empty string) is rejected by the
+    /// `generateContent` endpoint with HTTP 404, so it is mapped to the
+    /// backend-advertised default, then to a known-good catalog model, and
+    /// finally to a hardcoded fallback.
+    ///
+    /// Note: this only resolves the `"default"` alias / empty input. An
+    /// explicit model id from the user is honoured verbatim, except for ids
+    /// the backend advertises but cannot actually service, which are remapped
+    /// to an equivalent working id via [`remap_unsupported_model`], and when
+    /// Jcode's `swarm` sentinel is active, which routes requests to the
+    /// configured swarm root effort sibling.
+    fn resolve_model_for_request(&self, model: &str) -> String {
+        let effective = self.effective_selected_model_for(model);
+        let selected = if self.is_swarm_mode() {
+            self.resolve_swarm_request_model(&effective)
+        } else {
+            effective
+        };
+        remap_unsupported_model(&selected).to_string()
     }
 
     async fn fetch_available_models(&self) -> Result<CatalogSnapshot> {
@@ -946,7 +1026,90 @@ impl Provider for AntigravityProvider {
             .model
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = trimmed.to_string();
+        *self
+            .swarm_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         Ok(())
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        if self.available_efforts().is_empty() {
+            return None;
+        }
+        if self.is_swarm_mode() {
+            return Some(jcode_base::prompt::SWARM_EFFORT.to_string());
+        }
+        let effective = self.effective_selected_model_for(&self.model());
+        jcode_provider_core::split_antigravity_model_effort(&effective)
+            .map(|(_, effort)| effort.to_string())
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let requested = effort.trim().to_ascii_lowercase();
+        let effective = self.effective_selected_model_for(&self.model());
+        let available = self.available_efforts();
+        if available.is_empty() {
+            anyhow::bail!(
+                "Antigravity model '{}' does not support reasoning effort switching",
+                effective
+            );
+        }
+        if requested.is_empty() {
+            *self
+                .swarm_mode
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+            return Ok(());
+        }
+        if jcode_base::prompt::is_swarm_effort(&requested) {
+            *self
+                .swarm_mode
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            return Ok(());
+        }
+        if !available.iter().any(|candidate| *candidate == requested) {
+            let levels = available
+                .into_iter()
+                .filter(|candidate| !jcode_base::prompt::is_swarm_effort(candidate))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "Invalid reasoning effort '{}' for Antigravity model '{}'. Valid values: {}, {}",
+                requested,
+                effective,
+                levels,
+                jcode_base::prompt::SWARM_EFFORT
+            );
+        }
+        let target_model = self
+            .resolve_sibling_model_for_effort(&effective, &requested)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No Antigravity model variant available for '{}' at effort '{}'",
+                    effective,
+                    requested
+                )
+            })?;
+        *self
+            .model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = target_model;
+        *self
+            .swarm_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        let effective = self.effective_selected_model_for(&self.model());
+        let candidates = self.catalog_effort_candidates();
+        jcode_provider_core::antigravity_efforts_from_catalog(
+            &effective,
+            candidates.iter().map(String::as_str),
+        )
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -1102,6 +1265,7 @@ impl Provider for AntigravityProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            swarm_mode: Arc::new(RwLock::new(self.is_swarm_mode())),
         })
     }
 }
