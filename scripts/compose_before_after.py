@@ -150,8 +150,23 @@ def render_cells_frame(
             col += run_cols
         parsed_rows.append(parsed_row)
 
-    # Pass 2: draw glyphs and crisp vector parallelograms for jcode's ▰/▱ bars
-    # (which JetBrainsMono Nerd Font lacks).
+    # Fallback font for symbols missing from JetBrainsMono Nerd Font (e.g. ★).
+    symbol_font = font
+    for candidate in (
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    ):
+        if Path(candidate).is_file():
+            try:
+                symbol_font = ImageFont.truetype(candidate, size=font_size)
+                break
+            except OSError:
+                continue
+
+    # Pass 2: draw glyphs, crisp vector parallelograms (▰/▱), and cell-aligned
+    # box-drawing / symbol glyphs so corners join cleanly and ★ never tofu-boxes.
+    special_chars = set("▰▱★☆─│╭╮╰╯┌┐└┘")
     for row_idx, parsed_row in enumerate(parsed_rows):
         y = padding + row_idx * cell_h
         for col, text, fg, _bg, flags in parsed_row:
@@ -163,7 +178,7 @@ def render_cells_frame(
                 run_font = font
             x0 = padding + col * cell_w
             run_cols = len(text)
-            if "▰" in text or "▱" in text:
+            if any(ch in special_chars for ch in text):
                 for i, ch in enumerate(text):
                     cx = x0 + i * cell_w
                     if ch in ("▰", "▱"):
@@ -180,6 +195,34 @@ def render_cells_frame(
                             draw.polygon(poly, fill=fg)
                         else:
                             draw.polygon(poly, outline=fg, width=2)
+                    elif ch in ("★", "☆"):
+                        draw.text((cx, y + 1), ch, fill=fg, font=symbol_font)
+                    elif ch == "─":
+                        mid_y = y + cell_h // 2
+                        draw.line([cx, mid_y, cx + cell_w, mid_y], fill=fg, width=2)
+                    elif ch == "│":
+                        mid_x = cx + cell_w // 2
+                        draw.line([mid_x, y, mid_x, y + cell_h], fill=fg, width=2)
+                    elif ch in ("╭", "┌"):
+                        mid_x = cx + cell_w // 2
+                        mid_y = y + cell_h // 2
+                        draw.line([mid_x, mid_y, cx + cell_w, mid_y], fill=fg, width=2)
+                        draw.line([mid_x, mid_y, mid_x, y + cell_h], fill=fg, width=2)
+                    elif ch in ("╮", "┐"):
+                        mid_x = cx + cell_w // 2
+                        mid_y = y + cell_h // 2
+                        draw.line([cx, mid_y, mid_x, mid_y], fill=fg, width=2)
+                        draw.line([mid_x, mid_y, mid_x, y + cell_h], fill=fg, width=2)
+                    elif ch in ("╰", "└"):
+                        mid_x = cx + cell_w // 2
+                        mid_y = y + cell_h // 2
+                        draw.line([mid_x, y, mid_x, mid_y], fill=fg, width=2)
+                        draw.line([mid_x, mid_y, cx + cell_w, mid_y], fill=fg, width=2)
+                    elif ch in ("╯", "┘"):
+                        mid_x = cx + cell_w // 2
+                        mid_y = y + cell_h // 2
+                        draw.line([mid_x, y, mid_x, mid_y], fill=fg, width=2)
+                        draw.line([cx, mid_y, mid_x, mid_y], fill=fg, width=2)
                     elif ch != " ":
                         draw.text((cx, y + 1), ch, fill=fg, font=run_font)
             elif text.strip():
