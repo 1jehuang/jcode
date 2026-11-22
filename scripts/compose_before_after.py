@@ -125,9 +125,13 @@ def render_cells_frame(
     img = Image.new("RGB", (img_w, img_h), default_bg)
     draw = ImageDraw.Draw(img)
 
+    # Pass 1: paint all cell backgrounds first so descenders from row N are
+    # never clipped by row N+1's background rectangle.
+    parsed_rows: list[list[tuple[int, str, tuple[int, int, int], tuple[int, int, int], int]]] = []
     for row_idx, row in enumerate(rows[:height_cells]):
         y = padding + row_idx * cell_h
         col = 0
+        parsed_row = []
         for run in row:
             if not isinstance(run, list) or len(run) < 4:
                 continue
@@ -138,6 +142,19 @@ def render_cells_frame(
                 fg, bg = bg, fg
             if flags & 4:  # DIM
                 fg = tuple((c * 55 + b * 45) // 100 for c, b in zip(fg, bg))
+            x0 = padding + col * cell_w
+            run_cols = len(text)
+            if bg != default_bg and run_cols > 0:
+                draw.rectangle([x0, y, x0 + run_cols * cell_w, y + cell_h], fill=bg)
+            parsed_row.append((col, text, fg, bg, flags))
+            col += run_cols
+        parsed_rows.append(parsed_row)
+
+    # Pass 2: draw glyphs and crisp vector parallelograms for jcode's ▰/▱ bars
+    # (which JetBrainsMono Nerd Font lacks).
+    for row_idx, parsed_row in enumerate(parsed_rows):
+        y = padding + row_idx * cell_h
+        for col, text, fg, _bg, flags in parsed_row:
             if flags & 1:
                 run_font = bold_font
             elif flags & 2:
@@ -146,13 +163,29 @@ def render_cells_frame(
                 run_font = font
             x0 = padding + col * cell_w
             run_cols = len(text)
-            if bg != default_bg and run_cols > 0:
-                draw.rectangle([x0, y, x0 + run_cols * cell_w, y + cell_h], fill=bg)
-            if text.strip():
-                draw.text((x0, y + 2), text, fill=fg, font=run_font)
+            if "▰" in text or "▱" in text:
+                for i, ch in enumerate(text):
+                    cx = x0 + i * cell_w
+                    if ch in ("▰", "▱"):
+                        skew = max(2, cell_w // 5)
+                        pad_x = max(1, cell_w // 10)
+                        pad_y = max(4, cell_h // 4)
+                        poly = [
+                            (cx + pad_x + skew, y + pad_y),
+                            (cx + cell_w - pad_x, y + pad_y),
+                            (cx + cell_w - pad_x - skew, y + cell_h - pad_y),
+                            (cx + pad_x, y + cell_h - pad_y),
+                        ]
+                        if ch == "▰":
+                            draw.polygon(poly, fill=fg)
+                        else:
+                            draw.polygon(poly, outline=fg, width=2)
+                    elif ch != " ":
+                        draw.text((cx, y + 1), ch, fill=fg, font=run_font)
+            elif text.strip():
+                draw.text((x0, y + 1), text, fill=fg, font=run_font)
             if (flags & 8) and run_cols > 0:  # UNDERLINED
                 draw.line([x0, y + cell_h - 3, x0 + run_cols * cell_w, y + cell_h - 3], fill=fg, width=2)
-            col += run_cols
 
     return img
 
@@ -210,11 +243,12 @@ def compose_before_after(
         target_h = max(before.height, after.height)
         diff_bbox = (x0 - cx0, y0 - cy0, x1 - cx0, y1 - cy0)
 
-    outer_pad = 24
-    gap = 20
-    card_pad = 10
-    badge_h = 34
-    title_h = 38 if title else 0
+    ui_scale = max(1.0, min(2.0, target_h / 650.0))
+    outer_pad = round(24 * ui_scale)
+    gap = round(20 * ui_scale)
+    card_pad = round(10 * ui_scale)
+    badge_h = round(34 * ui_scale)
+    title_h = round(38 * ui_scale) if title else 0
 
     card_w_before = before.width + card_pad * 2
     card_w_after = after.width + card_pad * 2
@@ -225,12 +259,12 @@ def compose_before_after(
 
     canvas = Image.new("RGB", (total_w, total_h), BG_COLOR)
     draw = ImageDraw.Draw(canvas)
-    title_font = load_mono_font(18)
-    badge_font = load_mono_font(14)
+    title_font = load_mono_font(round(18 * ui_scale))
+    badge_font = load_mono_font(round(14 * ui_scale))
 
     top_y = outer_pad
     if title:
-        draw.text((outer_pad, top_y + 4), title, fill=TITLE_COLOR, font=title_font)
+        draw.text((outer_pad, top_y + round(4 * ui_scale)), title, fill=TITLE_COLOR, font=title_font)
         top_y += title_h
 
     def draw_panel(
@@ -243,22 +277,27 @@ def compose_before_after(
     ) -> None:
         draw.rounded_rectangle(
             [x, top_y, x + panel_w - 1, top_y + card_h - 1],
-            radius=10,
+            radius=round(10 * ui_scale),
             fill=CARD_BG,
             outline=CARD_BORDER,
-            width=1,
+            width=max(1, round(ui_scale)),
         )
         pill_x0 = x + card_pad
-        pill_y0 = top_y + 7
+        pill_y0 = top_y + round(7 * ui_scale)
         text_box = badge_font.getbbox(label)
-        pill_w = (text_box[2] - text_box[0]) + 18
-        pill_h = 22
+        pill_w = (text_box[2] - text_box[0]) + round(18 * ui_scale)
+        pill_h = round(24 * ui_scale)
         draw.rounded_rectangle(
             [pill_x0, pill_y0, pill_x0 + pill_w, pill_y0 + pill_h],
-            radius=6,
+            radius=round(6 * ui_scale),
             fill=badge_bg,
         )
-        draw.text((pill_x0 + 9, pill_y0 + 3), label, fill=badge_fg, font=badge_font)
+        draw.text(
+            (pill_x0 + round(9 * ui_scale), pill_y0 + round(3 * ui_scale)),
+            label,
+            fill=badge_fg,
+            font=badge_font,
+        )
         img_x0 = x + card_pad
         img_y0 = top_y + badge_h + card_pad
         canvas.paste(img, (img_x0, img_y0))
