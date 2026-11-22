@@ -333,8 +333,20 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             let mut agent = agent::Agent::new(provider, registry);
             agent.repl().await?;
         }
-        Some(Command::Update { channel }) => {
-            hot_exec::run_update(channel.as_deref())?;
+        Some(Command::Update {
+            channel,
+            prerelease,
+            stable,
+            set_channel_only,
+        }) => {
+            let resolved_channel = if prerelease {
+                Some("preview")
+            } else if stable {
+                Some("stable")
+            } else {
+                channel.as_deref()
+            };
+            hot_exec::run_update(resolved_channel, set_channel_only)?;
         }
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;

@@ -317,9 +317,21 @@ pub(crate) enum Command {
 
     /// Update jcode to the latest version
     Update {
-        /// Persist an update channel (stable permits returning from preview).
-        #[arg(long, value_parser = ["preview", "stable"])]
+        /// Persist an update channel (stable permits returning from prerelease/preview).
+        #[arg(long, value_parser = ["preview", "prerelease", "stable"])]
         channel: Option<String>,
+
+        /// Switch to prerelease builds, install the latest prerelease, and live-reload running sessions.
+        #[arg(long, alias = "preview", conflicts_with_all = ["channel", "stable"])]
+        prerelease: bool,
+
+        /// Switch back to stable releases, install the latest stable release, and live-reload running sessions.
+        #[arg(long, conflicts_with_all = ["channel", "prerelease"])]
+        stable: bool,
+
+        /// Only persist the selected update channel without checking, downloading, or reloading.
+        #[arg(long, hide = true)]
+        set_channel_only: bool,
     },
 
     /// Show build/version information in human or JSON form

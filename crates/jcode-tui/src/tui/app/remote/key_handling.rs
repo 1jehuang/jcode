@@ -487,8 +487,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/update" {
-            handle_remote_update_command(app, remote).await?;
+        if let Some(parsed) = App::parse_update_command_channel(trimmed) {
+            match parsed {
+                Ok(explicit_channel) => {
+                    handle_remote_update_command(app, remote, explicit_channel).await?;
+                }
+                Err(usage) => {
+                    app.set_status_notice(usage);
+                }
+            }
             return Ok(());
         }
 

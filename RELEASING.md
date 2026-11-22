@@ -11,13 +11,20 @@ to `master` **before building**. The hook requests a CI build of the public
 commit, not an upload of your workstation binary. Dirty or unpublished work
 stays local. Set the same config key to `false` to turn this off.
 
-Linux x86_64 testers can find `selfdev-linux-<commit>` prereleases with
-`gh release list -R 1jehuang/jcode` and download a chosen build with
-`gh release download <tag> -R 1jehuang/jcode`. Verify the archive against
-`SHA256SUMS`, extract it into a separate directory, and run the extracted
-launcher. This is a manual testing channel, separate from stable updates and
-the cross-platform v1 preview below. Rebuilding a commit does not create a
-second public release.
+Linux x86_64 testers can switch onto `selfdev-linux-<commit>` prereleases and
+live-update running sessions in one command:
+
+```bash
+curl -fsSL https://jcode.sh/install | bash -s -- --prerelease
+```
+
+Once on a build with prerelease channel support, testers can also run
+`jcode update --prerelease` (or `/update prerelease` inside a running jcode
+session) and return to stable anytime with `jcode update --stable` (or
+`/update stable`). Automatic updates will continue live-updating opted-in users
+as new `selfdev-linux-<commit>` builds publish. Manual downloads via
+`gh release download <tag> -R 1jehuang/jcode` also remain supported. Rebuilding
+a commit does not create a second public release.
 
 Before requesting `selfdev build` or `build-reload`, run `selfdev logs` and
 review the changes since the last **published Linux prerelease**, not just

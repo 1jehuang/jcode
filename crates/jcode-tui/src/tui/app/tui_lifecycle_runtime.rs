@@ -769,8 +769,18 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/update" {
-        app.start_background_client_update(app.session.id.clone());
+    if let Some(parsed) = App::parse_update_command_channel(trimmed) {
+        match parsed {
+            Ok(explicit_channel) => {
+                app.start_background_client_update_with_channel(
+                    app.session.id.clone(),
+                    explicit_channel,
+                );
+            }
+            Err(usage) => {
+                app.set_status_notice(usage);
+            }
+        }
         return true;
     }
 

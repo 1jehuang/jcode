@@ -199,7 +199,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/restart", "Restart with current binary"),
     RegisteredCommand::public("/rebuild", "Background rebuild and auto reload"),
     RegisteredCommand::public("/selfdev", "Open a new self-dev jcode session"),
-    RegisteredCommand::public("/update", "Background update and auto reload"),
+    RegisteredCommand::public("/update", "Update and live-reload (optional: prerelease|stable)"),
     RegisteredCommand::public("/update-sim", "Preview update UI safely (Alt+_)"),
     RegisteredCommand::hidden(
         "/update-rehearsal",

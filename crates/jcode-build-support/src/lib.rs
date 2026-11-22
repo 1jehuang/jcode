@@ -873,9 +873,33 @@ pub fn repair_stale_shared_server_channel() -> Result<SharedServerRepair> {
 fn is_release_channel_marker(marker: &str) -> bool {
     let marker = marker.trim();
     let marker = marker.strip_prefix('v').unwrap_or(marker);
-    marker.starts_with("main-")
-        || marker
-            .split('.')
+    if marker.starts_with("main-") {
+        return true;
+    }
+    if let Some(rest) = marker.strip_prefix("selfdev-")
+        && let Some((platform, sha)) = rest.split_once('-')
+    {
+        return !platform.is_empty()
+            && platform
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && sha.len() == 40
+            && sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    }
+    let core = marker.split_once('-').map_or(marker, |(base, _)| base);
+    let mut parts = core.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && [major, minor, patch]
+            .into_iter()
             .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
