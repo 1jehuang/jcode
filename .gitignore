@@ -20,3 +20,7 @@ captures/
 /*.avif
 /*.mp4
 /*.png
+
+# Merge leftovers
+*.orig
+*.rej

@@ -680,23 +680,61 @@ pub async fn refresh_models() -> Result<Vec<ChatGptWebModel>> {
 async fn record_refresh(
     discovery: impl std::future::Future<Output = Result<Snapshot>>,
 ) -> Result<Vec<ChatGptWebModel>> {
+    // Another jcode process (CLI or daemon) may have stored a newer
+    // observation. Annotate the newest one instead of overwriting it.
+    let newest_cached = || {
+        let memory = load_cache().snapshot;
+        let disk = cache_path()
+            .ok()
+            .and_then(|path| crate::storage::read_json::<Snapshot>(&path).ok());
+        match disk {
+            Some(disk) if disk.version == 1 && disk.observed_at > memory.observed_at => disk,
+            _ => memory,
+        }
+    };
+    let is_catalog = |snapshot: &Snapshot| snapshot.models.iter().any(|m| m.slug.is_some());
     match discovery.await {
-        Ok(snapshot) => {
+        Ok(mut snapshot) => {
+            if !is_catalog(&snapshot) {
+                let cached = newest_cached();
+                if is_catalog(&cached) {
+                    // A picker fallback lacks catalog-only routes and slugs:
+                    // keep the last full catalog's routes and rebuild the
+                    // picker-only ones from this observation.
+                    let Snapshot {
+                        models,
+                        mut reasoning,
+                        observed_at,
+                        ..
+                    } = std::mem::replace(&mut snapshot, cached);
+                    snapshot.models.retain(|model| model.slug.is_some());
+                    snapshot
+                        .reasoning
+                        .retain(|id, _| snapshot.models.iter().any(|model| &model.model == id));
+                    for model in models {
+                        if snapshot
+                            .models
+                            .iter()
+                            .all(|known| known.model != model.model)
+                        {
+                            if let Some(options) = reasoning.remove(&model.model) {
+                                snapshot.reasoning.insert(model.model.clone(), options);
+                            }
+                            snapshot.models.push(model);
+                        }
+                    }
+                    snapshot.observed_at = observed_at;
+                    snapshot.last_refresh_error = Some(
+                        "model catalog unavailable; catalog routes are from its last read".into(),
+                    );
+                }
+            }
             let models = snapshot_models(&snapshot);
             store_cache(snapshot);
             Ok(models)
         }
         Err(error) => {
-            // Another jcode process (CLI or daemon) may have stored a newer
-            // observation. Annotate the newest one instead of overwriting it.
-            let memory = load_cache().snapshot;
-            let disk = cache_path()
-                .ok()
-                .and_then(|path| crate::storage::read_json::<Snapshot>(&path).ok());
-            let mut previous = match disk {
-                Some(disk) if disk.version == 1 && disk.observed_at > memory.observed_at => disk,
-                _ => memory,
-            };
+            let mut previous = newest_cached();
             if previous.version == 1 {
                 previous.last_refresh_error = Some(refresh_error_summary(&error));
                 store_cache(previous);
@@ -990,6 +1028,37 @@ mod tests {
                 .detail
                 .contains("refresh failed")
         );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_web_picker_fallback_keeps_the_last_full_catalog() {
+        let _home = HomeGuard::new();
+        let catalog = parse_catalog(catalog_fixture()).unwrap();
+        let routes = catalog.models.len();
+        record_refresh(async { Ok(catalog) }).await.unwrap();
+        let picker = parse_discovery(json!({"models":[
+            {"label":"GPT-6","available":true,"detail":"","reasoning_options":[]},
+            {"label":"GPT-7","available":true,"detail":"","reasoning_options":[]}
+        ]}))
+        .unwrap();
+        let models = record_refresh(async { Ok(picker) }).await.unwrap();
+        assert_eq!(models.len(), routes + 1, "{models:?}");
+        assert_eq!(models.iter().filter(|m| m.slug.is_none()).count(), 1);
+        assert!(find_model("gpt-7[web]").is_some_and(|m| m.available));
+        assert!(
+            find_model("gpt-7[web]")
+                .unwrap()
+                .detail
+                .contains("catalog unavailable")
+        );
+        // Picker-only routes follow the latest picker, not the first one.
+        let picker = parse_discovery(json!({"models":[
+            {"label":"GPT-7","available":false,"detail":"","reasoning_options":[]}
+        ]}))
+        .unwrap();
+        let models = record_refresh(async { Ok(picker) }).await.unwrap();
+        assert_eq!(models.len(), routes + 1, "{models:?}");
+        assert!(!find_model("gpt-7[web]").unwrap().available);
     }
 
     #[test]
