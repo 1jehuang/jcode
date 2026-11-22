@@ -44,6 +44,7 @@ fn session(id: &str, opening: Option<&str>) -> SessionInfo {
             session_id: id.into(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }

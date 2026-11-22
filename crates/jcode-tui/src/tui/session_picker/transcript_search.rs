@@ -169,6 +169,7 @@ pub(super) struct Entry {
     save_label: Option<String>,
     has_prompt: bool,
     opening_prompt: String,
+    user_intention: String,
     intent_text: String,
     working_dir: Option<String>,
     server_name: Option<String>,
@@ -196,10 +197,16 @@ impl Entry {
                 .as_deref()
                 .unwrap_or("")
                 .to_owned(),
+            user_intention: session
+                .user_intention
+                .as_deref()
+                .unwrap_or("")
+                .to_owned(),
             intent_text: format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 session.title,
                 session.save_label.as_deref().unwrap_or(""),
+                session.user_intention.as_deref().unwrap_or(""),
                 session.first_user_prompt.as_deref().unwrap_or(""),
             ),
         }
@@ -225,10 +232,11 @@ impl Entry {
             && self.cloud == (session.server_icon.as_deref() == Some("☁"))
             && self.has_prompt == session.first_user_prompt.is_some()
             && self.opening_prompt == session.first_user_prompt.as_deref().unwrap_or("")
+            && self.user_intention == session.user_intention.as_deref().unwrap_or("")
     }
 
     fn exact_field(&self, query: &str) -> bool {
-        [&self.title, &self.short_name, &self.id]
+        [&self.title, &self.short_name, &self.id, &self.user_intention]
             .iter()
             .any(|field| normalized_equals(field, query))
             || self
@@ -339,7 +347,12 @@ fn prioritize_candidates(
         }
         let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
             .with_exact_field(candidate.exact_field);
-        rank.opening_prompt = phrase.map_or(0, |phrase| phrase.rank(&candidate.opening_prompt));
+        rank.opening_prompt = phrase.map_or(0, |phrase| {
+            phrase
+                .rank(&candidate.opening_prompt)
+                .max(phrase.rank(&candidate.user_intention))
+                .max(phrase.rank(&candidate.title))
+        });
         let intent = lowercase_field(&candidate.intent_text);
         rank.intent_terms = tokens
             .iter()
@@ -365,13 +378,10 @@ fn opening_prompt_rank(prompt: &str, query: &str) -> usize {
 }
 
 fn phrase_words(text: &str, limit: usize) -> Vec<String> {
-    text.split_whitespace()
-        .take(limit)
-        .map(|word| {
-            word.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
+    text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
+        .take(limit)
+        .map(str::to_lowercase)
         .collect()
 }
 

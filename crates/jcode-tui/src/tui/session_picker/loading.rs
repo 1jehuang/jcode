@@ -1850,14 +1850,17 @@ fn parse_jcode_session_info(
         session.model.as_deref(),
     );
 
+    let todo_summary = crate::todo::load_session_todo_summary(stem);
     let title = session
         .custom_title
         .or_else(|| {
-            crate::todo::load_session_title(stem).map(|title| truncate_title_text(&title, 72))
+            todo_summary
+                .title
+                .map(|title| truncate_title_text(&title, 72))
         })
         .or(session.title)
         .unwrap_or_else(|| short_name.clone());
-    let search_index = build_search_index_from_summary(
+    let mut search_index = build_search_index_from_summary(
         stem,
         &short_name,
         &title,
@@ -1869,6 +1872,10 @@ fn parse_jcode_session_info(
             text
         },
     );
+    if let Some(intention) = todo_summary.user_intention.as_deref() {
+        search_index.push(' ');
+        search_index.push_str(&intention.to_lowercase());
+    }
 
     Some(SessionInfo {
         id: stem.to_string(),
@@ -1898,6 +1905,7 @@ fn parse_jcode_session_info(
         needs_catchup,
         estimated_tokens,
         first_user_prompt: session.messages.first_user_prompt,
+        user_intention: todo_summary.user_intention,
         messages_preview: Vec::new(),
         search_index,
         server_name: None,
@@ -1907,12 +1915,7 @@ fn parse_jcode_session_info(
             session_id: stem.to_string(),
         },
         external_path: None,
-        todo_statuses: crate::todo::load_todos(stem)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|todo| !crate::todo::todo_status_is_cancelled(&todo.status))
-            .map(|todo| todo.status)
-            .collect(),
+        todo_statuses: todo_summary.todo_statuses,
     })
 }
 
@@ -2188,6 +2191,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                     session_path: session.full_path.clone(),
                 },
                 external_path: Some(session.full_path),
+                user_intention: None,
                 todo_statuses: Vec::new(),
             }
         })
@@ -2362,6 +2366,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -2586,6 +2591,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -2764,6 +2770,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -2898,6 +2905,7 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
             session_id: id.clone(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }

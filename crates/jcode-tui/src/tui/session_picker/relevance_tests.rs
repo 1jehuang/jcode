@@ -38,6 +38,7 @@ fn session(id: &str, title: &str, age: i64, path: &Path) -> SessionInfo {
             session_path: path.to_string_lossy().into_owned(),
         },
         external_path: Some(path.to_string_lossy().into_owned()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }
@@ -592,4 +593,38 @@ fn typo_in_user_prompt_beats_literal_words_scattered_in_tool_output() {
     picker.rebuild_items();
     wait(&mut picker);
     assert_eq!(ids(&picker).first().map(String::as_str), Some("rare"));
+}
+
+#[test]
+fn todo_plan_user_intention_phrase_outranks_scattered_user_prompts() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut scattered = session("ship-v1", "Ship jcode v1", 5 * 86_400, &path);
+    push_mark(&mut scattered.search_index, Source::User);
+    scattered.search_index.push_str(
+        "release jcode v1 now. please fix the build. check all tests. what is remaining?",
+    );
+
+    let mut intent_match = session(
+        "release-bugs",
+        "Fix All Release/Discord Pipeline Bugs & Refresh Messages",
+        45 * 60,
+        &path,
+    );
+    intent_match.first_user_prompt =
+        Some("Make interactive, logical commits for the current uncommitted work.".into());
+    intent_match.user_intention = Some(
+        "Fix all remaining release-notes and Discord pipeline bugs found in the audit".into(),
+    );
+    intent_match.search_index.push_str(
+        " fix all remaining release-notes and discord pipeline bugs found in the audit",
+    );
+
+    let mut picker = SessionPicker::new(vec![scattered, intent_match]);
+    picker.search_query = "fix all remaining release".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["release-bugs", "ship-v1"]);
 }
