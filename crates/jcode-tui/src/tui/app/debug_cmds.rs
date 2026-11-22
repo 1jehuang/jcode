@@ -554,10 +554,17 @@ impl App {
             let (default_w, default_h) = crate::tui::visual_debug::latest_frame()
                 .map(|f| f.terminal_size)
                 .unwrap_or((100, 36));
-            let (w, h) = cmd
-                .strip_prefix("cells:")
-                .and_then(|spec| {
-                    let (ws, hs) = spec.trim().split_once('x')?;
+            let spec = cmd.strip_prefix("cells:").unwrap_or("").trim();
+            let (synthetic, size_spec) = if let Some(rest) = spec.strip_prefix("synthetic:") {
+                (true, rest.trim())
+            } else if spec == "synthetic" {
+                (true, "")
+            } else {
+                (false, spec)
+            };
+            let (w, h) = size_spec
+                .split_once('x')
+                .and_then(|(ws, hs)| {
                     let w = ws.parse::<u16>().ok()?.clamp(20, 300);
                     let h = hs.parse::<u16>().ok()?.clamp(8, 120);
                     Some((w, h))
@@ -568,7 +575,53 @@ impl App {
                 Ok(t) => t,
                 Err(e) => return format!("cells error: {}", e),
             };
-            if let Err(e) = terminal.draw(|frame| crate::tui::ui::draw(frame, self)) {
+            let draw_result = if synthetic {
+                let saved_messages = std::mem::replace(
+                    &mut self.display_messages,
+                    vec![
+                        DisplayMessage::user(
+                            "Review the workspace setup and check the active configuration.",
+                        ),
+                        DisplayMessage::assistant(
+                            "All checks passed. Ready for the next command.",
+                        ),
+                    ],
+                );
+                let saved_user_count = std::mem::replace(&mut self.display_user_message_count, 1);
+                let saved_scroll = std::mem::replace(&mut self.scroll_offset, 0);
+                let saved_auto_scroll = std::mem::replace(&mut self.auto_scroll_paused, false);
+                let saved_processing = std::mem::replace(&mut self.is_processing, false);
+                let saved_streaming = std::mem::take(&mut self.streaming.streaming_text);
+                let saved_queued = std::mem::take(&mut self.queued_messages);
+                let saved_interleave = self.interleave_message.take();
+                let saved_soft = std::mem::take(&mut self.pending_soft_interrupts);
+                let saved_input = std::mem::take(&mut self.input);
+                let saved_cursor = std::mem::replace(&mut self.cursor_pos, 0);
+                let saved_status = std::mem::replace(&mut self.status, ProcessingStatus::Idle);
+                let saved_notice = self.status_notice.take();
+                self.bump_display_messages_version_no_stats();
+
+                let res = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
+
+                self.display_messages = saved_messages;
+                self.display_user_message_count = saved_user_count;
+                self.scroll_offset = saved_scroll;
+                self.auto_scroll_paused = saved_auto_scroll;
+                self.is_processing = saved_processing;
+                self.streaming.streaming_text = saved_streaming;
+                self.queued_messages = saved_queued;
+                self.interleave_message = saved_interleave;
+                self.pending_soft_interrupts = saved_soft;
+                self.input = saved_input;
+                self.cursor_pos = saved_cursor;
+                self.status = saved_status;
+                self.status_notice = saved_notice;
+                self.bump_display_messages_version_no_stats();
+                res
+            } else {
+                terminal.draw(|frame| crate::tui::ui::draw(frame, self))
+            };
+            if let Err(e) = draw_result {
                 return format!("cells error: {}", e);
             }
             let buf = terminal.backend().buffer();

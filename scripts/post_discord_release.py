@@ -801,6 +801,68 @@ def required(value: str | None, description: str) -> str:
     raise SystemExit(f"Missing {description}")
 
 
+SELFDEV_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+MAX_SELFDEV_ATTACHMENTS = 4
+
+
+def discover_selfdev_attachments(
+    *, tag: str, body: str, repo_root: Path | None = None
+) -> list[Path]:
+    """Return image files added/modified under changelog/discord/ in a selfdev release range."""
+    match = re.fullmatch(r"selfdev-linux-([0-9a-f]{40})", tag)
+    if not match:
+        return []
+    head_sha = match.group(1)
+    root = repo_root or Path(__file__).resolve().parent.parent
+
+    compare_match = re.search(
+        r"/compare/([0-9a-f]{7,40})\.\.\.([0-9a-f]{7,40})",
+        body or "",
+    )
+    if compare_match:
+        rev_range = f"{compare_match.group(1)}..{compare_match.group(2)}"
+    else:
+        rev_range = f"{head_sha}~1..{head_sha}"
+
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "diff",
+                "--name-only",
+                "--diff-filter=AM",
+                rev_range,
+                "--",
+                "changelog/discord",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    if proc.returncode != 0:
+        return []
+
+    discord_root = (root / "changelog" / "discord").resolve()
+    attachments: list[Path] = []
+    for rel in sorted(line.strip() for line in proc.stdout.splitlines() if line.strip()):
+        candidate = (root / rel).resolve()
+        if candidate.suffix.lower() not in SELFDEV_IMAGE_EXTENSIONS:
+            continue
+        try:
+            candidate.relative_to(discord_root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            attachments.append(candidate)
+            if len(attachments) >= MAX_SELFDEV_ATTACHMENTS:
+                break
+    return attachments
+
+
 def announce_release(
     *, repository: str, tag: str, token: str, webhook_url: str
 ) -> str | None:
@@ -839,12 +901,28 @@ def announce_release(
         body=body,
         url=release["html_url"],
     )
+    selfdev_attachments = discover_selfdev_attachments(tag=tag, body=body)
     if len(formatted_messages) > 1:
-        return announce_multipart(repository=repository, tag=tag, token=token,
-                                  webhook_url=webhook_url, messages=formatted_messages)
+        attachments_per_part = (
+            [selfdev_attachments] + [[] for _ in formatted_messages[1:]]
+            if selfdev_attachments
+            else None
+        )
+        return announce_multipart(
+            repository=repository,
+            tag=tag,
+            token=token,
+            webhook_url=webhook_url,
+            messages=formatted_messages,
+            attachments_per_part=attachments_per_part,
+        )
 
     content = formatted_messages[0]
-    message = post_to_discord(webhook_url=webhook_url, content=content)
+    message = post_to_discord(
+        webhook_url=webhook_url,
+        content=content,
+        attachments=selfdev_attachments or None,
+    )
     message_id = str(message["id"])
     print(f"Posted {tag} to Discord as message {message_id}")
 

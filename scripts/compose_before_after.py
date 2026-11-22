@@ -31,6 +31,46 @@ AFTER_BADGE_BG = (26, 62, 46)
 AFTER_BADGE_FG = (120, 232, 168)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+SENSITIVE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Full or truncated emails (e.g. jeremy@example.com or jeremy@…)
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]*[A-Za-z0-9….]*"), "user@example.com"),
+    # Home directory paths (/home/<user>/... or /Users/<user>/...)
+    (re.compile(r"/(?:home|Users)/[A-Za-z0-9._-]+"), "/home/user"),
+    # Common API key / token prefixes
+    (re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|AIza[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{12,})\b"), "[REDACTED]"),
+)
+
+
+def sanitize_text(text: str) -> str:
+    """Redact emails, home paths, and API tokens while preserving column width where possible."""
+    result = text
+    for pattern, replacement in SENSITIVE_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def sanitize_cells_frame(data: dict) -> dict:
+    """Return a copy of a `client:cells` frame with emails, home paths, and tokens redacted."""
+    clean_rows = []
+    for row in data.get("rows") or []:
+        clean_row = []
+        for run in row:
+            if isinstance(run, list) and len(run) >= 4 and isinstance(run[0], str):
+                orig = run[0]
+                redacted = sanitize_text(orig)
+                if len(redacted) < len(orig):
+                    redacted = redacted + (" " * (len(orig) - len(redacted)))
+                elif len(redacted) > len(orig):
+                    redacted = redacted[: len(orig)]
+                clean_row.append([redacted, run[1], run[2], run[3]])
+            else:
+                clean_row.append(run)
+        clean_rows.append(clean_row)
+    return {
+        "width": data.get("width", 80),
+        "height": data.get("height", len(clean_rows)),
+        "rows": clean_rows,
+    }
 FONT_CANDIDATES = (
     "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
     "/usr/share/fonts/TTF/JetBrainsMonoNLNerdFont-Regular.ttf",
@@ -422,6 +462,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Auto-crop both panels around the changed region with padding",
     )
+    parser.add_argument(
+        "--sanitize",
+        action="store_true",
+        help="Redact emails, home directory usernames, and API key prefixes in cell captures",
+    )
     parser.add_argument("--output", type=Path, required=True, help="Output PNG path")
     return parser.parse_args(argv)
 
@@ -433,6 +478,8 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.cells.read_text(encoding="utf-8")),
             args.crop_rows,
         )
+        if args.sanitize:
+            data = sanitize_cells_frame(data)
         rendered = render_cells_frame(data)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         rendered.save(args.output, format="PNG")
@@ -450,6 +497,9 @@ def main(argv: list[str] | None = None) -> int:
             json.loads(args.after_cells.read_text(encoding="utf-8")),
             args.after_crop_rows,
         )
+        if args.sanitize:
+            before_data = sanitize_cells_frame(before_data)
+            after_data = sanitize_cells_frame(after_data)
         before_img = render_cells_frame(before_data)
         after_img = render_cells_frame(after_data)
     elif args.before_text and args.after_text:

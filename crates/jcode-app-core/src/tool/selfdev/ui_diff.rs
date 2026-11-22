@@ -10,12 +10,15 @@ pub(super) struct ScreenshotArgs {
     pub(super) label: Option<String>,
     pub(super) crop_rows: Option<String>,
     pub(super) output: Option<String>,
+    pub(super) sanitize: Option<bool>,
+    pub(super) synthetic: Option<bool>,
 }
 
 pub(super) struct BeforeAfterArgs {
     pub(super) before: Option<String>,
     pub(super) after: Option<String>,
     pub(super) size: Option<String>,
+    pub(super) label: Option<String>,
     pub(super) before_crop_rows: Option<String>,
     pub(super) after_crop_rows: Option<String>,
     pub(super) before_label: Option<String>,
@@ -24,6 +27,9 @@ pub(super) struct BeforeAfterArgs {
     pub(super) output: Option<String>,
     pub(super) highlight_diff: Option<bool>,
     pub(super) auto_crop: Option<bool>,
+    pub(super) sanitize: Option<bool>,
+    pub(super) synthetic: Option<bool>,
+    pub(super) attach_to_discord: Option<bool>,
 }
 
 fn scratch_ui_dir() -> PathBuf {
@@ -79,9 +85,14 @@ fn resolve_composer_script(repo_dir: Option<&Path>) -> Result<PathBuf> {
 async fn capture_cells_to_file(
     session_id: &str,
     size: &str,
+    synthetic: bool,
     dest: &Path,
 ) -> Result<()> {
-    let cmd = format!("client:cells:{}", size.trim());
+    let cmd = if synthetic {
+        format!("client:cells:synthetic:{}", size.trim())
+    } else {
+        format!("client:cells:{}", size.trim())
+    };
     let json = execute_debug_command(&cmd, Some(session_id.to_string()), 15).await?;
     let trimmed = json.trim();
     if !trimmed.starts_with('{') {
@@ -108,7 +119,8 @@ pub(super) async fn do_screenshot(
         .unwrap_or_else(|| base_dir.join(format!("{stem}.png")));
     let cells_path = png_path.with_extension("json");
 
-    capture_cells_to_file(&ctx.session_id, &size, &cells_path).await?;
+    let synthetic = args.synthetic.unwrap_or(true);
+    capture_cells_to_file(&ctx.session_id, &size, synthetic, &cells_path).await?;
 
     let script = resolve_composer_script(repo_dir.as_deref())?;
     let mut cmd = tokio::process::Command::new("python3");
@@ -119,6 +131,9 @@ pub(super) async fn do_screenshot(
         .arg(&png_path);
     if let Some(crop) = args.crop_rows.as_deref().filter(|s| !s.trim().is_empty()) {
         cmd.arg("--crop-rows").arg(crop.trim());
+    }
+    if args.sanitize.unwrap_or(true) {
+        cmd.arg("--sanitize");
     }
     let output = cmd
         .output()
@@ -160,7 +175,8 @@ pub(super) async fn do_before_after(
         Some(p) => PathBuf::from(p.trim()),
         None => {
             let live_after = base_dir.join("after-live.json");
-            capture_cells_to_file(&ctx.session_id, &size, &live_after).await?;
+            let synthetic = args.synthetic.unwrap_or(true);
+            capture_cells_to_file(&ctx.session_id, &size, synthetic, &live_after).await?;
             live_after
         }
     };
@@ -168,10 +184,26 @@ pub(super) async fn do_before_after(
         anyhow::bail!("`after` file not found: {}", after_path.display());
     }
 
-    let png_path = args
-        .output
-        .map(PathBuf::from)
-        .unwrap_or_else(|| base_dir.join("before-after.png"));
+    let attach_to_discord = args.attach_to_discord.unwrap_or(false);
+    let png_path = if let Some(explicit) = args.output {
+        PathBuf::from(explicit)
+    } else if attach_to_discord {
+        let root = repo_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve repo directory for attach_to_discord"))?;
+        let slug = sanitize_slug(
+            args.label
+                .as_deref()
+                .or(args.title.as_deref())
+                .unwrap_or("ui-diff"),
+        );
+        root.join("changelog")
+            .join("discord")
+            .join(format!("selfdev-{slug}.png"))
+    } else {
+        base_dir.join("before-after.png")
+    };
     let script = resolve_composer_script(repo_dir.as_deref())?;
 
     let is_json = before_path
@@ -225,6 +257,9 @@ pub(super) async fn do_before_after(
     if args.auto_crop == Some(true) {
         cmd.arg("--auto-crop");
     }
+    if args.sanitize.unwrap_or(true) {
+        cmd.arg("--sanitize");
+    }
     cmd.arg("--output").arg(&png_path);
 
     let output = cmd
@@ -236,8 +271,13 @@ pub(super) async fn do_before_after(
         anyhow::bail!("compose_before_after.py failed: {}", stderr.trim());
     }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let discord_note = if attach_to_discord {
+        "\nDiscord auto-attach: saved under `changelog/discord/`. Commit & push it ONLY after visually verifying with `read` that zero private session content, emails, usernames, or secrets appear."
+    } else {
+        ""
+    };
     Ok(ToolOutput::new(format!(
-        "{stdout}\nPNG: {}\nNext: inspect the PNG with `read` to verify visual quality, then render it inline with `![title]({})`.",
+        "{stdout}\nPNG: {}\nPRIVACY & VISUAL CHECK REQUIRED: call `read` on `{}` right now and verify (1) zero real user prompts/transcripts, emails, local paths, or secrets are visible, and (2) the UI diff renders cleanly before sharing or committing.{discord_note}",
         png_path.display(),
         png_path.display()
     )))

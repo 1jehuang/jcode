@@ -108,6 +108,15 @@ struct SelfDevInput {
     /// Auto-crop around changed pixels in action=before-after.
     #[serde(default)]
     auto_crop: Option<bool>,
+    /// Redact emails, home paths, and API tokens in cell captures (default true).
+    #[serde(default)]
+    sanitize: Option<bool>,
+    /// Replace live session transcript with a synthetic demo transcript during capture (default true).
+    #[serde(default)]
+    synthetic: Option<bool>,
+    /// Save before-after PNG to `changelog/discord/selfdev-<slug>.png` so the next Discord prerelease auto-attaches it.
+    #[serde(default)]
+    attach_to_discord: Option<bool>,
 }
 
 /// Context saved before reload, restored after restart
@@ -616,7 +625,10 @@ impl SelfDevTool {
                     "title": { "type": "string", "description": "Header title for action=before-after." },
                     "output": { "type": "string", "description": "Output PNG path for screenshot/before-after." },
                     "highlight_diff": { "type": "boolean", "description": "Draw red/green diff highlight boxes (default true; false for whole-widget size/layout changes)." },
-                    "auto_crop": { "type": "boolean", "description": "Auto-crop both panels around the diff bounding box." }
+                    "auto_crop": { "type": "boolean", "description": "Auto-crop both panels around the diff bounding box." },
+                    "sanitize": { "type": "boolean", "description": "Redact emails, home paths, and API tokens in cell captures (default true)." },
+                    "synthetic": { "type": "boolean", "description": "Synthesize a clean demo transcript instead of capturing real session history (default true)." },
+                    "attach_to_discord": { "type": "boolean", "description": "Save PNG to changelog/discord/selfdev-<slug>.png so the next self-dev Discord update auto-attaches it after commit & push." }
                 },
                 "required": ["action"]
             })
@@ -794,6 +806,8 @@ impl Tool for SelfDevTool {
                             label: params.label,
                             crop_rows: params.crop_rows,
                             output: params.output,
+                            sanitize: params.sanitize,
+                            synthetic: params.synthetic,
                         },
                         SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
                         &ctx,
@@ -812,6 +826,7 @@ impl Tool for SelfDevTool {
                             before: params.before,
                             after: params.after,
                             size: params.size,
+                            label: params.label,
                             before_crop_rows: params.before_crop_rows,
                             after_crop_rows: params.after_crop_rows,
                             before_label: params.before_label,
@@ -820,6 +835,9 @@ impl Tool for SelfDevTool {
                             output: params.output,
                             highlight_diff: params.highlight_diff,
                             auto_crop: params.auto_crop,
+                            sanitize: params.sanitize,
+                            synthetic: params.synthetic,
+                            attach_to_discord: params.attach_to_discord,
                         },
                         SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
                         &ctx,

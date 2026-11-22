@@ -69,6 +69,25 @@ class ComposeBeforeAfterTests(unittest.TestCase):
         self.assertGreater(img.width, 150)
         self.assertGreater(img.height, 70)
 
+    def test_sanitize_cells_frame_redacts_emails_paths_and_tokens(self) -> None:
+        cells = {
+            "width": 50,
+            "height": 3,
+            "rows": [
+                [["Claude · jeremy@solosystems.dev", [240, 200, 120], None, 0]],
+                [["path /home/jeremy/secret-repo", [180, 180, 180], None, 0]],
+                [["key sk-ant-api03-secretvalue12345", [180, 180, 180], None, 0]],
+            ],
+        }
+        clean = MODULE.sanitize_cells_frame(cells)
+        joined = "\n".join(run[0] for row in clean["rows"] for run in row)
+        self.assertNotIn("jeremy@solosystems.dev", joined)
+        self.assertNotIn("/home/jeremy", joined)
+        self.assertNotIn("sk-ant-api03", joined)
+        self.assertIn("user@example.com", joined)
+        self.assertIn("/home/user", joined)
+        self.assertIn("[REDACTED]", joined)
+
     def test_cli_renders_ansi_text_frames_to_png(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

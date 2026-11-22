@@ -9,6 +9,7 @@ import json
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import subprocess
 import threading
 import unittest
 import urllib.error
@@ -723,6 +724,38 @@ Fast startup.
         self.assertEqual(len(capped), MODULE.MAX_AUTO_MULTIPART)
         self.assertTrue(capped[-1].endswith(f"\n… (full notes: <{url}>)"))
         self.assertTrue(all(MODULE.utf16_len(p) <= MODULE.DISCORD_LIMIT for p in capped))
+
+    def test_discover_selfdev_attachments_finds_only_new_images_in_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+
+            discord_dir = repo / "changelog" / "discord"
+            discord_dir.mkdir(parents=True)
+            (discord_dir / "old.png").write_bytes(b"\x89PNG\r\n\x1a\nold")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+            prev_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+
+            (discord_dir / "selfdev-login.png").write_bytes(b"\x89PNG\r\n\x1a\nnew")
+            (discord_dir / "notes.json").write_text("{}", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "ui change"], cwd=repo, check=True)
+            head_sha = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+            ).strip()
+
+            body = f"Compare: https://github.com/1jehuang/jcode/compare/{prev_sha}...{head_sha}"
+            found = MODULE.discover_selfdev_attachments(
+                tag=f"selfdev-linux-{head_sha}",
+                body=body,
+                repo_root=repo,
+            )
+            self.assertEqual([p.name for p in found], ["selfdev-login.png"])
 
 
 if __name__ == "__main__":
