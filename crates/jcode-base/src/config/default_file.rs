@@ -513,6 +513,9 @@ reactive_threshold_tokens = 400000
 proactive_floor = 0.40
 proactive_floor_tokens = 150000
 # Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Per-provider threshold overrides (unset fields inherit from [compaction]):
+# [compaction.providers.gemini]
+# reactive_threshold_tokens = 300000
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.

@@ -1108,7 +1108,7 @@ impl App {
         {
             let compaction = self.registry.compaction();
             if let Ok(mut manager) = compaction.try_write() {
-                manager.set_budget(limit);
+                manager.set_budget_for_provider(limit, self.provider.name());
             };
         }
     }
@@ -1125,7 +1125,7 @@ impl App {
         self.context_warning_shown = false;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(limit);
+            manager.set_budget_for_provider(limit, self.provider.name());
         };
     }
 
