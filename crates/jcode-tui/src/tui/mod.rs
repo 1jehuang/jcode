@@ -1477,6 +1477,47 @@ pub struct PromptHistorySearchView {
     pub selected: usize,
 }
 
+/// Choice highlighted on the fresh-install login screen (when no importable
+/// external logins were found).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingLoginChoice {
+    OpenAi,
+    Claude,
+    ApiKey,
+    Skip,
+}
+
+impl OnboardingLoginChoice {
+    pub const ALL: [Self; 4] = [Self::OpenAi, Self::Claude, Self::ApiKey, Self::Skip];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Claude => "Claude",
+            Self::ApiKey => "API key",
+            Self::Skip => "Skip",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::OpenAi => Self::Claude,
+            Self::Claude => Self::ApiKey,
+            Self::ApiKey => Self::Skip,
+            Self::Skip => Self::OpenAi,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::OpenAi => Self::Skip,
+            Self::Claude => Self::OpenAi,
+            Self::ApiKey => Self::Claude,
+            Self::Skip => Self::ApiKey,
+        }
+    }
+}
+
 /// What the first-run onboarding welcome screen should render in its body,
 /// driven by the active onboarding flow phase. `Suggestions` is the default
 /// resting state (the starter prompt cards).
@@ -1503,11 +1544,9 @@ pub enum OnboardingWelcomeKind {
         /// option.
         repair_agent_label: Option<String>,
     },
-    /// Ask the user whether to log in to OpenAI (no detected imports). A
-    /// highlightable Yes/No selector; `yes_highlighted` reflects the current
-    /// choice. Yes starts the OpenAI sign-in, No skips login and finishes
-    /// onboarding (the user can run `/login` later).
-    LoginOpenAi { yes_highlighted: bool },
+    /// Ask the user how they want to log in (no detected imports): OpenAI,
+    /// Claude, API key, or Skip.
+    LoginOpenAi { choice: OnboardingLoginChoice },
     /// "Continue where you left off in <cli>?" with a highlightable Yes/No
     /// selector and a live decision countdown (seconds remaining).
     ContinuePrompt {

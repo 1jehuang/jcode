@@ -8,7 +8,7 @@ mod auth_account_picker;
 #[path = "auth/auth_muse.rs"]
 pub(super) mod auth_muse;
 #[path = "auth_progress.rs"]
-mod auth_progress;
+pub(crate) mod auth_progress;
 /// Attempt-scoped Muse event helpers shared with the remote event forwarder.
 pub(super) use auth_muse as auth_muse_helpers;
 #[path = "auth_types.rs"]
@@ -541,7 +541,7 @@ impl App {
         self.pending_login = Some(pending);
     }
 
-    fn start_claude_login(&mut self) {
+    pub(super) fn start_claude_login(&mut self) {
         let label = crate::auth::claude::login_target_label(None)
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
         self.start_claude_login_for_account(&label);
@@ -2195,8 +2195,10 @@ impl App {
             if let Some((provider, method)) = pending.telemetry_context() {
                 crate::telemetry::record_auth_cancelled(&provider, &method);
             }
-            let replaced = auth_progress::login_card_title_for_pending(&pending)
-                .is_some_and(|title| self.finish_login_progress(title, format!("{title} cancelled.")));
+            let replaced =
+                auth_progress::login_card_title_for_pending(&pending).is_some_and(|title| {
+                    self.finish_login_progress(title, format!("{title} cancelled."))
+                });
             if !replaced {
                 self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
             }
@@ -2385,10 +2387,7 @@ impl App {
                         }
                     }
                 });
-                self.update_login_progress_exchange(
-                    auth_progress::GEMINI_LOGIN_TITLE,
-                    None,
-                );
+                self.update_login_progress_exchange(auth_progress::GEMINI_LOGIN_TITLE, None);
             }
             PendingLogin::Antigravity {
                 verifier,
@@ -2425,10 +2424,7 @@ impl App {
                         }
                     }
                 });
-                self.update_login_progress_exchange(
-                    auth_progress::ANTIGRAVITY_LOGIN_TITLE,
-                    None,
-                );
+                self.update_login_progress_exchange(auth_progress::ANTIGRAVITY_LOGIN_TITLE, None);
             }
             PendingLogin::AutoApiKey => {
                 let key = crate::provider_catalog::normalize_pasted_api_key(&input);
@@ -2452,7 +2448,8 @@ impl App {
                         self.validate_and_save_detected_api_key(provider, key, true);
                     }
                     crate::provider_catalog::ApiKeyDetection::Ambiguous { prefix, candidates } => {
-                        let choices = crate::provider_catalog::format_api_key_candidates(candidates);
+                        let choices =
+                            crate::provider_catalog::format_api_key_candidates(candidates);
                         self.push_display_message(DisplayMessage::system(format!(
                             "Keys starting with `{prefix}` are used by multiple providers:\n{choices}\n\nReply with a number or any provider name, or /cancel."
                         )));
@@ -2712,28 +2709,25 @@ impl App {
                         } else if key_name == "OPENROUTER_API_KEY" {
                             "Refreshing models automatically. Use /model to switch to OpenRouter models.".to_string()
                         } else {
-                            "Refreshing models automatically. Use /model to pick a model.".to_string()
+                            "Refreshing models automatically. Use /model to pick a model."
+                                .to_string()
                         };
-                        let saved_label = if let Some(resolved) =
-                            resolved_openai_compatible.as_ref()
-                        {
-                            if resolved.requires_api_key {
-                                format!("✓ {} API key saved", provider)
-                            } else if key.trim().is_empty() {
-                                format!("✓ {} local endpoint saved", provider)
+                        let saved_label =
+                            if let Some(resolved) = resolved_openai_compatible.as_ref() {
+                                if resolved.requires_api_key {
+                                    format!("✓ {} API key saved", provider)
+                                } else if key.trim().is_empty() {
+                                    format!("✓ {} local endpoint saved", provider)
+                                } else {
+                                    format!("✓ {} local endpoint and API key saved", provider)
+                                }
                             } else {
-                                format!("✓ {} local endpoint and API key saved", provider)
-                            }
-                        } else {
-                            format!("✓ {} API key saved", provider)
-                        };
+                                format!("✓ {} API key saved", provider)
+                            };
                         Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                             provider: provider.clone(),
                             success: true,
-                            message: format!(
-                                "{}.\n{}{}",
-                                saved_label, guidance, model_hint
-                            ),
+                            message: format!("{}.\n{}{}", saved_label, guidance, model_hint),
                         }));
                     }
                     Err(e) => {
@@ -3662,19 +3656,17 @@ impl App {
             }
         }
         if login.success {
-            let replaced_login_card = auth_progress::login_card_title_for_provider(
-                &login.provider,
-            )
-            .is_some_and(|title| {
-                let completion = if login.provider == "openai" {
-                    "✓ OpenAI login complete.".to_string()
-                } else if login.message.starts_with('✓') {
-                    login.message.clone()
-                } else {
-                    format!("✓ {}", login.message)
-                };
-                self.finish_login_progress(title, completion)
-            });
+            let replaced_login_card = auth_progress::login_card_title_for_provider(&login.provider)
+                .is_some_and(|title| {
+                    let completion = if login.provider == "openai" {
+                        "✓ OpenAI login complete.".to_string()
+                    } else if login.message.starts_with('✓') {
+                        login.message.clone()
+                    } else {
+                        format!("✓ {}", login.message)
+                    };
+                    self.finish_login_progress(title, completion)
+                });
             self.recent_authenticated_provider = Some((login.provider.clone(), Instant::now()));
             // A fresh login is exactly what the credential-failure breaker is
             // waiting for: give automatic retries a fresh budget.
@@ -3705,22 +3697,20 @@ impl App {
                 // publishing LoginCompleted. The generic auth refresh still
                 // needs to rebuild routes and release the picker loading state,
                 // but must not race it with a second model selection.
-                let profile_activation_owns_selection =
-                    if let Some(profile) =
-                        crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                            &login.provider,
-                        )
-                    {
-                        if matches!(self.pending_login, Some(PendingLogin::Exchanging { .. })) {
-                            self.start_openai_compatible_post_login_activation(
-                                profile.id.to_string(),
-                                profile.display_name.to_string(),
-                            );
-                        }
-                        true
-                    } else {
-                        false
-                    };
+                let profile_activation_owns_selection = if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        &login.provider,
+                    ) {
+                    if matches!(self.pending_login, Some(PendingLogin::Exchanging { .. })) {
+                        self.start_openai_compatible_post_login_activation(
+                            profile.id.to_string(),
+                            profile.display_name.to_string(),
+                        );
+                    }
+                    true
+                } else {
+                    false
+                };
                 self.trigger_provider_auth_changed(
                     Some(&login.provider),
                     prefer_strongest,
@@ -3738,13 +3728,14 @@ impl App {
             // During onboarding we route the failure to the recovery screen
             // (which explains next steps) instead of dumping a raw error message
             // and a status notice the user can miss.
-            let replaced_login_card = auth_progress::login_card_title_for_provider(
-                &login.provider,
-            )
-            .is_some_and(|title| {
-                let retry = auth_progress::login_retry_command_for_provider(&login.provider);
-                self.finish_login_progress(title, format!("{title} failed: {message}\nRetry {retry}."))
-            });
+            let replaced_login_card = auth_progress::login_card_title_for_provider(&login.provider)
+                .is_some_and(|title| {
+                    let retry = auth_progress::login_retry_command_for_provider(&login.provider);
+                    self.finish_login_progress(
+                        title,
+                        format!("{title} failed: {message}\nRetry {retry}."),
+                    )
+                });
             if self.onboarding_flow_active() {
                 self.onboarding_handle_login_failed(Some(message));
             } else {

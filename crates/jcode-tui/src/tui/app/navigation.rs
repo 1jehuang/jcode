@@ -320,9 +320,10 @@ impl App {
             && crate::tui::ui::is_oauth_login_progress_card(message)
             && let Some(parsed) =
                 jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
-            && let Some(url) = parsed.body.lines().find_map(|line| {
-                crate::tui::ui::parse_oauth_sign_in_link(line).map(|(_, url)| url)
-            })
+            && let Some(url) = parsed
+                .body
+                .lines()
+                .find_map(|line| crate::tui::ui::parse_oauth_sign_in_link(line).map(|(_, url)| url))
         {
             let url = url.to_string();
             let opened = Self::open_auth_browser(&url);

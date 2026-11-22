@@ -11,8 +11,7 @@ pub(super) const GROK_BUILD_LOGIN_TITLE: &str = "Grok Build login";
 pub(super) const MUSE_LOGIN_TITLE: &str = "Muse login";
 
 pub(in crate::tui::app) fn login_card_title_for_provider(provider: &str) -> Option<&'static str> {
-    if provider.starts_with("muse_subscription_code#")
-        || provider.starts_with("muse-subscription#")
+    if provider.starts_with("muse_subscription_code#") || provider.starts_with("muse-subscription#")
     {
         return Some(MUSE_LOGIN_TITLE);
     }
@@ -166,7 +165,9 @@ impl App {
         account_label: Option<&str>,
     ) {
         let text = match account_label {
-            Some(label) => format!("{title} [{label}]: callback received, exchanging credentials..."),
+            Some(label) => {
+                format!("{title} [{label}]: callback received, exchanging credentials...")
+            }
             None => format!("{title}: callback received, exchanging credentials..."),
         };
         if let Some(index) = self.display_messages.iter().rposition(|message| {
