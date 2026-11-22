@@ -32,7 +32,10 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "2.30.0";
+// Google gates the Gemini 4 catalog (Neon, Argon, Hydrogen tiers) on the Hub
+// client identity: `antigravity/<v>` gets the legacy free catalog and 404s on
+// `gemini-4-neon-*`, while `antigravity/hub/<v>` gets the full paid catalog.
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -206,11 +209,11 @@ pub fn antigravity_version() -> String {
 
 pub fn antigravity_user_agent() -> String {
     if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
+        format!("antigravity/hub/{} windows/amd64", antigravity_version())
     } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
+        format!("antigravity/hub/{} darwin/arm64", antigravity_version())
     } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
+        format!("antigravity/hub/{} darwin/amd64", antigravity_version())
     }
 }
 
