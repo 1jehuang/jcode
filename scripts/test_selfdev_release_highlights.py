@@ -12,10 +12,45 @@ SCRIPT = Path(__file__).with_name('selfdev_release_highlights.py').resolve()
 
 class HighlightsTests(unittest.TestCase):
     def test_public_text_is_bounded_plain_bullets(self):
-        result = bullets('- <script> @everyone\n* `example`\u202e\n' + ('z' * 300 + '\n') * 20)
+        result = bullets('- <script> @everyone\n* `example`\u202e\n' + ('z' * 500 + '\n') * 20)
         self.assertEqual(result[:2], ['- &lt;script&gt; ＠everyone', r'- \`example\`'])
         self.assertEqual(len(result), 8)
-        self.assertEqual(len(result[-1]), 202)
+        self.assertEqual(len(result[-1]), 362)
+
+    def test_truncation_preserves_words_and_balanced_backticks(self):
+        long_note = (
+            'Provider fallback now skips exhausted accounts across '
+            + ' '.join(f'`backend-{i}`' for i in range(45))
+            + ' cleanly.'
+        )
+        items = bullets(long_note)
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertTrue(item.endswith('…'))
+        # Unescaped backticks must stay balanced (even count) and never slice mid-word.
+        self.assertEqual(item.count(r'\`') % 2, 0)
+        self.assertNotRegex(item, r'backend-\d*…$')
+
+    def test_singular_commit_grammar(self):
+        with tempfile.TemporaryDirectory() as repo:
+            def git(*args):
+                return subprocess.check_output(['git', *args], cwd=repo, text=True).strip()
+
+            git('init', '-q')
+            hashes = []
+            for subject in ['base', 'single fix']:
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    'commit', '--allow-empty', '-qm', subject)
+                hashes.append(git('rev-parse', 'HEAD'))
+            tags = Path(repo, 'tags')
+            tags.write_text('selfdev-linux-' + hashes[0])
+            output = subprocess.check_output(
+                [sys.executable, SCRIPT, tags],
+                cwd=repo,
+                env=dict(os.environ, SHA=hashes[-1], RELEASE_NOTES='Single fix'),
+                text=True,
+            )
+            self.assertIn(f'[View all 1 commit](https://github.com/1jehuang/jcode/compare/{hashes[0]}...{hashes[-1]})', output)
 
     def test_public_history_and_explicit_override(self):
         with tempfile.TemporaryDirectory() as repo:

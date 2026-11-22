@@ -54,13 +54,21 @@ def already_announced(body: str, tag: str) -> bool:
 def release_notes_for_discord(body: str) -> str:
     body = PLATFORM_BLOCK.sub("\n", body)
     body = DISCORD_COMMENT_MARKER.sub("\n", body)
+    # Suppress Discord link preview cards on bare Full changelog compare links.
+    body = re.sub(
+        r"^(\*\*Full changelog\*\*:\s+)(https?://[^\s<>]+)$",
+        r"\1<\2>",
+        body,
+        flags=re.MULTILINE,
+    )
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
 COMMIT_LINE = re.compile(r"^- \[[0-9a-f]{4,40}\]\([^)]*\) (.+)$")
-SELFDEV_ESCAPED = re.compile(r"\\([\\`*_\[\]~|#+=.-])")
+ESCAPED_MARKDOWN = re.compile(r"\\([\\`*_{}\[\]()<>#~|+=.-])")
 RAW_URL = re.compile(r"(?<!<)https?://[^\s<>()]+")
-MORE_COMMITS_BULLET = re.compile(r"^…\s+and\s+\d+\s+more\s+commits\b", re.I)
+MORE_COMMITS_BULLET = re.compile(r"^…\s+and\s+\d+\s+more\s+commits?\b", re.I)
+MAX_AUTO_MULTIPART = 4
 
 
 def utf16_len(text: str) -> int:
@@ -79,12 +87,24 @@ def truncate_utf16(text: str, max_units: int, suffix: str = "…") -> str:
             break
         out.append(ch)
         used += width
-    return "".join(out).rstrip() + suffix
+    prefix = "".join(out)
+    if " " in prefix:
+        last_space = prefix.rfind(" ")
+        if utf16_len(prefix[:last_space]) >= budget // 2:
+            prefix = prefix[:last_space]
+    if prefix.count("`") % 2 == 1:
+        last_tick = prefix.rfind("`")
+        if last_tick > 0:
+            prefix = prefix[:last_tick]
+    prefix = prefix.rstrip(" ,;:([{-")
+    if not prefix:
+        prefix = "".join(out).rstrip()
+    return prefix + suffix
 
 
 def clean_selfdev_bullet(raw: str) -> str:
     text = html.unescape(raw.strip())
-    text = SELFDEV_ESCAPED.sub(r"\1", text)
+    text = ESCAPED_MARKDOWN.sub(r"\1", text)
     text = text.replace("@", "＠")
     text = RAW_URL.sub(r"<\g<0>>", text)
     return " ".join(text.split())
@@ -120,8 +140,10 @@ def preview_commit_lines(notes: str) -> list[str]:
     for raw in section.group(1).splitlines():
         match = COMMIT_LINE.match(raw.strip())
         if match:
-            # Neutralize any stray URL so the release link stays the only one.
-            subject = RAW_URL.sub(r"<\g<0>>", match.group(1))
+            # Unescape GitHub markdown escapes from preview_notes.py while keeping
+            # any stray URL wrapped so the release link stays the only active one.
+            subject = ESCAPED_MARKDOWN.sub(r"\1", html.unescape(match.group(1)))
+            subject = RAW_URL.sub(r"<\g<0>>", subject)
             lines.append(f"- {subject}")
     return lines
 
@@ -131,14 +153,15 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
         header = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
         links = f"[Download & release notes](<{url}>)"
         comparison = re.search(
-            r"^\[View all ([0-9]+) commits\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$",
+            r"^\[View all ([0-9]+) commits?\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$",
             body,
             re.M,
         )
         total_commits: int | None = None
         if comparison and comparison[3] == match[1]:
             total_commits = int(comparison[1])
-            links += f" · [All {comparison[1]} commits](<https://github.com/1jehuang/jcode/compare/{comparison[2]}...{match[1]}>)"
+            label = "1 commit" if total_commits == 1 else f"All {comparison[1]} commits"
+            links += f" · [{label}](<https://github.com/1jehuang/jcode/compare/{comparison[2]}...{match[1]}>)"
 
         def extract_bullets(heading: str) -> list[str]:
             section = re.search(
@@ -161,7 +184,8 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
         bundled = [item for item in bundled_raw if item.casefold() not in seen_highlights]
         deduped_count = len(bundled_raw) - len(bundled)
 
-        footer = ["", links]
+        install_hint = "Switch & live-update: `curl -fsSL https://jcode.sh/install | bash -s -- --prerelease`"
+        footer = ["", install_hint, links]
         lines = list(header)
         footer_units = utf16_len("\n".join(footer)) + 1
 
@@ -172,7 +196,7 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
             lines += ["", "**What changed**"]
             omitted_highlights = 0
             for idx, item in enumerate(highlights):
-                text = truncate_utf16(item, 280)
+                text = truncate_utf16(item, 360)
                 bullet = f"- {text}"
                 more_left = len(highlights) - idx - 1
                 reserve = (
@@ -273,6 +297,77 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     notes = release_notes_for_discord(body)
     message = title if not notes else f"{title}\n{notes}"
     return truncate_stable_message(message, url)
+
+
+def split_stable_message(message: str, url: str, *, max_parts: int = MAX_AUTO_MULTIPART) -> list[str]:
+    if utf16_len(message) <= DISCORD_LIMIT:
+        return [message]
+    lines = message.splitlines()
+    chunks: list[str] = []
+    current: list[str] = []
+
+    def joined(items: list[str]) -> str:
+        return "\n".join(items).strip()
+
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        # Keep a section heading attached to the first non-empty line below it.
+        group = [line]
+        if re.match(r"^#{1,6}\s+\S", line):
+            look = idx + 1
+            while look < len(lines) and lines[look].strip() == "":
+                group.append(lines[look])
+                look += 1
+            if look < len(lines) and not re.match(r"^#{1,6}\s+\S", lines[look]):
+                group.append(lines[look])
+                look += 1
+            next_idx = look
+        else:
+            next_idx = idx + 1
+
+        candidate = current + group
+        if utf16_len(joined(candidate)) <= DISCORD_LIMIT:
+            current = candidate
+            idx = next_idx
+            continue
+
+        if current:
+            chunks.append(joined(current))
+            current = []
+            if len(chunks) == max_parts - 1:
+                remainder = "\n".join(lines[idx:]).strip()
+                if remainder:
+                    chunks.append(truncate_stable_message(remainder, url))
+                return [c for c in chunks if c]
+            continue
+
+        # A single line/group exceeds DISCORD_LIMIT on its own.
+        raw_group = "\n".join(group).strip()
+        if len(chunks) >= max_parts - 1:
+            remainder = "\n".join(lines[idx:]).strip()
+            chunks.append(truncate_stable_message(remainder, url))
+            return [c for c in chunks if c]
+        chunks.append(truncate_utf16(raw_group, DISCORD_LIMIT))
+        idx = next_idx
+
+    if current:
+        text = joined(current)
+        if text:
+            chunks.append(text)
+    return chunks or [truncate_stable_message(message, url)]
+
+
+def format_messages(*, tag: str, name: str, body: str, url: str) -> list[str]:
+    if (
+        re.fullmatch(r"selfdev-linux-[0-9a-f]{40}", tag)
+        or re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag)
+    ):
+        return [format_message(tag=tag, name=name, body=body, url=url)]
+    title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
+    notes = release_notes_for_discord(body)
+    message = title if not notes else f"{title}\n{notes}"
+    return split_stable_message(message, url)
 
 
 def github_request(
@@ -566,12 +661,17 @@ def announce_release(
         return announce_multipart(repository=repository, tag=tag, token=token,
                                   webhook_url=webhook_url, messages=messages)
 
-    content = format_message(
+    formatted_messages = format_messages(
         tag=tag,
         name=release.get("name") or tag,
         body=body,
         url=release["html_url"],
     )
+    if len(formatted_messages) > 1:
+        return announce_multipart(repository=repository, tag=tag, token=token,
+                                  webhook_url=webhook_url, messages=formatted_messages)
+
+    content = formatted_messages[0]
     message = post_to_discord(webhook_url=webhook_url, content=content)
     message_id = str(message["id"])
     print(f"Posted {tag} to Discord as message {message_id}")

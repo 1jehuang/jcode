@@ -8,8 +8,29 @@ from pathlib import Path
 
 TAG = re.compile(r'selfdev-linux-([0-9a-f]{40})')
 MAX_ITEMS = 8
+MAX_ITEM_CHARS = 360
 MAX_BUNDLED_ITEMS = 50
 NO_USER_VISIBLE_RE = re.compile(r'^no user-visible changes\.?$', re.I)
+
+
+def truncate_plain(text, limit=MAX_ITEM_CHARS):
+    if len(text) <= limit:
+        return text
+    prefix = text[:limit - 1]
+    # Prefer a word boundary in the second half so words and tokens are not cut in half.
+    if ' ' in prefix:
+        last_space = prefix.rfind(' ')
+        if last_space >= limit // 2:
+            prefix = prefix[:last_space]
+    # Never leave an unclosed inline-code backtick span.
+    if prefix.count('`') % 2 == 1:
+        last_tick = prefix.rfind('`')
+        if last_tick > 0:
+            prefix = prefix[:last_tick]
+    prefix = prefix.rstrip(' ,;:([{-')
+    if not prefix:
+        prefix = text[:limit - 1].rstrip()
+    return prefix + '…'
 
 
 def bullets(text, limit=MAX_ITEMS):
@@ -20,8 +41,7 @@ def bullets(text, limit=MAX_ITEMS):
         plain = ' '.join(plain.split())
         if not plain:
             continue
-        if len(plain) > 200:
-            plain = plain[:199].rstrip() + '…'
+        plain = truncate_plain(plain, MAX_ITEM_CHARS)
         # Treat each entry as text, not authored markup or an active mention.
         plain = html.escape(plain, quote=False).replace('@', '＠')
         plain = re.sub(r'([\\`*_\[\]~|])', r'\\\1', plain)
@@ -70,7 +90,8 @@ def body(sha, notes, tags):
     if previous:
         revision = f'{previous}..{sha}'
         compare = f'https://github.com/1jehuang/jcode/compare/{previous}...{sha}'
-        result += f'\n## Bundled changes\n\n[View all {count} commits]({compare})\n'
+        commit_noun = 'commit' if count == 1 else 'commits'
+        result += f'\n## Bundled changes\n\n[View all {count} {commit_noun}]({compare})\n'
         if authored:
             bundled = bullets(
                 git('log', '--format=%s', '-n', str(MAX_BUNDLED_ITEMS), revision),
@@ -79,7 +100,9 @@ def body(sha, notes, tags):
             if bundled:
                 result += '\n'.join(bundled) + '\n'
             if count > len(bundled):
-                result += f'- … and {count - len(bundled)} more commits in the comparison above.\n'
+                remaining = count - len(bundled)
+                more_noun = 'commit' if remaining == 1 else 'commits'
+                result += f'- … and {remaining} more {more_noun} in the comparison above.\n'
         elif count > len(items):
             remaining_limit = max(0, MAX_BUNDLED_ITEMS - len(items))
             extra = (
@@ -94,7 +117,9 @@ def body(sha, notes, tags):
                 result += '\n'.join(extra) + '\n'
             shown = len(items) + len(extra)
             if count > shown:
-                result += f'- … and {count - shown} more commits in the comparison above.\n'
+                remaining = count - shown
+                more_noun = 'commit' if remaining == 1 else 'commits'
+                result += f'- … and {remaining} more {more_noun} in the comparison above.\n'
     return result
 
 

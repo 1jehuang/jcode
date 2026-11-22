@@ -52,6 +52,7 @@ class DiscordReleaseTests(unittest.TestCase):
         format_notes = lambda body: MODULE.format_message(tag=tag, name='', body=body, url='https://example.org/download')
         msg = format_notes('## Highlights\n- Captions update as you speak.\n- Configure the push-to-talk key.\n\n<!-- marker -->')
         self.assertIn('**What changed**\n- Captions update as you speak.\n- Configure the push-to-talk key.', msg)
+        self.assertIn('curl -fsSL https://jcode.sh/install | bash -s -- --prerelease', msg)
         self.assertTrue(msg.endswith('[Download & release notes](<https://example.org/download>)'))
         self.assertNotIn('marker', msg)
         self.assertNotIn('What changed', format_notes('Older build without highlights.'))
@@ -525,6 +526,110 @@ Fast startup.
                     messages,
                     f"{path} is stale relative to changelog/{tag}.json; update or remove it",
                 )
+
+    def test_preview_unescapes_markdown_escapes_while_wrapping_urls(self) -> None:
+        body = (
+            "## Commits\n\n"
+            r"- [abc12345](https://example.test/c) Fix \`--provider\` and foo\_bar \[beta\] \(see https://x.test/y\)"
+            "\n"
+        )
+        msg = MODULE.format_message(
+            tag="v1.0.0-preview.99",
+            name="Preview",
+            body=body,
+            url="https://example.test/releases/preview.99",
+        )
+        self.assertIn("- Fix `--provider` and foo_bar [beta] (see <https://x.test/y>)", msg)
+        self.assertNotIn(r"\`", msg)
+        self.assertNotIn(r"\_", msg)
+        self.assertNotIn(r"\[", msg)
+
+    def test_stable_full_changelog_url_is_wrapped_to_suppress_embeds(self) -> None:
+        body = (
+            "### Fixes\n\n- Fix a bug.\n\n"
+            "**Full changelog**: https://github.com/1jehuang/jcode/compare/v1.0.1...v1.0.3\n"
+        )
+        msg = MODULE.format_message(
+            tag="v1.0.3",
+            name="v1.0.3",
+            body=body,
+            url="https://github.com/1jehuang/jcode/releases/tag/v1.0.3",
+        )
+        self.assertIn(
+            "**Full changelog**: <https://github.com/1jehuang/jcode/compare/v1.0.1...v1.0.3>",
+            msg,
+        )
+
+    def test_selfdev_single_commit_link_and_word_safe_truncation(self) -> None:
+        sha = "c" * 40
+        prev = "d" * 40
+        tag = f"selfdev-linux-{sha}"
+        body = (
+            "## Highlights\n\n"
+            "- " + " ".join(f"`token-{i}`" for i in range(60)) + "\n\n"
+            "## Bundled changes\n\n"
+            f"[View all 1 commit](https://github.com/1jehuang/jcode/compare/{prev}...{sha})\n"
+            "- fix: single commit\n"
+        )
+        msg = MODULE.format_message(
+            tag=tag,
+            name=tag,
+            body=body,
+            url=f"https://github.com/1jehuang/jcode/releases/tag/{tag}",
+        )
+        self.assertIn(
+            f"[1 commit](<https://github.com/1jehuang/jcode/compare/{prev}...{sha}>)",
+            msg,
+        )
+        highlight_line = msg.split("**What changed**\n", 1)[1].splitlines()[0]
+        self.assertEqual(highlight_line.count("`") % 2, 0)
+        self.assertNotRegex(highlight_line, r"token-\d*…$")
+
+    def test_long_stable_release_auto_splits_via_multipart(self) -> None:
+        url = "https://github.com/1jehuang/jcode/releases/tag/v0.96.0"
+        body = (
+            "### Highlights\n\n"
+            + "\n".join(f"- Highlight item {i}: " + ("important detail " * 10) for i in range(8))
+            + "\n\n### Fixes\n\n"
+            + "\n".join(f"- Fix item {i}: " + ("bugfix explanation " * 10) for i in range(10))
+            + "\n\n**Full changelog**: https://github.com/1jehuang/jcode/compare/v0.95.0...v0.96.0\n"
+        )
+        parts = MODULE.format_messages(tag="v0.96.0", name="v0.96.0", body=body, url=url)
+        self.assertGreater(len(parts), 1)
+        self.assertLessEqual(len(parts), MODULE.MAX_AUTO_MULTIPART)
+        for part in parts:
+            self.assertLessEqual(MODULE.utf16_len(part), MODULE.DISCORD_LIMIT)
+            # Never leave an orphan heading at the very end of a chunk.
+            self.assertFalse(part.splitlines()[-1].startswith("### "))
+        joined = "\n".join(parts)
+        self.assertIn("Highlight item 0:", joined)
+        self.assertIn("Fix item 9:", joined)
+        self.assertIn("<https://github.com/1jehuang/jcode/compare/v0.95.0...v0.96.0>", joined)
+
+        # Verify announce_release uses receipt-backed multipart delivery for long stable releases.
+        release, posts, _, request = self.multipart_http()
+        release["body"] = body
+        release["name"] = "v0.96.0"
+        release["html_url"] = url
+        with (
+            mock.patch.object(MODULE, "load_announcement", return_value=None),
+            mock.patch.object(MODULE.urllib.request, "urlopen", side_effect=request),
+        ):
+            MODULE.announce_release(
+                repository="1jehuang/jcode",
+                tag="v0.96.0",
+                token="fake",
+                webhook_url="https://discord.test/webhook",
+            )
+        self.assertEqual(len(posts), len(parts))
+        self.assertIn(MODULE.announcement_marker("v0.96.0"), release["body"])
+
+        # Massive body caps cleanly at MAX_AUTO_MULTIPART with a full-notes link.
+        huge_body = "\n".join(f"- Huge item {i}: " + ("x" * 180) for i in range(120))
+        capped = MODULE.format_messages(tag="v0.96.0", name="v0.96.0", body=huge_body, url=url)
+        self.assertEqual(len(capped), MODULE.MAX_AUTO_MULTIPART)
+        self.assertTrue(capped[-1].endswith(f"\n… (full notes: <{url}>)"))
+        self.assertTrue(all(MODULE.utf16_len(p) <= MODULE.DISCORD_LIMIT for p in capped))
 
 
 if __name__ == "__main__":

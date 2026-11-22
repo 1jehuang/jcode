@@ -112,6 +112,8 @@ jobs:
       # subjects since the previous tag, always ending with the compare link.
       - name: Generate release notes
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           scripts/generate_release_notes.sh "$RELEASE_TAG" > release_notes.md
           if [ "$RELEASE_REPAIR" != none ]; then
