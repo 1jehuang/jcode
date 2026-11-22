@@ -13,6 +13,10 @@ impl MultiProvider {
             "claude" | "claude-oauth" | "claude-api" | "anthropic-api" | "anthropic-api-key" => {
                 "claude"
             }
+            "https" => "antigravity",
+            "code-assist-oauth" => "gemini",
+            "jcode-subscription" => "jcode",
+            "grok-build" | "grok-build-acp" => "grok-build",
             other => other,
         };
         if !models::is_agent_model_for_failover(model, provider) {
@@ -48,6 +52,10 @@ impl MultiProvider {
             match method {
                 "openai-api" | "openai-api-key" => "openai-api".to_owned(),
                 "claude-api" | "anthropic-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                "https" => "antigravity".to_owned(),
+                "code-assist-oauth" => "gemini".to_owned(),
+                "jcode-subscription" => "jcode".to_owned(),
+                "grok-build" | "grok-build-acp" => "grok-build".to_owned(),
                 // Unqualified OAuth routes do not identify a billing account.
                 "openai" | "claude" | "openai-oauth" | "claude-oauth" => return false,
                 other => other.to_owned(),

@@ -106,6 +106,12 @@ impl Agent {
         let provider = match provider.as_str() {
             "openai" => "openai",
             "claude" | "anthropic" => "claude",
+            "antigravity" => "antigravity",
+            "copilot" => "copilot",
+            "gemini" => "gemini",
+            "cursor" => "cursor",
+            "bedrock" => "bedrock",
+            "openrouter" => "openrouter",
             _ => return,
         };
         let label = self.provider.oauth_account_label();
@@ -114,16 +120,19 @@ impl Agent {
             self.provider.active_resolved_credential(),
             label.as_deref(),
         ) {
-            (_, Some(jcode_provider_core::ResolvedCredential::Oauth), Some(label)) => {
-                (provider, Some(label))
-            }
+            (
+                "openai" | "claude",
+                Some(jcode_provider_core::ResolvedCredential::Oauth),
+                Some(label),
+            ) => (provider, Some(label)),
             ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("openai-api", None)
             }
             ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("anthropic-api", None)
             }
-            _ => return,
+            ("openai" | "claude", _, _) => return,
+            (single, _, _) => (single, None),
         };
         if crate::provider::provider_unavailability_detail_for_account_label(key, label).is_none() {
             crate::provider::record_provider_unavailable_for_account_label(key, label, error);

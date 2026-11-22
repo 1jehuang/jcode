@@ -645,6 +645,11 @@ impl App {
             (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::ApiKey)) => {
                 Some("openai-api".to_string())
             }
+            (Some(ActiveProvider::Antigravity), _) => Some("https".to_string()),
+            (Some(ActiveProvider::Copilot), _) => Some("copilot".to_string()),
+            (Some(ActiveProvider::Cursor), _) => Some("cursor".to_string()),
+            (Some(ActiveProvider::Bedrock), _) => Some("bedrock".to_string()),
+            (Some(ActiveProvider::Gemini), _) => Some("code-assist-oauth".to_string()),
             _ => self.session.route_api_method.clone(),
         }
     }
@@ -712,25 +717,21 @@ impl App {
     /// The pool identity is independent of model availability. A failed source
     /// may be cooling down, but its explicit membership still governs consent.
     fn fallback_pool_identity(api_method: &str) -> Option<(String, bool)> {
-        if let Some((method, label)) = api_method.split_once('@') {
-            let provider = match method {
-                "claude-oauth" => "claude",
-                "openai-oauth" => "openai",
-                _ => return None,
-            };
-            return Some((
-                crate::auth::account_pool::account_key(provider, Some(label)),
-                false,
-            ));
-        }
-        match api_method {
-            "claude-oauth" | "openai-oauth" | "" => None,
-            "claude-api" | "anthropic-api" | "anthropic-api-key" => {
-                Some(("anthropic-api".into(), true))
-            }
-            "openai-api" | "openai-api-key" => Some(("openai-api".into(), true)),
-            other => Some((other.into(), true)),
-        }
+        let key = jcode_provider_core::route_pool_key(api_method)?;
+        let api_key = if key.ends_with("-api") {
+            true
+        } else if key.contains(':') || key == crate::auth::account_pool::JCODE_SUBSCRIPTION_KEY {
+            false
+        } else {
+            crate::provider_catalog::login_providers()
+                .iter()
+                .find(|login| login.id == key)
+                .map(|login| {
+                    login.auth_kind == crate::provider_catalog::LoginProviderAuthKind::ApiKey
+                })
+                .unwrap_or(true)
+        };
+        Some((key, api_key))
     }
 
     pub(super) fn clear_pending_fallback_offer(&mut self) {
