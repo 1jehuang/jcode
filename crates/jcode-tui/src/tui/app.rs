@@ -91,6 +91,7 @@ mod input_help;
 mod jarvis;
 mod jarvis_listen;
 mod jarvis_status;
+mod link_click;
 mod local;
 mod misc_ui;
 mod model_context;
