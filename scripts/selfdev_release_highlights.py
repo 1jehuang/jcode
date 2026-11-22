@@ -8,11 +8,13 @@ from pathlib import Path
 
 TAG = re.compile(r'selfdev-linux-([0-9a-f]{40})')
 MAX_ITEMS = 8
+MAX_BUNDLED_ITEMS = 50
+NO_USER_VISIBLE_RE = re.compile(r'^no user-visible changes\.?$', re.I)
 
 
-def bullets(text):
+def bullets(text, limit=MAX_ITEMS):
     items = []
-    for line in text[:16384].splitlines():
+    for line in text[:65536].splitlines():
         plain = ''.join(c if c.isprintable() else ' ' for c in line)
         plain = re.sub(r'^\s*[-*•]\s+', '', plain)
         plain = ' '.join(plain.split())
@@ -25,9 +27,16 @@ def bullets(text):
         plain = re.sub(r'([\\`*_\[\]~|])', r'\\\1', plain)
         plain = re.sub(r'^([#+=-]|\d+[.)])(?=\s|$)', lambda m: m[0][:-1] + '\\' + m[0][-1], plain)
         items.append('- ' + plain)
-        if len(items) == MAX_ITEMS:
+        if len(items) == limit:
             break
     return items
+
+
+def is_no_changes_placeholder(items):
+    return bool(items) and all(
+        NO_USER_VISIBLE_RE.fullmatch(item.removeprefix('- ').strip())
+        for item in items
+    )
 
 
 def git(*args):
@@ -38,7 +47,6 @@ def body(sha, notes, tags):
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('invalid commit SHA')
     items = bullets(notes)
-    authored = bool(items)
     previous = None
     for tag in tags:  # API release order, newest first; ignore unrelated histories.
         match = TAG.fullmatch(tag.strip())
@@ -49,17 +57,44 @@ def body(sha, notes, tags):
                 break
             if status != 1:
                 raise ValueError('unable to inspect release ancestry')
+    count = int(git('rev-list', '--count', f'{previous}..{sha}')) if previous else 0
+    # A single agent's "No user-visible changes." placeholder must not hide
+    # earlier commits bundled into the same release.
+    if previous and count > 1 and is_no_changes_placeholder(items):
+        items = []
+    authored = bool(items)
     if not items:
         revision = f'{previous}..{sha}' if previous else sha
         items = bullets(git('log', '--format=%s', '-n', str(MAX_ITEMS if previous else 1), revision))
     result = f'Portable Linux x86_64 self-dev build of {sha}.\n\n## Highlights\n\n' + '\n'.join(items or ['- Build ' + sha[:12]]) + '\n'
     if previous:
         revision = f'{previous}..{sha}'
-        count = int(git('rev-list', '--count', revision))
         compare = f'https://github.com/1jehuang/jcode/compare/{previous}...{sha}'
         result += f'\n## Bundled changes\n\n[View all {count} commits]({compare})\n'
         if authored:
-            result += '\n'.join(bullets(git('log', '--format=%s', '-n', str(MAX_ITEMS), revision))) + '\n'
+            bundled = bullets(
+                git('log', '--format=%s', '-n', str(MAX_BUNDLED_ITEMS), revision),
+                limit=MAX_BUNDLED_ITEMS,
+            )
+            if bundled:
+                result += '\n'.join(bundled) + '\n'
+            if count > len(bundled):
+                result += f'- … and {count - len(bundled)} more commits in the comparison above.\n'
+        elif count > len(items):
+            remaining_limit = max(0, MAX_BUNDLED_ITEMS - len(items))
+            extra = (
+                bullets(
+                    git('log', '--format=%s', f'--skip={len(items)}', '-n', str(remaining_limit), revision),
+                    limit=remaining_limit,
+                )
+                if remaining_limit > 0
+                else []
+            )
+            if extra:
+                result += '\n'.join(extra) + '\n'
+            shown = len(items) + len(extra)
+            if count > shown:
+                result += f'- … and {count - shown} more commits in the comparison above.\n'
     return result
 
 

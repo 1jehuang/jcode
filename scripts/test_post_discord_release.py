@@ -370,6 +370,162 @@ Fast startup.
             token="token",
         )
 
+    def test_linux_selfdev_includes_all_highlights_bundled_commits_and_clean_text(self) -> None:
+        base = "0" * 40
+        sha = "ab" * 20
+        tag = f"selfdev-linux-{sha}"
+        compare = f"https://github.com/1jehuang/jcode/compare/{base}...{sha}"
+        long_highlight = (
+            "Antigravity: support reasoning effort switching (low/medium/high/xhigh/swarm) "
+            "via sibling model tiers, default to gemini-4-neon-low, and present Google login "
+            "with pooled Gemini, Argon, and Claude quota bars"
+        )
+        body = (
+            f"Portable Linux x86_64 self-dev build of {sha}.\n\n"
+            "## Highlights\n\n"
+            f"- {long_highlight}\n"
+            r"- TUI &amp; diagnostics: \`jcode login\` &amp; auth\_remote improvements @everyone https://example.test/doc" + "\n"
+            "- Third highlight\n"
+            "- Fourth highlight\n"
+            "- Fifth highlight that must not be dropped\n"
+            "- Sixth highlight also preserved\n\n"
+            "## Bundled changes\n\n"
+            f"[View all 14 commits]({compare})\n"
+            "- Fifth highlight that must not be dropped\n"
+            "- Add scriptable --api-key and --api-key-env login flags\n"
+            "- Fix auth\\_remote &amp; model picker ranking\n"
+            "- … and 11 more commits in the comparison above.\n"
+        )
+        msg = MODULE.format_message(
+            tag=tag, name="", body=body, url="https://example.org/download"
+        )
+        self.assertLessEqual(MODULE.utf16_len(msg), MODULE.DISCORD_LIMIT)
+        self.assertIn(long_highlight, msg)
+        self.assertIn("TUI & diagnostics: `jcode login` & auth_remote improvements ＠everyone <https://example.test/doc>", msg)
+        self.assertNotIn("&amp;", msg)
+        self.assertNotIn(r"\`", msg)
+        self.assertNotIn(r"\_", msg)
+        self.assertIn("- Fifth highlight that must not be dropped", msg)
+        self.assertIn("- Sixth highlight also preserved", msg)
+        self.assertIn("**Bundled commits (14)**", msg)
+        self.assertIn("- Add scriptable --api-key and --api-key-env login flags", msg)
+        self.assertIn("- Fix auth_remote & model picker ranking", msg)
+        # Duplicate bundled commit matching a highlight should not be repeated.
+        self.assertEqual(msg.count("Fifth highlight that must not be dropped"), 1)
+        self.assertIn("- … and 11 more commits", msg)
+        self.assertTrue(msg.endswith(f"[Download & release notes](<https://example.org/download>) · [All 14 commits](<{compare}>)"))
+
+    def test_stale_checked_in_announcement_falls_back_to_release_body(self) -> None:
+        import hashlib
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            discord_dir = root / "discord"
+            discord_dir.mkdir()
+            changelog_file = root / "v9.0.0.json"
+            discord_file = discord_dir / "v9.0.0.json"
+            changelog_file.write_text('{"version":"9.0.0","highlights":["Full feature set"]}', encoding="utf-8")
+
+            # 1. Explicit changelog_sha256 mismatch is ignored as stale.
+            discord_file.write_text(
+                json.dumps({
+                    "changelog_sha256": "0" * 64,
+                    "messages": ["# jcode v9.0.0\n\nStale single bullet."],
+                }),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                self.assertIsNone(MODULE.load_announcement("v9.0.0"))
+
+            # Matching changelog_sha256 is accepted.
+            matching_sha = hashlib.sha256(changelog_file.read_bytes()).hexdigest()
+            discord_file.write_text(
+                json.dumps({
+                    "changelog_sha256": matching_sha,
+                    "messages": ["# jcode v9.0.0\n\nComplete summary."],
+                }),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                self.assertEqual(
+                    MODULE.load_announcement("v9.0.0"),
+                    ["# jcode v9.0.0\n\nComplete summary."],
+                )
+
+            # 2. Legacy plain-list announcement is rejected when git history shows
+            # changelog/v9.0.0.json was updated in a strictly newer commit.
+            def git(*args: str) -> None:
+                subprocess.run(
+                    ["git", *args],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            git("init", "-q")
+            git("config", "user.name", "Fixture")
+            git("config", "user.email", "fixture@example.invalid")
+            discord_file.write_text('["# jcode v9.0.0\\n\\nOld summary."]', encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "initial release notes")
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                self.assertEqual(
+                    MODULE.load_announcement("v9.0.0"),
+                    ["# jcode v9.0.0\n\nOld summary."],
+                )
+
+            # Update only changelog/v9.0.0.json in a newer commit.
+            changelog_file.write_text('{"version":"9.0.0","highlights":["Updated full feature set"]}', encoding="utf-8")
+            git("add", "v9.0.0.json")
+            git("commit", "-qm", "update changelog without updating discord override")
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                self.assertIsNone(MODULE.load_announcement("v9.0.0"))
+
+            # Updating discord override in a newer commit makes it valid again.
+            discord_file.write_text('["# jcode v9.0.0\\n\\nUpdated summary."]', encoding="utf-8")
+            git("add", "discord/v9.0.0.json")
+            git("commit", "-qm", "sync discord override")
+            with mock.patch.object(MODULE, "ANNOUNCEMENT_DIR", discord_dir):
+                self.assertEqual(
+                    MODULE.load_announcement("v9.0.0"),
+                    ["# jcode v9.0.0\n\nUpdated summary."],
+                )
+
+    def test_stable_message_strips_discord_markers_and_truncates_utf16_on_line_boundary(self) -> None:
+        url = "https://github.com/1jehuang/jcode/releases/tag/v1.0.9"
+        body = (
+            "### Highlights\n"
+            "- Feature A 🙂\n\n"
+            "<!-- jcode-discord-part:v1.0.9:deadbeef:1:sent:123 -->\n"
+            "<!-- jcode-discord-announced:v1.0.9 -->\n"
+        )
+        short = MODULE.format_message(tag="v1.0.9", name="v1.0.9", body=body, url=url)
+        self.assertNotIn("jcode-discord-", short)
+        self.assertIn("- Feature A 🙂", short)
+
+        long_body = "\n".join(f"- Bullet {i}: " + ("🙂" * 40) for i in range(40))
+        truncated = MODULE.format_message(tag="v1.0.9", name="v1.0.9", body=long_body, url=url)
+        self.assertLessEqual(MODULE.utf16_len(truncated), MODULE.DISCORD_LIMIT)
+        self.assertTrue(truncated.endswith(f"\n… (full notes: <{url}>)"))
+        # Should end on a full bullet line before the suffix, not mid-emoji/mid-bullet.
+        before_suffix = truncated.removesuffix(f"\n… (full notes: <{url}>)")
+        self.assertTrue(before_suffix.endswith("🙂" * 40))
+
+    def test_checked_in_discord_announcements_are_valid_and_not_stale(self) -> None:
+        if not MODULE.ANNOUNCEMENT_DIR.exists():
+            return
+        for path in sorted(MODULE.ANNOUNCEMENT_DIR.glob("*.json")):
+            tag = path.stem
+            with self.subTest(tag=tag):
+                messages = MODULE.load_announcement(tag)
+                self.assertIsNotNone(
+                    messages,
+                    f"{path} is stale relative to changelog/{tag}.json; update or remove it",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

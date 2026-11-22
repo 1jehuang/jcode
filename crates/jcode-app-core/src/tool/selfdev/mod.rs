@@ -550,7 +550,7 @@ impl SelfDevTool {
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
                     "reason": { "type": "string", "description": "Required for build/build-reload: private coordination reason, separate from public release notes." },
-                    "release_notes": { "type": "string", "description": "Required for build/build-reload: nonblank, public-facing build notes. For internal-only builds, state that there are no user-visible changes. Never include private reason, context, or session information." },
+                    "release_notes": { "type": "string", "description": "Required for build/build-reload: nonblank, public-facing build notes. Call action=logs first and summarize all user-visible changes bundled since the last published release (not only your own commit). For internal-only builds with no user-visible changes across the whole range, state that there are no user-visible changes. Never include private reason, context, or session information." },
                     "target": {
                         "type": "string",
                         "enum": ["auto", "tui", "all"],

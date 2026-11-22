@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 from pathlib import Path
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -38,6 +40,7 @@ PLATFORM_BLOCK = re.compile(
     r"<!-- jcode-platform-availability:end -->\n?",
     flags=re.DOTALL,
 )
+DISCORD_COMMENT_MARKER = re.compile(r"\n?<!-- jcode-discord-[^>]*-->\n?")
 
 
 def announcement_marker(tag: str) -> str:
@@ -50,10 +53,61 @@ def already_announced(body: str, tag: str) -> bool:
 
 def release_notes_for_discord(body: str) -> str:
     body = PLATFORM_BLOCK.sub("\n", body)
+    body = DISCORD_COMMENT_MARKER.sub("\n", body)
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 
 COMMIT_LINE = re.compile(r"^- \[[0-9a-f]{4,40}\]\([^)]*\) (.+)$")
+SELFDEV_ESCAPED = re.compile(r"\\([\\`*_\[\]~|#+=.-])")
+RAW_URL = re.compile(r"(?<!<)https?://[^\s<>()]+")
+MORE_COMMITS_BULLET = re.compile(r"^…\s+and\s+\d+\s+more\s+commits\b", re.I)
+
+
+def utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def truncate_utf16(text: str, max_units: int, suffix: str = "…") -> str:
+    if utf16_len(text) <= max_units:
+        return text
+    budget = max(0, max_units - utf16_len(suffix))
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        width = utf16_len(ch)
+        if used + width > budget:
+            break
+        out.append(ch)
+        used += width
+    return "".join(out).rstrip() + suffix
+
+
+def clean_selfdev_bullet(raw: str) -> str:
+    text = html.unescape(raw.strip())
+    text = SELFDEV_ESCAPED.sub(r"\1", text)
+    text = text.replace("@", "＠")
+    text = RAW_URL.sub(r"<\g<0>>", text)
+    return " ".join(text.split())
+
+
+def truncate_stable_message(message: str, url: str) -> str:
+    if utf16_len(message) <= DISCORD_LIMIT:
+        return message
+    suffix = f"\n… (full notes: <{url}>)"
+    budget = max(0, DISCORD_LIMIT - utf16_len(suffix))
+    out: list[str] = []
+    used = 0
+    for ch in message:
+        width = utf16_len(ch)
+        if used + width > budget:
+            break
+        out.append(ch)
+        used += width
+    prefix = "".join(out)
+    last_nl = prefix.rfind("\n")
+    if last_nl > 0 and utf16_len(prefix[:last_nl]) >= budget // 2:
+        prefix = prefix[:last_nl].rstrip()
+    return prefix + suffix
 
 
 def preview_commit_lines(notes: str) -> list[str]:
@@ -67,27 +121,131 @@ def preview_commit_lines(notes: str) -> list[str]:
         match = COMMIT_LINE.match(raw.strip())
         if match:
             # Neutralize any stray URL so the release link stays the only one.
-            subject = re.sub(r"(?<!<)https?://[^\s<>()]+", r"<\g<0>>", match.group(1))
+            subject = RAW_URL.sub(r"<\g<0>>", match.group(1))
             lines.append(f"- {subject}")
     return lines
 
 
 def format_message(*, tag: str, name: str, body: str, url: str) -> str:
     if match := re.fullmatch(r"selfdev-linux-([0-9a-f]{40})", tag):
-        lines = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
-        section = re.search(r"^## Highlights[ \t]*\n(.*?)(?=^#|^<!--|\Z)", body, re.M | re.S)
-        if section:
-            bullets = re.findall(r"^[-*] (\S[^\n]*)", section[1], re.M)
-            if bullets:
-                lines += ["", "**What changed**"]
-                for item in bullets[:4]:
-                    text = item.strip()
-                    lines.append("- " + (text if len(text) <= 160 else text[:159].rstrip() + "…"))
+        header = ["## jcode · Linux prerelease", f"Linux x86_64 · Build `{match[1][:9]}`"]
         links = f"[Download & release notes](<{url}>)"
-        comparison = re.search(r"^\[View all ([0-9]+) commits\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$", body, re.M)
+        comparison = re.search(
+            r"^\[View all ([0-9]+) commits\]\(https://github\.com/1jehuang/jcode/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})\)$",
+            body,
+            re.M,
+        )
+        total_commits: int | None = None
         if comparison and comparison[3] == match[1]:
+            total_commits = int(comparison[1])
             links += f" · [All {comparison[1]} commits](<https://github.com/1jehuang/jcode/compare/{comparison[2]}...{match[1]}>)"
-        lines += ["", links]
+
+        def extract_bullets(heading: str) -> list[str]:
+            section = re.search(
+                rf"^## {re.escape(heading)}[ \t]*\n(.*?)(?=^#|^<!--|\Z)",
+                body,
+                re.M | re.S,
+            )
+            if not section:
+                return []
+            extracted: list[str] = []
+            for raw in re.findall(r"^[-*] (\S[^\n]*)", section[1], re.M):
+                cleaned = clean_selfdev_bullet(raw)
+                if cleaned and not MORE_COMMITS_BULLET.match(cleaned):
+                    extracted.append(cleaned)
+            return extracted
+
+        highlights = extract_bullets("Highlights")
+        bundled_raw = extract_bullets("Bundled changes")
+        seen_highlights = {item.casefold() for item in highlights}
+        bundled = [item for item in bundled_raw if item.casefold() not in seen_highlights]
+        deduped_count = len(bundled_raw) - len(bundled)
+
+        footer = ["", links]
+        lines = list(header)
+        footer_units = utf16_len("\n".join(footer)) + 1
+
+        def remaining_units() -> int:
+            return DISCORD_LIMIT - utf16_len("\n".join(lines)) - footer_units
+
+        if highlights:
+            lines += ["", "**What changed**"]
+            omitted_highlights = 0
+            for idx, item in enumerate(highlights):
+                text = truncate_utf16(item, 280)
+                bullet = f"- {text}"
+                more_left = len(highlights) - idx - 1
+                reserve = (
+                    utf16_len(f"\n- … and {more_left} more")
+                    if more_left > 0
+                    else 0
+                )
+                if utf16_len(bullet) + 1 + reserve > remaining_units():
+                    if idx == 0:
+                        avail = remaining_units() - 3 - reserve
+                        if avail > 10:
+                            lines.append("- " + truncate_utf16(text, avail))
+                            continue
+                    omitted_highlights = len(highlights) - idx
+                    break
+                lines.append(bullet)
+            if omitted_highlights > 0:
+                more_line = f"- … and {omitted_highlights} more"
+                if utf16_len(more_line) + 1 <= remaining_units():
+                    lines.append(more_line)
+
+        if bundled:
+            heading = (
+                f"**Bundled commits ({total_commits})**"
+                if total_commits is not None and total_commits > 1
+                else "**Bundled commits**"
+            )
+            section_overhead = utf16_len(f"\n\n{heading}")
+            if remaining_units() > section_overhead + 30:
+                section_lines = ["", heading]
+                added = 0
+                for idx, item in enumerate(bundled):
+                    text = truncate_utf16(item, 160)
+                    bullet = f"- {text}"
+                    remaining_in_list = len(bundled) - (idx + 1)
+                    if total_commits is not None:
+                        unshown_after = max(
+                            remaining_in_list,
+                            total_commits - (idx + 1) - deduped_count,
+                        )
+                    else:
+                        unshown_after = remaining_in_list
+                    noun = "commit" if unshown_after == 1 else "commits"
+                    reserve = (
+                        utf16_len(f"\n- … and {unshown_after} more {noun}")
+                        if unshown_after > 0
+                        else 0
+                    )
+                    candidate_units = (
+                        utf16_len("\n".join(lines + section_lines + [bullet]))
+                        + footer_units
+                        + reserve
+                    )
+                    if candidate_units > DISCORD_LIMIT:
+                        break
+                    section_lines.append(bullet)
+                    added += 1
+                if added > 0:
+                    lines.extend(section_lines)
+                    if total_commits is not None:
+                        unshown = max(
+                            len(bundled) - added,
+                            total_commits - added - deduped_count,
+                        )
+                    else:
+                        unshown = len(bundled) - added
+                    if unshown > 0:
+                        noun = "commit" if unshown == 1 else "commits"
+                        more_line = f"- … and {unshown} more {noun}"
+                        if utf16_len(more_line) + 1 <= remaining_units():
+                            lines.append(more_line)
+
+        lines.extend(footer)
         return "\n".join(lines)
     if re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", tag):
         # An arbitrary URL cannot both fit Discord and remain intact. Fall back
@@ -100,24 +258,21 @@ def format_message(*, tag: str, name: str, body: str, url: str) -> str:
         if not commits:
             return header.rstrip()
         lines: list[str] = []
-        used = len(header)
+        used = utf16_len(header)
         for index, line in enumerate(commits):
             more = f"… {len(commits) - index} more"
             # Always reserve room for the overflow line unless this is the last.
-            reserve = 0 if index == len(commits) - 1 else len(more) + 1
-            if used + len(line) + 1 + reserve > DISCORD_LIMIT:
+            reserve = 0 if index == len(commits) - 1 else utf16_len(more) + 1
+            if used + utf16_len(line) + 1 + reserve > DISCORD_LIMIT:
                 lines.append(more)
                 break
             lines.append(line)
-            used += len(line) + 1
+            used += utf16_len(line) + 1
         return header + "\n".join(lines)
     title = f"## {tag}" + (f" — {name}" if name and name != tag else "")
     notes = release_notes_for_discord(body)
     message = title if not notes else f"{title}\n{notes}"
-    suffix = f"\n… (full notes: <{url}>)"
-    if len(message) > DISCORD_LIMIT:
-        message = message[: DISCORD_LIMIT - len(suffix)] + suffix
-    return message
+    return truncate_stable_message(message, url)
 
 
 def github_request(
@@ -210,6 +365,56 @@ def mark_release_announced(
 ANNOUNCEMENT_DIR = Path(__file__).resolve().parent.parent / "changelog" / "discord"
 
 
+def is_git_stale_announcement(discord_path: Path, changelog_path: Path) -> bool:
+    """Return True if changelog_path was updated after discord_path in git."""
+    repo_dir = changelog_path.parent
+    try:
+        discord_dirty = subprocess.run(
+            ["git", "-C", str(repo_dir), "status", "--porcelain", "--", str(discord_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        changelog_dirty = subprocess.run(
+            ["git", "-C", str(repo_dir), "status", "--porcelain", "--", str(changelog_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if discord_dirty.returncode == 0 and discord_dirty.stdout.strip():
+            return False
+        if changelog_dirty.returncode == 0 and changelog_dirty.stdout.strip():
+            return True
+        discord_rev = subprocess.run(
+            ["git", "-C", str(repo_dir), "log", "-1", "--format=%H", "--", str(discord_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        changelog_rev = subprocess.run(
+            ["git", "-C", str(repo_dir), "log", "-1", "--format=%H", "--", str(changelog_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if discord_rev.returncode != 0 or changelog_rev.returncode != 0:
+        return False
+    d_sha = discord_rev.stdout.strip()
+    c_sha = changelog_rev.stdout.strip()
+    if not (re.fullmatch(r"[0-9a-f]{40}", d_sha) and re.fullmatch(r"[0-9a-f]{40}", c_sha)):
+        return False
+    if d_sha == c_sha:
+        return False
+    ancestor = subprocess.run(
+        ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", d_sha, c_sha],
+        capture_output=True,
+        check=False,
+    )
+    return ancestor.returncode == 0
+
+
 def load_announcement(tag: str) -> list[str] | None:
     # Tags must never escape the checked-in announcement directory.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag):
@@ -217,17 +422,48 @@ def load_announcement(tag: str) -> list[str] | None:
     path = ANNOUNCEMENT_DIR / f"{tag}.json"
     if not path.exists():
         return None
+    expected_changelog_sha: str | None = None
     try:
-        messages = json.loads(path.read_text(encoding="utf-8"))
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            messages = parsed.get("messages")
+            sha_value = parsed.get("changelog_sha256")
+            if sha_value is not None:
+                if not isinstance(sha_value, str) or not re.fullmatch(r"[0-9a-f]{64}", sha_value):
+                    raise ValueError("changelog_sha256 must be a 64-char lowercase hex sha256")
+                expected_changelog_sha = sha_value
+        else:
+            messages = parsed
         if not isinstance(messages, list) or not messages:
             raise ValueError("expected a nonempty array of content strings")
         for index, content in enumerate(messages):
             if not isinstance(content, str) or not content.strip():
                 raise ValueError(f"message {index + 1} must be a nonempty string")
-            if len(content.encode("utf-16-le")) // 2 > DISCORD_LIMIT:
+            if utf16_len(content) > DISCORD_LIMIT:
                 raise ValueError(f"message {index + 1} exceeds 2000 UTF-16 units")
     except (OSError, ValueError, UnicodeError) as error:
         raise RuntimeError(f"Invalid Discord announcement {path}: {error}") from error
+
+    changelog_path = ANNOUNCEMENT_DIR.parent / f"{tag}.json"
+    if changelog_path.exists():
+        if expected_changelog_sha is not None:
+            actual_sha = hashlib.sha256(changelog_path.read_bytes()).hexdigest()
+            if actual_sha != expected_changelog_sha:
+                print(
+                    f"::warning::Ignoring stale Discord announcement {path}: "
+                    f"changelog_sha256 does not match {changelog_path}; "
+                    "falling back to GitHub release notes.",
+                    file=sys.stderr,
+                )
+                return None
+        elif is_git_stale_announcement(path, changelog_path):
+            print(
+                f"::warning::Ignoring stale Discord announcement {path}: "
+                f"{changelog_path} was updated in a newer commit; "
+                "falling back to GitHub release notes.",
+                file=sys.stderr,
+            )
+            return None
     return messages
 
 

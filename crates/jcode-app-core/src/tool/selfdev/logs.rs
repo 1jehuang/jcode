@@ -57,6 +57,22 @@ async fn get<T: serde::de::DeserializeOwned>(client: &reqwest::Client, path: &st
         .context("invalid canonical GitHub response")
 }
 
+fn should_stop_release_pagination(
+    rows: &[Release],
+    latest: Option<&(DateTime<Utc>, String)>,
+) -> bool {
+    if rows.len() < 100 {
+        return true;
+    }
+    let Some((latest_time, _)) = latest else {
+        return false;
+    };
+    rows.iter()
+        .rev()
+        .find_map(|r| r.published_at)
+        .is_some_and(|oldest| oldest < *latest_time)
+}
+
 async fn public_history(repo: &Path, text: &mut String) -> Result<()> {
     let head = git(repo, &["rev-parse", "HEAD"]).await?;
     ensure!(sha(&head), "invalid HEAD");
@@ -88,7 +104,7 @@ async fn public_history(repo: &Path, text: &mut String) -> Result<()> {
                 latest = Some((time, id.to_owned()));
             }
         }
-        if rows.len() < 100 {
+        if should_stop_release_pagination(&rows, latest.as_ref()) {
             break;
         }
     }
@@ -236,5 +252,29 @@ mod tests {
         r.prerelease = true;
         r.tag_name = id;
         assert!(r.reachable(&HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn release_pagination_stops_once_page_is_older_than_latest_found() {
+        let now = Utc::now();
+        let older = now - chrono::Duration::hours(2);
+        let rows: Vec<Release> = (0..100)
+            .map(|i| Release {
+                draft: false,
+                prerelease: true,
+                published_at: Some(if i == 0 { now } else { older }),
+                tag_name: format!("selfdev-linux-{}", "a".repeat(40)),
+            })
+            .collect();
+        assert!(!should_stop_release_pagination(&rows, None));
+        assert!(should_stop_release_pagination(
+            &rows,
+            Some(&(now, "a".repeat(40)))
+        ));
+        assert!(!should_stop_release_pagination(
+            &rows,
+            Some(&(older - chrono::Duration::hours(1), "a".repeat(40)))
+        ));
+        assert!(should_stop_release_pagination(&rows[..10], None));
     }
 }

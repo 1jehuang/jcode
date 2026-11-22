@@ -38,6 +38,8 @@ fn test_fast_release_prompt_uses_selfdev_cache() {
     assert!(fast_prompt.contains("quick-release.sh --fast-local"));
     assert!(fast_prompt.contains("warm target/selfdev cache"));
     assert!(fast_prompt.contains("Do not run the separate local macOS cross-build"));
+    assert!(fast_prompt.contains("last published release tag"));
+    assert!(fast_prompt.contains("changelog/discord/v<version>.json"));
     let prepare = fast_prompt.find("--prepare-fast").unwrap();
     let bump = fast_prompt.find("Bump the version").unwrap();
     assert!(prepare < bump);
