@@ -582,9 +582,7 @@ impl App {
                         DisplayMessage::user(
                             "Review the workspace setup and check the active configuration.",
                         ),
-                        DisplayMessage::assistant(
-                            "All checks passed. Ready for the next command.",
-                        ),
+                        DisplayMessage::assistant("All checks passed. Ready for the next command."),
                     ],
                 );
                 let saved_user_count = std::mem::replace(&mut self.display_user_message_count, 1);
@@ -685,7 +683,8 @@ impl App {
             for y in 0..h {
                 let mut runs: Vec<serde_json::Value> = Vec::new();
                 let mut cur_text = String::new();
-                let mut cur_style: Option<(Option<[u8; 3]>, Option<[u8; 3]>, u8)> = None;
+                type CellStyleKey = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
+                let mut cur_style: Option<CellStyleKey> = None;
                 for x in 0..w {
                     let cell = &buf[(x, y)];
                     let fg = color_to_rgb(cell.fg);

@@ -112,10 +112,9 @@ impl App {
     ) -> Option<Result<Option<crate::config::UpdateChannel>, &'static str>> {
         let rest = if trimmed == "/update" {
             ""
-        } else if let Some(rest) = trimmed.strip_prefix("/update ") {
-            rest.trim()
         } else {
-            return None;
+            let rest = trimmed.strip_prefix("/update ")?;
+            rest.trim()
         };
         if rest.is_empty() {
             return Some(Ok(None));
@@ -129,6 +128,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn start_background_client_update(&mut self, session_id: String) {
         self.start_background_client_update_with_channel(session_id, None);
     }

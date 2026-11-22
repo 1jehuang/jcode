@@ -615,12 +615,11 @@ fn todo_plan_user_intention_phrase_outranks_scattered_user_prompts() {
     );
     intent_match.first_user_prompt =
         Some("Make interactive, logical commits for the current uncommitted work.".into());
-    intent_match.user_intention = Some(
-        "Fix all remaining release-notes and Discord pipeline bugs found in the audit".into(),
-    );
-    intent_match.search_index.push_str(
-        " fix all remaining release-notes and discord pipeline bugs found in the audit",
-    );
+    intent_match.user_intention =
+        Some("Fix all remaining release-notes and Discord pipeline bugs found in the audit".into());
+    intent_match
+        .search_index
+        .push_str(" fix all remaining release-notes and discord pipeline bugs found in the audit");
 
     let mut picker = SessionPicker::new(vec![scattered, intent_match]);
     picker.search_query = "fix all remaining release".into();

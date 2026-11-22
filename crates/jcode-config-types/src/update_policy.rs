@@ -88,7 +88,10 @@ mod tests {
 
     #[test]
     fn parse_accepts_prerelease_and_preview_aliases() {
-        assert_eq!(UpdateChannel::parse("preview"), Some(UpdateChannel::Preview));
+        assert_eq!(
+            UpdateChannel::parse("preview"),
+            Some(UpdateChannel::Preview)
+        );
         assert_eq!(
             UpdateChannel::parse("prerelease"),
             Some(UpdateChannel::Preview)

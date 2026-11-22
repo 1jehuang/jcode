@@ -197,11 +197,7 @@ impl Entry {
                 .as_deref()
                 .unwrap_or("")
                 .to_owned(),
-            user_intention: session
-                .user_intention
-                .as_deref()
-                .unwrap_or("")
-                .to_owned(),
+            user_intention: session.user_intention.as_deref().unwrap_or("").to_owned(),
             intent_text: format!(
                 "{}\n{}\n{}\n{}",
                 session.title,
@@ -236,9 +232,14 @@ impl Entry {
     }
 
     fn exact_field(&self, query: &str) -> bool {
-        [&self.title, &self.short_name, &self.id, &self.user_intention]
-            .iter()
-            .any(|field| normalized_equals(field, query))
+        [
+            &self.title,
+            &self.short_name,
+            &self.id,
+            &self.user_intention,
+        ]
+        .iter()
+        .any(|field| normalized_equals(field, query))
             || self
                 .save_label
                 .as_ref()

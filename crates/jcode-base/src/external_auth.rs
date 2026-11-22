@@ -693,21 +693,26 @@ async fn validate_external_auth_review_candidate(
         ExternalAuthReviewAction::SharedExternal(source) => {
             validate_shared_external_import(source).await
         }
-        ExternalAuthReviewAction::CodexLegacy => {
-            Ok((validate_openai_import().await?, candidate.telemetry_auth_labels()))
-        }
-        ExternalAuthReviewAction::ClaudeCode | ExternalAuthReviewAction::ClaudeCodeNative => {
-            Ok((validate_claude_import().await?, candidate.telemetry_auth_labels()))
-        }
-        ExternalAuthReviewAction::GeminiCli => {
-            Ok((validate_gemini_import().await?, candidate.telemetry_auth_labels()))
-        }
-        ExternalAuthReviewAction::Copilot(_) => {
-            Ok((validate_copilot_import().await?, candidate.telemetry_auth_labels()))
-        }
-        ExternalAuthReviewAction::Cursor(_) => {
-            Ok((validate_cursor_import().await?, candidate.telemetry_auth_labels()))
-        }
+        ExternalAuthReviewAction::CodexLegacy => Ok((
+            validate_openai_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::ClaudeCode | ExternalAuthReviewAction::ClaudeCodeNative => Ok((
+            validate_claude_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::GeminiCli => Ok((
+            validate_gemini_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::Copilot(_) => Ok((
+            validate_copilot_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
+        ExternalAuthReviewAction::Cursor(_) => Ok((
+            validate_cursor_import().await?,
+            candidate.telemetry_auth_labels(),
+        )),
     }
 }
 
@@ -945,11 +950,29 @@ mod rerun_safety_tests {
 
     #[test]
     fn parse_selection_accepts_whitespace_and_skip_words() {
-        assert_eq!(parse_external_auth_review_selection("1 3", 3).unwrap(), vec![0, 2]);
-        assert_eq!(parse_external_auth_review_selection("1, 2", 3).unwrap(), vec![0, 1]);
-        assert!(parse_external_auth_review_selection("skip", 3).unwrap().is_empty());
-        assert!(parse_external_auth_review_selection("none", 3).unwrap().is_empty());
-        assert!(parse_external_auth_review_selection("n", 3).unwrap().is_empty());
+        assert_eq!(
+            parse_external_auth_review_selection("1 3", 3).unwrap(),
+            vec![0, 2]
+        );
+        assert_eq!(
+            parse_external_auth_review_selection("1, 2", 3).unwrap(),
+            vec![0, 1]
+        );
+        assert!(
+            parse_external_auth_review_selection("skip", 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_external_auth_review_selection("none", 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_external_auth_review_selection("n", 3)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1044,7 +1067,11 @@ mod rerun_safety_tests {
         )
         .unwrap();
 
-        assert!(pending_external_auth_review_candidates().unwrap().is_empty());
+        assert!(
+            pending_external_auth_review_candidates()
+                .unwrap()
+                .is_empty()
+        );
         assert!(!auth::AuthStatus::has_any_untrusted_external_auth());
     }
 
@@ -1073,7 +1100,10 @@ mod rerun_safety_tests {
             .unwrap();
         assert_eq!(outcome.imported, 1, "messages: {:?}", outcome.messages);
         assert!(
-            outcome.messages.iter().any(|m| m.contains("auth_file=true")),
+            outcome
+                .messages
+                .iter()
+                .any(|m| m.contains("auth_file=true")),
             "messages: {:?}",
             outcome.messages
         );

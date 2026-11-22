@@ -191,7 +191,9 @@ pub(super) async fn do_before_after(
         let root = repo_dir
             .clone()
             .or_else(|| std::env::current_dir().ok())
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve repo directory for attach_to_discord"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("cannot resolve repo directory for attach_to_discord")
+            })?;
         let slug = sanitize_slug(
             args.label
                 .as_deref()
@@ -242,7 +244,11 @@ pub(super) async fn do_before_after(
             .arg("--after")
             .arg(&after_path);
     }
-    if let Some(label) = args.before_label.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(label) = args
+        .before_label
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
         cmd.arg("--before-label").arg(label.trim());
     }
     if let Some(label) = args.after_label.as_deref().filter(|s| !s.trim().is_empty()) {

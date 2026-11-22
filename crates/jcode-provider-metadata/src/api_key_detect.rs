@@ -35,13 +35,8 @@ const UNAMBIGUOUS_KEY_PREFIXES: &[(&str, &str)] = &[
 ];
 
 /// Providers that commonly issue generic `sk-` keys without a vendor sub-prefix.
-pub const AMBIGUOUS_SK_CANDIDATES: &[&str] = &[
-    "openai-api",
-    "deepseek",
-    "moonshotai",
-    "kimi",
-    "opencode",
-];
+pub const AMBIGUOUS_SK_CANDIDATES: &[&str] =
+    &["openai-api", "deepseek", "moonshotai", "kimi", "opencode"];
 
 /// Canonical aliases that open the "Paste an API key" flow directly.
 pub fn is_auto_api_key_login_alias(input: &str) -> bool {

@@ -433,12 +433,11 @@ pub fn run_update(channel: Option<&str>, set_channel_only: bool) -> Result<()> {
     } else if set_channel_only {
         anyhow::bail!("--set-channel-only requires --channel, --prerelease, or --stable");
     }
-    let check_label = match explicit_channel
-        .unwrap_or_else(|| crate::config::config().features.update_channel)
-    {
-        crate::config::UpdateChannel::Preview => "Checking GitHub for latest prerelease...",
-        _ => "Checking GitHub for latest release...",
-    };
+    let check_label =
+        match explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel) {
+            crate::config::UpdateChannel::Preview => "Checking GitHub for latest prerelease...",
+            _ => "Checking GitHub for latest release...",
+        };
     super::output::print_centered(check_label);
     match update::check_for_update_with_channel_blocking(explicit_channel) {
         Ok(Some(release)) => {

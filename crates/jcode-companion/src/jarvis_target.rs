@@ -51,6 +51,7 @@ pub(crate) fn acquire_dictation_suppress() -> Option<std::fs::File> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .mode(0o600)
         .custom_flags(0o400000) // O_NOFOLLOW on Linux
         .open(dir.join("dictation.lock"))

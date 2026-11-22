@@ -99,6 +99,7 @@ pub(in crate::tui::app) fn encode_oauth_login_card(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::tui::app) fn encode_device_login_card(
     provider_label: &str,
     url: &str,

@@ -305,9 +305,7 @@ fn render_markdown_with_options(
                     && let Some((hash, width, height)) =
                         mermaid::register_markdown_image_with_dims(&local_path)
                 {
-                    let chat_width = max_width
-                        .unwrap_or(80)
-                        .clamp(20, u16::MAX as usize) as u16;
+                    let chat_width = max_width.unwrap_or(80).clamp(20, u16::MAX as usize) as u16;
                     let (rows, cols) = mermaid::inline_fit_geometry(width, height, chat_width, 28);
                     flush_current_line_with_alignment(
                         &mut lines,
@@ -338,7 +336,8 @@ fn render_markdown_with_options(
                         current_cell.push_str(&label);
                     } else {
                         ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
-                        current_spans.push(Span::styled(label, Style::default().fg(md_dim_color())));
+                        current_spans
+                            .push(Span::styled(label, Style::default().fg(md_dim_color())));
                     }
                 }
                 in_image = false;

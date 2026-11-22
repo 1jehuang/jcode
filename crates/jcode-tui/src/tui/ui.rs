@@ -2627,7 +2627,7 @@ pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Opt
     }
     let snapshot = copy_snapshot_for_pane(point.pane)?;
     let text = snapshot.wrapped_plain_line(point.abs_line)?;
-    let (start, end) = find_oauth_sign_in_label_span(&text)?;
+    let (start, end) = find_oauth_sign_in_label_span(text)?;
     if point.column < start || point.column >= end {
         return None;
     }

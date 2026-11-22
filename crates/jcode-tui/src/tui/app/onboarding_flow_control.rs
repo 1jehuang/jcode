@@ -742,6 +742,7 @@ impl App {
     }
 
     /// Compatibility helper mapping Yes/No to OpenAI vs Skip.
+    #[cfg(test)]
     pub(super) fn onboarding_answer_login_openai(&mut self, wants_openai: bool) {
         use crate::tui::OnboardingLoginChoice;
         self.onboarding_choose_login(if wants_openai {

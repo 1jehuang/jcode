@@ -11,9 +11,9 @@ pub use jcode_config_types::{
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
     NotificationsConfig, PowerConfig, ProviderCompactionConfig, ProviderConfig,
-    ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
+    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};

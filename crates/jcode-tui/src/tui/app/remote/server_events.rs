@@ -1694,70 +1694,72 @@ fn handle_server_event_inner(
                         "⚠ Auto-reload suppressed after repeated reload attempts. Check for duplicate jcode installations on PATH or run `jcode server stop`.".to_string(),
                     ));
                 } else {
-                let client_detected_stale = server_release_is_older_than_client(
-                    server_version.as_deref(),
-                    &client_release_version(),
-                );
-                app.remote_server_version = server_version;
-                app.remote_server_short_name = server_name.clone();
-                app.remote_server_icon = server_icon.clone();
-                app.remote_server_has_update = server_has_update;
-                app.pending_server_reload = true;
-                // Remember the session the server told us about *before* bailing
-                // out. We deliberately return below without assigning
-                // `app.remote_session_id` (history stays deferred until after the
-                // server reloads), but the client reload handoff still needs a
-                // real session id to resume. Without this, the handoff falls back
-                // to a freshly fabricated `ses_<ts>_<rand>` id that no store can
-                // ever resolve, leaving the user at a "No session found matching
-                // ..." shell prompt after an auto-update (issue #328).
-                if !session_id.is_empty() {
-                    app.pending_reload_session_id = Some(session_id.clone());
-                }
-                app.clear_remote_startup_phase();
-                if client_detected_stale {
-                    // The client independently measured the server's release as
-                    // older than its own. This covers both a pre-self-heal daemon
-                    // (server_has_update: None) AND a daemon that self-reports
-                    // "no update" because its own shared-server channel still
-                    // points at its old binary (the "current client, stale
-                    // server" report). Repair the channel client-side so the
-                    // forced reload below has a strictly-newer binary to exec
-                    // into instead of re-execing the same old build.
-                    match crate::build::repair_stale_shared_server_channel() {
-                        Ok(crate::build::SharedServerRepair::Repaired { repaired_to, .. }) => {
-                            crate::logging::info(&format!(
-                                "stale-server repair: repointed shared-server channel to {} before reloading older server",
-                                repaired_to
-                            ));
-                        }
-                        Ok(crate::build::SharedServerRepair::AlreadyCurrent) => {}
-                        Err(err) => {
-                            crate::logging::warn(&format!(
-                                "stale-server repair: failed to repoint shared-server channel: {}",
-                                err
-                            ));
-                        }
-                    }
-                    app.set_status_notice(
-                        "Connected server is an older release; reloading it before attach",
+                    let client_detected_stale = server_release_is_older_than_client(
+                        server_version.as_deref(),
+                        &client_release_version(),
                     );
-                    app.push_display_message(DisplayMessage::system(format!(
+                    app.remote_server_version = server_version;
+                    app.remote_server_short_name = server_name.clone();
+                    app.remote_server_icon = server_icon.clone();
+                    app.remote_server_has_update = server_has_update;
+                    app.pending_server_reload = true;
+                    // Remember the session the server told us about *before* bailing
+                    // out. We deliberately return below without assigning
+                    // `app.remote_session_id` (history stays deferred until after the
+                    // server reloads), but the client reload handoff still needs a
+                    // real session id to resume. Without this, the handoff falls back
+                    // to a freshly fabricated `ses_<ts>_<rand>` id that no store can
+                    // ever resolve, leaving the user at a "No session found matching
+                    // ..." shell prompt after an auto-update (issue #328).
+                    if !session_id.is_empty() {
+                        app.pending_reload_session_id = Some(session_id.clone());
+                    }
+                    app.clear_remote_startup_phase();
+                    if client_detected_stale {
+                        // The client independently measured the server's release as
+                        // older than its own. This covers both a pre-self-heal daemon
+                        // (server_has_update: None) AND a daemon that self-reports
+                        // "no update" because its own shared-server channel still
+                        // points at its old binary (the "current client, stale
+                        // server" report). Repair the channel client-side so the
+                        // forced reload below has a strictly-newer binary to exec
+                        // into instead of re-execing the same old build.
+                        match crate::build::repair_stale_shared_server_channel() {
+                            Ok(crate::build::SharedServerRepair::Repaired {
+                                repaired_to, ..
+                            }) => {
+                                crate::logging::info(&format!(
+                                    "stale-server repair: repointed shared-server channel to {} before reloading older server",
+                                    repaired_to
+                                ));
+                            }
+                            Ok(crate::build::SharedServerRepair::AlreadyCurrent) => {}
+                            Err(err) => {
+                                crate::logging::warn(&format!(
+                                    "stale-server repair: failed to repoint shared-server channel: {}",
+                                    err
+                                ));
+                            }
+                        }
+                        app.set_status_notice(
+                            "Connected server is an older release; reloading it before attach",
+                        );
+                        app.push_display_message(DisplayMessage::system(format!(
                         "ℹ Connected server is running an older release ({}) than this client ({}). Reloading it before applying session state. If reload does not take, run `jcode server stop` and relaunch. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing.",
                         app.remote_server_version.as_deref().unwrap_or("unknown"),
                         jcode_build_meta::version(),
                     )));
-                } else {
-                    app.set_status_notice(
-                        "Server/runtime mismatch detected; reloading server before attach",
-                    );
-                    app.push_display_message(DisplayMessage::system(
+                    } else {
+                        app.set_status_notice(
+                            "Server/runtime mismatch detected; reloading server before attach",
+                        );
+                        app.push_display_message(DisplayMessage::system(
                         "ℹ Connected server binary differs from the installed client channel. Reloading the server before applying remote session state. Set JCODE_ALLOW_SERVER_VERSION_MISMATCH=1 only for intentional compatibility testing."
                             .to_string(),
                     ));
-                }
-                app.update_terminal_title();
-                return false;
+                    }
+                    app.update_terminal_title();
+                    return false;
                 }
             } else {
                 clear_auto_reload_loop_guard();

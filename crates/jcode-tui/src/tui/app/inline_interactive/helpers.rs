@@ -261,14 +261,14 @@ impl App {
         match entry.action {
             crate::tui::PickerAction::AutoApiKey
             | crate::tui::PickerAction::ExpandLoginProviders => true,
-            crate::tui::PickerAction::Login(provider) => match provider.target {
+            crate::tui::PickerAction::Login(provider) => matches!(
+                provider.target,
                 crate::provider_catalog::LoginProviderTarget::OpenAi
-                | crate::provider_catalog::LoginProviderTarget::Claude
-                | crate::provider_catalog::LoginProviderTarget::Antigravity
-                | crate::provider_catalog::LoginProviderTarget::Gemini
-                | crate::provider_catalog::LoginProviderTarget::AutoImport => true,
-                _ => false,
-            },
+                    | crate::provider_catalog::LoginProviderTarget::Claude
+                    | crate::provider_catalog::LoginProviderTarget::Antigravity
+                    | crate::provider_catalog::LoginProviderTarget::Gemini
+                    | crate::provider_catalog::LoginProviderTarget::AutoImport
+            ),
             crate::tui::PickerAction::Account(_) => false,
             _ => true,
         }
@@ -279,10 +279,9 @@ impl App {
     ) {
         if picker.filter.is_empty() {
             let collapsed_login = picker.kind == crate::tui::PickerKind::Login
-                && picker
-                    .entries
-                    .iter()
-                    .any(|entry| matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders));
+                && picker.entries.iter().any(|entry| {
+                    matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders)
+                });
             if collapsed_login {
                 picker.filtered = picker
                     .entries

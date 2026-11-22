@@ -2011,6 +2011,7 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
+    #[cfg(test)]
     fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
         crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
     }

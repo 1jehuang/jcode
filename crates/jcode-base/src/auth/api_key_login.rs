@@ -12,10 +12,7 @@ pub enum ApiKeyValidationOutcome {
     /// Endpoint returned 2xx; credentials are valid.
     Verified,
     /// Endpoint explicitly rejected the credentials (401/403).
-    Rejected {
-        status: u16,
-        detail: Option<String>,
-    },
+    Rejected { status: u16, detail: Option<String> },
     /// Probe could not determine validity (offline, timeout, 404/5xx, or unsupported provider).
     Unverified { reason: String },
 }
@@ -169,7 +166,11 @@ pub fn save_api_key_for_provider(
 
     let saved = match provider.target {
         LoginProviderTarget::ClaudeApiKey => {
-            crate::provider_catalog::save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
+            crate::provider_catalog::save_named_api_key(
+                "anthropic.env",
+                "ANTHROPIC_API_KEY",
+                &key,
+            )?;
             SavedApiKeyLogin {
                 provider_id: provider.id,
                 display_name: provider.display_name,
@@ -206,7 +207,11 @@ pub fn save_api_key_for_provider(
             }
         }
         LoginProviderTarget::Bedrock => {
-            crate::provider_catalog::save_named_api_key("bedrock.env", "AWS_BEARER_TOKEN_BEDROCK", &key)?;
+            crate::provider_catalog::save_named_api_key(
+                "bedrock.env",
+                "AWS_BEARER_TOKEN_BEDROCK",
+                &key,
+            )?;
             crate::provider_catalog::save_env_value_to_env_file(
                 "AWS_REGION",
                 "bedrock.env",
@@ -234,7 +239,10 @@ pub fn save_api_key_for_provider(
         }
         LoginProviderTarget::OpenAiCompatible(profile) => {
             if profile.id == "muse-subscription" {
-                bail!("{} uses device code login, not an API key.", provider.display_name);
+                bail!(
+                    "{} uses device code login, not an API key.",
+                    provider.display_name
+                );
             }
             let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
             if resolved.requires_api_key {
@@ -264,10 +272,7 @@ pub fn save_api_key_for_provider(
                 default_model: resolved.default_model,
             }
         }
-        _ => bail!(
-            "{} does not use API key login.",
-            provider.display_name
-        ),
+        _ => bail!("{} does not use API key login.", provider.display_name),
     };
 
     crate::auth::AuthStatus::invalidate_cache();
@@ -336,6 +341,9 @@ mod tests {
         let client = reqwest::Client::new();
         let outcome =
             validate_api_key_with_client(&client, provider, "sk-proj-test", Some(&base)).await;
-        assert!(matches!(outcome, ApiKeyValidationOutcome::Unverified { .. }));
+        assert!(matches!(
+            outcome,
+            ApiKeyValidationOutcome::Unverified { .. }
+        ));
     }
 }

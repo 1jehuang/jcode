@@ -67,9 +67,7 @@ fn cloud_move_selection_defaults_to_swarm_and_independent_sessions_are_explicit(
 }
 
 #[inline(never)]
-fn parse_update_command(
-    argv: &[&str],
-) -> Result<(Option<String>, bool, bool, bool), clap::Error> {
+fn parse_update_command(argv: &[&str]) -> Result<(Option<String>, bool, bool, bool), clap::Error> {
     let owned: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
     std::thread::Builder::new()
         .name("parse-update-cli".to_string())

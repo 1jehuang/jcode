@@ -48,7 +48,9 @@ fn preview_discovery_accepts_selfdev_and_semver_preview_tags() {
     ] {
         assert!(!preview_is_installable(&preview_fixture(tag)), "{tag}");
     }
-    assert!(semver_preview_version("v1.0.0-preview.10") > semver_preview_version("v1.0.0-preview.9"));
+    assert!(
+        semver_preview_version("v1.0.0-preview.10") > semver_preview_version("v1.0.0-preview.9")
+    );
 }
 
 #[test]

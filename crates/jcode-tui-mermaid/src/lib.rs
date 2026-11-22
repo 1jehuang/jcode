@@ -262,8 +262,7 @@ pub use runtime::{
     is_video_export_mode, native_image_protocol_available, protocol_type,
     rediscover_external_image, register_external_image, register_inline_image,
     register_markdown_image, register_markdown_image_with_dims, set_video_export_mode,
-    uses_text_image_fallback,
-    with_image_protocol_override,
+    uses_text_image_fallback, with_image_protocol_override,
 };
 pub use viewport_render::{
     InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,

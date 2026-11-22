@@ -24,11 +24,7 @@ pub(super) fn selfdev_prerelease_sha(tag: &str) -> Option<&str> {
     {
         return None;
     }
-    if sha.len() != 40
-        || !sha
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
         return None;
     }
     Some(sha)
@@ -112,9 +108,12 @@ fn preview_is_installable(candidate: &PreviewRelease) -> bool {
             .is_some_and(|asset| asset._size > 0 && !asset.browser_download_url.is_empty())
 }
 
-fn preview_sort_key(
-    release: &GitHubRelease,
-) -> (Option<chrono::DateTime<chrono::Utc>>, Option<(u64, u64, u64, u64)>) {
+type PreviewSortKey = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<(u64, u64, u64, u64)>,
+);
+
+fn preview_sort_key(release: &GitHubRelease) -> PreviewSortKey {
     (
         parse_release_timestamp(release._published_at.as_deref()),
         semver_preview_version(&release.tag_name),
@@ -126,10 +125,9 @@ fn select_latest_preview(
     releases: impl IntoIterator<Item = PreviewRelease>,
 ) {
     for candidate in releases.into_iter().filter(preview_is_installable) {
-        if latest
-            .as_ref()
-            .is_none_or(|previous| preview_sort_key(&candidate.release) > preview_sort_key(previous))
-        {
+        if latest.as_ref().is_none_or(|previous| {
+            preview_sort_key(&candidate.release) > preview_sort_key(previous)
+        }) {
             *latest = Some(candidate.release);
         }
     }
