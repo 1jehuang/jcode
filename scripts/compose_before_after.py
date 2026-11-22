@@ -9,6 +9,7 @@ new jcode binaries, and produces a crisp dark-themed comparison card.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import re
 import sys
@@ -74,6 +75,70 @@ def render_text_frame(
     for line in raw_lines:
         draw.text((padding, y), line, fill=TEXT_COLOR, font=font)
         y += line_h
+    return img
+
+
+def render_cells_frame(
+    data: dict,
+    *,
+    font_size: int = 15,
+    padding: int = 14,
+) -> Image.Image:
+    """Render a jcode `client:cells` JSON frame with exact RGB colors and styles."""
+    width_cells = max(1, int(data.get("width", 80)))
+    height_cells = max(1, int(data.get("height", 24)))
+    rows = data.get("rows") or []
+
+    font = load_mono_font(font_size)
+    bold_font = font
+    for candidate in (
+        "/usr/share/fonts/noto/NotoSansMono-Bold.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    ):
+        if Path(candidate).is_file():
+            try:
+                bold_font = ImageFont.truetype(candidate, size=font_size)
+                break
+            except OSError:
+                continue
+
+    bbox = font.getbbox("M")
+    cell_w = max(8, bbox[2] - bbox[0])
+    cell_h = max(font_size + 5, (bbox[3] - bbox[1]) + 6)
+
+    img_w = width_cells * cell_w + padding * 2
+    img_h = height_cells * cell_h + padding * 2
+    default_bg = CARD_BG
+    default_fg = TEXT_COLOR
+
+    img = Image.new("RGB", (img_w, img_h), default_bg)
+    draw = ImageDraw.Draw(img)
+
+    for row_idx, row in enumerate(rows[:height_cells]):
+        y = padding + row_idx * cell_h
+        col = 0
+        for run in row:
+            if not isinstance(run, list) or len(run) < 4:
+                continue
+            text, fg_raw, bg_raw, flags = run[0], run[1], run[2], int(run[3])
+            fg = tuple(fg_raw) if fg_raw is not None else default_fg
+            bg = tuple(bg_raw) if bg_raw is not None else default_bg
+            if flags & 16:  # REVERSED
+                fg, bg = bg, fg
+            if flags & 4:  # DIM
+                fg = tuple((c * 55 + b * 45) // 100 for c, b in zip(fg, bg))
+            run_font = bold_font if (flags & 1) else font
+            x0 = padding + col * cell_w
+            run_cols = len(text)
+            if bg != default_bg and run_cols > 0:
+                draw.rectangle([x0, y, x0 + run_cols * cell_w, y + cell_h], fill=bg)
+            if text.strip():
+                draw.text((x0, y + 1), text, fill=fg, font=run_font)
+            if (flags & 8) and run_cols > 0:  # UNDERLINED
+                draw.line([x0, y + cell_h - 2, x0 + run_cols * cell_w, y + cell_h - 2], fill=fg, width=1)
+            col += run_cols
+
     return img
 
 
@@ -222,6 +287,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--after", type=Path, help="Path to after PNG image")
     parser.add_argument("--before-text", type=Path, help="Path to before TUI frame text")
     parser.add_argument("--after-text", type=Path, help="Path to after TUI frame text")
+    parser.add_argument("--before-cells", type=Path, help="Path to before `client:cells` JSON")
+    parser.add_argument("--after-cells", type=Path, help="Path to after `client:cells` JSON")
+    parser.add_argument("--cells", type=Path, help="Render a single `client:cells` JSON to PNG")
     parser.add_argument("--before-label", default="Before", help="Badge label for before panel")
     parser.add_argument("--after-label", default="After", help="Badge label for after panel")
     parser.add_argument("--title", default=None, help="Optional header title above both panels")
@@ -241,15 +309,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.cells:
+        data = json.loads(args.cells.read_text(encoding="utf-8"))
+        rendered = render_cells_frame(data)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        rendered.save(args.output, format="PNG")
+        print(f"Wrote {args.output} ({rendered.width}x{rendered.height})")
+        return 0
     if args.before and args.after:
         before_img = Image.open(args.before)
         after_img = Image.open(args.after)
+    elif args.before_cells and args.after_cells:
+        before_img = render_cells_frame(json.loads(args.before_cells.read_text(encoding="utf-8")))
+        after_img = render_cells_frame(json.loads(args.after_cells.read_text(encoding="utf-8")))
     elif args.before_text and args.after_text:
         before_img = render_text_frame(args.before_text.read_text(encoding="utf-8"))
         after_img = render_text_frame(args.after_text.read_text(encoding="utf-8"))
     else:
         print(
-            "Provide either (--before and --after) or (--before-text and --after-text)",
+            "Provide --cells, (--before and --after), (--before-cells and --after-cells), or (--before-text and --after-text)",
             file=sys.stderr,
         )
         return 2

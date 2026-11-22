@@ -550,6 +550,134 @@ impl App {
                 })
                 .collect();
             serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
+        } else if cmd == "cells" || cmd.starts_with("cells:") {
+            let (default_w, default_h) = crate::tui::visual_debug::latest_frame()
+                .map(|f| f.terminal_size)
+                .unwrap_or((100, 36));
+            let (w, h) = cmd
+                .strip_prefix("cells:")
+                .and_then(|spec| {
+                    let (ws, hs) = spec.trim().split_once('x')?;
+                    let w = ws.parse::<u16>().ok()?.clamp(20, 300);
+                    let h = hs.parse::<u16>().ok()?.clamp(8, 120);
+                    Some((w, h))
+                })
+                .unwrap_or((default_w.clamp(20, 300), default_h.clamp(8, 120)));
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = match ratatui::Terminal::new(backend) {
+                Ok(t) => t,
+                Err(e) => return format!("cells error: {}", e),
+            };
+            if let Err(e) = terminal.draw(|frame| crate::tui::ui::draw(frame, self)) {
+                return format!("cells error: {}", e);
+            }
+            let buf = terminal.backend().buffer();
+            let color_to_rgb = |c: ratatui::style::Color| -> Option<[u8; 3]> {
+                use ratatui::style::Color;
+                match c {
+                    Color::Reset => None,
+                    Color::Rgb(r, g, b) => Some([r, g, b]),
+                    Color::Black => Some([16, 18, 24]),
+                    Color::Red => Some([235, 111, 146]),
+                    Color::Green => Some([120, 232, 168]),
+                    Color::Yellow => Some([246, 193, 119]),
+                    Color::Blue => Some([138, 180, 248]),
+                    Color::Magenta => Some([196, 167, 231]),
+                    Color::Cyan => Some([120, 210, 230]),
+                    Color::Gray => Some([180, 188, 200]),
+                    Color::DarkGray => Some([108, 118, 134]),
+                    Color::LightRed => Some([255, 138, 128]),
+                    Color::LightGreen => Some([158, 245, 192]),
+                    Color::LightYellow => Some([255, 224, 150]),
+                    Color::LightBlue => Some([168, 204, 255]),
+                    Color::LightMagenta => Some([216, 190, 250]),
+                    Color::LightCyan => Some([156, 230, 245]),
+                    Color::White => Some([235, 240, 248]),
+                    Color::Indexed(idx) => {
+                        if idx < 16 {
+                            let base: [[u8; 3]; 16] = [
+                                [16, 18, 24],
+                                [235, 111, 146],
+                                [120, 232, 168],
+                                [246, 193, 119],
+                                [138, 180, 248],
+                                [196, 167, 231],
+                                [120, 210, 230],
+                                [180, 188, 200],
+                                [108, 118, 134],
+                                [255, 138, 128],
+                                [158, 245, 192],
+                                [255, 224, 150],
+                                [168, 204, 255],
+                                [216, 190, 250],
+                                [156, 230, 245],
+                                [235, 240, 248],
+                            ];
+                            Some(base[idx as usize])
+                        } else if idx < 232 {
+                            let n = idx - 16;
+                            let r = (n / 36) % 6;
+                            let g = (n / 6) % 6;
+                            let b = n % 6;
+                            let to_c = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                            Some([to_c(r), to_c(g), to_c(b)])
+                        } else {
+                            let v = 8 + (idx - 232) * 10;
+                            Some([v, v, v])
+                        }
+                    }
+                }
+            };
+            let mut rows = Vec::with_capacity(h as usize);
+            for y in 0..h {
+                let mut runs: Vec<serde_json::Value> = Vec::new();
+                let mut cur_text = String::new();
+                let mut cur_style: Option<(Option<[u8; 3]>, Option<[u8; 3]>, u8)> = None;
+                for x in 0..w {
+                    let cell = &buf[(x, y)];
+                    let fg = color_to_rgb(cell.fg);
+                    let bg = color_to_rgb(cell.bg);
+                    let mut flags: u8 = 0;
+                    if cell.modifier.contains(ratatui::style::Modifier::BOLD) {
+                        flags |= 1;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::ITALIC) {
+                        flags |= 2;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::DIM) {
+                        flags |= 4;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::UNDERLINED) {
+                        flags |= 8;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                        flags |= 16;
+                    }
+                    let style = (fg, bg, flags);
+                    let sym = cell.symbol();
+                    let ch = if sym.is_empty() { " " } else { sym };
+                    if cur_style == Some(style) {
+                        cur_text.push_str(ch);
+                    } else {
+                        if let Some((pfg, pbg, pflags)) = cur_style.take() {
+                            runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                            cur_text.clear();
+                        }
+                        cur_text.push_str(ch);
+                        cur_style = Some(style);
+                    }
+                }
+                if let Some((pfg, pbg, pflags)) = cur_style {
+                    runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                }
+                rows.push(serde_json::Value::Array(runs));
+            }
+            serde_json::to_string(&serde_json::json!({
+                "width": w,
+                "height": h,
+                "rows": rows,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "screen" {
             // Capture current visual state
             use crate::tui::visual_debug;

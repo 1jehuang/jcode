@@ -54,6 +54,21 @@ class ComposeBeforeAfterTests(unittest.TestCase):
         self.assertLess(cropped.width, 400)
         self.assertLess(cropped.height, 200)
 
+    def test_render_cells_frame_preserves_colors_and_dimensions(self) -> None:
+        cells = {
+            "width": 20,
+            "height": 4,
+            "rows": [
+                [["jcode", [120, 210, 230], None, 1], [" v1.0.4", [180, 188, 200], None, 0]],
+                [["status", [120, 232, 168], [35, 40, 50], 0]],
+                [["dim", [220, 220, 215], None, 4]],
+                [["under", [138, 180, 248], None, 8]],
+            ],
+        }
+        img = MODULE.render_cells_frame(cells)
+        self.assertGreater(img.width, 150)
+        self.assertGreater(img.height, 70)
+
     def test_cli_renders_ansi_text_frames_to_png(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

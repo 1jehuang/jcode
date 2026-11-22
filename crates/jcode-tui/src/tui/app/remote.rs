@@ -1227,6 +1227,7 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
         "frame"
             | "frame-normalized"
             | "screen"
+            | "cells"
             | "screen-json"
             | "screen-json-normalized"
             | "layout"
