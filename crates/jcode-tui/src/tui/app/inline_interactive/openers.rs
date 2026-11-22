@@ -133,10 +133,18 @@ impl App {
                     crate::auth::AuthState::Expired => "attention",
                     crate::auth::AuthState::NotConfigured => "setup",
                 };
+                let provider_label = if matches!(
+                    provider.target,
+                    crate::provider_catalog::LoginProviderTarget::AutoImport
+                ) {
+                    "import"
+                } else {
+                    provider.auth_kind.label()
+                };
                 PickerEntry {
                     name: provider.display_name.to_string(),
                     options: vec![PickerOption {
-                        provider: provider.auth_kind.label().to_string(),
+                        provider: provider_label.to_string(),
                         api_method: state_label.to_string(),
                         available: true,
                         detail: format!("{} · {}", assessment.method_detail, provider.menu_detail),
@@ -189,9 +197,9 @@ impl App {
                 effort: None,
             };
 
-            let mut starter_entries = saved_entries;
-            let mut other_starter_entries = Vec::new();
-            let mut hidden_entries = Vec::new();
+            let mut starter_entries = Vec::new();
+            let mut configured_hidden_entries = Vec::new();
+            let mut unconfigured_hidden_entries = Vec::new();
             let mut openai_entry = None;
             let mut claude_entry = None;
             let mut auto_import_entry = None;
@@ -218,12 +226,20 @@ impl App {
                         crate::provider_catalog::LoginProviderTarget::Gemini => {
                             gemini_entry = Some(entry);
                         }
-                        _ if Self::is_login_starter_entry(&entry) => {
-                            other_starter_entries.push(entry);
+                        _ => {
+                            let is_configured_or_attention = entry.is_current
+                                || entry
+                                    .options
+                                    .first()
+                                    .is_some_and(|opt| opt.api_method == "attention");
+                            if is_configured_or_attention {
+                                configured_hidden_entries.push(entry);
+                            } else {
+                                unconfigured_hidden_entries.push(entry);
+                            }
                         }
-                        _ => hidden_entries.push(entry),
                     },
-                    _ => other_starter_entries.push(entry),
+                    _ => configured_hidden_entries.push(entry),
                 }
             }
 
@@ -243,7 +259,10 @@ impl App {
             if let Some(entry) = gemini_entry {
                 starter_entries.push(entry);
             }
-            starter_entries.extend(other_starter_entries);
+
+            let mut hidden_entries = saved_entries;
+            hidden_entries.extend(configured_hidden_entries);
+            hidden_entries.extend(unconfigured_hidden_entries);
 
             if !hidden_entries.is_empty() {
                 let hidden_count = hidden_entries.len();

@@ -2209,8 +2209,14 @@ fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter()
         .as_ref()
         .expect("login picker should be open");
     assert_eq!(picker.kind, crate::tui::PickerKind::Login);
-    // Starter view should be strictly shorter than the full catalog and end
-    // with the "More providers (N)…" expand action.
+    // Starter view should stay compact (<= 7 rows, never pushed below the fold
+    // by saved accounts or other configured providers) and end with
+    // "More providers (N)…".
+    assert!(
+        picker.filtered.len() <= 7,
+        "starter list should stay compact (<= 7 rows), got {}",
+        picker.filtered.len()
+    );
     assert!(
         picker.filtered.len() < picker.entries.len(),
         "starter list ({}) should be shorter than full catalog ({})",

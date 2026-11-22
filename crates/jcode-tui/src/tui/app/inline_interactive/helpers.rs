@@ -259,8 +259,7 @@ impl App {
 
     pub(in crate::tui::app) fn is_login_starter_entry(entry: &crate::tui::PickerEntry) -> bool {
         match entry.action {
-            crate::tui::PickerAction::Account(_)
-            | crate::tui::PickerAction::AutoApiKey
+            crate::tui::PickerAction::AutoApiKey
             | crate::tui::PickerAction::ExpandLoginProviders => true,
             crate::tui::PickerAction::Login(provider) => match provider.target {
                 crate::provider_catalog::LoginProviderTarget::OpenAi
@@ -268,14 +267,9 @@ impl App {
                 | crate::provider_catalog::LoginProviderTarget::Copilot
                 | crate::provider_catalog::LoginProviderTarget::Gemini => true,
                 crate::provider_catalog::LoginProviderTarget::AutoImport => entry.is_current,
-                _ => {
-                    entry.is_current
-                        || entry
-                            .options
-                            .first()
-                            .is_some_and(|opt| opt.api_method == "attention")
-                }
+                _ => false,
             },
+            crate::tui::PickerAction::Account(_) => false,
             _ => true,
         }
     }
