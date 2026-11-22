@@ -585,6 +585,11 @@ Fast startup.
         self.assertEqual(highlight_line.count("`") % 2, 0)
         self.assertNotRegex(highlight_line, r"token-\d*…$")
 
+        # Pre-truncated legacy GitHub body with an unclosed backtick before ellipsis stays balanced.
+        legacy = MODULE.clean_selfdev_bullet(r"providers (\`https\`, \`grok-buil…")
+        self.assertEqual(legacy, "providers (`https`…")
+        self.assertEqual(legacy.count("`") % 2, 0)
+
     def test_long_stable_release_auto_splits_via_multipart(self) -> None:
         url = "https://github.com/1jehuang/jcode/releases/tag/v0.96.0"
         body = (

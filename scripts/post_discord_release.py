@@ -107,7 +107,14 @@ def clean_selfdev_bullet(raw: str) -> str:
     text = ESCAPED_MARKDOWN.sub(r"\1", text)
     text = text.replace("@", "＠")
     text = RAW_URL.sub(r"<\g<0>>", text)
-    return " ".join(text.split())
+    text = " ".join(text.split())
+    # Older GitHub releases may contain bullets truncated mid-backtick span;
+    # strip a dangling unclosed backtick before the ellipsis so Discord markdown stays valid.
+    if text.endswith("…") and text.count("`") % 2 == 1:
+        last_tick = text.rfind("`")
+        if last_tick > 0:
+            text = text[:last_tick].rstrip(" ,;:([{-") + "…"
+    return text
 
 
 def truncate_stable_message(message: str, url: str) -> str:
