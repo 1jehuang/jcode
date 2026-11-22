@@ -281,17 +281,23 @@ pub(crate) enum Command {
         #[command(flatten)]
         google: GoogleLoginArgs,
 
-        /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
+        /// API base / endpoint URL (OpenAI-compatible profiles, Azure endpoint).
         #[arg(long)]
         api_base: Option<String>,
 
-        /// OpenAI-compatible API key. If omitted, jcode prompts securely when needed.
+        /// API key for any API-key provider. Use `-` to read it from stdin.
+        /// If omitted, jcode prompts securely when needed.
         #[arg(long)]
         api_key: Option<String>,
 
-        /// Environment variable name to store/use for an OpenAI-compatible API key.
+        /// Read the API key from this environment variable (keeps secrets out of argv).
+        /// For openai-compatible, also records which variable to use at runtime.
         #[arg(long)]
         api_key_env: Option<String>,
+
+        /// AWS region for Bedrock (default us-east-2).
+        #[arg(long)]
+        region: Option<String>,
     },
 
     /// Log in to and manage your Jcode account

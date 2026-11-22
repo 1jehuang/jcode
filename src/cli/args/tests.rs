@@ -595,7 +595,9 @@ fn login_no_browser_flag_parses() {
             flow_id,
             cancel,
             device_code,
+            region,
         }) => {
+            assert!(region.is_none());
             assert!(provider.is_none());
             assert!(account.is_none());
             assert!(no_browser);

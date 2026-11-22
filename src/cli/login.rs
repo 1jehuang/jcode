@@ -45,6 +45,8 @@ pub struct LoginOptions {
     pub openai_compatible_api_key: Option<String>,
     pub openai_compatible_api_key_env: Option<String>,
     pub openai_compatible_default_model: Option<String>,
+    /// Bedrock region for non-interactive setup.
+    pub region: Option<String>,
 }
 
 impl LoginOptions {
@@ -60,6 +62,10 @@ impl LoginOptions {
             );
         }
         Ok(())
+    }
+
+    fn supplies_api_key(&self) -> bool {
+        self.openai_compatible_api_key.is_some() || self.openai_compatible_api_key_env.is_some()
     }
 
     fn has_provided_input(&self) -> bool {
@@ -281,6 +287,19 @@ pub async fn run_login_provider(
     }
     crate::telemetry::record_provider_selected(provider.id);
     crate::telemetry::record_auth_started(provider.id, provider.auth_kind.label());
+    if options.supplies_api_key() {
+        match provider.target {
+            LoginProviderTarget::Gemini => {
+                let result = login_gemini_api_key_flow(&options);
+                return finish_direct_key_login(provider, &options, result).await;
+            }
+            target if !target_accepts_api_key(target) => anyhow::bail!(
+                "{} uses OAuth/device login and does not accept --api-key. Use --print-auth-url --json for agent-driven login.",
+                provider.display_name
+            ),
+            _ => {}
+        }
+    }
     let explicit_scriptable_flow = options.uses_scriptable_flow()?;
     // Google setup is an interactive wizard. On a terminal it must run even
     // with --no-browser (it prints each URL), otherwise a first-time user
@@ -363,24 +382,24 @@ pub async fn run_login_provider(
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::ClaudeApiKey => {
-                login_anthropic_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+                login_anthropic_api_key_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::OpenAi => login_openai_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenAiApiKey => {
-                login_openai_api_key_flow().map(|_| LoginFlowOutcome::Completed)
+                login_openai_api_key_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::GrokBuild => login_grok_build_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenRouter => {
-                login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
+                login_openrouter_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Bedrock => {
-                login_bedrock_flow().map(|_| LoginFlowOutcome::Completed)
+                login_bedrock_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Azure => login_azure_flow().map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Azure => login_azure_flow(&options).map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenAiCompatible(profile)
                 if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
             {
@@ -392,7 +411,7 @@ pub async fn run_login_provider(
                 login_openai_compatible_flow(&profile, &options)
                     .map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Cursor => login_cursor_flow().map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Cursor => login_cursor_flow(&options).map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Copilot => device_login::login_copilot_flow(options.no_browser),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
@@ -493,6 +512,42 @@ pub async fn run_login_provider(
         ],
     );
     maybe_persist_default_provider_after_login(provider, &options);
+    notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
+    Ok(())
+}
+
+fn target_accepts_api_key(target: LoginProviderTarget) -> bool {
+    match target {
+        LoginProviderTarget::ClaudeApiKey
+        | LoginProviderTarget::OpenAiApiKey
+        | LoginProviderTarget::OpenRouter
+        | LoginProviderTarget::Bedrock
+        | LoginProviderTarget::Azure
+        | LoginProviderTarget::Cursor
+        | LoginProviderTarget::Gemini => true,
+        LoginProviderTarget::OpenAiCompatible(profile) => {
+            profile.id != crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id
+        }
+        _ => false,
+    }
+}
+
+/// Validate and announce a key login that bypassed the provider-target match.
+async fn finish_direct_key_login(
+    provider: LoginProviderDescriptor,
+    options: &LoginOptions,
+    result: Result<()>,
+) -> Result<()> {
+    result?;
+    auth::AuthStatus::invalidate_cache();
+    if !options.no_validate {
+        if options.json {
+            super::auth_test::run_post_login_validation_quiet(provider).await?;
+        } else {
+            super::commands::run_post_login_validation(provider).await?;
+        }
+    }
+    maybe_persist_default_provider_after_login(provider, options);
     notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
     Ok(())
 }
@@ -623,17 +678,10 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
     Ok(())
 }
 
-fn login_anthropic_api_key_flow() -> Result<()> {
+fn login_anthropic_api_key_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Setting up Anthropic API...");
     eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
-    eprint!("Paste your Anthropic API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
+    let key = obtain_api_key(options, "Anthropic")?;
 
     if !key.starts_with("sk-ant-") {
         eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
@@ -649,7 +697,7 @@ fn login_anthropic_api_key_flow() -> Result<()> {
     );
     eprintln!("Provider: claude (native Anthropic Messages API)");
     crate::telemetry::record_auth_success("anthropic-api", "api_key");
-    Ok(())
+    emit_key_login_success(options, "anthropic-api", "anthropic.env")
 }
 
 async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
@@ -668,17 +716,10 @@ async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> R
     Ok(())
 }
 
-fn login_openrouter_flow() -> Result<()> {
+fn login_openrouter_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Setting up OpenRouter...");
     eprintln!("Get your API key from: https://openrouter.ai/keys\n");
-    eprint!("Paste your OpenRouter API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
+    let key = obtain_api_key(options, "OpenRouter")?;
 
     if !key.starts_with("sk-or-") {
         eprintln!("Warning: OpenRouter API keys typically start with 'sk-or-'. Saving anyway.");
@@ -693,29 +734,33 @@ fn login_openrouter_flow() -> Result<()> {
             .display()
     );
     crate::telemetry::record_auth_success("openrouter", "api_key");
-    Ok(())
+    emit_key_login_success(options, "openrouter", "openrouter.env")
 }
 
-fn login_bedrock_flow() -> Result<()> {
+fn login_bedrock_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Setting up AWS Bedrock...");
     eprintln!(
         "Generate a Bedrock API key in the AWS Bedrock console: https://console.aws.amazon.com/bedrock/home#/api-keys"
     );
     eprintln!("Short-term keys are recommended for onboarding/testing.\n");
 
-    let region = read_line_trimmed("AWS region [us-east-2]: ")?;
+    let region = match options.region.as_deref() {
+        Some(region) => region.to_string(),
+        None if options.openai_compatible_api_key.is_some()
+            || options.openai_compatible_api_key_env.is_some()
+            || !io::stdin().is_terminal() =>
+        {
+            String::new()
+        }
+        None => read_line_trimmed("AWS region [us-east-2]: ")?,
+    };
     let region = if region.trim().is_empty() {
         "us-east-2".to_string()
     } else {
         region.trim().to_string()
     };
 
-    eprint!("Paste your Bedrock API key: ");
-    io::stdout().flush()?;
-    let key = read_secret_line()?;
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
+    let key = obtain_api_key(options, "Bedrock")?;
 
     save_named_api_key(
         crate::provider::bedrock::ENV_FILE,
@@ -738,10 +783,10 @@ fn login_bedrock_flow() -> Result<()> {
     eprintln!("Region: {}", region);
     eprintln!("Provider: bedrock (native AWS Bedrock Converse API)");
     crate::telemetry::record_auth_success("bedrock", "api_key");
-    Ok(())
+    emit_key_login_success(options, "bedrock", crate::provider::bedrock::ENV_FILE)
 }
 
-fn login_azure_flow() -> Result<()> {
+fn login_azure_flow(options: &LoginOptions) -> Result<()> {
     use crate::auth::azure;
 
     eprintln!("Setting up Azure OpenAI...");
@@ -749,25 +794,45 @@ fn login_azure_flow() -> Result<()> {
         "Reference: OpenCode supports Azure OpenAI with Entra credentials. jcode uses Azure OpenAI's newer `/openai/v1` API with either Microsoft Entra ID or an API key.\n"
     );
 
-    let endpoint_raw = read_line_trimmed(
-        "Azure OpenAI endpoint (for example `https://your-resource.openai.azure.com`): ",
-    )?;
+    let has_key_input = options.openai_compatible_api_key.is_some()
+        || options.openai_compatible_api_key_env.is_some();
+    let scripted = options.openai_compatible_api_base.is_some() || !io::stdin().is_terminal();
+    let endpoint_raw = match options.openai_compatible_api_base.as_deref() {
+        Some(value) => value.trim().to_string(),
+        None if scripted => anyhow::bail!(
+            "Non-interactive Azure login requires --api-base <endpoint> and --model <deployment>, plus --api-key/--api-key-env (omit for Entra ID)."
+        ),
+        None => read_line_trimmed(
+            "Azure OpenAI endpoint (for example `https://your-resource.openai.azure.com`): ",
+        )?,
+    };
     let endpoint = azure::normalize_endpoint(&endpoint_raw).ok_or_else(|| {
         anyhow::anyhow!(
             "Invalid Azure OpenAI endpoint. Use https://<resource>.openai.azure.com (or the full /openai/v1 URL)."
         )
     })?;
 
-    let model =
-        read_line_trimmed("Azure deployment/model name (required, for example `gpt-4.1-nano`): ")?;
+    let model = match options.openai_compatible_default_model.as_deref() {
+        Some(value) => value.trim().to_string(),
+        None if scripted => String::new(),
+        None => read_line_trimmed(
+            "Azure deployment/model name (required, for example `gpt-4.1-nano`): ",
+        )?,
+    };
     if model.is_empty() {
         anyhow::bail!("No deployment/model name provided.");
     }
 
-    eprintln!("\nAuthentication method:");
-    eprintln!("  1. Microsoft Entra ID (recommended)");
-    eprintln!("  2. API key");
-    let auth_choice = read_line_trimmed("Enter 1-2 [1]: ")?;
+    let auth_choice = if has_key_input {
+        "2".to_string()
+    } else if scripted {
+        "1".to_string()
+    } else {
+        eprintln!("\nAuthentication method:");
+        eprintln!("  1. Microsoft Entra ID (recommended)");
+        eprintln!("  2. API key");
+        read_line_trimmed("Enter 1-2 [1]: ")?
+    };
     let use_entra = match auth_choice.trim() {
         "" | "1" => true,
         "2" => false,
@@ -794,12 +859,7 @@ fn login_azure_flow() -> Result<()> {
             "That means jcode can authenticate via `az login`, managed identity, or Azure environment credentials."
         );
     } else {
-        eprint!("Paste your Azure OpenAI API key: ");
-        io::stdout().flush()?;
-        let key = read_secret_line()?;
-        if key.is_empty() {
-            anyhow::bail!("No API key provided.");
-        }
+        let key = obtain_api_key(options, "Azure OpenAI")?;
         assignments.push((azure::API_KEY_ENV, key));
     }
 
@@ -823,7 +883,7 @@ fn login_azure_flow() -> Result<()> {
         );
     }
     crate::telemetry::record_auth_success("azure", if use_entra { "entra_id" } else { "api_key" });
-    Ok(())
+    emit_key_login_success(options, "azure", azure::ENV_FILE)
 }
 
 fn login_openai_compatible_flow(
@@ -917,7 +977,7 @@ fn login_openai_compatible_flow(
             existing_key_notice::announce_existing_api_key(&resolved);
         }
         let key = match options.openai_compatible_api_key.as_deref() {
-            Some(value) => value.trim().to_string(),
+            Some(value) => resolve_auth_input(value.trim())?.trim().to_string(),
             None => {
                 eprint!("Paste your {} API key: ", resolved.display_name);
                 io::stdout().flush()?;
@@ -954,7 +1014,7 @@ fn login_openai_compatible_flow(
             "An API key is optional here. Press Enter to skip if your local server does not require one.\n"
         );
         let key = match options.openai_compatible_api_key.as_deref() {
-            Some(value) => value.trim().to_string(),
+            Some(value) => resolve_auth_input(value.trim())?.trim().to_string(),
             None => {
                 eprint!("Optional {} API key: ", resolved.display_name);
                 io::stdout().flush()?;
@@ -1040,18 +1100,12 @@ fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-fn login_cursor_flow() -> Result<()> {
+fn login_cursor_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Starting Cursor API key setup...");
 
     eprintln!("Get your API key from: https://cursor.com/settings");
     eprintln!("(Dashboard > Integrations > User API Keys)\n");
-    eprint!("Paste your Cursor API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
+    let key = obtain_api_key(options, "Cursor")?;
 
     save_named_api_key("cursor.env", "CURSOR_API_KEY", &key)?;
     crate::auth::AuthStatus::invalidate_cache();
@@ -1064,7 +1118,7 @@ fn login_cursor_flow() -> Result<()> {
     );
     eprintln!("jcode will use the native Cursor HTTPS transport.");
     crate::telemetry::record_auth_success("cursor", "api_key");
-    Ok(())
+    emit_key_login_success(options, "cursor", "cursor.env")
 }
 
 async fn login_antigravity_flow(no_browser: bool) -> Result<()> {
@@ -1114,7 +1168,7 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
         eprintln!();
         let choice = read_line_trimmed("Enter 1-3 [1]: ")?;
         match choice.as_str() {
-            "2" => return login_gemini_api_key_flow(),
+            "2" => return login_gemini_api_key_flow(&LoginOptions::default()),
             "3" => {}
             _ => {
                 eprintln!(
@@ -1155,16 +1209,10 @@ async fn login_gemini_flow(no_browser: bool) -> Result<()> {
     Ok(())
 }
 
-fn login_gemini_api_key_flow() -> Result<()> {
+fn login_gemini_api_key_flow(options: &LoginOptions) -> Result<()> {
     eprintln!("Setting up Gemini Developer API key...");
     eprintln!("Get your API key from: https://aistudio.google.com/apikey\n");
-    eprint!("Paste your Gemini API key: ");
-    io::stdout().flush()?;
-
-    let key = read_secret_line()?;
-    if key.is_empty() {
-        anyhow::bail!("No API key provided.");
-    }
+    let key = obtain_api_key(options, "Gemini")?;
 
     crate::auth::gemini::save_api_key(&key)?;
     eprintln!("\nSuccessfully saved Gemini Developer API key!");
@@ -1178,7 +1226,11 @@ fn login_gemini_api_key_flow() -> Result<()> {
         "Provider: gemini (official Gemini Developer API, generativelanguage.googleapis.com)"
     );
     crate::telemetry::record_auth_success("gemini", "api_key");
-    Ok(())
+    emit_key_login_success(
+        options,
+        "gemini",
+        crate::auth::gemini::GEMINI_API_KEY_ENV_FILE,
+    )
 }
 
 fn maybe_open_browser(target: &str, no_browser: bool) -> bool {
