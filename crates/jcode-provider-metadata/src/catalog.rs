@@ -1183,15 +1183,19 @@ pub const COPILOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
 
 pub const GEMINI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "gemini",
-    display_name: "Google Gemini",
+    display_name: "Gemini Code Assist (Cloud)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Gemini,
     auth_status_method: "OAuth",
-    aliases: &[],
-    menu_detail: "Google Gemini Code Assist OAuth login",
+    aliases: &["gemini-code-assist"],
+    menu_detail: "Paid Code Assist Standard/Enterprise (needs GOOGLE_CLOUD_PROJECT)",
     recommended: false,
     target: LoginProviderTarget::Gemini,
-    order: LoginProviderSurfaceOrder::new(Some(13), Some(11), Some(4), Some(11), Some(13)),
+    // Hidden from the CLI/TUI login pickers: Google retired Code Assist for
+    // individuals, so personal accounts must use Antigravity. Still reachable
+    // via `jcode login --provider gemini`, auto-init, and auth status so paid
+    // Cloud users and existing logins keep working.
+    order: LoginProviderSurfaceOrder::new(None, None, Some(4), Some(11), Some(13)),
 };
 
 pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1214,15 +1218,15 @@ pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
 
 pub const ANTIGRAVITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "antigravity",
-    display_name: "Antigravity",
+    display_name: "Google (Antigravity)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Antigravity,
     auth_status_method: "OAuth",
     aliases: &[],
-    menu_detail: "Google Antigravity OAuth login",
+    menu_detail: "Google account, AI Pro/Ultra (Gemini 4, Claude)",
     recommended: false,
     target: LoginProviderTarget::Antigravity,
-    order: LoginProviderSurfaceOrder::new(Some(12), Some(12), None, Some(12), Some(12)),
+    order: LoginProviderSurfaceOrder::new(Some(12), Some(11), None, Some(12), Some(12)),
 };
 
 pub const XIAOMI_MIMO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
