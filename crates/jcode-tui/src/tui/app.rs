@@ -834,6 +834,8 @@ struct KvCacheState {
     kv_cache_turn_number: Option<usize>,
     kv_cache_turn_call_index: u16,
     kv_cache_miss_samples: Vec<KvCacheMissSample>,
+    /// Learned normal tail gap for implicit-cache providers.
+    kv_cache_tail: crate::kv_cache_monitor::TailGapModel,
     /// Baseline completion time the cold-cache warning was last pushed for.
     ///
     /// The warning fires at most once per cache write: the idle tick warns as
@@ -2377,7 +2379,17 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
+        let is_miss =
+            self.kv_cache
+                .kv_cache_tail
+                .is_miss(&request.provider, expected_tokens, read_tokens);
+        self.kv_cache.kv_cache_tail.observe(
+            &request.provider,
+            expected_tokens,
+            read_tokens,
+            is_miss,
+        );
+        if !is_miss {
             return;
         }
 
@@ -2636,7 +2648,7 @@ impl App {
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
             || baseline.input_tokens.saturating_sub(read_tokens)
-                >= Self::kv_cache_min_missed_tokens(&request.provider)
+                > self.kv_cache.kv_cache_tail.tolerance(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }

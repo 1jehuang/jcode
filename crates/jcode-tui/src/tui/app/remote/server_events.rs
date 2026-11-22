@@ -1766,6 +1766,7 @@ fn handle_server_event_inner(
                 app.kv_cache.kv_cache_turn_number = None;
                 app.kv_cache.kv_cache_turn_call_index = 0;
                 app.kv_cache.kv_cache_miss_samples.clear();
+                app.kv_cache.kv_cache_tail.reset();
                 if !preserve_startup_send {
                     app.processing_started = None;
                     app.clear_visible_turn_started();
@@ -2738,14 +2739,33 @@ fn handle_server_event_inner(
             // redraw happens.
             true
         }
-        ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
+        ServerEvent::ReasoningEffortChanged {
+            effort,
+            model,
+            error,
+            ..
+        } => {
             if let Some(err) = error {
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
                     err
                 )));
+                false
             } else {
                 app.remote_reasoning_effort = effort.clone();
+                let model_changed = if let Some(new_model) = model {
+                    let changed = app.remote_provider_model.as_deref() != Some(new_model.as_str());
+                    app.remote_provider_model = Some(new_model.clone());
+                    app.session.model = Some(new_model);
+                    changed
+                } else {
+                    false
+                };
+                app.invalidate_model_picker_cache();
+                app.persist_remote_header_hint();
+                if model_changed {
+                    crate::tui::ui::prepare::invalidate_header_prep_cache();
+                }
                 let label = effort
                     .as_deref()
                     .map(app_mod::effort_display_label)
@@ -2755,8 +2775,8 @@ fn handle_server_event_inner(
                     label
                 )));
                 app.set_status_notice(format!("Effort: {}", label));
+                true
             }
-            false
         }
         ServerEvent::ServiceTierChanged {
             service_tier,

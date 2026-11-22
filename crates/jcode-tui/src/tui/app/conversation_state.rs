@@ -343,6 +343,7 @@ impl App {
         // pre-compaction request that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
+        self.kv_cache.kv_cache_tail.reset();
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
