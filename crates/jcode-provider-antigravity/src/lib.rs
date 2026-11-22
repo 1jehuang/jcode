@@ -4,11 +4,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Known-good model id used when the backend default is unknown. The literal
-/// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
-/// always resolve it to a real model id before issuing a request.
-pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
+/// Default Antigravity model id (`gemini-4-neon-low`) used when resolving the
+/// literal `"default"` alias or when no live catalog has been fetched yet. The
+/// literal alias `"default"` is rejected by `generateContent` with HTTP 404, so
+/// we must always resolve it to a real model id before issuing a request.
+pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-4-neon-low";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-4-neon-low",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-high",
+    "gemini-4-neon-xhigh",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
     "gemini-3.1-pro-high",

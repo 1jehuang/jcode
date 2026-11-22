@@ -271,18 +271,6 @@ impl MultiProvider {
                 {
                     return Some(*preferred);
                 }
-                if let Some(best) = group
-                    .iter()
-                    .filter(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                            != usize::MAX
-                    })
-                    .min_by_key(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                    })
-                {
-                    return Some(*best);
-                }
                 let models: Vec<&str> = group
                     .iter()
                     .map(|candidate| candidate_model(candidate))
@@ -295,6 +283,18 @@ impl MultiProvider {
                     .find(|candidate| candidate_model(candidate) == preferred)
                 {
                     return Some(*flagship);
+                }
+                if let Some(best) = group
+                    .iter()
+                    .filter(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                            != usize::MAX
+                    })
+                    .min_by_key(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                    })
+                {
+                    return Some(*best);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.

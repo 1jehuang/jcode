@@ -191,6 +191,14 @@ impl AntigravityProvider {
             return remap_unsupported_model(trimmed).to_string();
         }
 
+        let catalog = self.fetched_catalog();
+        if catalog
+            .iter()
+            .any(|model| model.available && model.id == DEFAULT_FALLBACK_MODEL)
+        {
+            return DEFAULT_FALLBACK_MODEL.to_string();
+        }
+
         if let Some(backend_default) = self
             .backend_default_model()
             .map(|id| id.trim().to_string())
@@ -204,7 +212,6 @@ impl AntigravityProvider {
         // Claude models on the Cloud Code backend currently reject jcode's tool
         // schemas (they require JSON Schema draft 2020-12), so they are a poor
         // automatic default even when listed first in the catalog.
-        let catalog = self.fetched_catalog();
         if let Some(gemini_model) = catalog
             .iter()
             .find(|model| {

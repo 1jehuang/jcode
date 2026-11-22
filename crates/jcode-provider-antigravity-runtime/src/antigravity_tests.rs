@@ -827,3 +827,57 @@ fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
     );
     assert!(provider.set_model("   ").is_err());
 }
+
+#[test]
+fn resolve_model_for_request_default_prefers_gemini_4_neon_low_when_advertised() {
+    assert_eq!(DEFAULT_FALLBACK_MODEL, "gemini-4-neon-low");
+
+    let provider = AntigravityProvider::new();
+    *provider
+        .backend_default_model
+        .write()
+        .expect("default lock") = Some("gemini-4-neon-high".to_string());
+    *provider.fetched_catalog.write().expect("catalog lock") = vec![
+        CatalogModel {
+            id: "gemini-3-flash".to_string(),
+            display_name: Some("Gemini 3 Flash".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: Some(1_048_576),
+            max_output_tokens: Some(65_536),
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+        CatalogModel {
+            id: "gemini-4-neon-high".to_string(),
+            display_name: Some("Gemini 4 Neon (High)".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: Some(1_048_576),
+            max_output_tokens: Some(65_536),
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+        CatalogModel {
+            id: "gemini-4-neon-low".to_string(),
+            display_name: Some("Gemini 4 Neon (Low)".to_string()),
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: Some(1_048_576),
+            max_output_tokens: Some(65_536),
+            recommended: true,
+            available: true,
+            remaining_fraction_milli: Some(1000),
+        },
+    ];
+
+    assert_eq!(
+        provider.resolve_model_for_request("default"),
+        "gemini-4-neon-low"
+    );
+}

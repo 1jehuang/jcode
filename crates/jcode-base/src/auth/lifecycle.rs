@@ -424,6 +424,22 @@ const ALL_BEDROCK_MODELS: &[&str] = &[
     "amazon.nova-micro",
 ];
 
+/// Curated flagship-first order for Antigravity OAuth.
+/// `gemini-4-neon-low` is the default Antigravity model, ahead of higher-effort
+/// Neon variants and legacy Gemini 3/2.5 models.
+const ALL_ANTIGRAVITY_MODELS: &[&str] = &[
+    "gemini-4-neon-low",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-high",
+    "gemini-4-neon-xhigh",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+];
+
 /// Curated flagship-first order for Gemini (Code Assist OAuth + Gemini API).
 /// `pro` is Gemini's flagship tier and `flash`/`lite` are the cheaper tiers, so
 /// (unlike Claude/OpenAI) `pro` must NOT be treated as a non-flagship marker for
@@ -473,8 +489,11 @@ fn provider_preferred_model_orders(
         Some("bedrock") => &[ALL_BEDROCK_MODELS],
         // Azure hosts the OpenAI family.
         Some("azure-openai") => &[crate::provider::ALL_OPENAI_MODELS],
-        // Gemini (Code Assist OAuth) and Antigravity both serve Gemini models.
-        Some("gemini") | Some("antigravity") => &[ALL_GEMINI_MODELS],
+        // Gemini (Code Assist OAuth) serves Gemini models; Antigravity defaults
+        // to Gemini 4 Neon Low and falls back to the general Gemini order when
+        // an account only exposes legacy Gemini 3/2.5 models.
+        Some("gemini") => &[ALL_GEMINI_MODELS],
+        Some("antigravity") => &[ALL_ANTIGRAVITY_MODELS, ALL_GEMINI_MODELS],
         _ => &[],
     }
 }
@@ -659,6 +678,10 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         prefix: "gpt",
         flagship_token: None,
     };
+    const GEMINI_NEON: FrontierFamily = FrontierFamily {
+        prefix: "gemini",
+        flagship_token: Some("neon"),
+    };
     const GEMINI: FrontierFamily = FrontierFamily {
         prefix: "gemini",
         flagship_token: Some("pro"),
@@ -676,7 +699,8 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
         // by normalize), so the Claude family applies.
         Some("bedrock") => &[CLAUDE],
-        Some("gemini") | Some("antigravity") => &[GEMINI],
+        Some("gemini") => &[GEMINI],
+        Some("antigravity") => &[GEMINI_NEON, GEMINI],
         _ => &[],
     }
 }
@@ -686,18 +710,23 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
 /// non-flagship tier word, or ids without a parseable version.
 fn parse_frontier_model(model: &str, families: &[FrontierFamily]) -> Option<FrontierModel> {
     let normalized = normalize_model_for_preference(model);
-    // Find the family this id belongs to (longest prefix wins so `claude-opus`
-    // is preferred over a hypothetical `claude`).
-    let family = families
+    // Try matching families from longest prefix first so `claude-opus` beats a
+    // hypothetical `claude`, while families sharing a prefix (e.g. Gemini Neon
+    // and Gemini Pro) can each test their flagship token.
+    let mut matching: Vec<&FrontierFamily> = families
         .iter()
         .filter(|fam| normalized.starts_with(fam.prefix))
-        .max_by_key(|fam| fam.prefix.len())?;
-
-    let version = parse_frontier_version_for_family(&normalized, *family, false)?;
-    Some(FrontierModel {
-        family: family.prefix.to_string(),
-        version,
-    })
+        .collect();
+    matching.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+    for family in matching {
+        if let Some(version) = parse_frontier_version_for_family(&normalized, *family, false) {
+            return Some(FrontierModel {
+                family: family.prefix.to_string(),
+                version,
+            });
+        }
+    }
+    None
 }
 
 /// Parse a model version within one known frontier family. Curated defaults may
@@ -758,6 +787,12 @@ fn parse_frontier_version_for_family(
                 }
                 if part == flagship_token {
                     saw_flagship_token = true;
+                    continue;
+                }
+                if allow_suffix
+                    && saw_flagship_token
+                    && matches!(part, "low" | "medium" | "high" | "xhigh")
+                {
                     continue;
                 }
                 let number: u64 = part.parse().ok()?; // any other word => reject
@@ -860,12 +895,15 @@ fn newest_frontier_release(
 
     let mut best: Option<(FrontierModel, String)> = None;
     for route in routes {
-        let Some(parsed) = parse_frontier_model(&route.model, families) else {
+        let normalized = normalize_model_for_preference(&route.model);
+        let Some(version) = parse_frontier_version_for_family(&normalized, active_family, false)
+        else {
             continue;
         };
-        if parsed.family != active_family.prefix {
-            continue;
-        }
+        let parsed = FrontierModel {
+            family: active_family.prefix.to_string(),
+            version,
+        };
         // Must strictly beat the curated baseline for its family.
         let Some(baseline) = curated_baseline(active_family) else {
             continue;
@@ -953,6 +991,16 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
                 api_method,
                 crate::provider::ModelRouteApiMethod::CodeAssistOAuth
             );
+        }
+        "antigravity" => {
+            // Antigravity routes carry the `https` api_method and display
+            // provider `"Antigravity"`, while the login descriptor label is
+            // `"Google (Antigravity)"`, so match explicitly like the other
+            // native credential routes above.
+            return matches!(
+                api_method,
+                crate::provider::ModelRouteApiMethod::AntigravityHttps
+            ) || route.provider.eq_ignore_ascii_case("Antigravity");
         }
         "jcode" => {
             // Jcode subscription routes deliberately keep their managed public
@@ -1374,8 +1422,8 @@ mod tests {
             ("bedrock", "bedrock", "AWS Bedrock"),
             ("cursor", "cursor", "Cursor"),
             ("copilot", "copilot", "GitHub Copilot"),
-            ("gemini", "gemini", "Google Gemini"),
-            ("antigravity", "antigravity", "Antigravity"),
+            ("gemini", "gemini", "Gemini Code Assist (Cloud)"),
+            ("antigravity", "antigravity", "Google (Antigravity)"),
         ] {
             assert_eq!(normalized_auth_provider_id(Some(hint)), Some(normalized));
             assert_eq!(provider_display_label(Some(hint)).as_deref(), Some(label));
@@ -2743,6 +2791,17 @@ mod tests {
                 ],
                 "gemini-3.1-pro-preview",
             ),
+            (
+                "antigravity",
+                &[
+                    "gemini-3-flash",
+                    "claude-sonnet-4-6",
+                    "gemini-3.1-pro-low",
+                    "gemini-4-neon-high",
+                    "gemini-4-neon-low",
+                ],
+                "gemini-4-neon-low",
+            ),
         ];
         for (provider, models, expected) in cases {
             assert_eq!(
@@ -2751,6 +2810,28 @@ mod tests {
                 "{provider} should default to its newest flagship"
             );
         }
+    }
+
+    #[test]
+    fn antigravity_defaults_to_gemini_4_neon_low_over_gemini_3_and_other_neon_efforts() {
+        assert_eq!(
+            default_model_for_provider("antigravity"),
+            Some("gemini-4-neon-low")
+        );
+
+        let activation = activation_for_provider_id("antigravity");
+        let routes = vec![
+            route("gemini-3-flash", "Antigravity", "https", true),
+            route("gemini-3.1-pro", "Antigravity", "https", true),
+            route("gemini-3.5-pro", "Antigravity", "https", true),
+            route("gemini-4-neon-high", "Antigravity", "https", true),
+            route("gemini-4-neon-low", "Antigravity", "https", true),
+        ];
+        assert_eq!(
+            provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
+            Some("gemini-4-neon-low"),
+            "Antigravity OAuth should pick gemini-4-neon-low when advertised, not Gemini 3 or higher Neon efforts"
+        );
     }
 
     #[test]
