@@ -20,6 +20,57 @@ fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
 
+const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
+const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
+const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
+
+fn parse_auto_reload_loop_guard(raw: &str) -> Option<(u64, u32)> {
+    let (ts, count) = raw.split_once(':')?;
+    Some((ts.parse().ok()?, count.parse().ok()?))
+}
+
+fn format_next_auto_reload_loop_guard(prev: Option<&str>, now_secs: u64) -> String {
+    let next_count = prev
+        .and_then(parse_auto_reload_loop_guard)
+        .filter(|(ts, _)| now_secs.saturating_sub(*ts) <= AUTO_RELOAD_LOOP_WINDOW_SECS)
+        .map(|(_, count)| count.saturating_add(1))
+        .unwrap_or(1);
+    format!("{now_secs}:{next_count}")
+}
+
+fn auto_reload_loop_guard_tripped_at(raw: Option<&str>, now_secs: u64) -> bool {
+    raw.and_then(parse_auto_reload_loop_guard)
+        .is_some_and(|(ts, count)| {
+            now_secs.saturating_sub(ts) <= AUTO_RELOAD_LOOP_WINDOW_SECS
+                && count >= AUTO_RELOAD_LOOP_MAX_ATTEMPTS
+        })
+}
+
+pub(super) fn record_auto_reload_attempt() {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prev = std::env::var(AUTO_RELOAD_LOOP_GUARD_ENV).ok();
+    let next = format_next_auto_reload_loop_guard(prev.as_deref(), now_secs);
+    crate::env::set_var(AUTO_RELOAD_LOOP_GUARD_ENV, next);
+}
+
+fn auto_reload_loop_guard_tripped() -> bool {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let raw = std::env::var(AUTO_RELOAD_LOOP_GUARD_ENV).ok();
+    auto_reload_loop_guard_tripped_at(raw.as_deref(), now_secs)
+}
+
+fn clear_auto_reload_loop_guard() {
+    if std::env::var_os(AUTO_RELOAD_LOOP_GUARD_ENV).is_some() {
+        crate::env::remove_var(AUTO_RELOAD_LOOP_GUARD_ENV);
+    }
+}
+
 /// Parse a jcode version string into an orderable `(major, minor, patch)`, but
 /// only for *clean release* builds.
 ///
@@ -1634,6 +1685,15 @@ fn handle_server_event_inner(
                     server_version.as_deref(),
                 )
             {
+                if auto_reload_loop_guard_tripped() {
+                    clear_auto_reload_loop_guard();
+                    crate::logging::warn(
+                        "Auto-reload suppressed after repeated reload attempts in a short window; attaching to current server",
+                    );
+                    app.push_display_message(DisplayMessage::system(
+                        "⚠ Auto-reload suppressed after repeated reload attempts. Check for duplicate jcode installations on PATH or run `jcode server stop`.".to_string(),
+                    ));
+                } else {
                 let client_detected_stale = server_release_is_older_than_client(
                     server_version.as_deref(),
                     &client_release_version(),
@@ -1698,6 +1758,9 @@ fn handle_server_event_inner(
                 }
                 app.update_terminal_title();
                 return false;
+                }
+            } else {
+                clear_auto_reload_loop_guard();
             }
 
             remote.set_session_id(session_id.clone());

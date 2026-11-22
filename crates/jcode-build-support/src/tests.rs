@@ -933,3 +933,24 @@ fn repair_repoints_stale_prerelease_shared_server_to_newer_release() {
         );
     });
 }
+
+#[test]
+fn detects_dynamic_loader_paths_and_ignores_real_jcode_binaries() {
+    assert!(is_dynamic_loader_path(Path::new(
+        "/data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1"
+    )));
+    assert!(is_dynamic_loader_path(Path::new(
+        "/lib64/ld-linux-x86-64.so.2"
+    )));
+    assert!(is_dynamic_loader_path(Path::new(
+        "/lib/ld-musl-aarch64.so.1"
+    )));
+    assert!(is_dynamic_loader_path(Path::new("/system/bin/linker64")));
+    assert!(is_dynamic_loader_path(Path::new("/system/bin/linker")));
+    assert!(!is_dynamic_loader_path(Path::new(
+        "/data/data/com.termux/files/home/.jcode/builds/versions/1.0.1/jcode"
+    )));
+    assert!(!is_dynamic_loader_path(Path::new(
+        "/home/user/.jcode/builds/versions/1.0.1/jcode-linux-x86_64.bin"
+    )));
+}

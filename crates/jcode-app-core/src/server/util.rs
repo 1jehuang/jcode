@@ -238,7 +238,18 @@ pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     RUNNING
         .get_or_init(|| match std::env::current_exe() {
-            Ok(exe) => Some(resolve_launch_path(exe)),
+            Ok(exe) => {
+                let resolved = resolve_launch_path(exe);
+                if build::is_dynamic_loader_path(&resolved) {
+                    crate::logging::warn(&format!(
+                        "running server binary resolved to dynamic loader {:?}; suppressing mtime-based update checks",
+                        resolved
+                    ));
+                    None
+                } else {
+                    Some(resolved)
+                }
+            }
             Err(error) => {
                 crate::logging::warn(&format!("cannot identify running server binary: {error}"));
                 None

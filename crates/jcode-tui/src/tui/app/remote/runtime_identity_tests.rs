@@ -1,7 +1,25 @@
 use super::{
-    parse_release_semver, server_release_is_older_than_client,
-    should_defer_history_for_runtime_identity_with_allow,
+    auto_reload_loop_guard_tripped_at, format_next_auto_reload_loop_guard, parse_release_semver,
+    server_release_is_older_than_client, should_defer_history_for_runtime_identity_with_allow,
 };
+
+#[test]
+fn auto_reload_loop_guard_trips_after_repeated_reloads_in_window() {
+    let first = format_next_auto_reload_loop_guard(None, 1_000);
+    assert_eq!(first, "1000:1");
+    assert!(!auto_reload_loop_guard_tripped_at(Some(&first), 1_001));
+
+    let second = format_next_auto_reload_loop_guard(Some(&first), 1_002);
+    assert_eq!(second, "1002:2");
+    assert!(auto_reload_loop_guard_tripped_at(Some(&second), 1_003));
+
+    // Once outside the 30s window, the guard resets cleanly.
+    assert!(!auto_reload_loop_guard_tripped_at(Some(&second), 1_040));
+    assert_eq!(
+        format_next_auto_reload_loop_guard(Some(&second), 1_040),
+        "1040:1"
+    );
+}
 
 #[test]
 fn runtime_identity_gate_defers_stale_server_history_by_default() {
