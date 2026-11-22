@@ -106,6 +106,12 @@ impl Agent {
         let provider = match provider.as_str() {
             "openai" => "openai",
             "claude" | "anthropic" => "claude",
+            "antigravity" => "antigravity",
+            "copilot" => "copilot",
+            "gemini" => "gemini",
+            "cursor" => "cursor",
+            "bedrock" => "bedrock",
+            "openrouter" => "openrouter",
             _ => return,
         };
         let label = self.provider.oauth_account_label();
@@ -114,16 +120,19 @@ impl Agent {
             self.provider.active_resolved_credential(),
             label.as_deref(),
         ) {
-            (_, Some(jcode_provider_core::ResolvedCredential::Oauth), Some(label)) => {
-                (provider, Some(label))
-            }
+            (
+                "openai" | "claude",
+                Some(jcode_provider_core::ResolvedCredential::Oauth),
+                Some(label),
+            ) => (provider, Some(label)),
             ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("openai-api", None)
             }
             ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey), _) => {
                 ("anthropic-api", None)
             }
-            _ => return,
+            ("openai" | "claude", _, _) => return,
+            (single, _, _) => (single, None),
         };
         if crate::provider::provider_unavailability_detail_for_account_label(key, label).is_none() {
             crate::provider::record_provider_unavailable_for_account_label(key, label, error);
@@ -178,7 +187,7 @@ impl Agent {
     pub async fn effective_context_budget(&self) -> usize {
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
-        manager.set_budget(self.provider.context_window());
+        manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
         manager.token_budget()
     }
 
@@ -194,14 +203,15 @@ impl Agent {
             return Err(error);
         }
         manager.set_context_cap_override(cap);
-        manager.set_budget(self.provider.context_window());
+        manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
         Ok(manager.token_budget())
     }
 
     fn refresh_compaction_budget(&self) {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
-            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Ok(mut manager) => manager
+                .set_budget_for_provider(self.provider.context_window(), self.provider.name()),
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),
@@ -344,9 +354,20 @@ impl Agent {
     }
 
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
+        let prev_model = self.provider.model();
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
+        let new_model = self.provider.model();
+        if new_model != prev_model {
+            self.session.model = Some(self.provider_model());
+            let event = crate::provider::ProviderStateEvent::selected_model(
+                crate::provider::ProviderModelSelectionSource::User,
+                new_model,
+            );
+            self.provider_runtime_state.apply(event);
+            self.refresh_compaction_budget();
+        }
         // Keep the side-table in sync (see `restore_reasoning_effort_from_session`).
         crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
         self.log_env_snapshot("set_reasoning_effort");

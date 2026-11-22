@@ -22,11 +22,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod build_queue;
 mod launch;
+mod logs;
 mod reload;
 mod setup;
 mod status;
 #[cfg(test)]
 mod tests;
+mod ui_diff;
 
 pub use launch::{enter_selfdev_session, schedule_selfdev_prompt_delivery};
 pub use reload::{ReloadRecoveryDirective, persisted_background_tasks_note};
@@ -47,6 +49,8 @@ struct SelfDevInput {
     /// Why this build is needed; shown to other queued/blocked agents.
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    release_notes: Option<String>,
     /// Build target for selfdev build: auto, tui, or all.
     #[serde(default)]
     target: Option<String>,
@@ -65,6 +69,54 @@ struct SelfDevInput {
     /// Background task id for actions like cancel-build.
     #[serde(default)]
     task_id: Option<String>,
+    /// Terminal cell size for action=screenshot/before-after (default "64x34").
+    #[serde(default)]
+    size: Option<String>,
+    /// Short name/slug for action=screenshot output file.
+    #[serde(default)]
+    label: Option<String>,
+    /// Optional 0-based start:end row crop for action=screenshot.
+    #[serde(default)]
+    crop_rows: Option<String>,
+    /// Path to before cells JSON or PNG for action=before-after.
+    #[serde(default)]
+    before: Option<String>,
+    /// Optional path to after cells JSON or PNG for action=before-after (defaults to live capture).
+    #[serde(default)]
+    after: Option<String>,
+    /// Optional 0-based start:end row crop for before cells in action=before-after.
+    #[serde(default)]
+    before_crop_rows: Option<String>,
+    /// Optional 0-based start:end row crop for after cells in action=before-after.
+    #[serde(default)]
+    after_crop_rows: Option<String>,
+    /// Badge label for before panel in action=before-after.
+    #[serde(default)]
+    before_label: Option<String>,
+    /// Badge label for after panel in action=before-after.
+    #[serde(default)]
+    after_label: Option<String>,
+    /// Title above both panels in action=before-after.
+    #[serde(default)]
+    title: Option<String>,
+    /// Output PNG path for action=screenshot or action=before-after.
+    #[serde(default)]
+    output: Option<String>,
+    /// Draw automatic red/green diff highlight boxes (default true; set false for layout/size changes).
+    #[serde(default)]
+    highlight_diff: Option<bool>,
+    /// Auto-crop around changed pixels in action=before-after.
+    #[serde(default)]
+    auto_crop: Option<bool>,
+    /// Redact emails, home paths, and API tokens in cell captures (default true).
+    #[serde(default)]
+    sanitize: Option<bool>,
+    /// Replace live session transcript with a synthetic demo transcript during capture (default true).
+    #[serde(default)]
+    synthetic: Option<bool>,
+    /// Save before-after PNG to `changelog/discord/selfdev-<slug>.png` so the next Discord prerelease auto-attaches it.
+    #[serde(default)]
+    attach_to_discord: Option<bool>,
 }
 
 /// Context saved before reload, restored after restart
@@ -120,6 +172,8 @@ struct BuildRequest {
     session_short_name: Option<String>,
     session_title: Option<String>,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_notes: Option<String>,
     repo_dir: String,
     #[serde(default)]
     repo_scope: String,
@@ -306,6 +360,21 @@ impl BuildRequest {
             .collect())
     }
 
+    fn public_build_notes(&self) -> Option<String> {
+        let mut highlights = Vec::new();
+        for notes in self.release_notes.iter().cloned().chain(
+            Self::attached_watchers(&self.request_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|w| w.release_notes),
+        ) {
+            if !highlights.contains(&notes) {
+                highlights.push(notes);
+            }
+        }
+        (!highlights.is_empty()).then(|| highlights.join("\n"))
+    }
+
     fn find_duplicate_pending(worktree_scope: &str, dedupe_key: &str) -> Result<Option<Self>> {
         Ok(Self::pending_requests_for_scope(worktree_scope)?
             .into_iter()
@@ -470,7 +539,11 @@ impl Drop for BuildLockGuard {
         // Windows does not allow deleting an open lock file. Close the handle
         // before unlinking so self-dev builds do not leave a permanent lock.
         self.file.take();
-        let _ = std::fs::remove_file(&self.path);
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!("Could not remove self-dev build lock: {error}"));
+        }
     }
 }
 
@@ -515,16 +588,20 @@ impl SelfDevTool {
                             "cancel-build",
                             "reload",
                             "reload-bridge",
+                            "logs",
                             "status",
                             "find-config",
                             "socket-info",
-                            "socket-help"
+                            "socket-help",
+                            "screenshot",
+                            "before-after"
                         ],
-                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash."
+                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash. `screenshot` captures the live TUI as a half-width (default 64x34) cells JSON + HiDPI PNG. `before-after` composes a saved `before` capture with `after` (or a fresh live capture) into a side-by-side PNG."
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
-                    "reason": { "type": "string" },
+                    "reason": { "type": "string", "description": "Required for build/build-reload: private coordination reason, separate from public release notes." },
+                    "release_notes": { "type": "string", "description": "Required for build/build-reload: nonblank, public-facing build notes. Call action=logs first and summarize all user-visible changes bundled since the last published release (not only your own commit). For internal-only builds with no user-visible changes across the whole range, state that there are no user-visible changes. Never include private reason, context, or session information." },
                     "target": {
                         "type": "string",
                         "enum": ["auto", "tui", "all"],
@@ -535,7 +612,23 @@ impl SelfDevTool {
                         "description": "Shell command for action=test. Runs under the selfdev worktree compile lock."
                     },
                     "request_id": { "type": "string" },
-                    "task_id": { "type": "string" }
+                    "task_id": { "type": "string" },
+                    "size": { "type": "string", "description": "Terminal WxH cells for screenshot/before-after (default 64x34)." },
+                    "label": { "type": "string", "description": "Slug for screenshot output filename." },
+                    "crop_rows": { "type": "string", "description": "0-based start:end row crop for screenshot." },
+                    "before": { "type": "string", "description": "Before cells JSON or PNG path for action=before-after." },
+                    "after": { "type": "string", "description": "After cells JSON or PNG path for action=before-after; omit to capture live TUI now." },
+                    "before_crop_rows": { "type": "string", "description": "0-based start:end row crop for before panel." },
+                    "after_crop_rows": { "type": "string", "description": "0-based start:end row crop for after panel." },
+                    "before_label": { "type": "string", "description": "Before badge text." },
+                    "after_label": { "type": "string", "description": "After badge text." },
+                    "title": { "type": "string", "description": "Header title for action=before-after." },
+                    "output": { "type": "string", "description": "Output PNG path for screenshot/before-after." },
+                    "highlight_diff": { "type": "boolean", "description": "Draw red/green diff highlight boxes (default true; false for whole-widget size/layout changes)." },
+                    "auto_crop": { "type": "boolean", "description": "Auto-crop both panels around the diff bounding box." },
+                    "sanitize": { "type": "boolean", "description": "Redact emails, home paths, and API tokens in cell captures (default true)." },
+                    "synthetic": { "type": "boolean", "description": "Synthesize a clean demo transcript instead of capturing real session history (default true)." },
+                    "attach_to_discord": { "type": "boolean", "description": "Save PNG to changelog/discord/selfdev-<slug>.png so the next self-dev Discord update auto-attaches it after commit & push." }
                 },
                 "required": ["action"]
             })
@@ -597,6 +690,12 @@ impl Tool for SelfDevTool {
             // Available in every session.
             "enter" => self.do_enter(params.prompt, &ctx).await,
             "setup" => self.do_setup(&ctx).await,
+            "logs" if is_selfdev => {
+                logs::output(SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref())).await
+            }
+            "logs" => Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                "logs",
+            ))),
             "status" => self.do_status().await,
             "find-config" => self.do_find_config(&ctx).await,
             "reload" => {
@@ -618,6 +717,7 @@ impl Tool for SelfDevTool {
             "build" => {
                 self.do_build(
                     params.reason,
+                    params.release_notes,
                     params.target,
                     params.notify,
                     params.wake,
@@ -627,8 +727,14 @@ impl Tool for SelfDevTool {
             }
             "build-reload" | "build_reload" => {
                 if is_selfdev {
-                    self.do_build_reload(params.reason, params.target, params.context, &ctx)
-                        .await
+                    self.do_build_reload(
+                        params.reason,
+                        params.release_notes,
+                        params.target,
+                        params.context,
+                        &ctx,
+                    )
+                    .await
                 } else {
                     Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
                         "build-reload",
@@ -692,10 +798,61 @@ impl Tool for SelfDevTool {
                     )))
                 }
             }
+            "screenshot" => {
+                if is_selfdev {
+                    ui_diff::do_screenshot(
+                        ui_diff::ScreenshotArgs {
+                            size: params.size,
+                            label: params.label,
+                            crop_rows: params.crop_rows,
+                            output: params.output,
+                            sanitize: params.sanitize,
+                            synthetic: params.synthetic,
+                        },
+                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        &ctx,
+                    )
+                    .await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "screenshot",
+                    )))
+                }
+            }
+            "before-after" | "before_after" => {
+                if is_selfdev {
+                    ui_diff::do_before_after(
+                        ui_diff::BeforeAfterArgs {
+                            before: params.before,
+                            after: params.after,
+                            size: params.size,
+                            label: params.label,
+                            before_crop_rows: params.before_crop_rows,
+                            after_crop_rows: params.after_crop_rows,
+                            before_label: params.before_label,
+                            after_label: params.after_label,
+                            title: params.title,
+                            output: params.output,
+                            highlight_diff: params.highlight_diff,
+                            auto_crop: params.auto_crop,
+                            sanitize: params.sanitize,
+                            synthetic: params.synthetic,
+                            attach_to_discord: params.attach_to_discord,
+                        },
+                        SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()),
+                        &ctx,
+                    )
+                    .await
+                } else {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "before-after",
+                    )))
+                }
+            }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
-                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'status', 'find-config', \
-                 'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
+                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'logs', 'status', 'find-config', \
+                 'socket-info', 'socket-help', 'screenshot', or 'before-after'. Outside self-dev mode use 'enter', 'setup', \
                  'reload', 'status', or 'find-config'.",
                 action
             ))),

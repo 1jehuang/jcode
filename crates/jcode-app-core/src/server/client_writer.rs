@@ -32,8 +32,14 @@ pub(super) fn todos_snapshot_event(session_id: &str) -> ServerEvent {
             crate::logging::warn(&format!("Failed to load todos for {session_id}: {error}"));
             Vec::new()
         }),
-        "plan": crate::todo::load_plan(session_id).unwrap_or_default(),
-        "goals": crate::todo::load_goals(session_id).unwrap_or_default(),
+        "plan": crate::todo::load_plan(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load todo plan for {session_id}: {error}"));
+            Default::default()
+        }),
+        "goals": crate::todo::load_goals(session_id).unwrap_or_else(|error| {
+            crate::logging::warn(&format!("Failed to load todo goals for {session_id}: {error}"));
+            Default::default()
+        }),
     });
     ServerEvent::Todos {
         session_id: session_id.to_owned(),

@@ -3,33 +3,32 @@ use jcode_provider_gemini::CodeAssistGenerateResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
-/// Known-good model id used when the backend default is unknown. The literal
-/// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
-/// always resolve it to a real model id before issuing a request.
-pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
+/// Default Antigravity model id (`gemini-4-neon-low`) used when resolving the
+/// literal `"default"` alias or when no live catalog has been fetched yet. The
+/// literal alias `"default"` is rejected by `generateContent` with HTTP 404, so
+/// we must always resolve it to a real model id before issuing a request.
+pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-4-neon-low";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-4-neon-low",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-high",
+    "gemini-4-neon-xhigh",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-4-carbon-low",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-high",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-high",
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
-    "gemini-4-neon-xhigh",
-    "gemini-4-neon-high",
-    "gemini-4-neon-medium",
-    "gemini-4-neon-low",
-    "gemini-4-hydrogen-xhigh",
-    "gemini-4-hydrogen-high",
-    "gemini-4-hydrogen-medium",
-    "gemini-4-hydrogen-low",
-    "gemini-4-carbon-high",
-    "gemini-4-carbon-medium",
-    "gemini-4-carbon-low",
-    "gemini-4-argon-high",
-    "gemini-4-argon-medium",
-    "gemini-4-argon-low",
-    "gemini-3.8-flash-high",
-    "gemini-3.8-flash-medium",
-    "gemini-3.8-flash-low",
     "gemini-3.1-pro-high",
     "gemini-3.1-pro-low",
     "gemini-3-flash",
@@ -51,18 +50,12 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-/// Fallback Antigravity CLI version used when neither [`VERSION_ENV`] nor an
-/// installed `agy` binary in `PATH` provides a valid semver string.
-pub const ANTIGRAVITY_VERSION: &str = "1.5.5";
-const AGY_BINARY_NAME: &str = "agy";
-const AGY_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
-const AGY_PROBE_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
-const AGY_PROBE_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const AGY_PROBE_RECV_FLOOR: Duration = Duration::from_millis(25);
+pub const ANTIGRAVITY_VERSION: &str = "2.30.0";
+// Google gates the Gemini 4 catalog (Neon, Argon, Hydrogen tiers) on the Hub
+// client identity: `antigravity/<v>` gets the legacy free catalog and 404s on
+// `gemini-4-neon-*`, while `antigravity/hub/<v>` gets the full paid catalog.
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
-
-static DETECTED_AGY_VERSION: OnceLock<Option<String>> = OnceLock::new();
 
 /// Resolve the Cloud Code base endpoint, honoring [`ENDPOINT_ENV`] and
 /// otherwise defaulting to [`DEFAULT_ENDPOINT`].
@@ -107,6 +100,15 @@ pub fn fetch_models_api_url() -> String {
 /// Full URL for the `generateContent` RPC against the resolved endpoint.
 pub fn generate_content_api_url() -> String {
     format!("{}/v1internal:generateContent", antigravity_endpoint())
+}
+
+/// Full URL for the SSE streaming `streamGenerateContent` RPC against the
+/// resolved endpoint.
+pub fn stream_generate_content_api_url() -> String {
+    format!(
+        "{}/v1internal:streamGenerateContent?alt=sse",
+        antigravity_endpoint()
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -315,11 +317,14 @@ pub fn is_valid_antigravity_semver(token: &str) -> bool {
     true
 }
 
-/// Normalize a raw version override (`1.5.5`, `cli/1.5.5`,
-/// `antigravity/cli/1.5.5`, `v1.5.5`) into a bare validated semver token.
+/// Normalize a raw version override (`2.30.0`, `hub/2.30.0`,
+/// `antigravity/hub/2.30.0`, `cli/1.5.5`, `antigravity/cli/1.5.5`, `v2.30.0`)
+/// into a bare validated semver token.
 pub fn normalize_antigravity_version(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    let without_prefix = strip_ascii_prefix(trimmed, "antigravity/cli/")
+    let without_prefix = strip_ascii_prefix(trimmed, "antigravity/hub/")
+        .or_else(|| strip_ascii_prefix(trimmed, "hub/"))
+        .or_else(|| strip_ascii_prefix(trimmed, "antigravity/cli/"))
         .or_else(|| strip_ascii_prefix(trimmed, "cli/"))
         .unwrap_or(trimmed)
         .trim();
@@ -331,122 +336,13 @@ pub fn normalize_antigravity_version(raw: &str) -> Option<String> {
     is_valid_antigravity_semver(candidate).then(|| candidate.to_string())
 }
 
-/// Extract a clean semver token from `agy --version` stdout.
-pub fn parse_agy_version_output(stdout: &str) -> Option<String> {
-    let first_line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    first_line
-        .split_whitespace()
-        .find_map(normalize_antigravity_version)
-}
-
-/// Run a version command with a hard wall-clock timeout and extract a validated
-/// semver token from its first non-empty stdout line.
-pub fn probe_agy_version_command(
-    program: &str,
-    args: &[&str],
-    timeout: Duration,
-) -> Option<String> {
-    use std::io::{BufRead, BufReader, Read};
-    use std::process::{Command, Stdio};
-
-    let start = Instant::now();
-    let mut child = match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => return None,
-    };
-
-    let stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout.take(256));
-        let mut first_line = String::new();
-        while first_line.trim().is_empty() {
-            first_line.clear();
-            match reader.read_line(&mut first_line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-        if tx.send(first_line).is_err() {}
-    });
-
-    let deadline = start + timeout;
-    let mut poll_interval = AGY_PROBE_INITIAL_POLL_INTERVAL;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    if child.kill().is_ok() {
-                        match child.wait() {
-                            Ok(_) | Err(_) => {}
-                        }
-                    }
-                    return None;
-                }
-                std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(now)));
-                poll_interval = (poll_interval * 2).min(AGY_PROBE_MAX_POLL_INTERVAL);
-            }
-            Err(_) => return None,
-        }
-    };
-
-    if !status.success() {
-        return None;
-    }
-
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    match rx.recv_timeout(remaining.max(AGY_PROBE_RECV_FLOOR)) {
-        Ok(line) => parse_agy_version_output(&line),
-        Err(_) => None,
-    }
-}
-
-/// Cached once-per-process version of an installed `agy` CLI in `PATH`, if any.
-pub fn detected_agy_version() -> Option<&'static str> {
-    DETECTED_AGY_VERSION
-        .get_or_init(|| {
-            probe_agy_version_command(AGY_BINARY_NAME, &["--version"], AGY_PROBE_TIMEOUT)
-        })
-        .as_deref()
-}
-
-/// Pure priority resolver: `JCODE_ANTIGRAVITY_VERSION` -> `agy --version` ->
-/// [`ANTIGRAVITY_VERSION`].
-pub fn resolve_antigravity_version_with(
-    env_override: Option<&str>,
-    detected_cli_version: Option<&str>,
-) -> String {
-    if let Some(raw_env) = env_override
-        && let Some(normalized) = normalize_antigravity_version(raw_env)
-    {
-        return normalized;
-    }
-    if let Some(raw_detected) = detected_cli_version
-        && let Some(normalized) = normalize_antigravity_version(raw_detected)
-    {
-        return normalized;
-    }
-    ANTIGRAVITY_VERSION.to_string()
-}
-
 pub fn antigravity_version() -> String {
     if let Ok(raw_env) = std::env::var(VERSION_ENV)
         && let Some(normalized) = normalize_antigravity_version(&raw_env)
     {
         return normalized;
     }
-    resolve_antigravity_version_with(None, detected_agy_version())
+    ANTIGRAVITY_VERSION.to_string()
 }
 
 pub fn antigravity_platform_suffix() -> &'static str {
@@ -467,7 +363,7 @@ pub fn antigravity_platform_suffix() -> &'static str {
 
 pub fn antigravity_user_agent() -> String {
     format!(
-        "antigravity/cli/{} {}",
+        "antigravity/hub/{} {}",
         antigravity_version(),
         antigravity_platform_suffix()
     )
@@ -755,7 +651,8 @@ pub fn is_retryable_empty_turn(response: &CodeAssistGenerateResponse) -> bool {
         .map(|content| {
             content.parts.iter().any(|part| {
                 part.function_call.is_some()
-                    || part.text.as_deref().is_some_and(|text| !text.is_empty())
+                    || (!part.is_thought()
+                        && part.text.as_deref().is_some_and(|text| !text.is_empty()))
             })
         })
         .unwrap_or(false);
@@ -786,19 +683,11 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
         .and_then(|candidate| candidate.content.as_ref())
         .is_some_and(|content| {
             content.parts.iter().any(|part| {
-                let Some(text) = part.text.as_deref() else {
-                    return false;
-                };
-                let Some(call) = text.trim_start().strip_prefix("[previous tool call]") else {
-                    return false;
-                };
-                let call = call.trim_start();
-                let name_len = call
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
-                    .map(char::len_utf8)
-                    .sum::<usize>();
-                name_len > 0 && call[name_len..].trim_start().starts_with('(')
+                !part.is_thought()
+                    && part
+                        .text
+                        .as_deref()
+                        .is_some_and(jcode_provider_gemini::stream::is_pseudo_tool_call_text)
             })
         })
 }

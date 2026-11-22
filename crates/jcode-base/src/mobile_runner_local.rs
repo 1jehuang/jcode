@@ -14,6 +14,8 @@
 use super::{ClaimResponse, MobileCommand, POLL_INTERVAL, events};
 use crate::mobile_sync;
 use anyhow::Result;
+use serde::ser::SerializeSeq;
+use serde::{Serialize, Serializer};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -38,6 +40,21 @@ pub trait LocalSessionHost: Send + Sync + 'static {
     /// Hand `text` to a live session as a user message. Returns once the
     /// message was accepted (turn started or queued), not when the turn ends.
     fn deliver<'a>(&'a self, session_id: &'a str, text: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Deliver validated SDK image tuples without silently discarding attachments.
+    fn deliver_images<'a>(
+        &'a self,
+        session_id: &'a str,
+        text: &'a str,
+        images: Vec<(String, String)>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            anyhow::ensure!(
+                images.is_empty(),
+                "this computer does not support photo messages"
+            );
+            self.deliver(session_id, text).await
+        })
+    }
 }
 
 /// Whether this daemon should accept messages from the phone.
@@ -74,6 +91,35 @@ fn report(sessions: Vec<LiveSession>) -> Vec<LiveSession> {
     sessions
 }
 
+// Field order preserves the legacy serde_json map's sorted wire keys.
+#[derive(Serialize)]
+struct ClaimLocalRequest<'a> {
+    machine: &'a str,
+    sessions: ClaimLocalSessions<'a>,
+    supports_images: bool,
+}
+
+struct ClaimLocalSessions<'a>(&'a [LiveSession]);
+
+#[derive(Serialize)]
+struct ClaimLocalSession<'a> {
+    busy: bool,
+    session_id: &'a str,
+}
+
+impl Serialize for ClaimLocalSessions<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for session in self.0 {
+            sequence.serialize_element(&ClaimLocalSession {
+                busy: session.busy,
+                session_id: &session.session_id,
+            })?;
+        }
+        sequence.end()
+    }
+}
+
 async fn claim_local(
     client: &reqwest::Client,
     base: &str,
@@ -81,19 +127,19 @@ async fn claim_local(
     machine: &str,
     sessions: &[LiveSession],
 ) -> Result<Option<MobileCommand>> {
-    let sessions: Vec<_> = sessions
-        .iter()
-        .map(
-            |session| serde_json::json!({ "session_id": session.session_id, "busy": session.busy }),
-        )
-        .collect();
-    let response = client
-        .post(format!("{base}/mobile/commands/claim-local"))
-        .bearer_auth(key)
-        .json(&serde_json::json!({ "machine": machine, "sessions": sessions }))
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await?;
+    let request = {
+        let body = ClaimLocalRequest {
+            machine,
+            sessions: ClaimLocalSessions(sessions),
+            supports_images: true,
+        };
+        client
+            .post(format!("{base}/mobile/commands/claim-local"))
+            .bearer_auth(key)
+            .json(&body)
+            .timeout(Duration::from_secs(30))
+    };
+    let response = request.send().await?;
     if !response.status().is_success() {
         anyhow::bail!("claim-local returned {}", response.status());
     }
@@ -126,10 +172,12 @@ pub async fn run_local_once(
             .as_deref()
             .filter(|id| sessions.iter().any(|session| session.session_id == *id))
             .ok_or_else(|| anyhow::anyhow!("that session is not running on this computer"))?;
-        if command.text.trim().is_empty() {
+        let images = command.validated_images()?;
+        if command.text.trim().is_empty() && images.is_empty() {
             anyhow::bail!("empty message");
         }
-        host.deliver(session_id, &command.text).await?;
+        host.deliver_images(session_id, &command.text, images)
+            .await?;
         Ok(session_id.to_string())
     }
     .await;
@@ -151,7 +199,7 @@ pub fn spawn_local_runner(host: Arc<dyn LocalSessionHost>) {
         return;
     }
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = mobile_sync::daemon_http_client();
         let machine = machine_name();
         // Created on first use so a daemon without mobile sync opens no socket.
         let mut wakeups: Option<events::Wakeups> = None;

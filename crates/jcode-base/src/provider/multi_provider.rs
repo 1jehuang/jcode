@@ -13,6 +13,10 @@ impl MultiProvider {
             "claude" | "claude-oauth" | "claude-api" | "anthropic-api" | "anthropic-api-key" => {
                 "claude"
             }
+            "https" => "antigravity",
+            "code-assist-oauth" => "gemini",
+            "jcode-subscription" => "jcode",
+            "grok-build" | "grok-build-acp" => "grok-build",
             other => other,
         };
         if !models::is_agent_model_for_failover(model, provider) {
@@ -48,6 +52,10 @@ impl MultiProvider {
             match method {
                 "openai-api" | "openai-api-key" => "openai-api".to_owned(),
                 "claude-api" | "anthropic-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                "https" => "antigravity".to_owned(),
+                "code-assist-oauth" => "gemini".to_owned(),
+                "jcode-subscription" => "jcode".to_owned(),
+                "grok-build" | "grok-build-acp" => "grok-build".to_owned(),
                 // Unqualified OAuth routes do not identify a billing account.
                 "openai" | "claude" | "openai-oauth" | "claude-oauth" => return false,
                 other => other.to_owned(),
@@ -136,6 +144,18 @@ impl MultiProvider {
         } else {
             tokens
         };
+        let openai_context_limit = models::openai_route_context_limit_resolver();
+        // Use the same eligibility policy for saved-account and catalog
+        // candidates, without leaking Codex capacity into API-key routes.
+        let model_fits = |model: &str, provider: &str, api_method: &str| {
+            let limit = if provider == "openai" {
+                openai_context_limit(model, api_method)
+            } else {
+                models::context_limit_for_model_with_provider(model, Some(provider))
+            };
+            models::is_agent_model_for_failover(model, provider)
+                && limit.is_some_and(|limit| limit >= required_context)
+        };
         if let Some(current) = from_label
             .as_deref()
             .filter(|_| !context_only && same_provider_account_failover_enabled())
@@ -151,7 +171,7 @@ impl MultiProvider {
             {
                 let spec = format!("{method}@{label}:{}", self.model());
                 if Self::is_failover_route_pool_approved(&spec)
-                    && Self::failover_model_fits(&self.model(), from_provider, required_context)
+                    && model_fits(&self.model(), from_provider, &format!("{method}@{label}"))
                 {
                     candidates.push((
                         crate::auth::account_pool::account_key(from_provider, Some(&label)),
@@ -186,10 +206,10 @@ impl MultiProvider {
                 jcode_provider_core::RuntimeKey::OpenRouter => ActiveProvider::OpenRouter,
                 _ => continue,
             };
-            if !Self::failover_model_fits(
+            if !model_fits(
                 &route.model,
                 Self::provider_key(target_provider),
-                required_context,
+                &route.api_method,
             ) || route.detail.contains("no tools")
             {
                 continue;
@@ -259,18 +279,6 @@ impl MultiProvider {
                 {
                     return Some(*preferred);
                 }
-                if let Some(best) = group
-                    .iter()
-                    .filter(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                            != usize::MAX
-                    })
-                    .min_by_key(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                    })
-                {
-                    return Some(*best);
-                }
                 let models: Vec<&str> = group
                     .iter()
                     .map(|candidate| candidate_model(candidate))
@@ -283,6 +291,18 @@ impl MultiProvider {
                     .find(|candidate| candidate_model(candidate) == preferred)
                 {
                     return Some(*flagship);
+                }
+                if let Some(best) = group
+                    .iter()
+                    .filter(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                            != usize::MAX
+                    })
+                    .min_by_key(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                    })
+                {
+                    return Some(*best);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.

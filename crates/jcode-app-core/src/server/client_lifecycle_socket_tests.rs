@@ -399,7 +399,7 @@ async fn sdk_socket_cancel_workflow(
         .await;
         send(
             &mut client_writer,
-            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn"}),
+            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn", "jarvis_voice":idle_soft_interrupt}),
         )
         .await;
         tokio::time::timeout(
@@ -410,8 +410,8 @@ async fn sdk_socket_cancel_workflow(
         .unwrap();
         if idle_soft_interrupt {
             until(&mut client_reader, |event| {
-                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, .. }
-                    if content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
+                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, display_role, .. }
+                    if display_role.as_deref() == Some("jarvis_user") && content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
             })
             .await;
         }
@@ -626,6 +626,14 @@ async fn sdk_socket_cancel_workflow(
             .unwrap();
         return;
     }
+    // A catalog/startup task can hold the Agent without an active turn. Tool
+    // registration must wait for that work, not return a spurious busy error.
+    let startup_agent = sessions.read().await.values().next().unwrap().clone();
+    let startup_guard = startup_agent.lock_owned().await;
+    let release_startup = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(startup_guard);
+    });
     send(&mut client_writer, json!({"type":"configure_tools","id":2,"tools":{"enabled":[],"custom":[{"name":"read","description":"SDK read callback","parameters":{"type":"object"}}]}})).await;
     let configured = until(&mut client_reader, |e| {
         matches!(
@@ -634,6 +642,7 @@ async fn sdk_socket_cancel_workflow(
         )
     })
     .await;
+    release_startup.await.unwrap();
     assert!(
         matches!(configured, ServerEvent::Ack { .. }),
         "{configured:?}"
@@ -758,7 +767,8 @@ async fn sdk_socket_cancel_workflow(
             content: vec![ContentBlock::Text {
                 text: format!("history {index}"),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,

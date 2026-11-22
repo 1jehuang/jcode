@@ -110,6 +110,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
+    needs_redraw |= app.maybe_backfill_expanded_prompt_history();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
@@ -521,7 +522,8 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             content: vec![ContentBlock::Text {
                 text: notification,
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });
@@ -566,14 +568,21 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
         ),
         percent,
     );
-    app.set_status_notice(format!(
-        "Background task stalled · {} · no output for {}s",
-        crate::message::background_task_display_label(
-            &task.tool_name,
-            task.display_name.as_deref()
-        ),
-        task.stall_wake_seconds
-    ));
+    let label = crate::message::background_task_display_label(
+        &task.tool_name,
+        task.display_name.as_deref(),
+    );
+    app.set_status_notice(if task.elapsed_review {
+        format!(
+            "Background task review · {label} · running {:.0}s",
+            task.running_secs
+        )
+    } else {
+        format!(
+            "Background task stalled · {label} · no output for {}s",
+            task.stall_wake_seconds
+        )
+    });
 
     if !app.is_processing {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));
@@ -582,7 +591,8 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
             content: vec![ContentBlock::Text {
                 text: notification.clone(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         });

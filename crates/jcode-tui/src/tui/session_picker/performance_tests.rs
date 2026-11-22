@@ -32,6 +32,7 @@ pub(super) fn session(id: usize, turns: usize) -> SessionInfo {
         status: SessionStatus::Closed,
         needs_catchup: false,
         estimated_tokens: turns * 1000,
+        user_intention: None,
         todo_statuses: Vec::new(),
         first_user_prompt: Some("improve resume responsiveness".into()),
         messages_preview,

@@ -1,5 +1,84 @@
 use super::*;
 
+/// A transport prototype only. Real clients negotiate turn identity separately,
+/// so a shared encoding cannot replace per-client encoding without grouping by
+/// transport capabilities first.
+#[test]
+#[ignore = "manual multi-client encoding cost probe"]
+fn multi_client_shared_encoding_cost_probe() {
+    use std::{hint::black_box, sync::Arc, time::Instant};
+
+    for bytes in [24, 65_536] {
+        for recipients in [1, 4] {
+            let event = ServerEvent::TurnEvent {
+                identity: TurnIdentity {
+                    runtime_generation: "generation".into(),
+                    turn_id: 1,
+                },
+                event: Box::new(ServerEvent::TextDelta {
+                    text: "x".repeat(bytes),
+                }),
+            };
+            let expected = encode_event(&event).into_bytes();
+            let mut legacy = Vec::new();
+            let mut shared = Vec::new();
+            for round in 0..8 {
+                for prototype in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let mut buffers = vec![Vec::new(); recipients];
+                    let started = Instant::now();
+                    for _ in 0..1_000 {
+                        if prototype {
+                            // Models encoding once and queueing immutable bytes.
+                            // Includes the shared allocation even for one client.
+                            let mut buffer = Vec::new();
+                            encode_event_into(black_box(&event), &mut buffer);
+                            let payload: Arc<[u8]> = buffer.into();
+                            for _ in 0..recipients {
+                                black_box(Arc::clone(&payload));
+                            }
+                            black_box(&*payload);
+                        } else {
+                            for (index, buffer) in buffers.iter_mut().enumerate() {
+                                if index + 1 == recipients {
+                                    // Production moves the original to the final recipient.
+                                    encode_event_into(black_box(&event), buffer);
+                                } else {
+                                    let owned = black_box(&event).clone();
+                                    encode_event_into(&owned, buffer);
+                                }
+                                black_box(&*buffer);
+                            }
+                        }
+                    }
+                    let ns = started.elapsed().as_nanos() / 1_000;
+                    if prototype {
+                        let mut buffer = Vec::new();
+                        encode_event_into(&event, &mut buffer);
+                        let payload: Arc<[u8]> = buffer.into();
+                        assert_eq!(&*payload, expected.as_slice());
+                        shared.push(ns);
+                    } else {
+                        for buffer in &buffers {
+                            assert_eq!(buffer, &expected);
+                        }
+                        legacy.push(ns);
+                    }
+                }
+            }
+            legacy.sort_unstable();
+            shared.sort_unstable();
+            eprintln!(
+                "sharing prototype bytes={bytes} recipients={recipients}: owned+encode={} ns/event, shared-encode={} ns/event (upper median, test profile)",
+                legacy[4], shared[4]
+            );
+        }
+    }
+}
+
 #[test]
 fn reusable_event_encoding_matches_legacy_bytes_and_reuses_storage() {
     let mut buffer = Vec::new();

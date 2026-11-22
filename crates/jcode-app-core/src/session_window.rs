@@ -134,12 +134,79 @@ struct NiriMove {
     output: Option<String>,
     /// Set when the window is not already on the focused workspace.
     workspace_idx: Option<u64>,
+    /// Set when the window is on the focused workspace but in another column:
+    /// how to bring its column next to the one the user is looking at.
+    column: Option<NiriColumnMove>,
+}
+
+/// Bring a window's column to just right of the focused column. Focusing a
+/// far away column instead would scroll the user over to it.
+#[derive(Debug, PartialEq, Eq)]
+struct NiriColumnMove {
+    /// The window shares its column, so it must be expelled into its own
+    /// column first or its neighbours would be dragged along.
+    expel: bool,
+    /// 1-based index for `move-column-to-index`, applied after the expel.
+    /// `None` when the expel alone already puts it in place.
+    index: Option<u64>,
+}
+
+/// 1-based column of a tiled window. `None` for floating windows.
+fn scrolling_column(window: &serde_json::Value) -> Option<u64> {
+    window
+        .get("layout")?
+        .get("pos_in_scrolling_layout")?
+        .get(0)?
+        .as_u64()
+}
+
+/// Work out how to get `window` beside the focused column of the workspace
+/// they share. `None` when it is already adjacent on the right, in the same
+/// column alone, floating, or nothing tiled is focused.
+fn plan_column_move(
+    windows: &[serde_json::Value],
+    window: &serde_json::Value,
+    workspace_id: u64,
+) -> Option<NiriColumnMove> {
+    let workspace_of = |w: &serde_json::Value| w.get("workspace_id").and_then(|id| id.as_u64());
+    let target = scrolling_column(window)?;
+    let focused = windows
+        .iter()
+        .find(|w| {
+            w.get("is_focused").and_then(|f| f.as_bool()) == Some(true)
+                && workspace_of(w) == Some(workspace_id)
+        })
+        .and_then(scrolling_column)?;
+    let window_id = window.get("id").and_then(|id| id.as_u64());
+    let expel = windows.iter().any(|w| {
+        w.get("id").and_then(|id| id.as_u64()) != window_id
+            && workspace_of(w) == Some(workspace_id)
+            && scrolling_column(w) == Some(target)
+    });
+    // Expelling puts the window in a new column right after its old one.
+    let (current, focused) = if expel {
+        (target + 1, focused + u64::from(target < focused))
+    } else {
+        (target, focused)
+    };
+    if current == focused {
+        // Alone in the focused column: it is the focused window already.
+        return None;
+    }
+    // Taking a column out from the left shifts the focused one down by one.
+    let index = if current < focused {
+        focused
+    } else {
+        focused + 1
+    };
+    let index = (index != current).then_some(index);
+    (expel || index.is_some()).then_some(NiriColumnMove { expel, index })
 }
 
 /// Pick the single window owned by one of `ancestries` and work out how to get
-/// it onto the focused workspace. `None` when no window, or more than one,
-/// matches: a terminal that hosts several windows in one process is ambiguous,
-/// and moving the wrong one is worse than not moving any.
+/// it next to what the user is looking at. `None` when no window, or more than
+/// one, matches: a terminal that hosts several windows in one process is
+/// ambiguous, and moving the wrong one is worse than not moving any.
 fn plan_niri_move(
     windows: &serde_json::Value,
     workspaces: &serde_json::Value,
@@ -175,6 +242,7 @@ fn plan_niri_move(
             window_id,
             output: None,
             workspace_idx: None,
+            column: plan_column_move(windows, window, focused_id),
         });
     }
     let output_of = |ws: &serde_json::Value| {
@@ -191,11 +259,13 @@ fn plan_niri_move(
         window_id,
         output: focused_output.filter(|output| Some(output) != window_output.as_ref()),
         workspace_idx: Some(focused.get("idx")?.as_u64()?),
+        column: None,
     })
 }
 
-/// Bring the window hosting one of `client_pids` to the focused workspace and
-/// focus it. Returns false when there is no niri, or no unambiguous window.
+/// Bring the window hosting one of `client_pids` next to the focused column of
+/// the focused workspace and focus it. Returns false when there is no niri, or
+/// no unambiguous window.
 fn bring_client_window_here(client_pids: &[u32]) -> bool {
     if cfg!(test) || std::env::var_os("NIRI_SOCKET").is_none() {
         return false;
@@ -232,7 +302,22 @@ fn bring_client_window_here(client_pids: &[u32]) -> bool {
     {
         return false;
     }
-    niri_action(&["focus-window".into(), "--id".into(), id])
+    if !niri_action(&["focus-window".into(), "--id".into(), id]) {
+        return false;
+    }
+    // The column actions only act on the focused window, which is now ours.
+    // Failing here leaves the window focused where it was, still a success.
+    if let Some(column) = plan.column {
+        if column.expel {
+            // Not `expel-window-from-column`: that takes the bottom window of
+            // the column, whichever one is focused.
+            niri_action(&["consume-or-expel-window-right".into()]);
+        }
+        if let Some(index) = column.index {
+            niri_action(&["move-column-to-index".into(), index.to_string()]);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -262,6 +347,7 @@ mod tests {
                 window_id: 20,
                 output: None,
                 workspace_idx: Some(2),
+                column: None,
             })
         );
     }
@@ -280,6 +366,82 @@ mod tests {
         let plan = plan_niri_move(&windows, &workspaces(), &[vec![601, 600]]).unwrap();
         assert_eq!(plan.workspace_idx, None);
         assert_eq!(plan.output, None);
+        assert_eq!(plan.column, None);
+    }
+
+    fn tiled(id: u64, pid: u64, column: u64, focused: bool) -> serde_json::Value {
+        json!({
+            "id": id, "pid": pid, "workspace_id": 4, "is_focused": focused,
+            "layout": {"pos_in_scrolling_layout": [column, 1]},
+        })
+    }
+
+    fn column_plan(windows: serde_json::Value) -> Option<NiriColumnMove> {
+        plan_niri_move(&windows, &workspaces(), &[vec![601, 600]])
+            .unwrap()
+            .column
+    }
+
+    #[test]
+    fn far_column_on_the_same_workspace_is_brought_beside_the_focused_one() {
+        // Session to the right of the picker: lands right after it.
+        let right = json!([tiled(1, 900, 3, true), tiled(2, 600, 9, false)]);
+        assert_eq!(
+            column_plan(right),
+            Some(NiriColumnMove {
+                expel: false,
+                index: Some(4)
+            })
+        );
+        // Session to the left: removing it shifts the picker down to 6, so
+        // index 7 is again right after the picker.
+        let left = json!([tiled(1, 900, 7, true), tiled(2, 600, 2, false)]);
+        assert_eq!(
+            column_plan(left),
+            Some(NiriColumnMove {
+                expel: false,
+                index: Some(7)
+            })
+        );
+    }
+
+    #[test]
+    fn adjacent_or_floating_windows_are_only_focused() {
+        let adjacent = json!([tiled(1, 900, 3, true), tiled(2, 600, 4, false)]);
+        assert_eq!(column_plan(adjacent), None);
+        let floating = json!([
+            tiled(1, 900, 3, true),
+            {"id": 2, "pid": 600, "workspace_id": 4, "is_focused": false,
+             "layout": {"pos_in_scrolling_layout": null}},
+        ]);
+        assert_eq!(column_plan(floating), None);
+    }
+
+    #[test]
+    fn window_sharing_a_column_is_expelled_before_moving() {
+        // Shares column 2 with window 3, picker at 7. Expelled to column 3,
+        // the picker shifts to 8 and back to 7 once it leaves, so index 8.
+        let left = json!([
+            tiled(1, 900, 7, true),
+            tiled(2, 600, 2, false),
+            tiled(3, 901, 2, false),
+        ]);
+        assert_eq!(
+            column_plan(left),
+            Some(NiriColumnMove {
+                expel: true,
+                index: Some(8)
+            })
+        );
+        // Stacked with the picker itself: the expel alone puts it beside it.
+        let stacked = json!([tiled(1, 900, 5, true), tiled(2, 600, 5, false)]);
+        assert_eq!(
+            column_plan(stacked),
+            Some(NiriColumnMove {
+                expel: true,
+                index: None
+            })
+        );
     }
 
     #[test]

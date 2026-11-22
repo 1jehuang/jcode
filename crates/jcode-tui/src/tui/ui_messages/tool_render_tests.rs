@@ -2,6 +2,32 @@
 use super::*;
 
 #[test]
+fn speak_card_displays_the_requested_text_not_queue_confirmation() {
+    let msg = DisplayMessage::tool(
+        "Held for local playback",
+        crate::message::ToolCall {
+            id: "v".into(),
+            name: "speak".into(),
+            input: serde_json::json!({"text":"Can you hear me?\n界\u{1b}[31mHello\u{1b}[0m"}),
+            intent: Some("Answer microphone check".into()),
+            thought_signature: None,
+        },
+    );
+    let rows = render_tool_message(&msg, 36, crate::config::DiffDisplayMode::Off);
+    let caption = rows
+        .iter()
+        .skip(1)
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        caption.contains("Can you hear me?") && caption.contains("界Hello"),
+        "{caption}"
+    );
+    assert!(!caption.contains('\u{1b}') && !caption.contains("Held for local playback"));
+}
+
+#[test]
 fn render_tool_message_groups_duration_and_tokens() {
     for name in [
         "bash",

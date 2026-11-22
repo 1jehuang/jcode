@@ -591,7 +591,7 @@ fn live_catalog_discovery_handles_future_models_fresh_cache_forced_refresh_and_f
             .clone()
             .expect("captured user-agent");
         assert!(
-            observed_ua.starts_with("antigravity/cli/1.5.5 "),
+            observed_ua.starts_with("antigravity/hub/1.5.5 "),
             "unexpected User-Agent: {observed_ua}"
         );
         assert!(

@@ -22,6 +22,9 @@ pub struct SessionToolDefinition {
 /// Replaces the session SDK overlay. None inherits normal selection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionToolConfig {
+    /// Session-only instructions owned by the configuring connection, not persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_append: Option<String>,
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
     #[serde(default)]
@@ -34,6 +37,13 @@ pub struct SessionToolConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    /// Passive latest-state metadata. Never starts a turn or cancels generation.
+    #[serde(rename = "screen_context")]
+    ScreenContext {
+        id: u64,
+        session_id: String,
+        action: ScreenContextAction,
+    },
     #[serde(rename = "configure_tools")]
     ConfigureTools { id: u64, tools: SessionToolConfig },
     #[serde(rename = "list_tools")]
@@ -51,6 +61,9 @@ pub enum Request {
     Message {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,6 +91,9 @@ pub enum Request {
     SoftInterrupt {
         id: u64,
         content: String,
+        /// Out-of-band client provenance for rendering. Never part of provider input.
+        #[serde(default, skip_serializing_if = "is_false")]
+        jarvis_voice: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<(String, String)>,
         /// If true, can skip remaining tools at injection point C

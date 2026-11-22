@@ -16,13 +16,7 @@ pub(super) async fn maybe_handle_event_query_command(
             .unwrap_or(50);
 
         let history = event_history.read().await;
-        let events: Vec<serde_json::Value> = history
-            .iter()
-            .rev()
-            .take(count)
-            .map(event_payload)
-            .collect();
-        return Some(serde_json::to_string_pretty(&events).unwrap_or_else(|_| "[]".to_string()));
+        return Some(pretty_events(history.iter().rev().take(count)));
     }
 
     if cmd.starts_with("events:since:") {
@@ -32,12 +26,9 @@ pub(super) async fn maybe_handle_event_query_command(
             .unwrap_or(0);
 
         let history = event_history.read().await;
-        let events: Vec<serde_json::Value> = history
-            .iter()
-            .filter(|event| event.id > since_id)
-            .map(event_payload)
-            .collect();
-        return Some(serde_json::to_string_pretty(&events).unwrap_or_else(|_| "[]".to_string()));
+        return Some(pretty_events(
+            history.iter().filter(|event| event.id > since_id),
+        ));
     }
 
     if cmd == "events:types" {
@@ -154,6 +145,22 @@ pub(super) async fn maybe_handle_event_subscription_command<W: AsyncWrite + Unpi
     }
 
     Ok(true)
+}
+
+// Materialize only the current payload while writing the pretty JSON array.
+fn pretty_events<'a>(events: impl Iterator<Item = &'a SwarmEvent> + Clone) -> String {
+    struct Stream<I>(I);
+    impl<'a, I: Iterator<Item = &'a SwarmEvent> + Clone> serde::Serialize for Stream<I> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(None)?;
+            for event in self.0.clone() {
+                seq.serialize_element(&event_payload(event))?;
+            }
+            seq.end()
+        }
+    }
+    serde_json::to_string_pretty(&Stream(events)).unwrap_or_else(|_| "[]".to_owned())
 }
 
 fn event_payload(event: &SwarmEvent) -> serde_json::Value {

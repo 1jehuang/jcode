@@ -6,7 +6,8 @@ fn user_text(text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -19,7 +20,8 @@ fn tool_result(id: &str, content: &str) -> Message {
             tool_use_id: id.to_string(),
             content: content.to_string(),
             is_error: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: Some(1),
     }

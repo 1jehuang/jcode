@@ -186,6 +186,7 @@ pub(crate) struct ResponsesStream {
     // can split a UTF-8 character at any byte.
     buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
+    resolved_model: Option<String>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
     ended: bool,
@@ -199,6 +200,7 @@ impl ResponsesStream {
             inner: Box::pin(stream),
             buffer: Vec::new(),
             pending: Vec::new(),
+            resolved_model: None,
             tools: HashMap::new(),
             thinking: false,
             ended: false,
@@ -209,6 +211,18 @@ impl ResponsesStream {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
+        if let Some(model) = value
+            .get("response")
+            .and_then(|response| response.get("model"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            && self.resolved_model.as_deref() != Some(model)
+        {
+            self.resolved_model = Some(model.to_owned());
+            self.pending.push(StreamEvent::ResolvedModel {
+                model: model.to_owned(),
+            });
+        }
         let kind = value
             .get("type")
             .and_then(Value::as_str)
@@ -379,9 +393,8 @@ impl ResponsesStream {
     }
 
     fn next_event(&mut self) -> Option<StreamEvent> {
-        if let Some(event) = self.pending.first().cloned() {
-            self.pending.remove(0);
-            return Some(event);
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
         }
         while let Some((pos, separator_len)) = [
             self.buffer
@@ -409,9 +422,8 @@ impl ResponsesStream {
                 continue;
             }
             self.parse_event(&data);
-            if let Some(event) = self.pending.first().cloned() {
-                self.pending.remove(0);
-                return Some(event);
+            if !self.pending.is_empty() {
+                return Some(self.pending.remove(0));
             }
         }
         None
@@ -480,18 +492,16 @@ impl Stream for ResponsesStream {
                     if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
                         self.parse_event(String::from_utf8_lossy(&tail).trim());
-                        if let Some(event) = self.pending.first().cloned() {
-                            self.pending.remove(0);
-                            return Poll::Ready(Some(Ok(event)));
+                        if !self.pending.is_empty() {
+                            return Poll::Ready(Some(Ok(self.pending.remove(0))));
                         }
                     }
                     if !self.ended {
                         if self.thinking {
                             self.pending.push(StreamEvent::ThinkingEnd);
                             self.thinking = false;
-                            if let Some(event) = self.pending.first().cloned() {
-                                self.pending.remove(0);
-                                return Poll::Ready(Some(Ok(event)));
+                            if !self.pending.is_empty() {
+                                return Poll::Ready(Some(Ok(self.pending.remove(0))));
                             }
                         }
                         self.ended = true;
@@ -509,8 +519,53 @@ impl Stream for ResponsesStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_model_metadata_dedupes_and_resets_per_attempt() {
+        for _attempt in 0..2 {
+            let mut stream = super::ResponsesStream::new(futures::stream::empty());
+            for data in [
+                r#"{"type":"response.created","model":"requested-alias","response":{}}"#,
+                r#"{"type":"response.created","response":{"model":" "}}"#,
+                r#"{"type":"response.created","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"other-snapshot"}}"#,
+            ] {
+                stream.parse_event(data);
+            }
+            let models = stream
+                .pending
+                .iter()
+                .filter_map(|event| match event {
+                    super::StreamEvent::ResolvedModel { model } => Some(model.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(models, ["actual-snapshot", "other-snapshot"]);
+        }
+    }
+
     use super::*;
     use futures::StreamExt;
+
+    #[test]
+    fn queued_payload_is_moved_without_reallocating_and_preserves_order() {
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        let text = "large queued tool input".repeat(65536);
+        let pointer = text.as_ptr();
+        let capacity = text.capacity();
+        stream.pending.push(StreamEvent::ToolInputDelta(text));
+        stream.pending.push(StreamEvent::ToolUseEnd);
+        match stream.next_event().expect("queued payload") {
+            StreamEvent::ToolInputDelta(text) => {
+                assert_eq!(text.as_ptr(), pointer);
+                assert_eq!(text.capacity(), capacity);
+                assert_eq!(text, "large queued tool input".repeat(65536));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert!(matches!(stream.next_event(), Some(StreamEvent::ToolUseEnd)));
+        assert!(stream.next_event().is_none());
+    }
 
     #[test]
     fn only_open_code_go_responses_models_use_responses() {

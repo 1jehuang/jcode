@@ -160,208 +160,8 @@ pub(crate) struct AuthLifecycleResult {
     pub credential_location: Option<String>,
 }
 
-impl AuthLifecycleResult {
-    pub(crate) fn assert_success(&self, spec: &AuthLifecycleSpec) {
-        let transcript = self.transcript_text();
-        assert!(self.catalog_report.ok(), "{}", self.failure_report(spec));
-        assert_eq!(
-            self.activation.provider_id.as_deref(),
-            Some(spec.provider_id)
-        );
-        assert_eq!(
-            self.activation.provider_label.as_deref(),
-            Some(spec.provider_label)
-        );
-        assert_eq!(
-            self.activation.expected_runtime.as_deref(),
-            Some("openai-compatible")
-        );
-        assert_eq!(
-            self.activation.expected_catalog_namespace.as_deref(),
-            Some(spec.provider_id)
-        );
-        assert!(
-            transcript.contains(&format!("{} catalog changed", spec.provider_label)),
-            "{}",
-            self.failure_report(spec)
-        );
-        // Anti-confusion guard: the transcript must never attribute the new
-        // access to a different provider. Skip the marker matching the provider
-        // under test: OpenRouter/OpenAI-labelled compat profiles legitimately
-        // produce their own catalog-changed line.
-        for other_label in ["OpenAI", "OpenRouter"] {
-            if spec.provider_label == other_label {
-                continue;
-            }
-            assert!(
-                !transcript.contains(&format!("{other_label} catalog changed")),
-                "{}",
-                self.failure_report(spec)
-            );
-        }
-        self.assert_transcript_order(spec);
-        for forbidden in [
-            "Auth Model Catalog Warning",
-            "did not switch models",
-            "contained no selectable",
-            "Login: failed",
-            "failed",
-            "Unable to sign in",
-            "Saved the API key and fetched the model catalog, but",
-        ] {
-            assert!(
-                !transcript.contains(forbidden),
-                "happy auth lifecycle transcript contained forbidden degraded-success marker `{forbidden}`:\n{}",
-                self.failure_report(spec)
-            );
-        }
-        assert!(
-            !self.picker.provider_entries.is_empty(),
-            "{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            self.picker
-                .selected_model
-                .as_ref()
-                .is_some_and(|selected| self
-                    .picker
-                    .provider_entries
-                    .iter()
-                    .any(|entry| entry == selected)),
-            "{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            self.picker.switch_target.is_some(),
-            "{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            self.picker
-                .switch_request
-                .as_ref()
-                .is_some_and(|request| request.starts_with(&format!("{}:", spec.provider_id))),
-            "{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            self.picker
-                .switch_route_api_method
-                .as_deref()
-                .is_some_and(|api_method| api_method
-                    .eq_ignore_ascii_case(&format!("openai-compatible:{}", spec.provider_id))
-                    || api_method.eq_ignore_ascii_case(spec.provider_id)),
-            "{}",
-            self.failure_report(spec)
-        );
-        let matching_routes = self
-            .catalog_routes
-            .iter()
-            .filter(|route| route.available && route_matches_spec(route, spec))
-            .collect::<Vec<_>>();
-        assert!(
-            matching_routes.iter().all(|route| spec
-                .catalog_models_after_auth
-                .iter()
-                .any(|model| model == &route.model)),
-            "happy auth lifecycle advertised provider routes that were not returned by the live catalog:\n{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            self.picker.provider_entries.iter().all(|entry| spec
-                .catalog_models_after_auth
-                .iter()
-                .any(|model| model == entry)),
-            "happy auth lifecycle picker included models that were not returned by the live catalog:\n{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            matching_routes
-                .iter()
-                .all(|route| route.detail.contains("live-catalog")),
-            "happy auth lifecycle must be backed by live/provider catalog routes, not static fallback routes:\n{}",
-            self.failure_report(spec)
-        );
-        assert!(
-            matching_routes.iter().all(|route| !route
-                .detail
-                .to_ascii_lowercase()
-                .contains("static fallback")),
-            "happy auth lifecycle accepted a static fallback route:\n{}",
-            self.failure_report(spec)
-        );
-    }
-
-    fn assert_transcript_order(&self, spec: &AuthLifecycleSpec) {
-        let transcript = self.transcript_text();
-        let saved_or_detected = if spec.auth_path.shows_paste_prompt() {
-            format!("**{} API key saved.**", spec.provider_label)
-        } else {
-            format!("**{} credentials detected.**", spec.provider_label)
-        };
-        let markers = [saved_or_detected.as_str(), "**Model ready:**"];
-        let mut previous = None;
-        for marker in markers {
-            let first = transcript.find(marker).unwrap_or_else(|| {
-                panic!(
-                    "happy auth lifecycle transcript is missing `{marker}`:\n{}",
-                    self.failure_report(spec)
-                )
-            });
-            let last = transcript.rfind(marker).expect("marker found above");
-            assert_eq!(
-                first,
-                last,
-                "happy auth lifecycle transcript contained duplicate `{marker}`:\n{}",
-                self.failure_report(spec)
-            );
-            if let Some(previous) = previous {
-                assert!(
-                    previous < first,
-                    "happy auth lifecycle transcript marker `{marker}` was out of order:\n{}",
-                    self.failure_report(spec)
-                );
-            }
-            previous = Some(first);
-        }
-    }
-
-    pub(crate) fn transcript_text(&self) -> String {
-        self.transcript.join("\n\n")
-    }
-
-    pub(crate) fn failure_report(&self, spec: &AuthLifecycleSpec) -> String {
-        let warning = self
-            .catalog_report
-            .warning_message()
-            .unwrap_or_else(|| "none".to_string());
-        let route_sample = self
-            .catalog_routes
-            .iter()
-            .take(8)
-            .map(|route| {
-                format!(
-                    "{} via {} provider={} available={}",
-                    route.model, route.api_method, route.provider, route.available
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n  ");
-        format!(
-            "auth lifecycle failed for {} via {:?}\ncredential: {:?}\nactivation: {:?}\ncatalog invariant: {:?}\nwarning: {}\npicker: {:?}\nroutes:\n  {}\ntranscript:\n{}",
-            spec.provider_label,
-            spec.auth_path,
-            self.credential_location,
-            self.activation,
-            self.catalog_report,
-            warning,
-            self.picker,
-            route_sample,
-            self.transcript_text()
-        )
-    }
-}
+#[path = "lifecycle_driver_result_assertions.rs"]
+mod result_assertions;
 
 pub(crate) struct AuthLifecycleDriver {
     sandbox: AuthTestSandbox,
@@ -543,6 +343,52 @@ pub(crate) use crate::live_provider_probes::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_lifecycle_evidence_matches_legacy_and_retains_sources() {
+        let mut source = "fixture-only auth source 🦀".to_string();
+        let mut location = Some("sandbox/credentials".to_string());
+        let mut picker = PickerSnapshot {
+            selected_model: Some("future-model".to_string()),
+            provider_entries: vec!["future-model".to_string(), "alternate".to_string()],
+            switch_target: None,
+            switch_request: Some("fixture:alternate".to_string()),
+            switch_route_provider: None,
+            switch_route_api_method: None,
+        };
+        let legacy = serde_json::json!({
+            "source": source.clone(),
+            "credential_location": location.clone(),
+            "selected_model": picker.selected_model.clone(),
+            "provider_entries": picker.provider_entries.clone(),
+            "switch_request": picker.switch_request.clone(),
+            "switch_route_api_method": picker.switch_route_api_method.clone(),
+        });
+        let evidence = serde_json::json!({
+            "source": source,
+            "credential_location": location,
+            "selected_model": picker.selected_model,
+            "provider_entries": picker.provider_entries,
+            "switch_request": picker.switch_request,
+            "switch_route_api_method": picker.switch_route_api_method,
+        });
+        assert_eq!(evidence, legacy);
+        assert_eq!(
+            serde_json::to_vec(&evidence).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+        assert_eq!(source, legacy["source"]);
+        assert_eq!(location.as_deref(), legacy["credential_location"].as_str());
+        assert_eq!(picker.provider_entries.len(), 2);
+        source.clear();
+        location = None;
+        picker.provider_entries.clear();
+        picker.selected_model = None;
+        picker.switch_request = None;
+        picker.switch_route_api_method = Some("changed".to_string());
+        assert!(source.is_empty() && location.is_none() && picker.provider_entries.is_empty());
+        assert_eq!(evidence, legacy);
+    }
 
     /// True when an OpenAI-compatible profile id is intentionally remapped onto a
     /// native runtime (e.g. `anthropic-api` -> `claude-api`, `openai-api`) instead
@@ -1269,11 +1115,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(spend_smoke || stream_smoke),
         ];
         let models_result = fetch_live_openai_compatible_models(
@@ -1352,7 +1195,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1370,10 +1213,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(selected.clone()))
+            .with_evidence("selected_model", serde_json::json!(selected))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1392,11 +1235,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 
@@ -1496,11 +1339,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(true),
         ];
         let models_result = fetch_live_openai_compatible_models(
@@ -1573,7 +1413,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1591,10 +1431,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(model.clone()))
+            .with_evidence("selected_model", serde_json::json!(model))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1613,11 +1453,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 
@@ -1726,11 +1566,8 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::AUTH_CREDENTIAL_LOADED,
             )
-            .with_evidence(
-                "auth_source",
-                serde_json::json!(api_key.auth.source.clone()),
-            )
-            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key.clone())),
+            .with_evidence("auth_source", serde_json::json!(api_key.auth.source))
+            .with_evidence("env_key", serde_json::json!(api_key.auth.env_key)),
             cost_quota_safety_stage(spend_smoke || stream_smoke),
         ];
 
@@ -1803,7 +1640,7 @@ mod tests {
             )
             .with_evidence(
                 "credential_location",
-                serde_json::json!(result.credential_location.clone()),
+                serde_json::json!(result.credential_location),
             )
             .with_evidence("sandboxed", serde_json::json!(true)),
         );
@@ -1821,10 +1658,10 @@ mod tests {
             jcode_base::live_tests::LiveVerificationStage::passed(
                 jcode_base::live_tests::checkpoints::PICKER_LIVE_MODELS,
             )
-            .with_evidence("selected_model", serde_json::json!(selected.clone()))
+            .with_evidence("selected_model", serde_json::json!(selected))
             .with_evidence(
                 "picker_entries",
-                serde_json::json!(result.picker.provider_entries.clone()),
+                serde_json::json!(result.picker.provider_entries),
             ),
         );
         stages.push(
@@ -1843,11 +1680,11 @@ mod tests {
             )
             .with_evidence(
                 "switch_request",
-                serde_json::json!(result.picker.switch_request.clone()),
+                serde_json::json!(result.picker.switch_request),
             )
             .with_evidence(
                 "switch_route_api_method",
-                serde_json::json!(result.picker.switch_route_api_method.clone()),
+                serde_json::json!(result.picker.switch_route_api_method),
             ),
         );
 

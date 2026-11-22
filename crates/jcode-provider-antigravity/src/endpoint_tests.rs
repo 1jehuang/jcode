@@ -185,116 +185,17 @@ impl Drop for VersionEnvGuard {
 }
 
 #[test]
-fn resolve_version_honors_env_then_detected_cli_then_fallback() {
-    assert_eq!(
-        resolve_antigravity_version_with(Some("antigravity/cli/1.6.2"), Some("1.5.5")),
-        "1.6.2"
-    );
-    assert_eq!(
-        resolve_antigravity_version_with(Some("  cli/1.4.0  "), Some("1.5.5")),
-        "1.4.0"
-    );
-    assert_eq!(
-        resolve_antigravity_version_with(Some("   "), Some("1.6.0-rc.1")),
-        "1.6.0-rc.1"
-    );
-    assert_eq!(
-        resolve_antigravity_version_with(Some("not-a-semver\r\nBad: 1"), Some("1.5.5")),
-        "1.5.5"
-    );
-    assert_eq!(
-        resolve_antigravity_version_with(None, Some("garbage")),
-        ANTIGRAVITY_VERSION
-    );
-    assert_eq!(
-        resolve_antigravity_version_with(None, None),
-        ANTIGRAVITY_VERSION
-    );
-}
-
-#[test]
-fn parse_agy_version_output_extracts_valid_semver_and_rejects_garbage() {
-    assert_eq!(parse_agy_version_output("1.5.5\n"), Some("1.5.5".into()));
-    assert_eq!(
-        parse_agy_version_output("\n  agy version 1.6.0 (2026-11-14)\n"),
-        Some("1.6.0".into())
-    );
-    assert_eq!(
-        parse_agy_version_output("antigravity/cli/1.5.5 darwin/arm64\n"),
-        Some("1.5.5".into())
-    );
-    assert_eq!(
-        parse_agy_version_output("v2.0.1-beta.2\nDate: 2026-11-14\n"),
-        Some("2.0.1-beta.2".into())
-    );
-    for invalid in [
-        "",
-        "   \n\t",
-        "error: command failed",
-        "1",
-        "1.5.5; echo injected",
-        "1.5.5-",
-        "1..5",
-    ] {
-        assert_eq!(
-            parse_agy_version_output(invalid),
-            None,
-            "invalid output {invalid:?} must be rejected"
-        );
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn probe_agy_version_command_handles_success_failure_missing_and_timeout() {
-    assert_eq!(
-        probe_agy_version_command(
-            "/bin/sh",
-            &["-c", "printf '1.7.3\\n'"],
-            Duration::from_millis(500),
-        ),
-        Some("1.7.3".to_string())
-    );
-    assert_eq!(
-        probe_agy_version_command(
-            "/bin/sh",
-            &["-c", "printf '1.7.3\\n'; exit 1"],
-            Duration::from_millis(500),
-        ),
-        None
-    );
-    assert_eq!(
-        probe_agy_version_command(
-            "/nonexistent/jcode-missing-agy-binary",
-            &["--version"],
-            Duration::from_millis(200),
-        ),
-        None
-    );
-    let start = Instant::now();
-    assert_eq!(
-        probe_agy_version_command("/bin/sh", &["-c", "sleep 2"], Duration::from_millis(80)),
-        None
-    );
-    assert!(
-        start.elapsed() < Duration::from_millis(1000),
-        "timed-out agy probe must be killed promptly"
-    );
-}
-
-#[test]
 fn antigravity_user_agent_normalizes_env_overrides_and_falls_back_cleanly() {
     let _guard = VersionEnvGuard::acquire();
     unsafe {
         std::env::remove_var(VERSION_ENV);
     }
-    let expected_default = detected_agy_version().unwrap_or(ANTIGRAVITY_VERSION);
-    assert!(is_valid_antigravity_semver(expected_default));
-    assert_eq!(antigravity_version(), expected_default);
+    assert!(is_valid_antigravity_semver(ANTIGRAVITY_VERSION));
+    assert_eq!(antigravity_version(), ANTIGRAVITY_VERSION);
     assert_eq!(
         antigravity_user_agent(),
         format!(
-            "antigravity/cli/{expected_default} {}",
+            "antigravity/hub/{ANTIGRAVITY_VERSION} {}",
             antigravity_platform_suffix()
         )
     );
@@ -303,45 +204,51 @@ fn antigravity_user_agent_normalizes_env_overrides_and_falls_back_cleanly() {
         "",
         "   ",
         "\t\n",
+        "hub/",
         "cli/",
-        "  cli/   ",
+        "  hub/   ",
+        "antigravity/hub/",
         "antigravity/cli/",
         "bad\r\nheader",
+        "1",
+        "2.30.0; echo injected",
+        "2.30.0-",
+        "2..30",
     ] {
         unsafe {
             std::env::set_var(VERSION_ENV, blank);
         }
         assert_eq!(
             antigravity_version(),
-            expected_default,
+            ANTIGRAVITY_VERSION,
             "invalid override {blank:?} must fall back cleanly"
         );
     }
 
     for (expected_ver, raw_variants) in [
         (
-            "1.4.0",
+            "2.31.0",
             [
-                "1.4.0",
-                "  1.4.0  ",
-                "cli/1.4.0",
-                "antigravity/cli/1.4.0",
-                "  antigravity/cli/1.4.0  ",
+                "2.31.0",
+                "  2.31.0  ",
+                "hub/2.31.0",
+                "antigravity/hub/2.31.0",
+                "  antigravity/hub/2.31.0  ",
             ],
         ),
         (
-            "1.5.5",
+            "2.30.0",
             [
-                "1.5.5",
-                "v1.5.5",
-                "cli/1.5.5",
-                "antigravity/cli/1.5.5",
-                "  cli/1.5.5  ",
+                "2.30.0",
+                "v2.30.0",
+                "cli/2.30.0",
+                "antigravity/cli/2.30.0",
+                "  hub/2.30.0  ",
             ],
         ),
     ] {
         let expected_ua = format!(
-            "antigravity/cli/{expected_ver} {}",
+            "antigravity/hub/{expected_ver} {}",
             antigravity_platform_suffix()
         );
         for raw in raw_variants {

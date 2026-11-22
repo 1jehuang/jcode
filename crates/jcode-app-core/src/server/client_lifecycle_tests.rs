@@ -7,43 +7,8 @@ use futures::stream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-#[test]
-fn identity_transport_negotiation_preserves_legacy_payload_shape() {
-    let identity = crate::protocol::TurnIdentity {
-        runtime_generation: "runtime".into(),
-        turn_id: 7,
-    };
-    let wrapped = ServerEvent::TurnEvent {
-        identity: identity.clone(),
-        event: Box::new(ServerEvent::Done { id: 99 }),
-    };
-    assert!(matches!(
-        event_for_transport(wrapped.clone(), false),
-        Some(ServerEvent::Done { id: 99 })
-    ));
-    assert!(matches!(
-        event_for_transport(wrapped, true),
-        Some(ServerEvent::TurnEvent { .. })
-    ));
-    let started = ServerEvent::TurnStarted { identity };
-    assert!(event_for_transport(started.clone(), false).is_none());
-    assert!(matches!(
-        event_for_transport(started, true),
-        Some(ServerEvent::TurnStarted { .. })
-    ));
-    assert!(
-        event_for_transport(
-            ServerEvent::TurnState {
-                session_id: "session".into(),
-                runtime_generation: "runtime".into(),
-                turn_id: None,
-                latest_turn_id: 7
-            },
-            false
-        )
-        .is_none()
-    );
-}
+#[path = "client_lifecycle_daemon_continuation_socket_tests.rs"]
+mod daemon_continuation_socket_tests;
 
 fn turn_payload(event: ServerEvent) -> ServerEvent {
     match event {
@@ -132,123 +97,6 @@ impl Drop for IsolatedRuntimeDir {
             crate::env::remove_var("JCODE_RUNTIME_DIR");
         }
     }
-}
-
-/// Regression for issue #428: a turn actively streaming in this session but
-/// NOT owned by the cancelling connection (no local task handle: post-reload
-/// reattach, server-initiated wake turns, headless recovery) must abort
-/// promptly even when the control handle's stop signal is a *different
-/// instance* from the streaming agent's own `graceful_shutdown` signal.
-///
-/// Before the fix, `cancel_processing_message` hit the NO_LOCAL_TASK branch,
-/// fired the stale handle-local signal (which nothing was listening to),
-/// emitted `Interrupted` immediately, and the provider stream kept generating
-/// for minutes ("Interrupting..." disappears, model keeps going, eventually
-/// "Interrupted [x66]").
-#[test]
-fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Result<()> {
-    let _lock = crate::storage::lock_test_env();
-    let _env = IsolatedReloadRecoveryEnv::new();
-    let session_id = "session_detached_streaming_cancel_428";
-
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    rt.block_on(async {
-        let provider: Arc<dyn Provider> = Arc::new(NeverEndingStreamProvider);
-        let registry = Registry::new(Arc::clone(&provider)).await;
-        let mut session =
-            crate::session::Session::create_with_id(session_id.to_string(), None, None);
-        session.model = Some("never-ending-stream".to_string());
-        let agent = Arc::new(Mutex::new(Agent::new_with_session(
-            provider, registry, session, None,
-        )));
-
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-
-        // Start the turn the way server-initiated paths do: no entry in any
-        // connection's processing-task map.
-        let turn_agent = Arc::clone(&agent);
-        let turn = tokio::spawn(async move {
-            process_message_streaming_mpsc(turn_agent, "stream forever", Vec::new(), None, event_tx)
-                .await
-        });
-
-        // Wait until the provider stream is actively producing output.
-        loop {
-            match tokio::time::timeout(Duration::from_secs(5), event_rx.recv()).await {
-                Ok(Some(ServerEvent::TextDelta { .. })) => break,
-                Ok(Some(_)) => continue,
-                Ok(None) => panic!("event channel closed before streaming started"),
-                Err(_) => panic!("turn never started streaming"),
-            }
-        }
-
-        // Esc arrives on a connection that does not own the task. Its control
-        // handle holds a stop signal instance that is NOT the streaming
-        // agent's graceful_shutdown signal (stale/lost registration).
-        let stale_stop_signal = InterruptSignal::new();
-        let control = SessionControlHandle::cancel_only(
-            session_id,
-            Arc::new(std::sync::Mutex::new(Vec::new())),
-            stale_stop_signal.clone(),
-        );
-        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
-        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
-        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
-        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (swarm_event_tx, _) = broadcast::channel(8);
-        let mut client_is_processing = false;
-        let mut message_id = None;
-        let mut cancel_session_id = None;
-        let mut task = None;
-
-        cancel_processing_message(
-            &mut ProcessingState {
-                client_is_processing: &mut client_is_processing,
-                message_id: &mut message_id,
-                session_id: &mut cancel_session_id,
-                task: &mut task,
-            },
-            &control,
-            &client_event_tx,
-            &SwarmStatusRefs {
-                members: &swarm_members,
-                swarms_by_id: &swarms_by_id,
-                event_history: &event_history,
-                event_counter: &event_counter,
-                event_tx: &swarm_event_tx,
-            },
-            Some(1),
-            None,
-            None,
-        )
-        .await;
-
-        // The streaming turn must observe the cancel and stop promptly, not
-        // minutes later when the provider happens to finish (issue #428).
-        let result = tokio::time::timeout(Duration::from_secs(2), turn)
-            .await
-            .expect("streaming turn must abort promptly after cancel (issue #428)")
-            .expect("turn task join");
-        result.expect("cancelled turn should checkpoint cleanly");
-
-        // The turn is over, so its cancel registration must be gone and the
-        // agent's own signal must be reset so the *next* turn is not aborted
-        // by the consumed cancel.
-        assert!(
-            crate::turn_cancel_registry::active_turn_signals(session_id).is_empty(),
-            "finished turn must unregister its cancel signal"
-        );
-        let agent_signal = {
-            let agent_guard = agent.lock().await;
-            agent_guard.graceful_shutdown_signal()
-        };
-        assert!(
-            !agent_signal.is_set(),
-            "consumed cancel must not leak into the next turn"
-        );
-    });
-    Ok(())
 }
 
 /// A cancel that arrives while the session is idle must not arm the cancel
@@ -604,6 +452,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                jarvis_voice: false,
                 id: 42,
                 content: "do not start during reload".to_string(),
                 images: Vec::new(),
@@ -706,6 +555,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            jarvis_voice: false,
             id: 479,
             content: "stream to every attachment".to_string(),
             images: Vec::new(),
@@ -931,6 +781,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let other_connection = agent.lock().await.claim_server_turn().unwrap();
     start_processing_message(
         ProcessingMessage {
+            jarvis_voice: false,
             id: 1,
             content: "must not enter transcript".into(),
             images: Vec::new(),
@@ -958,6 +809,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
             .send(ProcessingMessage {
+                jarvis_voice: false,
                 id,
                 content: content.into(),
                 images: Vec::new(),
@@ -1235,6 +1087,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                jarvis_voice: false,
                 id: 77,
                 content: "continue after reload".to_string(),
                 images: Vec::new(),
@@ -1296,6 +1149,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
+                jarvis_voice: false,
                 id: 78,
                 content: String::new(),
                 images: Vec::new(),
@@ -1360,6 +1214,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             }
             start_processing_message(
                 ProcessingMessage {
+                    jarvis_voice: false,
                     id,
                     content: continuation.to_string(),
                     images: Vec::new(),
@@ -1454,6 +1309,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    jarvis_voice: false,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
                     images: Vec::new(),
@@ -1660,103 +1516,8 @@ mod socket_workflows;
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 
-/// Thirty text deltas 20ms apart, the shape of a provider stream.
-#[derive(Clone, Default)]
-struct SteadyDeltaProvider;
+#[path = "client_lifecycle_tests/stream_coalescing.rs"]
+mod stream_coalescing;
 
-const STEADY_DELTAS: usize = 30;
-
-#[async_trait]
-impl Provider for SteadyDeltaProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        Ok(Box::pin(stream::unfold(0_usize, |step| async move {
-            if step < STEADY_DELTAS {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                Some((Ok(StreamEvent::TextDelta(format!("w{step} "))), step + 1))
-            } else if step == STEADY_DELTAS {
-                Some((
-                    Ok(StreamEvent::MessageEnd {
-                        stop_reason: Some("end_turn".to_string()),
-                    }),
-                    step + 1,
-                ))
-            } else {
-                None
-            }
-        })))
-    }
-
-    fn name(&self) -> &str {
-        "steady-delta"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
-    }
-}
-
-/// A streamed turn publishes one text event per provider delta while a client
-/// is focused or has never said, and a few coalesced ones once every attached
-/// client reported that it is unfocused. The text itself must be identical.
-#[tokio::test(start_paused = true)]
-async fn streamed_text_is_coalesced_only_when_every_client_is_unfocused() {
-    let _guard = crate::storage::lock_test_env();
-    let _env = IsolatedReloadRecoveryEnv::new();
-    let expected: String = (0..STEADY_DELTAS).map(|step| format!("w{step} ")).collect();
-
-    for unfocused in [false, true] {
-        let provider: Arc<dyn Provider> = Arc::new(SteadyDeltaProvider);
-        let registry = Registry::new(Arc::clone(&provider)).await;
-        let mut agent = Agent::new(provider, registry);
-        let session_id = agent.session_id().to_string();
-        let connection = format!("steady-conn-{unfocused}");
-        if unfocused {
-            crate::stream_batching::set_connection_focus(&connection, &session_id, false, false);
-        }
-        // What the session fanout does with the attached connections.
-        crate::stream_batching::note_session_targets(&session_id, [&connection]);
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        agent
-            .run_once_streaming_mpsc("go", Vec::new(), None, tx)
-            .await
-            .expect("turn completes");
-
-        let mut text = String::new();
-        let mut text_events = 0usize;
-        let mut text_after_end = false;
-        let mut ended = false;
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                ServerEvent::TextDelta { text: delta } => {
-                    text_after_end |= ended;
-                    text.push_str(&delta);
-                    text_events += 1;
-                }
-                ServerEvent::MessageEnd { .. } | ServerEvent::Done { .. } => ended = true,
-                _ => {}
-            }
-        }
-        assert_eq!(text, expected, "unfocused={unfocused}");
-        assert!(
-            !text_after_end,
-            "held text must precede the end of the turn"
-        );
-        if unfocused {
-            // 600ms of stream in 250ms batches.
-            assert!(
-                (2..=4).contains(&text_events),
-                "expected a few batches, got {text_events}"
-            );
-        } else {
-            assert_eq!(text_events, STEADY_DELTAS);
-        }
-        crate::stream_batching::forget_connection(&connection);
-    }
-}
+#[path = "client_lifecycle_tests_additional_tests.rs"]
+mod additional_identity_transport_negotiation_preserves_legacy_payload_shape;

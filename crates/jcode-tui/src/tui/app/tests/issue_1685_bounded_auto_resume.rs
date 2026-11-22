@@ -7,6 +7,7 @@ fn issue_1685_user_turn(
     retry_attempts: u8,
 ) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: content.to_string(),
         images: vec![],
         is_system: false,

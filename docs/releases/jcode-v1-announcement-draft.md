@@ -8,13 +8,13 @@
 
 ## 🐝 A swarm that works from a plan
 
-Plans now have **phases, parallel lanes, and tasks**, with workers starting automatically as their dependencies finish. Independent parts of a job run together, the coordinator receives progress and results automatically, and you can follow the whole team in one pinned view.
+jcode now builds parallel work into the plan. It breaks larger jobs into **phases and independent lanes**, brings in workers as tasks become ready, and coordinates their results as the work moves forward.
 
-We’re using this to build jcode itself. **In one bug-fix batch, four worker lanes delivered fixes for five GitHub issues in about six minutes.** Another four-lane batch handled lint, safety checks, the session picker, and runtime fixes simultaneously.
+Ready worker lanes **start automatically as their dependencies finish**, rather than relying on the model to explicitly spawn every agent. The coordinator stays focused on the overall job while workers tackle separate pieces.
 
-Plans can wait for background jobs or other workers and wake when those finish. Long-running tools yield to the background after **3 seconds**, so the agent can keep doing useful work.
+In our own jcode development sessions, **worker launches nearly doubled, from 88 to 174**, comparing November 2–8 with November 9–15. That averaged **roughly 3× as many worker dispatches per active session**.
 
-**Clearer todo semantics keep work moving:** a retryable problem is not a reason to stop. Tasks can pause while tracked background work finishes, or when they genuinely need a login, 2FA, or credentials the agent cannot access. Work that truly cannot be completed is recorded at the goal level, instead of repeatedly poking the same impossible task.
+**More work in parallel, less babysitting.** Follow the plan and the whole team’s progress in one pinned view.
 
 ## Message 2: official cloud launch
 
@@ -82,7 +82,7 @@ jcode v1 is here. I wanted coding agents that could work as a team without makin
 
 ## Optional reply 1: swarms
 
-The swarm works from phases, parallel lanes, and tasks. Workers start as dependencies finish, and progress comes back to the coordinator. We used four worker lanes to fix five GitHub issues in about six minutes while building jcode itself.
+Ready worker lanes now start automatically as dependencies finish. In our own jcode development, worker launches nearly doubled week over week, averaging roughly 3× as many dispatches per active session. Follow the plan and the whole team in one pinned view.
 
 ## Optional reply 2: official cloud launch
 

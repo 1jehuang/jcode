@@ -10,7 +10,7 @@ impl Agent {
             .try_read()
             .map_err(|_| anyhow::anyhow!("compaction state is busy"))?;
         anyhow::ensure!(!manager.is_compacting(), "compaction is still running");
-        self.session.compaction = manager.persisted_state();
+        self.session.compaction = manager.persisted_state().map(Arc::new);
         // Prepared blank sessions also have externally visible IDs. Ordinary
         // save intentionally skips these until the first user message.
         self.session.save_prepared()?;
@@ -312,7 +312,7 @@ impl Agent {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
             manager.set_context_cap_override(self.session.context_cap);
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {

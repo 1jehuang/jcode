@@ -63,6 +63,382 @@ fn reload_replay_context(session_id: &str) -> ReloadContext {
 }
 
 #[test]
+fn reload_recovery_execution_retries_are_not_delivery_replays() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    let directive = ReloadContext::recovery_directive(
+        Some(&reload_replay_context("reload_retry")),
+        true,
+        "",
+        None,
+    )
+    .unwrap();
+    let original = directive.continuation_message;
+
+    // Initial delivery must still exactly match the durable recovery record.
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(original.clone()),
+        true,
+        0,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .as_deref(),
+        Some(original.as_str())
+    );
+
+    // Model a provider failure after acceptance and a confirmed fallback switch.
+    // The server has already marked the original reload intent delivered.
+    app.is_processing = false;
+    app.pending_fallback_resend = Some(FallbackResendPayload {
+        retry_attempts: 0,
+        content: String::new(),
+        images: vec![],
+        is_system: true,
+        auto_retry: true,
+        system_reminder: Some(original.clone()),
+        raw_input: None,
+    });
+    rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+    assert!(app.is_processing);
+    assert!(app.pending_fallback_resend.is_none());
+    let pending = app.rate_limit_pending_message.as_ref().unwrap();
+    assert!(
+        pending.content.is_empty(),
+        "do not echo another user prompt"
+    );
+    assert_eq!(pending.retry_attempts, 1);
+    let retry = pending.system_reminder.clone().unwrap();
+    assert_ne!(
+        retry, original,
+        "an exact replay is suppressed by the server"
+    );
+    assert!(retry.contains("Retry the interrupted execution"));
+    assert!(
+        retry.ends_with(&original),
+        "preserve the recovery instructions"
+    );
+
+    // Same-route retries share the fix and must not grow the reminder each time.
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(retry.clone()),
+        true,
+        2,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .as_deref(),
+        Some(retry.as_str())
+    );
+}
+
+#[test]
+fn reload_recovery_cloud_retry_marks_final_wire_reminder() {
+    use tokio::io::AsyncBufReadExt;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for existing in [None, Some("Additional recovery instructions".to_string())] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let session = super::commands::active_session_id(&app);
+        let original = ReloadContext::recovery_directive(
+            Some(&reload_replay_context(&session)),
+            true,
+            "",
+            None,
+        )
+        .unwrap()
+        .continuation_message;
+        app.cloud_recovery_context = Some((session, original.clone()));
+        app.cloud_recovery_auto_pending = true;
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        let mut peer = tokio::io::BufReader::new(connection.take_dummy_peer().unwrap());
+        rt.block_on(async {
+            remote::begin_remote_send(
+                &mut app,
+                &mut connection,
+                String::new(),
+                vec![],
+                true,
+                existing.clone(),
+                true,
+                1,
+            )
+            .await
+            .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let wire: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let reminder = wire["system_reminder"].as_str().unwrap();
+            assert!(reminder.starts_with("<system-reminder>Retry the interrupted execution"));
+            assert!(reminder.ends_with(&original));
+            if let Some(existing) = existing.as_ref() {
+                assert!(reminder.contains(existing));
+            }
+            assert!(app.cloud_recovery_context.is_none());
+            assert!(!app.cloud_recovery_auto_pending);
+            let pending = app.rate_limit_pending_message.clone().unwrap();
+            assert_eq!(pending.system_reminder.as_deref(), Some(reminder));
+
+            // A manual fallback can reset the retry budget. That must not
+            // strip execution identity or add another wrapper on the wire.
+            remote::begin_remote_send(
+                &mut app,
+                &mut connection,
+                pending.content,
+                pending.images,
+                pending.is_system,
+                pending.system_reminder,
+                pending.auto_retry,
+                0,
+            )
+            .await
+            .unwrap();
+            let mut retry_line = String::new();
+            tokio::time::timeout(Duration::from_secs(1), peer.read_line(&mut retry_line))
+                .await
+                .unwrap()
+                .unwrap();
+            let retry_wire: serde_json::Value = serde_json::from_str(&retry_line).unwrap();
+            assert_eq!(retry_wire["system_reminder"], wire["system_reminder"]);
+        });
+    }
+}
+
+#[test]
+fn reload_recovery_same_route_tick_marks_execution_retry() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_poke_incomplete_todos = false;
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    let original = ReloadContext::recovery_directive(
+        Some(&reload_replay_context("reload_same_route_retry")),
+        true,
+        "",
+        None,
+    )
+    .unwrap()
+    .continuation_message;
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(original.clone()),
+        true,
+        0,
+    ))
+    .unwrap();
+    app.is_processing = false;
+    assert!(app.schedule_pending_remote_retry("provider interrupted"));
+    app.rate_limit_reset = Some(Instant::now() - Duration::from_secs(1));
+    rt.block_on(remote::handle_tick(&mut app, &mut connection));
+    let pending = app.rate_limit_pending_message.as_ref().unwrap();
+    assert!(app.is_processing);
+    assert_eq!(pending.retry_attempts, 1);
+    let reminder = pending.system_reminder.as_deref().unwrap();
+    assert!(reminder.starts_with("<system-reminder>Retry the interrupted execution"));
+    assert!(reminder.ends_with(&original));
+}
+
+#[test]
+fn reload_recovery_cloud_only_retry_marks_final_reminder_once() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let session = super::commands::active_session_id(&app);
+    app.cloud_recovery_context = Some((session, "Recover the cloud environment".to_string()));
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        None,
+        true,
+        1,
+    ))
+    .unwrap();
+    let reminder = app
+        .rate_limit_pending_message
+        .as_ref()
+        .unwrap()
+        .system_reminder
+        .clone()
+        .unwrap();
+    assert!(reminder.starts_with("<system-reminder>Retry the interrupted execution"));
+    assert!(reminder.ends_with("Recover the cloud environment"));
+    assert!(app.cloud_recovery_context.is_none());
+    rt.block_on(remote::begin_remote_send(
+        &mut app,
+        &mut connection,
+        String::new(),
+        vec![],
+        true,
+        Some(reminder.clone()),
+        true,
+        2,
+    ))
+    .unwrap();
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .as_deref(),
+        Some(reminder.as_str())
+    );
+}
+
+#[test]
+fn reload_recovery_prepared_send_failure_restores_draft_without_exiting() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    drop(connection.take_dummy_peer());
+    let images = vec![("image/png".to_string(), "preserved-image".to_string())];
+    let result = rt.block_on(remote::submit_prepared_remote_input(
+        &mut app,
+        &mut connection,
+        input::PreparedInput {
+            raw_input: "Continue the interrupted work".to_string(),
+            expanded: "Expanded instructions for the interrupted work".to_string(),
+            images: images.clone(),
+        },
+    ));
+    assert!(
+        result.is_ok(),
+        "recoverable transport failures must not escape the TUI loop"
+    );
+    assert!(!app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert_eq!(app.input, "Continue the interrupted work [image 1]");
+    assert_eq!(app.cursor_pos, app.input.len());
+    assert_eq!(app.pending_images, images);
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user")
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("Failed to send message:"))
+    );
+    assert_eq!(
+        app.last_submitted_input.as_deref(),
+        Some("Continue the interrupted work")
+    );
+}
+
+#[test]
+fn reload_recovery_keyboard_send_failure_keeps_client_and_draft_alive() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.input = "Keep this prompt".to_string();
+    app.cursor_pos = app.input.len();
+    let images = vec![("image/png".to_string(), "preserved-image".to_string())];
+    app.pending_images = images.clone();
+    let mut connection = crate::tui::backend::RemoteConnection::dummy();
+    connection.mark_history_loaded();
+    drop(connection.take_dummy_peer());
+    let result =
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut connection));
+    assert!(result.is_ok());
+    assert_eq!(app.input, "Keep this prompt [image 1]");
+    assert_eq!(app.pending_images, images);
+    assert!(!app.is_processing);
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("Failed to send message:"))
+    );
+}
+
+#[test]
+fn reload_recovery_deferred_send_failure_preserves_newer_draft() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for after_model_switch in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        let mut connection = crate::tui::backend::RemoteConnection::dummy();
+        app.remote_model_switch_in_flight = after_model_switch;
+        let held_image = ("image/png".to_string(), "held-image".to_string());
+        rt.block_on(remote::submit_prepared_remote_input(
+            &mut app,
+            &mut connection,
+            input::PreparedInput {
+                raw_input: "Held prompt [image 1]".to_string(),
+                expanded: "Expanded held prompt".to_string(),
+                images: vec![held_image.clone()],
+            },
+        ))
+        .unwrap();
+        let new_image = ("image/png".to_string(), "new-image".to_string());
+        app.input = "Newer unsent draft [image 1]".to_string();
+        app.cursor_pos = app.input.len();
+        app.pending_images = vec![new_image.clone()];
+        connection.mark_history_loaded();
+        app.remote_model_switch_in_flight = false;
+        drop(connection.take_dummy_peer());
+        rt.block_on(remote::process_remote_followups(&mut app, &mut connection));
+        assert_eq!(app.input, "Newer unsent draft [image 1] [image 2]");
+        assert_eq!(app.pending_images, vec![new_image, held_image]);
+        assert!(!app.is_processing);
+        assert!(app.pending_prompt_after_model_switch.is_none());
+        assert!(app.pending_prompt_before_history.is_none());
+        assert!(app.display_messages().iter().any(|message| {
+            message.content.contains("Held prompt [image 1]")
+                && message.content.contains("draft text is preserved")
+        }));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("Failed to send message:"))
+        );
+    }
+}
+
+#[test]
 fn reload_recovery_preserves_visible_turn_timer_through_dispatch() {
     let _env_guard = crate::storage::lock_test_env();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -165,9 +541,7 @@ fn reload_recovery_delayed_history_after_completion_does_not_restart_turn() {
         &mut remote,
     );
     app.handle_server_event(
-        crate::protocol::ServerEvent::MessageEnd {
-            stop_reason: None,
-        },
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
         &mut remote,
     );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);

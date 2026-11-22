@@ -8,6 +8,7 @@ struct Request {
     line: String,
     auth: String,
     body: serde_json::Value,
+    body_bytes: Vec<u8>,
 }
 
 /// Answers each request with the next canned JSON body.
@@ -53,6 +54,7 @@ async fn api(
                     .unwrap_or_default()
                     .to_string(),
                 body: serde_json::from_slice(&raw[head_len..head_len + body_len]).unwrap(),
+                body_bytes: raw[head_len..head_len + body_len].to_vec(),
             });
             let body = reply.to_string();
             let response = format!(
@@ -103,6 +105,59 @@ fn message(session: &str, text: &str) -> serde_json::Value {
         "text": text, "status": "running", "target": "local"}})
 }
 
+async fn assert_legacy_claim_bytes(machine: &str, sessions: &[LiveSession]) {
+    let legacy_sessions: Vec<_> = sessions
+        .iter()
+        .map(|session| serde_json::json!({"session_id": session.session_id, "busy": session.busy}))
+        .collect();
+    let expected = serde_json::to_vec(&serde_json::json!({
+        "machine": machine, "sessions": legacy_sessions, "supports_images": true
+    }))
+    .unwrap();
+    let (base, server) = api(vec![(200, serde_json::json!({"command": null}))]).await;
+    assert!(
+        claim_local(&reqwest::Client::new(), &base, "k", machine, sessions)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let requests = server.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body_bytes, expected);
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_empty_sessions() {
+    assert_legacy_claim_bytes("laptop", &[]).await;
+    assert_eq!(
+        serde_json::to_vec(&ClaimLocalRequest {
+            machine: "laptop",
+            sessions: ClaimLocalSessions(&[]),
+            supports_images: true,
+        })
+        .unwrap(),
+        br#"{"machine":"laptop","sessions":[],"supports_images":true}"#
+    );
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_unicode_and_escaping() {
+    assert_legacy_claim_bytes(
+        "电脑 💻\n\"\\",
+        &[live("会話_💬\t\"\\", true), live("é_\u{0000}", false)],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn claim_bytes_match_legacy_ninety_sessions() {
+    let sessions: Vec<_> = (0..90)
+        .map(|i| live(&format!("session_{i:03}"), i % 2 == 0))
+        .collect();
+    assert_eq!(sessions.len(), MAX_REPORTED_SESSIONS);
+    assert_legacy_claim_bytes("laptop", &sessions).await;
+}
+
 #[tokio::test]
 async fn reports_live_sessions_and_delivers_the_claimed_message_once() {
     let (base, server) = api(vec![
@@ -136,7 +191,7 @@ async fn reports_live_sessions_and_delivers_the_claimed_message_once() {
     assert!(requests[0].auth.ends_with("Bearer fixture-key"));
     assert_eq!(
         requests[0].body,
-        serde_json::json!({"machine": "laptop", "sessions": [
+        serde_json::json!({"machine": "laptop", "supports_images": true, "sessions": [
             {"session_id": "session_b", "busy": true},
             {"session_id": "session_a", "busy": false}]})
     );
@@ -197,6 +252,38 @@ async fn failed_delivery_is_reported_instead_of_dropped() {
         requests[1].body,
         serde_json::json!({"status": "failed", "error": "that session cannot take a message right now"})
     );
+}
+
+#[tokio::test]
+async fn photo_validation_and_unsupported_host_fail_explicitly_without_text_delivery() {
+    for (data, expected) in [
+        ("aGk=", "does not support photo messages"),
+        ("bad base64", "invalid image base64"),
+    ] {
+        let mut command = message("session_a", "look at this");
+        command["command"]["images"] =
+            serde_json::json!([{ "media_type":"image/png", "data":data }]);
+        let (base, server) = api(vec![(200, command), (200, serde_json::json!({}))]).await;
+        let host = FakeHost {
+            live: vec![live("session_a", false)],
+            ..Default::default()
+        };
+        assert!(
+            run_local_once(&reqwest::Client::new(), &base, "k", "laptop", &host)
+                .await
+                .unwrap()
+        );
+        assert!(host.delivered.lock().unwrap().is_empty());
+        let requests = server.await.unwrap();
+        assert_eq!(requests[1].body["status"], "failed");
+        assert!(
+            requests[1].body["error"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+        assert!(!requests[1].body["error"].as_str().unwrap().contains(data));
+    }
 }
 
 #[tokio::test]

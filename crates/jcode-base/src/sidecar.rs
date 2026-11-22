@@ -529,8 +529,11 @@ impl Sidecar {
             }
         }
 
+        // RequestBuilder owns the serialized body. Release the duplicate JSON tree
+        // before waiting for the response (which can include a long SSE stream).
+        let builder = builder.json(&request);
+        drop(request);
         let response = builder
-            .json(&request)
             .send()
             .await
             .context("Failed to send request to OpenAI API")
@@ -552,7 +555,7 @@ impl Sidecar {
                 .await
                 .context("Failed to parse OpenAI API response")
                 .map_err(OpenAiSidecarError::other)?;
-            record_openai_sidecar_usage(model, Some(&result));
+            record_openai_sidecar_usage(model, Some(&result), None);
             extract_openai_response_text(&result).map_err(OpenAiSidecarError::other)
         }
     }
@@ -609,7 +612,7 @@ impl Sidecar {
             }],
         };
 
-        let response = crate::provider::anthropic::apply_oauth_attribution_headers(
+        let builder = crate::provider::anthropic::apply_oauth_attribution_headers(
             self.client
                 .post(CLAUDE_API_URL)
                 .header("Authorization", format!("Bearer {}", creds.access_token))
@@ -622,10 +625,12 @@ impl Sidecar {
                 .header("content-type", "application/json")
                 .json(&request),
             &crate::provider::anthropic::new_oauth_request_id(),
-        )
-        .send()
-        .await
-        .context("Failed to send request to Claude API")?;
+        );
+        drop(request);
+        let response = builder
+            .send()
+            .await
+            .context("Failed to send request to Claude API")?;
 
         Self::parse_claude_response(response, &self.model).await
     }
@@ -651,14 +656,16 @@ impl Sidecar {
             }],
         };
 
-        let response = self
+        let builder = self
             .client
             .post(CLAUDE_API_KEY_URL)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", "prompt-caching-2024-07-31")
             .header("content-type", "application/json")
-            .json(&request)
+            .json(&request);
+        drop(request);
+        let response = builder
             .send()
             .await
             .context("Failed to send request to Claude API")?;
@@ -685,10 +692,11 @@ impl Sidecar {
             .context("Failed to parse Claude API response")?;
 
         if let Some(usage) = result.usage.as_ref() {
-            crate::telemetry::record_provider_usage(
+            crate::telemetry::record_provider_usage_with_model_attribution(
                 None,
                 "claude",
-                reported_sidecar_model(model, result.model.as_deref()),
+                model,
+                jcode_provider_core::nonempty_response_model(result.model.as_deref()),
                 crate::telemetry::UsageSource::Sidecar,
                 crate::telemetry::ProviderUsage {
                     input_tokens: usage.input_tokens,
@@ -863,104 +871,16 @@ impl Default for Sidecar {
 #[cfg(test)]
 pub const SIDECAR_FAST_MODEL: &str = SIDECAR_OPENAI_MODEL;
 
-fn resolve_openai_request_model(
-    preferred_model: &str,
-    is_chatgpt_mode: bool,
-) -> (&str, Option<&'static str>) {
-    if preferred_model != SIDECAR_OPENAI_MODEL {
-        return (preferred_model, None);
-    }
-
-    match (
-        is_chatgpt_mode,
-        crate::provider::is_model_available_for_account(SIDECAR_OPENAI_MODEL),
-    ) {
-        (true, Some(false)) => (
-            SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL,
-            Some(SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING),
-        ),
-        _ => (SIDECAR_OPENAI_MODEL, Some(SIDECAR_OPENAI_REASONING)),
-    }
-}
-
-fn build_openai_request(
-    model: &str,
-    system: &str,
-    user_message: &str,
-    stream: bool,
-    reasoning_effort: Option<&str>,
-) -> serde_json::Value {
-    let mut instructions = String::new();
-    if !system.is_empty() {
-        instructions.push_str(system);
-    }
-
-    let mut request = serde_json::json!({
-        "model": model,
-        "instructions": instructions,
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": user_message,
-            }],
-        }],
-        "stream": stream,
-        "store": false,
-    });
-
-    if let Some(effort) = reasoning_effort {
-        request["reasoning"] = serde_json::json!({ "effort": effort });
-    }
-
-    request
-}
-
-fn classify_openai_model_unavailable(status: StatusCode, body: &str) -> Option<String> {
-    let lower = body.to_ascii_lowercase();
-    let mentions_model = lower.contains("model")
-        || lower.contains("slug")
-        || lower.contains("engine")
-        || lower.contains("deployment");
-    let unavailable = lower.contains("not available")
-        || lower.contains("unavailable")
-        || lower.contains("does not have access")
-        || lower.contains("not enabled")
-        || lower.contains("not found")
-        || lower.contains("unknown model")
-        || lower.contains("unsupported model")
-        || lower.contains("invalid model");
-
-    if !mentions_model || !unavailable {
-        return None;
-    }
-
-    if matches!(
-        status,
-        StatusCode::NOT_FOUND
-            | StatusCode::FORBIDDEN
-            | StatusCode::BAD_REQUEST
-            | StatusCode::UNPROCESSABLE_ENTITY
-    ) {
-        let trimmed = body.trim();
-        return Some(if trimmed.is_empty() {
-            format!("model denied by OpenAI API (status {})", status)
-        } else {
-            format!(
-                "model denied by OpenAI API (status {}): {}",
-                status, trimmed
-            )
-        });
-    }
-
-    None
-}
-
-fn is_openai_model_unavailable(status: StatusCode, body: &str) -> bool {
-    classify_openai_model_unavailable(status, body).is_some()
-}
-
+#[path = "sidecar/response_helpers.rs"]
+mod response_helpers;
+use response_helpers::{
+    anthropic_sidecar_prefers_api_key, build_claude_api_key_system_param,
+    build_claude_system_param, build_openai_request, classify_openai_model_unavailable,
+    collect_openai_sse_text, extract_openai_response_text, is_anthropic_oauth_forbidden,
+    is_openai_model_unavailable, record_openai_sidecar_usage, resolve_openai_request_model,
+};
+#[cfg(test)]
+use response_helpers::{openai_sidecar_response_model, parse_openai_usage};
 enum OpenAiSidecarError {
     Api { status: StatusCode, body: String },
     Other(anyhow::Error),
@@ -990,125 +910,6 @@ pub struct ExtractedMemory {
     pub category: String,
     pub content: String,
     pub trust: String,
-}
-
-/// Collect text from an OpenAI Responses API SSE stream.
-///
-/// Parses `data: <json>` lines and accumulates text deltas from
-/// `response.output_text.delta` events, stopping on completion/done.
-async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Result<String> {
-    use futures::StreamExt;
-    let mut stream = response.bytes_stream();
-    let mut text = String::new();
-    let mut buf = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.context("Error reading SSE stream")?;
-        buf.push_str(&String::from_utf8_lossy(&bytes));
-
-        // Process all complete lines in the buffer
-        while let Some(newline_pos) = buf.find('\n') {
-            let line = buf[..newline_pos].trim_end_matches('\r').to_string();
-            buf = buf[newline_pos + 1..].to_string();
-
-            if let Some(data) = crate::util::sse_data_line(&line) {
-                if data == "[DONE]" {
-                    return Ok(text);
-                }
-                if let Ok(event) = serde_json::from_str::<SseEvent>(data) {
-                    match event.kind.as_str() {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = event.delta {
-                                text.push_str(&delta);
-                            }
-                        }
-                        "response.completed" | "response.incomplete" => {
-                            record_openai_sidecar_usage(model, event.response.as_ref());
-                            return Ok(text);
-                        }
-                        "response.failed" | "error" => {
-                            let msg = event
-                                .error
-                                .as_ref()
-                                .and_then(|e| e.as_str())
-                                .unwrap_or("unknown error");
-                            anyhow::bail!("OpenAI SSE error: {}", msg);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(text)
-}
-
-/// Parsed OpenAI Responses API `usage` object. OpenAI reports cached prompt
-/// tokens as a subset of `input_tokens` (`input_tokens_details.cached_tokens`),
-/// so the total stays `input + output`; cache reads are surfaced separately for
-/// pricing, the same convention the agent path uses for OpenAI providers.
-fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::ProviderUsage> {
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64());
-    let output = usage.get("output_tokens").and_then(|v| v.as_u64());
-    if input.is_none() && output.is_none() {
-        return None;
-    }
-    let cached = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64());
-    Some(crate::telemetry::ProviderUsage {
-        input_tokens: input.unwrap_or(0),
-        output_tokens: output.unwrap_or(0),
-        cache_read_input_tokens: cached,
-        cache_creation_input_tokens: None,
-    })
-}
-
-fn reported_sidecar_model<'a>(requested: &'a str, reported: Option<&'a str>) -> &'a str {
-    reported
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or(requested)
-}
-
-fn record_openai_sidecar_usage(model: &str, response: Option<&serde_json::Value>) {
-    if let Some(response) = response
-        && let Some(parsed) = response.get("usage").and_then(parse_openai_usage)
-    {
-        let model = reported_sidecar_model(model, response.get("model").and_then(|v| v.as_str()));
-        crate::telemetry::record_provider_usage(
-            None,
-            "openai",
-            model,
-            crate::telemetry::UsageSource::Sidecar,
-            parsed,
-        );
-    }
-}
-
-/// Extract text from a non-streaming OpenAI Responses API JSON response.
-fn extract_openai_response_text(result: &serde_json::Value) -> Result<String> {
-    let mut text = String::new();
-    if let Some(output) = result.get("output").and_then(|v| v.as_array()) {
-        for item in output {
-            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if item_type == "message"
-                && let Some(content) = item.get("content").and_then(|v| v.as_array())
-            {
-                for block in content {
-                    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    if (block_type == "output_text" || block_type == "text")
-                        && let Some(t) = block.get("text").and_then(|v| v.as_str())
-                    {
-                        text.push_str(t);
-                    }
-                }
-            }
-        }
-    }
-    Ok(text)
 }
 
 #[derive(Deserialize)]
@@ -1151,60 +952,6 @@ struct ClaudeApiSystemBlock<'a> {
     text: &'a str,
 }
 
-fn build_claude_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
-    let mut blocks = Vec::new();
-    blocks.push(ClaudeApiSystemBlock {
-        block_type: "text",
-        text: CLAUDE_OAUTH_BILLING_BLOCK,
-    });
-    if !system.is_empty() {
-        blocks.push(ClaudeApiSystemBlock {
-            block_type: "text",
-            text: system,
-        });
-    }
-    Some(ClaudeApiSystem::Blocks(blocks))
-}
-
-/// Build the system param for the direct API-key path.
-///
-/// The OAuth billing block is only valid for the subscription endpoint; a
-/// direct API key talks to the standard Messages API. So this only carries
-/// the caller's own system prompt (if any).
-fn build_claude_api_key_system_param(system: &str) -> Option<ClaudeApiSystem<'_>> {
-    if system.is_empty() {
-        return None;
-    }
-    Some(ClaudeApiSystem::Blocks(vec![ClaudeApiSystemBlock {
-        block_type: "text",
-        text: system,
-    }]))
-}
-
-/// Whether the sidecar's Claude backend should use the direct API key rather
-/// than OAuth. True when the runtime is pinned to Anthropic API-key mode
-/// (`claude-api`), or when no OAuth credentials are present at all. Mirrors the
-/// main provider's resolution so memory features authenticate the same way the
-/// agent does.
-fn anthropic_sidecar_prefers_api_key() -> bool {
-    match jcode_provider_core::runtime_env_pinned_mode(
-        jcode_provider_core::DualAuthProvider::Anthropic,
-    ) {
-        Some(jcode_provider_core::AuthMode::ApiKey) => true,
-        Some(jcode_provider_core::AuthMode::Oauth) => false,
-        None => auth::claude::load_credentials().is_err(),
-    }
-}
-
-/// Recognize the Anthropic "OAuth not allowed for this organization" 403 so the
-/// sidecar can transparently fall back to the API key.
-fn is_anthropic_oauth_forbidden(err: &anyhow::Error) -> bool {
-    let msg = err.to_string();
-    msg.contains("403")
-        && (msg.contains("OAuth authentication is currently not allowed")
-            || msg.contains("permission_error"))
-}
-
 #[derive(Deserialize)]
 struct ClaudeMessagesResponse {
     model: Option<String>,
@@ -1239,19 +986,178 @@ mod tests {
     use crate::auth::codex;
     use std::ffi::OsString;
 
+    #[tokio::test]
+    async fn openai_private_request_preserves_wire_body_headers_and_results() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        // Only loopback HTTP and explicit dummy auth, never credential discovery.
+        for chatgpt in [false, true] {
+            for success in [false, true] {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let url = format!("http://{}/responses", listener.local_addr().unwrap());
+                let server = std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    let mut socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                                assert!(std::time::Instant::now() < deadline, "request timed out");
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(err) => panic!("accept: {err}"),
+                        }
+                    };
+                    // BSD/macOS accepted sockets can inherit the listener's mode.
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .unwrap();
+                    let mut received = Vec::new();
+                    let (header_end, length) = loop {
+                        let mut chunk = [0; 4096];
+                        let count = socket.read(&mut chunk).unwrap();
+                        assert_ne!(count, 0);
+                        received.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&received[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (key, value) = line.split_once(':')?;
+                                    key.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap();
+                            break (end + 4, length);
+                        }
+                    };
+                    while received.len() < header_end + length {
+                        let mut chunk = [0; 4096];
+                        let count = socket.read(&mut chunk).unwrap();
+                        assert_ne!(count, 0);
+                        received.extend_from_slice(&chunk[..count]);
+                    }
+                    let headers = String::from_utf8(received[..header_end].to_vec()).unwrap();
+                    assert!(headers.starts_with("POST /responses HTTP/1.1\r\n"));
+                    let headers: std::collections::HashMap<_, _> = headers
+                        .lines()
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
+                        .collect();
+                    assert_eq!(
+                        headers.get("authorization").map(String::as_str),
+                        Some("Bearer test-only-token")
+                    );
+                    assert_eq!(
+                        headers.get("content-type").map(String::as_str),
+                        Some("application/json")
+                    );
+                    assert_eq!(
+                        headers.get("originator").map(String::as_str),
+                        chatgpt.then_some(OPENAI_ORIGINATOR)
+                    );
+                    assert_eq!(
+                        headers.get("chatgpt-account-id").map(String::as_str),
+                        chatgpt.then_some("test-account")
+                    );
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&received[header_end..header_end + length]).unwrap();
+                    assert_eq!(
+                        body,
+                        serde_json::json!({
+                            "model": "test-model", "instructions": "system\n\"quoted\"",
+                            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello λ"}]}],
+                            "stream": chatgpt, "store": false, "reasoning": {"effort": "low"}
+                        })
+                    );
+                    let (status, content_type, body) = if !success {
+                        (
+                            "403 Forbidden",
+                            "application/json",
+                            "{\"error\":\"test denial\"}",
+                        )
+                    } else if chatgpt {
+                        (
+                            "200 OK",
+                            "text/event-stream",
+                            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: [DONE]\n\n",
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            "application/json",
+                            "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}",
+                        )
+                    };
+                    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                });
+                let sidecar = Sidecar {
+                    client: reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .unwrap(),
+                    model: "test-model".into(),
+                    max_tokens: 16,
+                    backend: SidecarBackend::OpenAI,
+                    provider: None,
+                    reasoning_override: None,
+                };
+                let result = sidecar
+                    .complete_openai_with_model(
+                        &url,
+                        "test-only-token",
+                        Some("test-account"),
+                        chatgpt,
+                        "system\n\"quoted\"",
+                        "hello λ",
+                        "test-model",
+                        Some("low"),
+                    )
+                    .await;
+                server.join().unwrap();
+                if success {
+                    assert_eq!(result.ok().expect("successful response"), "ok");
+                } else {
+                    match result.unwrap_err() {
+                        OpenAiSidecarError::Api { status, body } => {
+                            assert_eq!(status, StatusCode::FORBIDDEN);
+                            assert_eq!(body, "{\"error\":\"test denial\"}");
+                        }
+                        OpenAiSidecarError::Other(error) => panic!("unexpected error: {error}"),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
-    fn sidecar_model_prefers_reported_identity_with_requested_fallback() {
+    fn sidecar_model_metadata_never_infers_configured_identity() {
         assert_eq!(
-            reported_sidecar_model("alias", Some("served-snapshot")),
-            "served-snapshot"
+            jcode_provider_core::nonempty_response_model(Some("served-snapshot")),
+            Some("served-snapshot")
         );
         assert_eq!(
-            reported_sidecar_model("alias", Some(" served-snapshot ")),
-            "served-snapshot"
+            jcode_provider_core::nonempty_response_model(Some(" served-snapshot ")),
+            Some("served-snapshot")
         );
         for reported in [None, Some(""), Some("  ")] {
-            assert_eq!(reported_sidecar_model("alias", reported), "alias");
+            assert_eq!(jcode_provider_core::nonempty_response_model(reported), None);
         }
+        for (body, expected) in [
+            (
+                serde_json::json!({"model": " served-snapshot "}),
+                Some("served-snapshot"),
+            ),
+            (serde_json::json!({"model": " "}), None),
+            (serde_json::json!({"model": 42}), None),
+            (serde_json::json!({}), None),
+        ] {
+            assert_eq!(openai_sidecar_response_model(Some(&body)), expected);
+        }
+        assert_eq!(openai_sidecar_response_model(None), None);
         let parsed: ClaudeMessagesResponse = serde_json::from_value(serde_json::json!({
             "model": "claude-served-snapshot", "content": []
         }))
@@ -1277,8 +1183,12 @@ mod tests {
 
     #[test]
     fn sse_completed_event_exposes_response_usage() {
-        let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":3}}}"#;
+        let data = r#"{"type":"response.completed","response":{"model":"served-snapshot","usage":{"input_tokens":10,"output_tokens":3}}}"#;
         let event: SseEvent = serde_json::from_str(data).expect("sse event");
+        assert_eq!(
+            openai_sidecar_response_model(event.response.as_ref()),
+            Some("served-snapshot")
+        );
         let usage = event
             .response
             .as_ref()
@@ -1707,6 +1617,51 @@ mod tests {
         assert!(is_anthropic_oauth_forbidden(&anyhow::anyhow!(
             "Claude API error (403 Forbidden): {{\"error\":{{\"type\":\"permission_error\"}}}}"
         )));
+    }
+
+    #[test]
+    fn claude_serialized_builder_body_survives_request_drop() {
+        for oauth in [false, true] {
+            for system in ["", "be terse λ"] {
+                let request = ClaudeMessagesRequest {
+                    model: "test-claude",
+                    max_tokens: 42,
+                    system: if oauth {
+                        build_claude_system_param(system)
+                    } else {
+                        build_claude_api_key_system_param(system)
+                    },
+                    messages: vec![ClaudeMessage {
+                        role: "user",
+                        content: "hello\n\"world\"",
+                    }],
+                };
+                let builder = reqwest::Client::new()
+                    .post("http://127.0.0.1/unused")
+                    .json(&request);
+                drop(request);
+                let built = builder.build().unwrap();
+                let actual: serde_json::Value =
+                    serde_json::from_slice(built.body().unwrap().as_bytes().unwrap()).unwrap();
+                let mut expected = serde_json::json!({
+                    "model": "test-claude", "max_tokens": 42,
+                    "messages": [{"role": "user", "content": "hello\n\"world\""}]
+                });
+                let mut blocks = Vec::new();
+                if oauth {
+                    blocks.push(
+                        serde_json::json!({"type": "text", "text": CLAUDE_OAUTH_BILLING_BLOCK}),
+                    );
+                }
+                if !system.is_empty() {
+                    blocks.push(serde_json::json!({"type": "text", "text": system}));
+                }
+                if !blocks.is_empty() {
+                    expected["system"] = serde_json::json!(blocks);
+                }
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

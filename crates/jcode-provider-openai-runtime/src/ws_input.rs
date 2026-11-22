@@ -137,15 +137,20 @@ pub(super) fn log_ws_replayed_calls(items: &[Value], previous_output: &[Value]) 
 /// successful tool response. Erasing those items replays the assistant's calls
 /// on the next previous_response_id continuation and disrupts cache reuse.
 /// A nonempty final array remains authoritative.
+#[cfg(test)]
 pub(super) fn observe_ws_response_output(text: &str, output: &mut Vec<Value>) {
-    // Token deltas dominate the stream. Only completed output events need a
-    // second parse for response-chain bookkeeping.
+    // Wire adapter for existing fixtures. Production passes the already parsed
+    // envelope to observe_ws_response_output_event instead of parsing again.
     if !text.contains("response.output_item.done") && !text.contains("response.completed") {
         return;
     }
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         return;
     };
+    observe_ws_response_output_event(&event, output);
+}
+
+pub(super) fn observe_ws_response_output_event(event: &Value, output: &mut Vec<Value>) {
     match event.get("type").and_then(Value::as_str) {
         Some("response.output_item.done") => {
             if let Some(item) = event.get("item") {

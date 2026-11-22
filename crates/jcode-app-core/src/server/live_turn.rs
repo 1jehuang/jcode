@@ -101,6 +101,15 @@ pub(super) async fn idle_live_agent(
     Some(agent)
 }
 
+/// Content and presentation metadata for a server-initiated turn.
+pub(super) struct LiveTurnInput {
+    pub message: String,
+    pub images: Vec<(String, String)>,
+    pub system_reminder: Option<String>,
+    pub display_role: Option<crate::session::StoredDisplayRole>,
+    pub status_detail: Option<String>,
+}
+
 /// Spawn `message` as a full tracked turn in a live session.
 ///
 /// Mirrors the client-initiated turn lifecycle: the swarm member is marked
@@ -110,13 +119,41 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
-    mut agent: OwnedMutexGuard<Agent>,
+    agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    spawn_tracked_live_turn_with_images(
+        session_id,
+        agent,
+        LiveTurnInput {
+            message,
+            images: Vec::new(),
+            system_reminder,
+            display_role,
+            status_detail,
+        },
+        swarm,
+    )
+    .await
+}
+
+pub(super) async fn spawn_tracked_live_turn_with_images(
+    session_id: &str,
+    mut agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    let LiveTurnInput {
+        message,
+        images,
+        system_reminder,
+        display_role,
+        status_detail,
+    } = input;
     let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
         return false;
     };
@@ -157,6 +194,17 @@ pub(super) async fn spawn_tracked_live_turn(
         let start_message_index = agent.message_count();
         let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
+            if !images.is_empty() {
+                return super::turn_failover::process_reserved_locked_message_with_server_failover(
+                    &mut agent,
+                    &turn_lease,
+                    &message,
+                    images,
+                    system_reminder,
+                    event_tx.clone(),
+                )
+                .await;
+            }
             process_reserved_locked_context_with_server_failover(
                 &mut agent,
                 &turn_lease,
@@ -205,7 +253,7 @@ pub(super) async fn spawn_tracked_live_turn(
                 }
                 crate::logging::error(&format!(
                     "Server-initiated turn failed for live session {}: {}",
-                    session_id, error
+                    session_id, message
                 ));
                 update_member_status_with_report(
                     &session_id,

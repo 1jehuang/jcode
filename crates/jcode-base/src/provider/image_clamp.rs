@@ -165,8 +165,7 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
         })
         .any(|(media_type, data)| {
             data.len() > IMAGE_BASE64_BYTE_LIMIT
-                || image_exceeds_edge(data, max_edge)
-                || format_needs_fix(media_type, data)
+                || decoded_image_needs_change(media_type, data, max_edge)
         });
     if !needs_change {
         return None;
@@ -213,6 +212,33 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
 /// True when the block cannot go on the wire as-is: the payload is not valid
 /// base64, its bytes are not a provider-accepted format, or the declared
 /// `media_type` disagrees with the magic bytes.
+/// Decode once for both header checks. In-limit images previously allocated and
+/// decoded their entire base64 payload twice even though only headers are read.
+fn decoded_image_needs_change(media_type: &str, data_b64: &str, max_edge: u32) -> bool {
+    let Some(bytes) = decode_b64(data_b64) else {
+        return true;
+    };
+    if probe_dimensions(&bytes).is_none_or(|(w, h)| w > max_edge || h > max_edge) {
+        return true;
+    }
+    match sniff_provider_media_type(&bytes) {
+        Some(actual) => !media_type.eq_ignore_ascii_case(actual),
+        None => true,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn preflight_probe(media: &str, data: Option<&str>, baseline: bool) -> bool {
+    let Some(data) = data else { return false };
+    data.len() > IMAGE_BASE64_BYTE_LIMIT
+        || if baseline {
+            image_exceeds_edge(data, 8000) || format_needs_fix(media, data)
+        } else {
+            decoded_image_needs_change(media, data, 8000)
+        }
+}
+
+#[cfg(test)]
 fn format_needs_fix(media_type: &str, data_b64: &str) -> bool {
     let Some(bytes) = decode_b64(data_b64) else {
         return true;
@@ -484,7 +510,8 @@ mod tests {
             content: vec![ContentBlock::Image {
                 media_type: "image/png".to_string(),
                 data,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -496,7 +523,8 @@ mod tests {
             content: vec![ContentBlock::Image {
                 media_type: media_type.to_string(),
                 data,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }
@@ -515,6 +543,84 @@ mod tests {
         let bytes = decode_b64(data_b64).unwrap();
         let img = image::load_from_memory(&bytes).unwrap();
         (img.width(), img.height())
+    }
+
+    // Frozen preflight expression from d103e8a62, before decode sharing.
+    fn baseline_needs_change(media_type: &str, data: &str, max_edge: u32) -> bool {
+        data.len() > IMAGE_BASE64_BYTE_LIMIT
+            || image_exceeds_edge(data, max_edge)
+            || format_needs_fix(media_type, data)
+    }
+
+    #[test]
+    fn shared_decode_matches_frozen_preflight() {
+        let fixtures = [
+            encode_png(100, 100),
+            encode_jpeg_b64(64, 64),
+            bmp_b64(),
+            "@@not base64@@".into(),
+            "".into(),
+            base64::engine::general_purpose::STANDARD.encode(b"unknown bytes"),
+            format!(" \n{}\t", encode_png(32, 32)),
+            "A".repeat(IMAGE_BASE64_BYTE_LIMIT + 1),
+        ];
+        for data in fixtures {
+            for media in ["image/png", "IMAGE/PNG", "image/jpeg", "image/bmp"] {
+                for edge in [1, 32, 2000, 8000] {
+                    assert_eq!(
+                        baseline_needs_change(media, &data, edge),
+                        data.len() > IMAGE_BASE64_BYTE_LIMIT
+                            || decoded_image_needs_change(media, &data, edge),
+                        "media={media}, edge={edge}, length={}",
+                        data.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Run explicitly with --ignored --nocapture. Linux schedstat reports actual
+    /// CPU nanoseconds consumed by this test thread, excluding time descheduled.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn image_preflight_cpu_probe() {
+        fn cpu_ns() -> u64 {
+            std::fs::read_to_string("/proc/thread-self/schedstat")
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let large = encode_noise_png(1400, 1400);
+        let ordinary = encode_png(100, 100);
+        for (name, data, iterations) in [
+            ("large-in-limit", large.as_str(), 40),
+            ("ordinary", ordinary.as_str(), 100_000),
+            ("invalid", "@@not base64@@", 100_000),
+        ] {
+            for (label, check) in [
+                (
+                    "baseline",
+                    baseline_needs_change as fn(&str, &str, u32) -> bool,
+                ),
+                ("shared", |media: &str, data: &str, edge| {
+                    data.len() > IMAGE_BASE64_BYTE_LIMIT
+                        || decoded_image_needs_change(media, data, edge)
+                }),
+            ] {
+                let start = cpu_ns();
+                for _ in 0..iterations {
+                    std::hint::black_box(check("image/png", std::hint::black_box(data), 8000));
+                }
+                eprintln!(
+                    "image-preflight {name} {label}: iterations={iterations} cpu_ns={}",
+                    cpu_ns() - start
+                );
+            }
+        }
     }
 
     #[test]
@@ -799,7 +905,8 @@ mod tests {
                     cache_control: None,
                 },
                 tool_result_block("toolu_2", "second"),
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];

@@ -48,6 +48,23 @@ fn default_action() -> String {
     "load".to_string()
 }
 
+/// Explain which discovered `SKILL.md` files were rejected, so a skill that
+/// fails to load is never silently absent from `list` or `reload_all`.
+fn skill_load_errors_section(registry: &SkillRegistry) -> String {
+    let errors = registry.load_errors();
+    if errors.is_empty() {
+        return String::new();
+    }
+    let mut section = format!(
+        "\nSkipped {} skill file(s) that failed to load:\n",
+        errors.len()
+    );
+    for failed in errors {
+        section.push_str(&format!("- {}: {}\n", failed.path.display(), failed.error));
+    }
+    section
+}
+
 #[async_trait]
 impl Tool for SkillTool {
     fn name(&self) -> &str {
@@ -196,6 +213,7 @@ impl SkillTool {
         };
 
         append_endorsed_skills(&mut output, &installed);
+        output.push_str(&skill_load_errors_section(&registry));
 
         Ok(ToolOutput::new(output).with_title("Skills: List"))
     }
@@ -262,6 +280,7 @@ impl SkillTool {
                 for skill in skills {
                     output.push_str(&format!("- /{}: {}\n", skill.name, skill.description));
                 }
+                output.push_str(&skill_load_errors_section(&effective));
 
                 Ok(
                     ToolOutput::new(output)

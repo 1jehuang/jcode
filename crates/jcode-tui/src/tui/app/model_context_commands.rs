@@ -120,8 +120,15 @@ pub(in crate::tui::app) fn handle_model_command(app: &mut App, trimmed: &str) ->
     if let Some(level) = trimmed.strip_prefix("/effort ") {
         app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         let level = level.trim();
+        let prev_model = app.provider.model();
         match app.provider.set_reasoning_effort(level) {
             Ok(()) => {
+                let new_model = app.provider.model();
+                if new_model != prev_model {
+                    app.session.model = Some(new_model);
+                    app.invalidate_model_picker_cache();
+                    crate::tui::ui::prepare::invalidate_header_prep_cache();
+                }
                 let new_effort = app.provider.reasoning_effort();
                 let label = new_effort
                     .as_deref()

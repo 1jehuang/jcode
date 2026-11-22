@@ -99,6 +99,7 @@ fn event_for_transport(
 }
 
 struct ProcessingMessage {
+    jarvis_voice: bool,
     id: u64,
     content: String,
     images: Vec<(String, String)>,
@@ -138,105 +139,9 @@ use request_watchdog::{
     RequestHandlerWatchdog, RequestHandlerWatchdogContext, log_request_lifecycle_handled,
     reject_if_agent_busy_for_request, send_agent_busy_error, should_start_idle_soft_interrupt,
 };
-/// Session and payload of a todo snapshot, for skipping identical resends.
-fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
-    match event {
-        ServerEvent::Todos {
-            session_id,
-            payload,
-            ..
-        } => Some((session_id.clone(), payload.clone())),
-        _ => None,
-    }
-}
-
-fn server_reload_starting() -> bool {
-    matches!(
-        crate::server::recent_reload_state(RELOAD_STARTING_GUARD_MAX_AGE),
-        Some(state) if state.phase == crate::server::ReloadPhase::Starting
-    )
-}
-
-fn compaction_server_event(event: crate::compaction::CompactionEvent) -> ServerEvent {
-    ServerEvent::Compaction {
-        trigger: event.trigger,
-        pre_tokens: event.pre_tokens,
-        post_tokens: event.post_tokens,
-        tokens_saved: event.tokens_saved,
-        duration_ms: event.duration_ms,
-        messages_dropped: event.messages_dropped,
-        messages_compacted: event.messages_compacted,
-        summary_chars: event.summary_chars,
-        active_messages: event.active_messages,
-    }
-}
-
-async fn poll_agent_compaction_completion(agent: Arc<Mutex<Agent>>) -> Option<ServerEvent> {
-    let mut agent_guard = agent.lock().await;
-    agent_guard
-        .poll_compaction_completion_event()
-        .map(compaction_server_event)
-}
-
-async fn refresh_session_control_handle(
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    soft_interrupt_queues: &SessionInterruptQueues,
-) -> SessionControlHandle {
-    let started = Instant::now();
-    let agent_guard = match agent.try_lock() {
-        Ok(agent_guard) => agent_guard,
-        Err(_) => {
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: waiting for busy agent lock for session {}; cancel/control requests on this connection may be delayed",
-                session_id
-            ));
-            let fallback_stop_signal = shutdown_signals.read().await.get(session_id).cloned();
-            let fallback_soft_interrupt_queue =
-                soft_interrupt_queues.read().await.get(session_id).cloned();
-            if let Some(soft_interrupt_queue) = fallback_soft_interrupt_queue {
-                // A missing shutdown-signal registration (e.g. a session created
-                // through the headless spawn path) must not force this connection
-                // to block on the busy agent mutex: cancels fired through the
-                // handle fan out to the running turn's own signal via the
-                // turn-cancel registry (issue #428), so a detached signal is a
-                // safe stand-in.
-                let stop_signal = fallback_stop_signal.unwrap_or_else(|| {
-                    crate::logging::warn(&format!(
-                        "refresh_session_control_handle: no registered shutdown signal for busy session {}; using detached signal (cancels reach the running turn via the turn cancel registry)",
-                        session_id
-                    ));
-                    InterruptSignal::new()
-                });
-                crate::logging::warn(&format!(
-                    "refresh_session_control_handle: using lock-free cancel-only control handle for busy session {} after {}ms",
-                    session_id,
-                    started.elapsed().as_millis()
-                ));
-                return SessionControlHandle::cancel_only(
-                    session_id,
-                    soft_interrupt_queue,
-                    stop_signal,
-                );
-            }
-            let agent_guard = agent.lock().await;
-            crate::logging::warn(&format!(
-                "refresh_session_control_handle: acquired agent lock for session {} after {}ms",
-                session_id,
-                started.elapsed().as_millis()
-            ));
-            agent_guard
-        }
-    };
-    SessionControlHandle::new(
-        session_id,
-        agent_guard.soft_interrupt_queue(),
-        agent_guard.background_tool_signal(),
-        agent_guard.graceful_shutdown_signal(),
-    )
-    .with_provider(agent_guard.provider_handle())
-}
+#[path = "client_event_control.rs"]
+mod client_event_control;
+use client_event_control::*;
 
 #[expect(
     clippy::too_many_arguments,
@@ -432,6 +337,7 @@ pub(super) async fn handle_client(
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
+    let mut model_catalog_retry = ModelCatalogRetry::default();
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
@@ -702,6 +608,33 @@ pub(super) async fn handle_client(
                 }
                 continue;
             }
+            _ = async {
+                match model_catalog_retry.deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if client_subscribed => {
+                let Some(catalog) = try_available_models_catalog_offloaded(&agent).await else {
+                    model_catalog_retry.busy();
+                    continue;
+                };
+                model_catalog_retry.complete();
+                if !last_available_models_snapshot.as_ref().is_some_and(|previous| {
+                    Arc::ptr_eq(previous, &catalog.dedup_key)
+                        || previous.as_ref() == catalog.dedup_key.as_ref()
+                }) {
+                    if let Some(event) = catalog.live_event() {
+                        let _ = client_event_tx.send(event.clone());
+                    } else {
+                        crate::logging::warn(&format!(
+                            "Skipping oversized catalog for connection {} ({} bytes)",
+                            client_connection_id, catalog.encoded_len
+                        ));
+                    }
+                    last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
+                }
+                continue;
+            }
             // Forward bus events to this client
             bus_event = bus_rx.recv(), if client_subscribed => {
                 match bus_event {
@@ -711,27 +644,9 @@ pub(super) async fn handle_client(
                         }
                     }
                     Ok(BusEvent::ModelsUpdated) => {
-                        let Some(catalog) = try_available_models_catalog_offloaded(&agent).await else {
-                            continue;
-                        };
-                        // Equivalent clients share the snapshot, normalized key,
-                        // and size/downgrade decision. Pointer equality makes an
-                        // unchanged shared catalog a constant-time fast path.
-                        if last_available_models_snapshot.as_ref().is_some_and(|previous| {
-                            Arc::ptr_eq(previous, &catalog.dedup_key)
-                                || previous.as_ref() == catalog.dedup_key.as_ref()
-                        }) {
-                            continue;
-                        }
-                        if let Some(event) = catalog.live_event() {
-                            let _ = client_event_tx.send(event.clone());
-                        } else {
-                            crate::logging::warn(&format!(
-                                "Skipping oversized catalog for connection {} ({} bytes)",
-                                client_connection_id, catalog.encoded_len
-                            ));
-                        }
-                        last_available_models_snapshot = Some(Arc::clone(&catalog.dedup_key));
+                        // One pending refresh per connection. Repeated events must
+                        // not reset the busy backoff or allocate waiting tasks.
+                        model_catalog_retry.queue();
                     }
                     // Push the todo card to windows showing this session, so
                     // they do not each poll for it. One todo-tool call writes
@@ -750,6 +665,8 @@ pub(super) async fn handle_client(
                     // Missed bus events may include a todo write. The client no
                     // longer polls, so resend the snapshot rather than guess.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // A catalog update may also have been lost.
+                        model_catalog_retry.queue();
                         let event = super::client_writer::todos_snapshot_event(&client_session_id);
                         let key = todos_event_key(&event);
                         if key != last_pushed_todos {
@@ -1015,6 +932,26 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // Passive screen controls must not acquire the Agent mutex or enter
+        // ordinary dispatch: idle observations never start a provider turn.
+        if let Request::ScreenContext { id, session_id, action } = request {
+            let result = if session_id != client_session_id {
+                Err(anyhow::anyhow!("Screen update belongs to a different session attachment"))
+            } else if matches!(action, crate::protocol::ScreenContextAction::Disable)
+                || crate::tool::sdk::owns_jarvis(&client_session_id, &client_connection_id)
+            {
+                crate::screen_context::apply(&client_session_id, &client_connection_id, action)
+            } else {
+                Err(anyhow::anyhow!("Screen context requires the live Jarvis client owner"))
+            };
+            let event = match result {
+                Ok(()) => ServerEvent::Ack { id },
+                Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
+            };
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // SDK controls reply only after validation. Callback results must never
         // wait for the Agent mutex held by the turn awaiting that callback.
         if matches!(&request, Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. }) {
@@ -1026,17 +963,25 @@ pub(super) async fn handle_client(
                 }
                 Request::ConfigureTools { tools, .. } => {
                     if client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id) { Err(anyhow::anyhow!("Session is busy")) }
-                    else if let Ok(mut locked) = agent.try_lock() {
-                        let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
-                        if result.is_ok() {
-                            locked.invalidate_sdk_tools();
-                            // Queue the acknowledgment before releasing the session lock,
-                            // so a second client cannot start a new-policy call first.
-                            let _ = client_event_tx.send(ServerEvent::Ack { id });
-                            continue;
+                    else {
+                        // Startup/catalog prewarming briefly owns this mutex too.
+                        // That is not an active turn and must not reject client
+                        // capabilities before the first user message.
+                        let mut locked = agent.lock().await;
+                        if crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                            Err(anyhow::anyhow!("Session is busy"))
+                        } else {
+                            let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
+                            if result.is_ok() {
+                                locked.invalidate_sdk_tools();
+                                // Queue the acknowledgment before releasing the session lock,
+                                // so a second client cannot start a new-policy call first.
+                                let _ = client_event_tx.send(ServerEvent::Ack { id });
+                                continue;
+                            }
+                            result.map(|()| ServerEvent::Ack { id })
                         }
-                        result.map(|()| ServerEvent::Ack { id })
-                    } else { Err(anyhow::anyhow!("Session is busy")) }
+                    }
                 }
                 Request::ListTools { .. } => {
                     if let Ok(locked) = agent.try_lock() {
@@ -1135,8 +1080,10 @@ pub(super) async fn handle_client(
             connection_client_name = Some(name.clone());
         }
         match request {
+            Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1173,6 +1120,7 @@ pub(super) async fn handle_client(
                 let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
+                        jarvis_voice,
                         id,
                         content,
                         images,
@@ -1208,8 +1156,13 @@ pub(super) async fn handle_client(
                         &swarm_members,
                         &client_session_id,
                         &client_connection_id,
-                        ServerEvent::PeerUserMessage {
-                            content: peer_content,
+                        if jarvis_voice {
+                            ServerEvent::SoftInterruptInjected {
+                                content: peer_content, display_role: Some("jarvis_user".into()),
+                                point: "turn_start".into(), tools_skipped: None, client_ids: Vec::new(),
+                            }
+                        } else {
+                            ServerEvent::PeerUserMessage { content: peer_content }
                         },
                     )
                     .await;
@@ -1248,6 +1201,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SoftInterrupt {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1283,6 +1237,7 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            jarvis_voice,
                             id,
                             content,
                             images,
@@ -1317,7 +1272,7 @@ pub(super) async fn handle_client(
                     if processing_message_id == Some(id) {
                         let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
-                            display_role: None,
+                            display_role: jarvis_voice.then(|| "jarvis_user".to_owned()),
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
@@ -1335,6 +1290,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
+                        jarvis_voice,
                         client_id,
                         &session_control,
                         &client_event_tx,
@@ -2103,6 +2059,7 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
+                            model: None,
                             error: Some(format!("target session not found: {target_session_id}")),
                         });
                     }
@@ -2461,6 +2418,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
+                                    jarvis_voice: false,
                                     id, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
                                 },
@@ -3457,6 +3415,34 @@ pub(super) async fn handle_client(
     connection_result
 }
 
+/// A single coalesced refresh, with bounded polling while a turn holds the agent.
+/// Keep retrying until idle rather than losing the last catalog update of a turn.
+#[derive(Default)]
+struct ModelCatalogRetry {
+    deadline: Option<tokio::time::Instant>,
+    attempts: u32,
+}
+
+impl ModelCatalogRetry {
+    fn queue(&mut self) {
+        self.deadline.get_or_insert_with(tokio::time::Instant::now);
+    }
+
+    fn busy(&mut self) {
+        let millis = 100u64 << self.attempts.min(4);
+        self.attempts = self.attempts.saturating_add(1);
+        self.deadline = Some(tokio::time::Instant::now() + Duration::from_millis(millis));
+    }
+
+    fn complete(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+#[path = "client_lifecycle_catalog_retry_tests.rs"]
+mod model_catalog_retry_tests;
+
 #[path = "client_processing.rs"]
 mod client_processing;
 use client_processing::{
@@ -3512,10 +3498,38 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_reserved_message_with_role(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn process_reserved_message_with_role(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(
@@ -3538,60 +3552,9 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
 
-/// Only metadata-changing events need the shared connection write lock.
-/// Borrow tool names until the lock is held, avoiding allocations for lookup misses.
-enum ConnectionMetadataUpdate<'a> {
-    TurnStarted,
-    ToolStarted(&'a str),
-    ToolDone,
-    TurnEnded,
-}
-
-fn release_large_event_buffer(buffer: &mut Vec<u8>) {
-    // Keep ordinary streaming allocations, but do not pin a large History or
-    // tool-result payload for the rest of a long-lived connection.
-    if buffer.capacity() > 64 * 1024 {
-        *buffer = Vec::new();
-    }
-}
-
-impl<'a> ConnectionMetadataUpdate<'a> {
-    fn from_event(event: &'a ServerEvent) -> Option<Self> {
-        // Deliberately unwrap exactly one level, matching the forwarder's original
-        // behavior. Nested wrappers are not metadata transitions.
-        let observed = match event {
-            ServerEvent::TurnEvent { event, .. } => event.as_ref(),
-            event => event,
-        };
-        match observed {
-            ServerEvent::TurnStarted { .. } => Some(Self::TurnStarted),
-            ServerEvent::ToolStart { name, .. } => Some(Self::ToolStarted(name)),
-            ServerEvent::ToolDone { .. } => Some(Self::ToolDone),
-            ServerEvent::Done { .. } | ServerEvent::Error { .. } | ServerEvent::Interrupted => {
-                Some(Self::TurnEnded)
-            }
-            _ => None,
-        }
-    }
-
-    fn apply(self, is_processing: &mut bool, current_tool_name: &mut Option<String>) {
-        match self {
-            Self::TurnStarted => {
-                *is_processing = true;
-                *current_tool_name = None;
-            }
-            Self::ToolStarted(name) => {
-                *is_processing = true;
-                *current_tool_name = Some(name.to_owned());
-            }
-            Self::ToolDone => *current_tool_name = None,
-            Self::TurnEnded => {
-                *is_processing = false;
-                *current_tool_name = None;
-            }
-        }
-    }
-}
+#[path = "connection_metadata.rs"]
+mod connection_metadata;
+use connection_metadata::*;
 
 #[cfg(test)]
 #[path = "client_lifecycle_metadata_tests.rs"]

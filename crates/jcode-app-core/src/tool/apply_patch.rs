@@ -162,6 +162,7 @@ impl Tool for ApplyPatchTool {
                         path,
                         "created",
                         &diff,
+                        super::edit_stats::line_delta(old.as_deref().unwrap_or(""), contents),
                         params.intent.as_deref(),
                     );
                     touched_paths.push(path.clone());
@@ -199,6 +200,7 @@ impl Tool for ApplyPatchTool {
                             path,
                             "deleted",
                             &diff,
+                            super::edit_stats::line_delta(old_contents, ""),
                             params.intent.as_deref(),
                         );
                         touched_paths.push(path.clone());
@@ -220,6 +222,7 @@ impl Tool for ApplyPatchTool {
                     match apply_update_chunks(&resolved, chunks).await {
                         Ok((old_contents, new_contents)) => {
                             let diff = generate_diff_summary(&old_contents, &new_contents);
+                            let delta = super::edit_stats::line_delta(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
                                 let dest_resolved = ctx.resolve_path(Path::new(dest));
                                 if let Some(parent) = dest_resolved.parent() {
@@ -260,6 +263,7 @@ impl Tool for ApplyPatchTool {
                                     path,
                                     "modified",
                                     &diff,
+                                    delta,
                                     params.intent.as_deref(),
                                 );
                                 publish_file_touch(
@@ -268,6 +272,7 @@ impl Tool for ApplyPatchTool {
                                     dest,
                                     "modified",
                                     &diff,
+                                    delta,
                                     params.intent.as_deref(),
                                 );
                                 touched_paths.push(path.clone());
@@ -303,6 +308,7 @@ impl Tool for ApplyPatchTool {
                                     path,
                                     "modified",
                                     &diff,
+                                    delta,
                                     params.intent.as_deref(),
                                 );
                                 touched_paths.push(path.clone());
@@ -411,6 +417,7 @@ fn publish_file_touch(
     display_path: &str,
     verb: &str,
     diff: &str,
+    (added, removed): (u64, u64),
     intent: Option<&str>,
 ) {
     let detail = build_file_touch_preview(diff);
@@ -424,6 +431,8 @@ fn publish_file_touch(
             .map(str::to_string),
         summary: Some(format!("{} via apply_patch", verb)),
         detail,
+        added,
+        removed,
     }));
     let _ = display_path;
 }

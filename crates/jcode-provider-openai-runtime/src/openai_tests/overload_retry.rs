@@ -1,5 +1,5 @@
 // Exercise real Provider::complete retries, not a reconstructed diagnostic chain.
-async fn overload_public_retry_case(recover: bool, partial: bool) {
+async fn overload_public_retry_case(recover: bool, partial: bool, large_input: bool) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _lock = jcode_base::storage::lock_test_env();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -8,6 +8,12 @@ async fn overload_public_retry_case(recover: bool, partial: bool) {
     let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
     let _idle = EnvVarGuard::set("JCODE_STREAM_IDLE_TIMEOUT_SECS", "1");
     jcode_base::config::invalidate_config_cache();
+    let prompt = if large_input {
+        format!("fixture-{}-tail", "x".repeat(1024 * 1024))
+    } else {
+        "fixture".to_string()
+    };
+    let expected_prompt = prompt.clone();
     let server = tokio::spawn(async move {
         let mut attempts = 0;
         loop {
@@ -39,6 +45,18 @@ async fn overload_public_retry_case(recover: bool, partial: bool) {
                 continue;
             }
             assert!(data.starts_with(b"POST /v1/responses "));
+            let end = data.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            let request: serde_json::Value = serde_json::from_slice(&data[end..]).unwrap();
+            assert!(
+                request["input"].as_array().unwrap().iter().any(|item| {
+                    item["content"].as_array().is_some_and(|content| {
+                        content
+                            .iter()
+                            .any(|block| block["text"].as_str() == Some(&expected_prompt))
+                    })
+                }),
+                "every attempt must retain the complete original prompt"
+            );
             attempts += 1;
             if attempts == 1 {
                 if partial {
@@ -66,7 +84,7 @@ async fn overload_public_retry_case(recover: bool, partial: bool) {
     provider.set_transport("https").unwrap();
     // Keep the fixture independent of the user's cached model catalog.
     *provider.model.write().await = "gpt-5.6-sol".into();
-    let messages = [ChatMessage::user("fixture")];
+    let messages = [ChatMessage::user(&prompt)];
     let mut stream = provider
         .complete(&messages, &[], "fixture", None)
         .await
@@ -119,15 +137,20 @@ async fn overload_public_retry_case(recover: bool, partial: bool) {
 
 #[tokio::test]
 async fn overload_public_retry_retains_report_before_later_timeout() {
-    overload_public_retry_case(false, false).await;
+    overload_public_retry_case(false, false, false).await;
 }
 
 #[tokio::test]
 async fn overload_public_retry_notice_survives_successful_recovery() {
-    overload_public_retry_case(true, false).await;
+    overload_public_retry_case(true, false, false).await;
 }
 
 #[tokio::test]
 async fn overload_public_retry_rolls_back_partial_output_before_notice() {
-    overload_public_retry_case(true, true).await;
+    overload_public_retry_case(true, true, false).await;
+}
+
+#[tokio::test]
+async fn overload_public_retry_preserves_large_input_after_continuation_scratch_release() {
+    overload_public_retry_case(true, false, true).await;
 }
