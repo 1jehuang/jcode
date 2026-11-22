@@ -963,8 +963,8 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("xAI sign-in URL and device code"));
-    assert!(rendered.contains("You do not need to install the Grok CLI"));
+    assert!(rendered.contains("Grok Build login: requesting xAI device code"));
+    assert!(rendered.contains("Type /cancel to abort."));
     assert!(!rendered.contains("run `jcode login"));
 }
 

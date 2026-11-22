@@ -29,7 +29,7 @@
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1590,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1215,
     "crates/jcode-tui/src/tui/app/tests/onboarding_eval.rs": 3306,
-    "crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs": 1694,
+    "crates/jcode-tui/src/tui/app/tests/onboarding_flow.rs": 1698,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_01/part_01.rs": 1689,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_04.rs": 2587,
     "crates/jcode-tui/src/tui/app/tests/remote_failover_routes.rs": 1275,

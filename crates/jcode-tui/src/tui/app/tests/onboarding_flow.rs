@@ -99,7 +99,9 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
         .last()
         .expect("missing OpenAI API key prompt")
         .content;
-    assert!(openai_prompt.contains("Endpoint: https://api.openai.com/v1"));
+    assert!(openai_prompt.contains("OpenAI API Key"));
+    assert!(openai_prompt.contains("Paste your API key below"));
+    assert!(!openai_prompt.contains("Default model:"));
     assert!(!openai_prompt.contains("Suggested default model:"));
 
     app.start_login_provider(
@@ -111,7 +113,9 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
         .last()
         .expect("missing Anthropic API key prompt")
         .content;
-    assert!(anthropic_prompt.contains("Endpoint: https://api.anthropic.com"));
+    assert!(anthropic_prompt.contains("Anthropic API Key"));
+    assert!(anthropic_prompt.contains("Paste your API key below"));
+    assert!(!anthropic_prompt.contains("Default model:"));
     assert!(!anthropic_prompt.contains("Suggested default model:"));
 }
 
