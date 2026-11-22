@@ -176,3 +176,75 @@ pub(super) fn login_bedrock_flow(options: &LoginOptions) -> Result<()> {
     crate::telemetry::record_auth_success("bedrock", "api_key");
     emit_key_login_success(options, "bedrock", crate::provider::bedrock::ENV_FILE)
 }
+
+pub(super) async fn login_auto_api_key_flow(options: &LoginOptions) -> Result<()> {
+    let raw_key = obtain_api_key(options, "API")?;
+    let key = crate::provider_catalog::normalize_pasted_api_key(&raw_key);
+    anyhow::ensure!(!key.is_empty(), "No API key provided.");
+
+    let (provider, auto_detected) = match crate::provider_catalog::detect_api_key_provider(&key) {
+        crate::provider_catalog::ApiKeyDetection::Matched(provider) => (provider, true),
+        crate::provider_catalog::ApiKeyDetection::Ambiguous { prefix, candidates } => {
+            if !io::stdin().is_terminal() {
+                let choices = crate::provider_catalog::format_api_key_candidates(candidates);
+                anyhow::bail!(
+                    "API key prefix `{prefix}` is shared by multiple providers ({choices}). Pass `--provider <id>` explicitly."
+                );
+            }
+            let choices = crate::provider_catalog::format_api_key_candidates(candidates);
+            eprintln!("Keys starting with `{prefix}` are used by multiple providers:");
+            eprintln!("  {choices}");
+            let answer = read_line_trimmed("Choose a number or provider name: ")?;
+            let provider =
+                crate::provider_catalog::resolve_api_key_provider_input(&answer, candidates)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown API-key provider '{}'.", answer))?;
+            (provider, false)
+        }
+        crate::provider_catalog::ApiKeyDetection::Unknown => {
+            if !io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "Could not detect provider from API key prefix. Pass `--provider <id>` explicitly."
+                );
+            }
+            let answer = read_line_trimmed(
+                "Could not detect provider automatically. Enter provider name (e.g. mistral, deepseek, openrouter): ",
+            )?;
+            let provider = crate::provider_catalog::resolve_api_key_provider_input(&answer, &[])
+                .ok_or_else(|| anyhow::anyhow!("Unknown API-key provider '{}'.", answer))?;
+            (provider, false)
+        }
+    };
+
+    if !options.no_validate {
+        match crate::auth::api_key_login::validate_api_key_for_provider(provider, &key).await {
+            crate::auth::api_key_login::ApiKeyValidationOutcome::Verified => {
+                if auto_detected {
+                    eprintln!("Detected and verified {} API key.", provider.display_name);
+                } else {
+                    eprintln!("Verified {} API key.", provider.display_name);
+                }
+            }
+            crate::auth::api_key_login::ApiKeyValidationOutcome::Rejected { status, detail } => {
+                let suffix = detail.map(|d| format!(": {d}")).unwrap_or_default();
+                anyhow::bail!(
+                    "{} rejected that API key (HTTP {status}{suffix}).",
+                    provider.display_name
+                );
+            }
+            crate::auth::api_key_login::ApiKeyValidationOutcome::Unverified { .. } => {
+                if auto_detected {
+                    eprintln!(
+                        "Detected {} API key (could not verify online; saving anyway).",
+                        provider.display_name
+                    );
+                }
+            }
+        }
+    }
+
+    let saved = crate::auth::api_key_login::save_api_key_for_provider(provider, &key)?;
+    eprintln!("Saved {} API key.", saved.display_name);
+    crate::telemetry::record_auth_success(saved.provider_id, "api_key");
+    notify_running_server_auth_changed_best_effort(Some(saved.provider_id)).await;
+    emit_key_login_success(options, saved.provider_id, &saved.env_file)
+}

@@ -2,6 +2,7 @@ pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
+pub mod api_key_login;
 pub mod azure;
 pub mod claude;
 pub mod codex;

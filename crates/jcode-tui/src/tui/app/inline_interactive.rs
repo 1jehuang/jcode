@@ -3609,6 +3609,10 @@ impl App {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
                     }
+                    PickerAction::AutoApiKey => {
+                        self.inline_interactive_state = None;
+                        self.start_auto_api_key_login();
+                    }
                     PickerAction::RemoteLogin { provider, import } => {
                         self.inline_interactive_state = None;
                         self.select_ssh_login_action(provider, import);

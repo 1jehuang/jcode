@@ -243,6 +243,9 @@ pub async fn run_login(
                     "Scriptable login flags require an explicit provider. Use `jcode login --provider <provider> ...`."
                 );
             }
+            if options.supplies_api_key() {
+                return login_auto_api_key_flow(&options).await;
+            }
             crate::telemetry::record_setup_step_once("login_picker_opened");
             let providers = crate::provider_catalog::cli_login_providers();
             if !io::stdin().is_terminal() {

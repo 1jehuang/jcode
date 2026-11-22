@@ -778,6 +778,10 @@ pub trait TuiState {
     fn login_input_hint(&self) -> Option<&'static str> {
         None
     }
+    /// Whether the active login prompt captures a secret (API key) that should be masked.
+    fn login_input_is_secret(&self) -> bool {
+        false
+    }
     fn input(&self) -> &str;
     /// Whether the one-based composer image tag has a pending payload.
     /// This does not acknowledge delivery to a provider.
@@ -1704,6 +1708,8 @@ pub enum PickerAction {
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
+    /// Prompt to paste any API key and auto-detect the provider from its prefix.
+    AutoApiKey,
     /// Native SSH actions never dispatch through laptop-local authentication.
     RemoteLogin {
         provider: &'static str,
@@ -1770,6 +1776,7 @@ impl InlineInteractiveState {
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
+        | PickerAction::AutoApiKey
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)

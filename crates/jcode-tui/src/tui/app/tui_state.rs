@@ -696,6 +696,17 @@ impl crate::tui::TuiState for App {
             PendingLogin::Exchanging { .. } => {
                 Some("Login only: exchanging credentials · not sent to AI · please wait")
             }
+            PendingLogin::AutoApiKey => {
+                Some("Login only: paste any API key · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyChooseProvider { .. } => {
+                Some("Login only: enter provider number or name · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyProfile { .. }
+            | PendingLogin::CursorApiKey
+            | PendingLogin::AzureApiKey { .. } => {
+                Some("Login only: paste API key · not sent to AI · /cancel")
+            }
             PendingLogin::OpenAiAccount { .. }
             | PendingLogin::Gemini { .. }
             | PendingLogin::Antigravity { .. } => {
@@ -703,6 +714,18 @@ impl crate::tui::TuiState for App {
             }
             _ => Some("Login only: authentication input · not sent to AI · /cancel"),
         }
+    }
+
+    fn login_input_is_secret(&self) -> bool {
+        matches!(
+            self.pending_login.as_ref(),
+            Some(
+                PendingLogin::AutoApiKey
+                    | PendingLogin::ApiKeyProfile { .. }
+                    | PendingLogin::CursorApiKey
+                    | PendingLogin::AzureApiKey { .. }
+            )
+        )
     }
 
     fn input(&self) -> &str {

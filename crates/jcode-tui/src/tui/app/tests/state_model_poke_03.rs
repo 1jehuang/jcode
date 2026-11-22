@@ -790,15 +790,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .clone();
     assert!(prompt.contains("Cerebras API Key"), "{prompt}");
     assert!(
-        prompt.contains("Stored variable: CEREBRAS_API_KEY"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Endpoint: https://api.cerebras.ai/v1"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Suggested default model: gpt-oss-120b"),
+        prompt.contains("Default model: gpt-oss-120b"),
         "{prompt}"
     );
     assert!(prompt.contains("Paste your API key below"), "{prompt}");
@@ -834,11 +826,9 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                         .unwrap()
                         .join("cerebras.env");
                     assert!(
-                        login
-                            .message
-                            .contains(&format!("Stored at {}.", expected_path.display())),
-                        "{}",
-                        login.message
+                        expected_path.exists(),
+                        "expected saved key file at {}",
+                        expected_path.display()
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));

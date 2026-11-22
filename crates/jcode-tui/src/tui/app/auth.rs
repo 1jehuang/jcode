@@ -1501,6 +1501,144 @@ impl App {
         );
     }
 
+    pub(super) fn start_auto_api_key_login(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "Paste an API key\n\n\
+             Provider is detected automatically for Anthropic, OpenAI, OpenRouter, Gemini, xAI, Groq, Hugging Face, Cerebras, Fireworks, Perplexity, Together, NVIDIA NIM, Bedrock, and more.\n\n\
+             Paste your key below, or /cancel."
+                .to_string(),
+        ));
+        self.set_status_notice("Login: paste any API key...");
+        self.begin_pending_login(PendingLogin::AutoApiKey);
+    }
+
+    fn validate_and_save_detected_api_key(
+        &mut self,
+        provider: crate::provider_catalog::LoginProviderDescriptor,
+        key: String,
+        auto_detected: bool,
+    ) {
+        let provider_id = provider.id.to_string();
+        let display_name = provider.display_name.to_string();
+        crate::logging::event_info(
+            "login_api_key_save_attempt",
+            vec![
+                ("provider_id", provider_id.clone()),
+                ("provider", display_name.clone()),
+                ("auth_method", "api_key".to_string()),
+                ("auto_detected", auto_detected.to_string()),
+                ("input_len", key.len().to_string()),
+            ],
+        );
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            match crate::auth::api_key_login::save_api_key_for_provider(provider, &key) {
+                Ok(saved) => {
+                    if let Some(profile) = saved.openai_compatible_profile {
+                        crate::provider_catalog::apply_openai_compatible_profile_env(Some(profile));
+                    }
+                    let verb = if auto_detected {
+                        "Detected and saved"
+                    } else {
+                        "Saved"
+                    };
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: provider_id,
+                        success: true,
+                        message: format!(
+                            "✓ {verb} {display_name} API key.\nUse /model to switch models."
+                        ),
+                    }));
+                }
+                Err(err) => {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "Failed to save {display_name} API key: {err}"
+                    )));
+                    self.pending_login = Some(PendingLogin::AutoApiKey);
+                }
+            }
+            return;
+        };
+
+        self.pending_login = Some(PendingLogin::Exchanging {
+            provider: provider_id.clone(),
+        });
+        let action_label = if auto_detected {
+            format!("Detected {display_name} · verifying key...")
+        } else {
+            format!("Verifying {display_name} key...")
+        };
+        self.set_status_notice(action_label);
+
+        handle.spawn(async move {
+            let validation =
+                crate::auth::api_key_login::validate_api_key_for_provider(provider, &key).await;
+            match validation {
+                crate::auth::api_key_login::ApiKeyValidationOutcome::Rejected { status, detail } => {
+                    let detail_suffix = detail
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default();
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: provider_id,
+                        success: false,
+                        message: format!(
+                            "{display_name} rejected that API key (HTTP {status}{detail_suffix}). Check the key and run /login key to try again."
+                        ),
+                    }));
+                }
+                crate::auth::api_key_login::ApiKeyValidationOutcome::Verified
+                | crate::auth::api_key_login::ApiKeyValidationOutcome::Unverified { .. } => {
+                    let verified = matches!(
+                        validation,
+                        crate::auth::api_key_login::ApiKeyValidationOutcome::Verified
+                    );
+                    match crate::auth::api_key_login::save_api_key_for_provider(provider, &key) {
+                        Ok(saved) => {
+                            if saved.provider_id == "bedrock" {
+                                crate::provider::activation::select_initial_runtime_provider_key(
+                                    "bedrock",
+                                );
+                            }
+                            if let Some(profile) = saved.openai_compatible_profile {
+                                crate::provider_catalog::apply_openai_compatible_profile_env(
+                                    Some(profile),
+                                );
+                            }
+                            let headline = match (auto_detected, verified) {
+                                (true, true) => {
+                                    format!("✓ Detected and verified {display_name} API key.")
+                                }
+                                (false, true) => {
+                                    format!("✓ Verified and saved {display_name} API key.")
+                                }
+                                (true, false) => format!(
+                                    "✓ Detected and saved {display_name} API key (could not verify online)."
+                                ),
+                                (false, false) => format!(
+                                    "✓ Saved {display_name} API key (could not verify online)."
+                                ),
+                            };
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: provider_id,
+                                success: true,
+                                message: format!(
+                                    "{headline}\nRefreshing models automatically. Use /model to switch."
+                                ),
+                            }));
+                        }
+                        Err(err) => {
+                            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                provider: provider_id,
+                                success: false,
+                                message: format!("Failed to save {display_name} API key: {err}"),
+                            }));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "API-key login setup passes provider-specific metadata assembled at call sites"
@@ -1516,36 +1654,35 @@ impl App {
         api_key_optional: bool,
         openai_compatible_profile: Option<crate::provider_catalog::OpenAiCompatibleProfile>,
     ) {
-        let model_hint = default_model
-            .map(|m| format!("Suggested default model: {}\n\n", m))
-            .unwrap_or_default();
-        let endpoint_hint = endpoint
-            .map(|endpoint| format!("Endpoint: {}\n", endpoint))
-            .unwrap_or_default();
-        let prompt = if api_key_optional {
-            "Paste your API key below if your endpoint requires one. Press Enter to skip, or type /cancel to abort."
+        let heading = if api_key_optional {
+            format!("{provider} (Local Endpoint)")
+        } else if provider.ends_with("API Key") {
+            provider.to_string()
+        } else if provider.ends_with("API") {
+            format!("{provider} Key")
         } else {
-            "Paste your API key below (it will be saved securely), or type /cancel to abort."
+            format!("{provider} API Key")
         };
-        self.push_display_message(DisplayMessage::system(format!(
-            "{} {}\n\n\
-             Setup docs: {}\n\
-             Stored variable: {}\n\
-             {}\
-             {}\n\
-             {}",
-            provider,
-            if api_key_optional {
-                "Local Endpoint"
-            } else {
-                "API Key"
-            },
-            docs_url,
-            key_name,
-            endpoint_hint,
-            model_hint,
-            prompt,
-        )));
+        let mut lines = vec![heading, String::new()];
+        if api_key_optional && let Some(endpoint) = endpoint {
+            lines.push(format!("Endpoint: {endpoint}"));
+        }
+        if !docs_url.is_empty() && !docs_url.contains("#openai-compatible-providers") {
+            lines.push(format!("Get a key: {docs_url}"));
+        }
+        if let Some(model) = default_model {
+            lines.push(format!("Default model: {model}"));
+        }
+        if lines.len() > 2 {
+            lines.push(String::new());
+        }
+        lines.push(if api_key_optional {
+            "Paste a key if your endpoint requires one, press Enter to skip, or /cancel."
+                .to_string()
+        } else {
+            "Paste your API key below, or /cancel.".to_string()
+        });
+        self.push_display_message(DisplayMessage::system(lines.join("\n")));
         self.set_status_notice(if api_key_optional {
             "Login: optional key..."
         } else {
@@ -1872,10 +2009,27 @@ impl App {
             return;
         }
 
-        if trimmed.is_empty() {
+        if trimmed.is_empty()
+            && !matches!(
+                &pending,
+                PendingLogin::ApiKeyProfile {
+                    api_key_optional: true,
+                    ..
+                }
+            )
+        {
             let help = match &pending {
                 PendingLogin::AutoImportSelection { .. } => {
                     "Auto import is waiting for your selection. Reply with a to approve all, 1,3 to approve specific sources, or /cancel to abort.".to_string()
+                }
+                PendingLogin::AutoApiKey => {
+                    "Paste an API key below, or type /cancel to abort.".to_string()
+                }
+                PendingLogin::ApiKeyChooseProvider { .. } => {
+                    "Reply with a provider number or name (for example: openai-api, deepseek, mistral), or /cancel.".to_string()
+                }
+                PendingLogin::ApiKeyProfile { .. } | PendingLogin::CursorApiKey => {
+                    "Paste your API key below, or type /cancel to abort.".to_string()
                 }
                 _ => "Login still in progress. Complete it in your browser, or paste the callback URL / authorization code here. Type /cancel to abort.".to_string(),
             };
@@ -2075,6 +2229,72 @@ impl App {
                     "Exchanging Antigravity callback for tokens...".to_string(),
                 ));
             }
+            PendingLogin::AutoApiKey => {
+                let key = crate::provider_catalog::normalize_pasted_api_key(&input);
+                if key.is_empty() {
+                    self.push_display_message(DisplayMessage::error(
+                        "API key cannot be empty.".to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::AutoApiKey);
+                    return;
+                }
+                if key.len() < 8 && key.chars().all(|c| c.is_ascii_digit()) {
+                    self.push_display_message(DisplayMessage::error(format!(
+                        "'{}' looks like a menu selection, not an API key. Paste the API key itself, or /cancel.",
+                        key
+                    )));
+                    self.pending_login = Some(PendingLogin::AutoApiKey);
+                    return;
+                }
+                match crate::provider_catalog::detect_api_key_provider(&key) {
+                    crate::provider_catalog::ApiKeyDetection::Matched(provider) => {
+                        self.validate_and_save_detected_api_key(provider, key, true);
+                    }
+                    crate::provider_catalog::ApiKeyDetection::Ambiguous { prefix, candidates } => {
+                        let choices = crate::provider_catalog::format_api_key_candidates(candidates);
+                        self.push_display_message(DisplayMessage::system(format!(
+                            "Keys starting with `{prefix}` are used by multiple providers:\n{choices}\n\nReply with a number or any provider name, or /cancel."
+                        )));
+                        self.set_status_notice("Login: pick provider for key...");
+                        self.pending_login =
+                            Some(PendingLogin::ApiKeyChooseProvider { key, candidates });
+                    }
+                    crate::provider_catalog::ApiKeyDetection::Unknown => {
+                        self.push_display_message(DisplayMessage::system(
+                            "Couldn't detect the provider from that key automatically.\nReply with the provider name (e.g. mistral, deepseek, openrouter, cerebras, bedrock), or /cancel."
+                                .to_string(),
+                        ));
+                        self.set_status_notice("Login: enter provider name...");
+                        self.pending_login = Some(PendingLogin::ApiKeyChooseProvider {
+                            key,
+                            candidates: &[],
+                        });
+                    }
+                }
+            }
+            PendingLogin::ApiKeyChooseProvider { key, candidates } => {
+                match crate::provider_catalog::resolve_api_key_provider_input(trimmed, candidates) {
+                    Some(provider) => {
+                        self.validate_and_save_detected_api_key(provider, key, false);
+                    }
+                    None => {
+                        let hint = if candidates.is_empty() {
+                            "Enter an API-key provider name (e.g. openai-api, anthropic-api, deepseek, mistral, openrouter), or /cancel.".to_string()
+                        } else {
+                            format!(
+                                "Enter 1-{} or a provider name ({}), or /cancel.",
+                                candidates.len(),
+                                crate::provider_catalog::format_api_key_candidates(candidates)
+                            )
+                        };
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Unknown API-key provider '{trimmed}'. {hint}"
+                        )));
+                        self.pending_login =
+                            Some(PendingLogin::ApiKeyChooseProvider { key, candidates });
+                    }
+                }
+            }
             PendingLogin::ApiKeyProfile {
                 provider_id,
                 provider,
@@ -2087,7 +2307,7 @@ impl App {
                 api_key_optional,
                 openai_compatible_profile,
             } => {
-                let key = input.trim().to_string();
+                let key = crate::provider_catalog::normalize_pasted_api_key(&input);
                 if key.is_empty() && !api_key_optional {
                     self.push_display_message(DisplayMessage::error(
                         "API key cannot be empty.".to_string(),
@@ -2289,37 +2509,29 @@ impl App {
                         } else if key_name == crate::provider::bedrock::API_KEY_ENV {
                             "You can now use /model to switch to Bedrock models. TUI onboarding saved region us-east-2; for a different region, run jcode login --provider bedrock from a terminal.".to_string()
                         } else if key_name == "OPENROUTER_API_KEY" {
-                            "You can now use /model to switch to OpenRouter models. If the model list looks stale, run /refresh-model-list.".to_string()
+                            "Refreshing models automatically. Use /model to switch to OpenRouter models.".to_string()
                         } else {
-                            "API key saved. Run /refresh-model-list to refresh model discovery, then use /model to pick an accessible model.".to_string()
+                            "Refreshing models automatically. Use /model to pick a model.".to_string()
                         };
                         let saved_label = if let Some(resolved) =
                             resolved_openai_compatible.as_ref()
                         {
                             if resolved.requires_api_key {
-                                format!("{} API key saved", provider)
+                                format!("✓ {} API key saved", provider)
                             } else if key.trim().is_empty() {
-                                format!("{} local endpoint saved", provider)
+                                format!("✓ {} local endpoint saved", provider)
                             } else {
-                                format!("{} local endpoint and optional API key saved", provider)
+                                format!("✓ {} local endpoint and API key saved", provider)
                             }
                         } else {
-                            format!("{} API key saved", provider)
+                            format!("✓ {} API key saved", provider)
                         };
                         Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                             provider: provider.clone(),
                             success: true,
                             message: format!(
-                                "{}.\n\n\
-                                 Stored at {}.\n\
-                                 {}{}",
-                                saved_label,
-                                crate::storage::app_config_dir()
-                                    .expect("config directory resolved while saving API key")
-                                    .join(&env_file)
-                                    .display(),
-                                guidance,
-                                model_hint
+                                "{}.\n{}{}",
+                                saved_label, guidance, model_hint
                             ),
                         }));
                     }
@@ -3238,10 +3450,21 @@ impl App {
                 // needs to rebuild routes and release the picker loading state,
                 // but must not race it with a second model selection.
                 let profile_activation_owns_selection =
-                    crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                        &login.provider,
-                    )
-                    .is_some();
+                    if let Some(profile) =
+                        crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                            &login.provider,
+                        )
+                    {
+                        if matches!(self.pending_login, Some(PendingLogin::Exchanging { .. })) {
+                            self.start_openai_compatible_post_login_activation(
+                                profile.id.to_string(),
+                                profile.display_name.to_string(),
+                            );
+                        }
+                        true
+                    } else {
+                        false
+                    };
                 self.trigger_provider_auth_changed(
                     Some(&login.provider),
                     prefer_strongest,

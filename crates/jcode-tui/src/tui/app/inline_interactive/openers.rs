@@ -162,13 +162,34 @@ impl App {
             .collect::<Vec<_>>();
 
         if !logout {
-            let mut saved_accounts =
+            let mut top_entries =
                 super::super::auth_account_picker_saved_accounts::saved_login_picker_entries(
                     self.provider.name(),
                     self.provider.oauth_account_label().as_deref(),
                 );
-            saved_accounts.extend(models);
-            models = saved_accounts;
+            top_entries.push(PickerEntry {
+                name: "Paste an API key".to_string(),
+                options: vec![PickerOption {
+                    provider: "auto-detect".to_string(),
+                    api_method: "API key".to_string(),
+                    available: true,
+                    detail: "Auto-detects Anthropic, OpenAI, OpenRouter, Gemini, xAI, Groq, Hugging Face & more".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: PickerAction::AutoApiKey,
+                selected_option: 0,
+                is_current: false,
+                is_default: false,
+                is_favorite: false,
+                recommended: true,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            });
+            top_entries.extend(models);
+            models = top_entries;
         }
 
         if logout {
