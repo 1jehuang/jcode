@@ -114,13 +114,12 @@ def render_cells_frame(
             except OSError:
                 continue
 
-    bbox = font.getbbox("M")
-    cell_w = max(8, bbox[2] - bbox[0])
-    cell_h = max(font_size + 8, (bbox[3] - bbox[1]) + 10)
+    cell_w = max(8, int(round(font.getlength("M"))))
+    cell_h = max(font_size + 3, int(round(font_size * 1.18)))
 
     img_w = width_cells * cell_w + padding * 2
     img_h = height_cells * cell_h + padding * 2
-    default_bg = (12, 13, 18)
+    default_bg = (0, 0, 0)
     default_fg = TEXT_COLOR
 
     img = Image.new("RGB", (img_w, img_h), default_bg)
