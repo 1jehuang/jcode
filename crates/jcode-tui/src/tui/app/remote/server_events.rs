@@ -670,6 +670,13 @@ fn handle_server_event_inner(
         }
         ServerEvent::Pong { .. } => false,
         ServerEvent::ConnectionPhase { phase } => {
+            if let Some(listener) =
+                crate::network_retry::parse_waiting_for_network_connection_phase(&phase)
+            {
+                app.connection_phase_started = None;
+                app.status = ProcessingStatus::WaitingForNetwork { listener };
+                return true;
+            }
             let cp = match phase.as_str() {
                 "authenticating" => crate::message::ConnectionPhase::Authenticating,
                 "connecting" => crate::message::ConnectionPhase::Connecting,
@@ -1287,11 +1294,8 @@ fn handle_server_event_inner(
             // Stream-idle failures follow an accepted request. The provider
             // owns transport retries and fallback already. A network probe
             // cannot fix these and must not restart that entire retry budget.
-            let lower_message = message.to_ascii_lowercase();
-            let is_stream_idle_timeout = lower_message
-                .contains("stream read timeout: no data received")
-                || lower_message.contains("timed out waiting for next websocket activity")
-                || lower_message.contains("did not complete within");
+            let is_stream_idle_timeout =
+                crate::network_retry::is_stream_idle_timeout_message(&message);
             if is_stream_idle_timeout {
                 app.pause_exhausted_auto_resume(
                     "Stopped automatic retries: the provider stream stalled after the request was accepted. Your message is back in the input box. Retry manually, reduce the conversation with /compact, or choose another route with /model.".to_string(),

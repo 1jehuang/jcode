@@ -2531,5 +2531,57 @@ fn test_remote_model_changed_updates_reasoning_effort() {
     );
 }
 
+#[test]
+fn test_server_waiting_for_network_connection_phase_sets_status_and_exempts_stall_guard() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let waiting_phase =
+        crate::network_retry::waiting_for_network_connection_phase("listening via ip monitor");
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: waiting_phase,
+        },
+        &mut remote,
+    );
+
+    assert!(
+        app.is_processing,
+        "ConnectionPhase from a server-initiated turn should adopt processing state"
+    );
+    assert!(
+        matches!(
+            &app.status,
+            ProcessingStatus::WaitingForNetwork { listener } if listener == "listening via ip monitor"
+        ),
+        "expected ProcessingStatus::WaitingForNetwork, got {:?}",
+        app.status
+    );
+
+    // Simulate a long offline period exceeding the stream stall timeout.
+    app.last_stream_activity = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or_else(Instant::now),
+    );
+    rt.block_on(crate::tui::app::remote::detect_and_cancel_stall(
+        &mut app,
+        &mut remote,
+    ));
+
+    assert!(
+        app.is_processing,
+        "stall guard must NOT cancel a turn while WaitingForNetwork"
+    );
+    assert!(
+        matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }),
+        "status must remain WaitingForNetwork after stall guard tick, got {:?}",
+        app.status
+    );
+}
+
 #[path = "remote_events_reload_04_additional_tests.rs"]
 mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;

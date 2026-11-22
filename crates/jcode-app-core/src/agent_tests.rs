@@ -2725,6 +2725,9 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
 #[path = "agent_tests/system_prompt_reminder.rs"]
 mod system_prompt_reminder;
 
+#[path = "agent_tests/network_disconnect_recovery.rs"]
+mod network_disconnect_recovery;
+
 #[derive(Clone, Default)]
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,

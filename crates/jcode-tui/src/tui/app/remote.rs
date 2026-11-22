@@ -1681,10 +1681,13 @@ fn format_stall_duration(timeout: Duration) -> String {
     }
 }
 
-async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
+pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
     let stall_timeout = stall_timeout();
-    let is_running_tool = matches!(app.status, ProcessingStatus::RunningTool(_));
-    if app.is_processing && !is_running_tool {
+    let exempt_from_stall_guard = matches!(
+        app.status,
+        ProcessingStatus::RunningTool(_) | ProcessingStatus::WaitingForNetwork { .. }
+    );
+    if app.is_processing && !exempt_from_stall_guard {
         let stalled = app
             .last_stream_activity
             .map(|t| t.elapsed() > stall_timeout)
