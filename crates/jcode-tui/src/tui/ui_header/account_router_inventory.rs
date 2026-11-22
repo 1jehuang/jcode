@@ -118,7 +118,18 @@ pub(super) fn inventory_lines(
         ("openrouter", "openrouter", auth.openrouter, true),
         ("cursor", "cursor", auth.cursor, false),
         ("copilot", "copilot", auth.copilot, false),
-        ("gemini", "gemini", auth.gemini, false),
+        // Code Assist OAuth only serves paid Cloud projects now; personal
+        // Google accounts route through the Antigravity row instead.
+        (
+            "gemini",
+            "gemini",
+            if std::env::var_os("GOOGLE_CLOUD_PROJECT").is_some() {
+                auth.gemini
+            } else {
+                AuthState::NotConfigured
+            },
+            false,
+        ),
     ] {
         if state != AuthState::NotConfigured {
             let is_current = current_provider.is_some()
