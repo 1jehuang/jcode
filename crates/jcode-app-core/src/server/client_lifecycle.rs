@@ -1713,11 +1713,57 @@ server_resumes: false,
                         )
                         .await;
                         if client_session_id == target_session_id {
+                            crate::hooks::with_client_terminal_env(
+                                active_terminal_env.clone(),
+                                handle_subscribe(
+                                    id,
+                                    subscribe_working_dir,
+                                    selfdev,
+                                    false,
+                                    &mut client_selfdev,
+                                    &client_session_id,
+                                    &client_connection_id,
+                                    &friendly_name,
+                                    &agent,
+                                    &registry,
+                                    swarm_enabled,
+                                    &swarm_members,
+                                    &swarms_by_id,
+                                    &channel_subscriptions,
+                                    &channel_subscriptions_by_session,
+                                    &swarm_plans,
+                                    &swarm_coordinators,
+                                    &client_event_tx,
+                                    &mcp_pool,
+                                    &event_history,
+                                    &event_counter,
+                                    &swarm_event_tx,
+                                    &sessions,
+                                    &soft_interrupt_queues,
+                                ),
+                            )
+                            .await;
+                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
+                                last_available_models_snapshot = Some(snapshot);
+                            }
+                        } else {
+                            crate::logging::warn(&format!(
+                                "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
+                                target_session_id, pre_resume_session_id, client_connection_id
+                            ));
+                            break;
+                        }
+                    } else {
+                        if provisional_session {
+                            agent.lock().await.activate_concurrency_tracking();
+                        }
+                        crate::hooks::with_client_terminal_env(
+                            active_terminal_env.clone(),
                             handle_subscribe(
                                 id,
                                 subscribe_working_dir,
                                 selfdev,
-                                false,
+                                true,
                                 &mut client_selfdev,
                                 &client_session_id,
                                 &client_connection_id,
@@ -1738,22 +1784,16 @@ server_resumes: false,
                                 &swarm_event_tx,
                                 &sessions,
                                 &soft_interrupt_queues,
-                            )
-                            .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                                last_available_models_snapshot = Some(snapshot);
-                            }
-                        } else {
-                            crate::logging::warn(&format!(
-                                "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
-                                target_session_id, pre_resume_session_id, client_connection_id
-                            ));
-                            break;
-                        }
-                    } else {
-                        if provisional_session {
-                            agent.lock().await.activate_concurrency_tracking();
-                        }
+                            ),
+                        )
+                        .await;
+                    }
+                } else {
+                    if provisional_session {
+                        agent.lock().await.activate_concurrency_tracking();
+                    }
+                    crate::hooks::with_client_terminal_env(
+                        active_terminal_env.clone(),
                         handle_subscribe(
                             id,
                             subscribe_working_dir,
@@ -1779,38 +1819,7 @@ server_resumes: false,
                             &swarm_event_tx,
                             &sessions,
                             &soft_interrupt_queues,
-                        )
-                        .await;
-                    }
-                } else {
-                    if provisional_session {
-                        agent.lock().await.activate_concurrency_tracking();
-                    }
-                    handle_subscribe(
-                        id,
-                        subscribe_working_dir,
-                        selfdev,
-                        true,
-                        &mut client_selfdev,
-                        &client_session_id,
-                        &client_connection_id,
-                        &friendly_name,
-                        &agent,
-                        &registry,
-                        swarm_enabled,
-                        &swarm_members,
-                        &swarms_by_id,
-                        &channel_subscriptions,
-                        &channel_subscriptions_by_session,
-                        &swarm_plans,
-                        &swarm_coordinators,
-                        &client_event_tx,
-                        &mcp_pool,
-                        &event_history,
-                        &event_counter,
-                        &swarm_event_tx,
-                        &sessions,
-                        &soft_interrupt_queues,
+                        ),
                     )
                     .await;
                     // No catalog dedup baseline here. A fresh subscribe sends

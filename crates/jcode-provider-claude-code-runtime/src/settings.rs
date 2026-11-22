@@ -23,6 +23,14 @@ pub const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Settings JSON that disables user hooks for probe and one-shot children.
 pub const DISABLE_HOOKS_SETTINGS: &str = r#"{"disableAllHooks":true}"#;
 
+/// Settings JSON that keeps claude-peers out of the persistent child. Its
+/// channel pushes need `--dangerously-load-development-channels`, which a
+/// backend never has, so its registration would be an inbox nobody reads,
+/// named after the agent of whichever pane started the daemon. The jcode
+/// session runs its own claude-peers server instead.
+pub const DENY_CLAUDE_PEERS_SETTINGS: &str =
+    r#"{"deniedMcpServers":[{"serverName":"claude-peers"}]}"#;
+
 /// `--mcp-config` value that declares the in-process `jcode` SDK MCP server.
 pub const JCODE_SDK_MCP_CONFIG: &str = r#"{"mcpServers":{"jcode":{"type":"sdk","name":"jcode"}}}"#;
 
@@ -151,6 +159,16 @@ pub fn build_argv(spec: &SpawnSpec) -> Vec<String> {
     match &spec.session {
         SessionStart::Resume(id) => argv.push(format!("--resume={id}")),
         SessionStart::New(id) => argv.push(format!("--session-id={id}")),
+    }
+
+    // A user's own `--settings` wins rather than racing a second one.
+    if !spec
+        .launch_args
+        .iter()
+        .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
+    {
+        argv.push("--settings".into());
+        argv.push(DENY_CLAUDE_PEERS_SETTINGS.into());
     }
 
     if spec.expose_mcp {
@@ -426,9 +444,20 @@ mod tests {
                 "--permission-mode",
                 "default",
                 "--session-id=abc",
+                "--settings",
+                DENY_CLAUDE_PEERS_SETTINGS,
             ]
         );
         assert!(!argv.iter().any(|a| a == "-p"));
+    }
+
+    #[test]
+    fn a_users_own_settings_replace_the_claude_peers_denial() {
+        let mut s = spec(SessionStart::New("x".into()));
+        s.launch_args = parse_launch_args("--settings /tmp/mine.json");
+        let argv = build_argv(&s);
+        assert!(!argv.iter().any(|a| a == DENY_CLAUDE_PEERS_SETTINGS));
+        assert_eq!(argv.iter().filter(|a| *a == "--settings").count(), 1);
     }
 
     #[test]

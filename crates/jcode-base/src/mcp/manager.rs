@@ -425,15 +425,17 @@ impl McpManager {
             let mut config = config.clone();
             if self.pool.is_some() {
                 // Session children descend from the daemon, whose environment
-                // may name the yaran pane that started it. Mark them so yaran
-                // matches this session's claude-peers registration by cwd, and
-                // knows this build delivers channel pushes.
-                // shortcut: no yaran session id, so shared-workspace jcode
-                // agents stay on AMQ; pass the client's id to fix that.
+                // may name the yaran pane that started it. Give them the yaran
+                // agent of the client this session serves (empty when none),
+                // so yaran matches this session's claude-peers registration by
+                // identity, and mark them so it knows this build delivers
+                // channel pushes.
+                let client_agent = crate::hooks::current_client_terminal_var("YARAN_SESSION_ID")
+                    .unwrap_or_default();
                 config
                     .env
                     .entry("YARAN_SESSION_ID".to_string())
-                    .or_default();
+                    .or_insert(client_agent);
                 config.env.insert(
                     "JCODE_MCP_CHANNEL_SESSION".to_string(),
                     self.session_id.clone(),
@@ -1339,6 +1341,21 @@ done
     /// channel message right after listing tools.
     #[tokio::test]
     async fn channel_server_runs_per_session_and_delivers_to_its_session() {
+        // Session children never carry a yaran id inherited from the daemon.
+        channel_server_case("daemon", None).await;
+    }
+
+    /// A session serving a yaran agent's client hands its MCP children that
+    /// agent's id, so yaran finds the session's claude-peers registration by
+    /// identity even when another jcode session shares the directory.
+    #[tokio::test]
+    async fn channel_server_children_speak_as_the_client_agent() {
+        let env = vec![("YARAN_SESSION_ID".to_string(), "agent-7".to_string())];
+        crate::hooks::with_client_terminal_env(env, channel_server_case("client", Some("agent-7")))
+            .await;
+    }
+
+    async fn channel_server_case(tag: &str, client_agent: Option<&str>) {
         let script = r#"
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
@@ -1353,7 +1370,7 @@ while IFS= read -r line; do
   esac
 done
 "#;
-        let name = format!("peers-test-{}", std::process::id());
+        let name = format!("peers-test-{tag}-{}", std::process::id());
         let session_id = format!("session-{name}");
         let mut config = McpConfig::default();
         config.servers.insert(
@@ -1410,10 +1427,10 @@ done
             notification.contains("\nping from peer\n</channel>"),
             "{notification}"
         );
-        // Session children are marked for yaran and never carry a yaran id
-        // inherited from the daemon.
+        // Session children are marked for yaran and carry the client's agent.
+        let agent = client_agent.unwrap_or_default();
         assert!(
-            notification.contains(&format!(r#"child="{session_id}[]""#)),
+            notification.contains(&format!(r#"child="{session_id}[{agent}]""#)),
             "{notification}"
         );
 
