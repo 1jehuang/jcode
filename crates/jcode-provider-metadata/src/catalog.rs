@@ -122,14 +122,10 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
-// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
-// endpoints, so they can be driven by `provider-doctor` /
-// `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
-// alias the native login-provider ids (`anthropic-api`, `openai-api`); auth
-// activation deliberately routes them through the native runtime, while the
-// live HTTP probes hit these hosts (Anthropic needs `x-api-key` +
-// `anthropic-version`, handled in the probe layer). `default_model` is None so
-// the doctor selects from the live catalog unless `--model` is passed.
+// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions` endpoints for
+// `provider-doctor` / `provider-test-coverage`. These ids alias `anthropic-api` / `openai-api`:
+// auth activation uses the native runtime while live HTTP probes hit these hosts (Anthropic uses
+// `x-api-key` + `anthropic-version` in the probe layer). `default_model` is None for live catalog.
 pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "anthropic-api",
     display_name: "Anthropic API",
@@ -1191,10 +1187,9 @@ pub const GEMINI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     menu_detail: "Paid Code Assist Standard/Enterprise (needs GOOGLE_CLOUD_PROJECT)",
     recommended: false,
     target: LoginProviderTarget::Gemini,
-    // Hidden from the CLI/TUI login pickers: Google retired Code Assist for
-    // individuals, so personal accounts must use Antigravity. Still reachable
-    // via `jcode login --provider gemini`, auto-init, and auth status so paid
-    // Cloud users and existing logins keep working.
+    // Hidden from CLI/TUI login pickers: Google retired Code Assist for individuals,
+    // so personal accounts use Antigravity. Still reachable via `--provider gemini`,
+    // auto-init, and auth status so paid Cloud users and existing logins keep working.
     order: LoginProviderSurfaceOrder::new(None, None, Some(4), Some(11), Some(13)),
 };
 

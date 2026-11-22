@@ -197,10 +197,7 @@ fn browser_size_typed_request_and_error_parity() {
         let overhead = serde_json::to_vec(&request).unwrap().len();
         request.observation["padding"] = json!("x".repeat(size - overhead));
         assert_eq!(serde_json::to_vec(&request).unwrap().len(), size);
-        assert_eq!(
-            crate::process_memory::estimate_json_bytes(&request),
-            size
-        );
+        assert_eq!(crate::process_memory::estimate_json_bytes(&request), size);
     }
     struct Fails;
     impl serde::Serialize for Fails {

@@ -9,6 +9,8 @@ use std::{
 };
 
 pub(super) struct CaptureStatus {
+    #[cfg(unix)]
+    directory: PathBuf,
     path: PathBuf,
     temporary: PathBuf,
     pause: PathBuf,
@@ -76,6 +78,7 @@ impl CaptureStatus {
             );
             let pid = std::process::id();
             Ok(Self {
+                directory: directory.to_path_buf(),
                 path: directory.join(format!("{pid}.json")),
                 temporary: directory.join(format!("{pid}.tmp")),
                 pause: directory.join(format!("{pid}.paused")),
@@ -95,7 +98,7 @@ impl CaptureStatus {
 
     #[cfg(unix)]
     pub(super) fn private_directory(&self) -> &Path {
-        self.path.parent().expect("status directory")
+        &self.directory
     }
 
     fn retry_path(&self) -> PathBuf {

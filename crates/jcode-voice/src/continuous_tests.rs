@@ -957,3 +957,35 @@ fn bounded_events() {
         1
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn recovery_wake_respects_deadline_and_cancellation() {
+    let stopped = AtomicBool::new(false);
+    let delay = Duration::from_secs(60);
+    for (watch, expected) in [(true, 3), (false, 60)] {
+        let start = tokio::time::Instant::now();
+        wait_for_recovery(
+            &stopped,
+            delay,
+            watch,
+            tokio::time::sleep(Duration::from_secs(3)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(expected));
+    }
+    let start = tokio::time::Instant::now();
+    wait_for_recovery(&stopped, delay, true, std::future::pending())
+        .await
+        .unwrap();
+    assert_eq!(start.elapsed(), delay);
+    let (result, ()) = tokio::join!(
+        wait_for_recovery(&stopped, delay, true, std::future::pending()),
+        async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stopped.store(true, Ordering::SeqCst);
+        }
+    );
+    assert_eq!(result, Err(VoiceError::Cancelled));
+    assert!(start.elapsed() < delay + Duration::from_secs(2));
+}

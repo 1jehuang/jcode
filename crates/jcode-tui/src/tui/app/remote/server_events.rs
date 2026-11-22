@@ -3364,29 +3364,10 @@ fn handle_server_event_inner(
         }
         ServerEvent::CompactResult {
             message, success, ..
-        } => {
-            if success {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compacting context");
-            } else {
-                app.push_display_message(DisplayMessage::system(message));
-                app.set_status_notice("Compaction failed");
-            }
-            false
-        }
+        } => super::server_event_handlers::handle_compact_result(app, message, success),
         ServerEvent::ResumeAllResult {
             resumed, message, ..
-        } => {
-            app.push_display_message(DisplayMessage::system(message));
-            if resumed == 0 {
-                app.set_status_notice("No sessions to resume");
-            } else if resumed == 1 {
-                app.set_status_notice("Resuming 1 session");
-            } else {
-                app.set_status_notice(format!("Resuming {} sessions", resumed));
-            }
-            false
-        }
+        } => super::server_event_handlers::handle_resume_all_result(app, resumed, message),
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false

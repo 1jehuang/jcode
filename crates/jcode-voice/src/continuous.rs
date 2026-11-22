@@ -191,9 +191,15 @@ impl GateContext {
             background_transcript,
             candidate,
         };
-        serde_json::Value::String(
-            serde_json::to_string(&state).expect("voice gate state is serializable"),
-        )
+        serde_json::Value::String(match serde_json::to_string(&state) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                jcode_base::logging::warn(&format!(
+                    "Failed to serialize Jarvis gate state: {error}"
+                ));
+                String::new()
+            }
+        })
     }
 }
 #[derive(Default)]
@@ -1082,38 +1088,6 @@ async fn wait_for_recovery(
         _ = tokio::time::sleep(delay) => Ok(()),
         _ = restoration, if watch_network => Ok(()),
     }
-}
-
-#[tokio::test(start_paused = true)]
-async fn recovery_wake_respects_deadline_and_cancellation() {
-    let stopped = AtomicBool::new(false);
-    let delay = Duration::from_secs(60);
-    for (watch, expected) in [(true, 3), (false, 60)] {
-        let start = tokio::time::Instant::now();
-        wait_for_recovery(
-            &stopped,
-            delay,
-            watch,
-            tokio::time::sleep(Duration::from_secs(3)),
-        )
-        .await
-        .unwrap();
-        assert_eq!(start.elapsed(), Duration::from_secs(expected));
-    }
-    let start = tokio::time::Instant::now();
-    wait_for_recovery(&stopped, delay, true, std::future::pending())
-        .await
-        .unwrap();
-    assert_eq!(start.elapsed(), delay);
-    let (result, ()) = tokio::join!(
-        wait_for_recovery(&stopped, delay, true, std::future::pending()),
-        async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            stopped.store(true, Ordering::SeqCst);
-        }
-    );
-    assert_eq!(result, Err(VoiceError::Cancelled));
-    assert!(start.elapsed() < delay + Duration::from_secs(2));
 }
 
 fn recovery_delay(error: &VoiceError, failures: usize) -> Option<Duration> {

@@ -17,16 +17,28 @@ impl Drop for HistoryControl {
     fn drop(&mut self) {
         self.stop();
         #[cfg(unix)]
-        if let Some((_, p)) = self.socket.take() {
-            let _ = std::fs::remove_file(p);
+        if let Some((_, p)) = self.socket.take()
+            && let Err(err) = std::fs::remove_file(&p)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::debug(&format!(
+                "Failed to remove Jarvis history control socket {}: {err}",
+                p.display()
+            ));
         }
     }
 }
 impl HistoryControl {
     fn stop(&mut self) {
         if let Some((mut child, _)) = self.player.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Err(err) = child.kill()
+                && err.kind() != std::io::ErrorKind::InvalidInput
+            {
+                crate::logging::debug(&format!("Failed to stop Jarvis replay player: {err}"));
+            }
+            if let Err(err) = child.wait() {
+                crate::logging::debug(&format!("Failed to reap Jarvis replay player: {err}"));
+            }
         }
     }
     pub fn busy(&mut self) -> bool {
@@ -54,8 +66,13 @@ impl HistoryControl {
         if let Ok(s) = UnixDatagram::bind(&path) {
             if s.set_nonblocking(true).is_ok() {
                 self.socket = Some((s, path));
-            } else {
-                let _ = std::fs::remove_file(path);
+            } else if let Err(err) = std::fs::remove_file(&path)
+                && err.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logging::debug(&format!(
+                    "Failed to remove nonblocking-failed Jarvis history socket {}: {err}",
+                    path.display()
+                ));
             }
         }
     }
@@ -63,9 +80,21 @@ impl HistoryControl {
         #[cfg(unix)]
         {
             let mut buf = [0; 64];
-            let n = self.socket.as_ref()?.0.recv(&mut buf).ok()?;
+            let n = match self.socket.as_ref()?.0.recv(&mut buf) {
+                Ok(n) => n,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return None,
+                Err(err) => {
+                    crate::logging::debug(&format!(
+                        "Failed to read Jarvis history control command: {err}"
+                    ));
+                    return None;
+                }
+            };
             if n < buf.len() {
-                return Some(std::str::from_utf8(&buf[..n]).ok()?.trim().to_owned());
+                return match std::str::from_utf8(&buf[..n]) {
+                    Ok(text) => Some(text.trim().to_owned()),
+                    Err(_) => None,
+                };
             }
         }
         None
@@ -145,7 +174,23 @@ impl HistoryControl {
                         .spawn()
                     {
                         Ok(mut child) => {
-                            let mut input = child.stdin.take().expect("piped stdin");
+                            let Some(mut input) = child.stdin.take() else {
+                                if let Err(err) = child.kill()
+                                    && err.kind() != std::io::ErrorKind::InvalidInput
+                                {
+                                    crate::logging::debug(&format!(
+                                        "Failed to stop Jarvis replay player without stdin: {err}"
+                                    ));
+                                }
+                                if let Err(err) = child.wait() {
+                                    crate::logging::debug(&format!(
+                                        "Failed to reap Jarvis replay player without stdin: {err}"
+                                    ));
+                                }
+                                self.commands = self.commands.wrapping_add(1);
+                                self.last = "local paplay unavailable";
+                                return self.last;
+                            };
                             std::thread::spawn(move || {
                                 for chunk in pcm.chunks(1024) {
                                     let bytes: Vec<_> =

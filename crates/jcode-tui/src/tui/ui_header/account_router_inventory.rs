@@ -139,7 +139,10 @@ pub(super) fn inventory_lines(
         let key = "antigravity";
         let is_current = current_provider.is_some()
             && current_provider == jcode_provider_core::parse_provider_hint(key);
-        let quota = inventory.antigravity.clone().unwrap_or_default();
+        let quota = match inventory.antigravity.as_ref() {
+            Some(quota) => quota.clone(),
+            None => AntigravityQuota::default(),
+        };
         let mut row = detail(
             auth.antigravity,
             format!(
@@ -364,12 +367,17 @@ fn load_antigravity_quota() -> Option<AntigravityQuota> {
     if !crate::auth::antigravity::has_cached_auth() {
         return None;
     }
-    let email = crate::auth::antigravity::load_tokens()
-        .ok()
-        .and_then(|tokens| tokens.email);
-    let models = crate::provider::antigravity::load_persisted_catalog()
-        .map(|catalog| catalog.models)
-        .unwrap_or_default();
+    let email = match crate::auth::antigravity::load_tokens() {
+        Ok(tokens) => tokens.email,
+        Err(error) => {
+            crate::logging::debug(&format!("Header Antigravity tokens unavailable: {error}"));
+            None
+        }
+    };
+    let models = match crate::provider::antigravity::load_persisted_catalog() {
+        Some(catalog) => catalog.models,
+        None => Vec::new(),
+    };
     Some(AntigravityQuota {
         email,
         pools: antigravity_quota_pools(&models),
@@ -379,10 +387,11 @@ fn load_antigravity_quota() -> Option<AntigravityQuota> {
 pub(super) fn antigravity_quota_pools(
     models: &[crate::provider::antigravity::CatalogModel],
 ) -> Vec<(String, u16, Option<String>)> {
-    let mut groups: Vec<(
+    type QuotaPoolGroup<'a> = (
         (u16, Option<String>),
-        Vec<&crate::provider::antigravity::CatalogModel>,
-    )> = Vec::new();
+        Vec<&'a crate::provider::antigravity::CatalogModel>,
+    );
+    let mut groups: Vec<QuotaPoolGroup<'_>> = Vec::new();
     for model in models {
         let Some(remaining) = model.remaining_fraction_milli else {
             continue;

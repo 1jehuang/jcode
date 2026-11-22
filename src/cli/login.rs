@@ -399,7 +399,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Bedrock => {
                 login_bedrock_flow(&options).map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Azure => login_azure_flow(&options).map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Azure => {
+                login_azure_flow(&options).map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenAiCompatible(profile)
                 if profile.id == crate::provider_catalog::MUSE_SUBSCRIPTION_PROFILE.id =>
             {
@@ -411,7 +413,9 @@ pub async fn run_login_provider(
                 login_openai_compatible_flow(&profile, &options)
                     .map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::Cursor => login_cursor_flow(&options).map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Cursor => {
+                login_cursor_flow(&options).map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::Copilot => device_login::login_copilot_flow(options.no_browser),
             LoginProviderTarget::Gemini => login_gemini_flow(options.no_browser)
                 .await
@@ -678,28 +682,6 @@ async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> R
     Ok(())
 }
 
-fn login_anthropic_api_key_flow(options: &LoginOptions) -> Result<()> {
-    eprintln!("Setting up Anthropic API...");
-    eprintln!("Get your API key from: https://console.anthropic.com/settings/keys\n");
-    let key = obtain_api_key(options, "Anthropic")?;
-
-    if !key.starts_with("sk-ant-") {
-        eprintln!("Warning: Anthropic API keys typically start with 'sk-ant-'. Saving anyway.");
-    }
-
-    save_named_api_key("anthropic.env", "ANTHROPIC_API_KEY", &key)?;
-    eprintln!("\nSuccessfully saved Anthropic API key!");
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join("anthropic.env")
-            .display()
-    );
-    eprintln!("Provider: claude (native Anthropic Messages API)");
-    crate::telemetry::record_auth_success("anthropic-api", "api_key");
-    emit_key_login_success(options, "anthropic-api", "anthropic.env")
-}
-
 async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::codex::login_target_label(requested_label)?;
     eprintln!("Logging in to OpenAI/Codex (account: {})...", label);
@@ -714,76 +696,6 @@ async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> R
     );
     crate::telemetry::record_auth_success("openai", "oauth");
     Ok(())
-}
-
-fn login_openrouter_flow(options: &LoginOptions) -> Result<()> {
-    eprintln!("Setting up OpenRouter...");
-    eprintln!("Get your API key from: https://openrouter.ai/keys\n");
-    let key = obtain_api_key(options, "OpenRouter")?;
-
-    if !key.starts_with("sk-or-") {
-        eprintln!("Warning: OpenRouter API keys typically start with 'sk-or-'. Saving anyway.");
-    }
-
-    save_named_api_key("openrouter.env", "OPENROUTER_API_KEY", &key)?;
-    eprintln!("\nSuccessfully saved OpenRouter API key!");
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join("openrouter.env")
-            .display()
-    );
-    crate::telemetry::record_auth_success("openrouter", "api_key");
-    emit_key_login_success(options, "openrouter", "openrouter.env")
-}
-
-fn login_bedrock_flow(options: &LoginOptions) -> Result<()> {
-    eprintln!("Setting up AWS Bedrock...");
-    eprintln!(
-        "Generate a Bedrock API key in the AWS Bedrock console: https://console.aws.amazon.com/bedrock/home#/api-keys"
-    );
-    eprintln!("Short-term keys are recommended for onboarding/testing.\n");
-
-    let region = match options.region.as_deref() {
-        Some(region) => region.to_string(),
-        None if options.openai_compatible_api_key.is_some()
-            || options.openai_compatible_api_key_env.is_some()
-            || !io::stdin().is_terminal() =>
-        {
-            String::new()
-        }
-        None => read_line_trimmed("AWS region [us-east-2]: ")?,
-    };
-    let region = if region.trim().is_empty() {
-        "us-east-2".to_string()
-    } else {
-        region.trim().to_string()
-    };
-
-    let key = obtain_api_key(options, "Bedrock")?;
-
-    save_named_api_key(
-        crate::provider::bedrock::ENV_FILE,
-        crate::provider::bedrock::API_KEY_ENV,
-        &key,
-    )?;
-    crate::provider_catalog::save_env_value_to_env_file(
-        crate::provider::bedrock::REGION_ENV,
-        crate::provider::bedrock::ENV_FILE,
-        Some(&region),
-    )?;
-
-    eprintln!("\nSuccessfully saved AWS Bedrock API key!");
-    eprintln!(
-        "Stored at {}",
-        crate::storage::app_config_dir()?
-            .join(crate::provider::bedrock::ENV_FILE)
-            .display()
-    );
-    eprintln!("Region: {}", region);
-    eprintln!("Provider: bedrock (native AWS Bedrock Converse API)");
-    crate::telemetry::record_auth_success("bedrock", "api_key");
-    emit_key_login_success(options, "bedrock", crate::provider::bedrock::ENV_FILE)
 }
 
 fn login_azure_flow(options: &LoginOptions) -> Result<()> {

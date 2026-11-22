@@ -43,7 +43,12 @@ fn thread_cpu_ns() -> u128 {
     let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
     // SAFETY: clock_gettime initializes the timespec on success, checked below.
     let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) };
-    assert_eq!(result, 0, "clock_gettime: {}", std::io::Error::last_os_error());
+    assert_eq!(
+        result,
+        0,
+        "clock_gettime: {}",
+        std::io::Error::last_os_error()
+    );
     let time = unsafe { time.assume_init() };
     time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
 }

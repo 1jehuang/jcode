@@ -744,6 +744,7 @@ pub(super) async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> 
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn queue_soft_interrupt(
     id: u64,
     content: String,
@@ -754,7 +755,11 @@ pub(super) fn queue_soft_interrupt(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let source = if jarvis_voice { SoftInterruptSource::JarvisUser } else { SoftInterruptSource::User };
+    let source = if jarvis_voice {
+        SoftInterruptSource::JarvisUser
+    } else {
+        SoftInterruptSource::User
+    };
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     crate::logging::info(&format!(

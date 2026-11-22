@@ -63,7 +63,7 @@ pub(super) fn render_message_into(
             // the words or JSON inside a trusted Jarvis row.
             let marked;
             let prompt_text: &str = if msg.is_jarvis_user() {
-                &*visible
+                &visible
             } else {
                 let (text, transcribed) = jcode_session_types::strip_transcription(&visible);
                 if transcribed {

@@ -99,3 +99,25 @@ pub(super) fn handle_generated_image(
     app.status = ProcessingStatus::Streaming;
     true
 }
+
+pub(super) fn handle_compact_result(app: &mut App, message: String, success: bool) -> bool {
+    app.push_display_message(DisplayMessage::system(message));
+    if success {
+        app.set_status_notice("Compacting context");
+    } else {
+        app.set_status_notice("Compaction failed");
+    }
+    false
+}
+
+pub(super) fn handle_resume_all_result(app: &mut App, resumed: usize, message: String) -> bool {
+    app.push_display_message(DisplayMessage::system(message));
+    if resumed == 0 {
+        app.set_status_notice("No sessions to resume");
+    } else if resumed == 1 {
+        app.set_status_notice("Resuming 1 session");
+    } else {
+        app.set_status_notice(format!("Resuming {} sessions", resumed));
+    }
+    false
+}

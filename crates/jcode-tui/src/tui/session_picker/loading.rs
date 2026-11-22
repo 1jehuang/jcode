@@ -1548,17 +1548,17 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
-        let content_search = if conversational_role && !content_starts_with_system_reminder {
-            content
-                .and_then(|raw| classified_search_excerpt(raw, &role, self.content_excerpt_budget))
-        } else {
-            None
-        };
-        let content_text = if conversational_role && !content_starts_with_system_reminder {
-            content.and_then(raw_value_display_text)
-        } else {
-            None
-        };
+        let (content_search, content_text) =
+            if conversational_role && !content_starts_with_system_reminder {
+                (
+                    content.and_then(|raw| {
+                        classified_search_excerpt(raw, &role, self.content_excerpt_budget)
+                    }),
+                    content.and_then(raw_value_display_text),
+                )
+            } else {
+                (None, None)
+            };
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
@@ -1573,16 +1573,10 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
 }
 
 fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    if !matches!(
+    matches!(
         message.display_role,
         None | Some(StoredDisplayRole::JarvisUser)
-    ) {
-        return false;
-    }
-    if message.content_starts_with_system_reminder {
-        return false;
-    }
-    true
+    ) && !message.content_starts_with_system_reminder
 }
 
 fn raw_content_starts_with_system_reminder(raw: &RawValue) -> bool {

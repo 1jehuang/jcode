@@ -1,6 +1,4 @@
-use super::ClientConnectionInfo;
-use super::SessionAgents;
-use super::server_has_newer_binary;
+use super::{ClientConnectionInfo, SessionAgents, server_has_newer_binary};
 use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};

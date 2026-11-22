@@ -1181,10 +1181,7 @@ impl AcpRuntime {
 
         let prompt_id = session.next_id();
         session.cancel_requested.store(false, Ordering::SeqCst);
-        {
-            let mut active = session.active_prompt_id.lock().await;
-            *active = Some(prompt_id);
-        }
+        *session.active_prompt_id.lock().await = Some(prompt_id);
 
         let send_result = session
             .send(&Request::Message {
