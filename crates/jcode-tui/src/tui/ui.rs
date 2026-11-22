@@ -79,8 +79,10 @@ mod memory_estimates;
 mod memory_ui;
 #[path = "ui_messages.rs"]
 mod messages;
-pub(crate) use messages::is_collapsed_agent_dm;
-pub(crate) use messages::strip_todo_tool_output_headers;
+pub(crate) use messages::{
+    OAUTH_LOGIN_DETAILS_MARKER, is_collapsed_agent_dm, is_oauth_login_progress_card,
+    parse_oauth_sign_in_link, strip_todo_tool_output_headers,
+};
 #[path = "ui_onboarding.rs"]
 mod onboarding;
 mod output_style;
@@ -2601,6 +2603,22 @@ pub(crate) fn link_target_from_screen(column: u16, row: u16) -> Option<String> {
     link_target_from_snapshot(&snapshot, point)
 }
 
+fn find_oauth_sign_in_label_span(text: &str) -> Option<(usize, usize)> {
+    let mut search_from = 0;
+    while let Some(rel_start) = text[search_from..].find("Open ") {
+        let start_byte = search_from + rel_start;
+        let after_open = &text[start_byte + "Open ".len()..];
+        if let Some(rel_end) = after_open.find(" sign-in") {
+            let end_byte = start_byte + "Open ".len() + rel_end + " sign-in".len();
+            let start_col = line_display_width(&text[..start_byte]);
+            let label_width = line_display_width(&text[start_byte..end_byte]);
+            return Some((start_col, start_col + label_width));
+        }
+        search_from = start_byte + "Open ".len();
+    }
+    None
+}
+
 /// Short OAuth link labels resolve against the source card, not a printed URL.
 pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Option<usize> {
     let point = copy_point_from_screen(column, row)?;
@@ -2609,10 +2627,8 @@ pub(crate) fn oauth_login_link_message_from_screen(column: u16, row: u16) -> Opt
     }
     let snapshot = copy_snapshot_for_pane(point.pane)?;
     let text = snapshot.wrapped_plain_line(point.abs_line)?;
-    let label = "Open OpenAI sign-in";
-    let start = text.find(label)?;
-    let start = line_display_width(&text[..start]);
-    if point.column < start || point.column >= start + label.len() {
+    let (start, end) = find_oauth_sign_in_label_span(&text)?;
+    if point.column < start || point.column >= end {
         return None;
     }
     match &snapshot.data {

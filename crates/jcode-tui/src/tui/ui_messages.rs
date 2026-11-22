@@ -418,6 +418,29 @@ pub(super) fn starts_with_reasoning(content: &str) -> bool {
     content.trim_start().starts_with("*\u{2063}")
 }
 
+pub(crate) const OAUTH_LOGIN_DETAILS_MARKER: &str = "\n\n<!-- oauth-details -->\n\n";
+
+/// Parse a compact OAuth/device sign-in markdown link line such as
+/// `[Open Claude sign-in](https://...)` into `(label, url)`.
+pub(crate) fn parse_oauth_sign_in_link(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('[')?;
+    let (label, url_part) = rest.split_once("](")?;
+    let url = url_part.strip_suffix(')')?;
+    if label.starts_with("Open ") && label.ends_with(" sign-in") && !url.is_empty() {
+        Some((label, url))
+    } else {
+        None
+    }
+}
+
+/// Whether `msg` is a collapsible OAuth or device-code login progress card.
+pub(crate) fn is_oauth_login_progress_card(msg: &DisplayMessage) -> bool {
+    msg.role == "system"
+        && msg.title.is_some()
+        && jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+            .is_some_and(|parsed| parsed.body.contains(OAUTH_LOGIN_DETAILS_MARKER))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
@@ -429,25 +452,40 @@ pub(crate) fn render_system_message(
     if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
         return lines;
     }
-    if msg.title.as_deref() == Some("OpenAI login")
+    if let Some(title) = msg.title.as_deref()
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+        && let Some((summary, details)) = parsed.body.split_once(OAUTH_LOGIN_DETAILS_MARKER)
     {
-        let (summary, details) = parsed
-            .body
-            .split_once("\n\n<!-- oauth-details -->\n\n")
-            .unwrap_or((parsed.body, ""));
         let mut lines = vec![Line::from(Span::styled(
-            "OpenAI login",
+            title.to_string(),
             Style::default().fg(system_message_color()).bold(),
         ))];
         // Generic markdown links append the full destination visibly. Keep this
         // label short, and resolve its click from the owning message instead.
         for line in summary.lines() {
-            if line.starts_with("[Open OpenAI sign-in](") {
+            if let Some((label, _url)) = parse_oauth_sign_in_link(line) {
                 lines.push(Line::from(Span::styled(
-                    "Open OpenAI sign-in",
+                    label.to_string(),
                     Style::default().fg(super::accent_color()).underlined(),
                 )));
+            } else if let Some(rest) = line.strip_prefix("Code: ") {
+                let mut parts = rest.splitn(2, "  ");
+                let code = parts.next().unwrap_or(rest);
+                let suffix = parts.next();
+                let mut spans = vec![
+                    Span::styled("Code: ", Style::default().fg(system_message_color())),
+                    Span::styled(
+                        code.to_string(),
+                        Style::default().fg(super::accent_color()).bold(),
+                    ),
+                ];
+                if let Some(extra) = suffix {
+                    spans.push(Span::styled(
+                        format!("  {extra}"),
+                        Style::default().fg(system_message_color()),
+                    ));
+                }
+                lines.push(Line::from(spans));
             } else {
                 lines.push(Line::from(Span::styled(
                     line.to_string(),

@@ -12,10 +12,14 @@ use super::auth_types::PendingLogin;
 use crate::auth::muse;
 use crate::bus::{Bus, BusEvent, LoginCompleted};
 
-/// Device-code progress displays (`copilot_code`, `muse_subscription_code#…`)
-/// are pending approval, never completed logins.
+/// Device-code progress displays (`copilot_code`, `openai_device_code`,
+/// `grok_build_code`, `jcode_code`, `muse_subscription_code#…`) are pending
+/// approval, never completed logins.
 pub(crate) fn is_device_code_progress(provider: &str) -> bool {
-    provider == "copilot_code" || provider.starts_with("muse_subscription_code#")
+    matches!(
+        provider,
+        "copilot_code" | "openai_device_code" | "grok_build_code" | "jcode_code"
+    ) || provider.starts_with("muse_subscription_code#")
 }
 
 /// Attempt-scoped Muse approval events (`muse-subscription#…`) are consumed by
@@ -106,11 +110,7 @@ impl App {
             let verification_uri = device_resp.verification_uri.clone();
 
             let clipboard_ok = copy_to_clipboard(&user_code);
-            let clipboard_msg = if clipboard_ok {
-                " (copied to clipboard - just paste it!)"
-            } else {
-                ""
-            };
+            let browser_opened = Self::open_auth_browser(&verification_uri);
 
             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                 provider: "copilot_code".to_string(),
@@ -120,21 +120,24 @@ impl App {
                         &verification_uri,
                         "Scan this on another device to open the GitHub verification page:",
                     )
-                    .map(|section| format!("\n\n{section}"))
                     .unwrap_or_default();
-                    format!(
-                        "GitHub Copilot Login\n\n\
-                         Your code: {}{}\n\n\
-                         Opening browser to {} ...\n\
-                         Paste the code there and authorize.{}\n\n\
-                         Waiting for authorization... (type /cancel to abort)",
-                        user_code, clipboard_msg, verification_uri, qr_section
+                    let details = format!(
+                        "Enter code `{user_code}` at GitHub and approve access.{}{}",
+                        if qr_section.is_empty() { "" } else { "\n\n" },
+                        qr_section
+                    );
+                    super::auth_progress::encode_device_login_card(
+                        "GitHub",
+                        &verification_uri,
+                        Some(&user_code),
+                        clipboard_ok,
+                        browser_opened,
+                        "Waiting for GitHub authorization",
+                        "Type /cancel to abort",
+                        &details,
                     )
                 },
             }));
-
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let _ = Self::open_auth_browser(&verification_uri);
 
             let token = match crate::auth::copilot::poll_for_access_token(
                 &client,
@@ -180,11 +183,10 @@ impl App {
             }
         });
 
-        self.push_display_message(DisplayMessage::system(
-            "GitHub Copilot Login\n\n\
-             Starting device flow... please wait. Type /cancel to abort."
-                .to_string(),
-        ));
+        self.upsert_login_progress_card(
+            super::auth_progress::COPILOT_LOGIN_TITLE,
+            "Copilot login: requesting GitHub device code...\nType /cancel to abort.".to_string(),
+        );
     }
 }
 
@@ -269,6 +271,9 @@ impl App {
                 .unwrap_or_else(|| challenge.verification_uri.clone());
             let user_code = challenge.user_code.clone();
 
+            let clipboard_ok = copy_to_clipboard(&user_code);
+            let browser_opened = Self::open_auth_browser(&url);
+
             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                 provider: progress_provider,
                 success: true,
@@ -280,23 +285,25 @@ impl App {
                     )
                     .map(|section| format!("\n\n{section}"))
                     .unwrap_or_default();
-                    format!(
-                        "{warning}\n\n\
-                         Muse Subscription Login\n\n\
-                         Your code: {user_code}\n\n\
-                         Opening browser to {url} ...\n\
-                         Paste the code there and authorize.{qr_section}\n\n\
-                         No local Muse installation is required.\n\n\
-                         Waiting for authorization... (type /cancel to abort)"
+                    let details = format!(
+                        "{warning}\n\nEnter code `{user_code}` and authorize. No local Muse installation is required.{qr_section}"
+                    );
+                    super::auth_progress::encode_device_login_card(
+                        "Meta",
+                        &url,
+                        Some(&user_code),
+                        clipboard_ok,
+                        browser_opened,
+                        "Waiting for Meta authorization",
+                        "Type /cancel to abort",
+                        &details,
                     )
                 },
             }));
 
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if is_cancelled() {
                 return;
             }
-            let _ = Self::open_auth_browser(&url);
 
             let mut interval_secs = u64::try_from(challenge.interval).unwrap_or(5).max(1);
             let expires_secs = u64::try_from(challenge.expires_in).unwrap_or(1800).max(60);
@@ -377,11 +384,10 @@ impl App {
             }));
         });
 
-        self.push_display_message(DisplayMessage::system(
-            "Muse Subscription Login\n\n\
-             Starting device flow... please wait. Type /cancel to abort."
-                .to_string(),
-        ));
+        self.upsert_login_progress_card(
+            super::auth_progress::MUSE_LOGIN_TITLE,
+            "Muse login: requesting device code...\nType /cancel to abort.".to_string(),
+        );
     }
 }
 

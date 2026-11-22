@@ -548,10 +548,10 @@ impl App {
     }
 
     fn start_jcode_login(&mut self) {
-        self.push_display_message(DisplayMessage::system(
-            "Jcode Account Login\n\nRequesting a secure browser approval flow. No email or API key will be requested in the terminal."
-                .to_string(),
-        ));
+        self.upsert_login_progress_card(
+            auth_progress::JCODE_LOGIN_TITLE,
+            "Jcode login: requesting browser approval...".to_string(),
+        );
         self.set_status_notice("Jcode account: requesting browser approval");
         let session_id = self.session.id.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -598,18 +598,23 @@ impl App {
             };
 
             let opened = App::open_auth_browser(&device.verification_uri_complete);
-            publish(
-                format!(
-                    "Jcode Account Login\n\n{}\n\nApprove the request in the same browser. Jcode is waiting for the single-use exchange.{}",
-                    device.verification_uri_complete,
-                    if opened {
-                        ""
-                    } else {
-                        "\n\nThe browser could not be opened automatically. Open the public URL above manually."
-                    }
-                ),
-                "Jcode account: waiting for browser approval",
+            let card = auth_progress::encode_device_login_card(
+                "Jcode",
+                &device.verification_uri_complete,
+                None,
+                false,
+                opened,
+                "Waiting for browser approval",
+                "Approve the request in your browser",
+                "No email or API key is requested in the terminal.",
             );
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::LoginCompleted(
+                crate::bus::LoginCompleted {
+                    provider: "jcode_code".to_string(),
+                    success: true,
+                    message: card,
+                },
+            ));
 
             let approved = {
                 let deadline = tokio::time::Instant::now()
@@ -902,19 +907,12 @@ impl App {
             "After logging in, copy the callback URL or authorization code and paste it here.\n"
                 .to_string()
         };
-
-        self.push_display_message(DisplayMessage::system(format!(
-            "Claude OAuth Login (account: {})\n\n\
-             Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}\
-             Or paste the full callback URL or authorization code here to finish from another device. Type /cancel to abort.{}",
-            label,
-            auth_url,
+        let details = format!(
+            "{}{}{}{}",
             if preflight.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", preflight)
+                format!("{preflight}\n")
             },
             callback_line,
             if preflight.is_empty() {
@@ -922,8 +920,19 @@ impl App {
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
             },
-            qr_section
-        )));
+            qr_section.trim_start_matches('\n')
+        );
+
+        self.show_oauth_login_progress(
+            auth_progress::CLAUDE_LOGIN_TITLE,
+            "Claude",
+            Some(label),
+            &auth_url,
+            browser_opened,
+            callback_available,
+            "Paste callback URL or code here if needed",
+            &details,
+        );
         if callback_available {
             self.set_status_notice(format!("Login [{}]: waiting...", label));
         } else {
@@ -1179,6 +1188,17 @@ impl App {
             Some(callback_available),
         );
 
+        let device_fallback_cancelled = if !browser_opened || !callback_available {
+            let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            Self::spawn_openai_device_fallback(
+                label_owned.clone(),
+                std::sync::Arc::clone(&cancelled),
+            );
+            Some(cancelled)
+        } else {
+            None
+        };
+
         self.show_openai_login_progress(
             label,
             &auth_url,
@@ -1192,6 +1212,147 @@ impl App {
             label: label.to_string(),
             expected_state: state,
             redirect_uri,
+            device_fallback_cancelled,
+        });
+    }
+
+    /// Automatically try OpenAI's device-code flow when browser launch or the
+    /// localhost:1455 callback listener is unavailable (e.g. headless/SSH/busy port).
+    /// If device-code auth is unavailable or disabled on the account, stays silent
+    /// so the already-displayed manual callback URL card remains active.
+    fn spawn_openai_device_fallback(
+        label: String,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            use std::sync::atomic::Ordering;
+
+            let device = match crate::auth::oauth::start_openai_device_login().await {
+                Ok(device) => device,
+                Err(err) => {
+                    crate::logging::info(&format!(
+                        "OpenAI device-code fallback unavailable (keeping manual callback): {}",
+                        err
+                    ));
+                    return;
+                }
+            };
+            if cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let clipboard_ok = super::helpers::copy_to_clipboard(&device.user_code);
+            let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
+                &device.verification_url,
+                "Scan this on a phone or another device to enter the code:",
+            )
+            .map(|section| format!("\n\n{section}"))
+            .unwrap_or_default();
+            let details = format!(
+                "Account: {label}\n\nOpen {} on any browser or phone and enter code `{}`.\nYou can still paste a manual OAuth callback URL here if preferred.{qr_section}",
+                device.verification_url, device.user_code
+            );
+            let card = auth_progress::encode_device_login_card(
+                "OpenAI",
+                &device.verification_url,
+                Some(&device.user_code),
+                clipboard_ok,
+                false,
+                "Waiting for OpenAI approval (or paste callback URL)",
+                "Paste callback URL here if needed · /cancel",
+                &details,
+            );
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "openai_device_code".to_string(),
+                success: true,
+                message: card,
+            }));
+
+            let interval = std::time::Duration::from_secs(device.interval.max(1));
+            loop {
+                if cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                match crate::auth::oauth::poll_openai_device_login_at(
+                    crate::auth::oauth::openai::AUTH_BASE,
+                    &device.device_auth_id,
+                    &device.user_code,
+                )
+                .await
+                {
+                    Ok(Some((code, verifier))) => {
+                        if cancelled.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match crate::auth::oauth::exchange_openai_code(
+                            &code,
+                            &verifier,
+                            crate::auth::oauth::openai::DEVICE_REDIRECT_URI,
+                        )
+                        .await
+                        {
+                            Ok(tokens) => {
+                                if cancelled.load(Ordering::Acquire) {
+                                    return;
+                                }
+                                match crate::auth::oauth::save_openai_tokens_for_account(
+                                    &tokens, &label,
+                                ) {
+                                    Ok(()) => {
+                                        Bus::global().publish(BusEvent::LoginCompleted(
+                                            LoginCompleted {
+                                                provider: "openai".to_string(),
+                                                success: true,
+                                                message: format!(
+                                                    "Successfully logged in to OpenAI! (account: {})",
+                                                    label
+                                                ),
+                                            },
+                                        ));
+                                    }
+                                    Err(err) => {
+                                        Bus::global().publish(BusEvent::LoginCompleted(
+                                            LoginCompleted {
+                                                provider: "openai".to_string(),
+                                                success: false,
+                                                message: format!("Failed to save tokens: {}", err),
+                                            },
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                crate::logging::info(&format!(
+                                    "OpenAI device-code token exchange failed: {}",
+                                    err
+                                ));
+                                Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                                    provider: "openai".to_string(),
+                                    success: false,
+                                    message: format!("OpenAI device login failed: {}", err),
+                                }));
+                            }
+                        }
+                        return;
+                    }
+                    Ok(None) => {
+                        if chrono::Utc::now().timestamp_millis() >= device.expires_at_ms {
+                            crate::logging::info("OpenAI device-code fallback expired.");
+                            return;
+                        }
+                        tokio::time::sleep(interval).await;
+                    }
+                    Err(err) => {
+                        crate::logging::info(&format!(
+                            "OpenAI device-code polling stopped: {}",
+                            err
+                        ));
+                        return;
+                    }
+                }
+            }
         });
     }
 
@@ -1381,17 +1542,12 @@ impl App {
             Some(callback_available),
         );
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "Gemini OAuth Login\n\n\
-             Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}\
-             Or paste the full callback URL, query string, or authorization code here to finish. Type /cancel to abort.{}",
-            auth_url,
+        let details = format!(
+            "{}{}{}{}",
             if preflight.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", preflight)
+                format!("{preflight}\n")
             },
             callback_line,
             if preflight.is_empty() {
@@ -1399,8 +1555,19 @@ impl App {
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
             },
-            qr_section
-        )));
+            qr_section.trim_start_matches('\n')
+        );
+
+        self.show_oauth_login_progress(
+            auth_progress::GEMINI_LOGIN_TITLE,
+            "Gemini",
+            None,
+            &auth_url,
+            browser_opened,
+            callback_available,
+            "Paste callback URL or code here if needed",
+            &details,
+        );
         self.set_status_notice("Login: waiting...");
         self.begin_pending_login(PendingLogin::Gemini {
             verifier,
@@ -1743,12 +1910,11 @@ impl App {
     fn start_grok_build_login(&mut self) {
         self.set_status_notice("Grok Build: preparing sign-in...");
         self.begin_pending_login(PendingLogin::GrokBuild);
-        self.push_display_message(DisplayMessage::system(
-            "Grok Build Login\n\nRequesting an xAI sign-in URL and device code. They will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
-                .to_string(),
-        ));
+        self.upsert_login_progress_card(
+            auth_progress::GROK_BUILD_LOGIN_TITLE,
+            "Grok Build login: requesting xAI device code...\nType /cancel to abort.".to_string(),
+        );
 
-        let session_id = self.session.id.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                 provider: "grok-build".to_string(),
@@ -1758,14 +1924,6 @@ impl App {
             return;
         };
         handle.spawn(async move {
-            let publish_progress = |message: String, status: &'static str| {
-                Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::auth(
-                    Some(session_id.clone()),
-                    message,
-                    Some(status),
-                )));
-            };
-
             let client = crate::provider::shared_http_client();
             let authorization = match crate::auth::grok_build::initiate_device_login(&client).await {
                 Ok(authorization) => authorization,
@@ -1778,13 +1936,37 @@ impl App {
                     return;
                 }
             };
-            let url = authorization.verification_uri_complete.as_deref()
+            let url = authorization
+                .verification_uri_complete
+                .as_deref()
                 .unwrap_or(&authorization.verification_uri);
-            let _ = Self::open_auth_browser(url);
-            publish_progress(format!(
-                "Grok Build Login\n\nOpen: {}\n\nConfirm code: {}\n\nWaiting for authorization...",
-                authorization.verification_uri, authorization.user_code
-            ), "Grok Build: waiting for browser approval");
+            let clipboard_ok = super::helpers::copy_to_clipboard(&authorization.user_code);
+            let browser_opened = Self::open_auth_browser(url);
+            let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
+                url,
+                "Scan this on another device to open the xAI verification page:",
+            )
+            .map(|section| format!("\n\n{section}"))
+            .unwrap_or_default();
+            let details = format!(
+                "Confirm code `{}` in your browser. You do not need to install the Grok CLI.{qr_section}",
+                authorization.user_code
+            );
+            let card = auth_progress::encode_device_login_card(
+                "xAI",
+                url,
+                Some(&authorization.user_code),
+                clipboard_ok,
+                browser_opened,
+                "Waiting for xAI browser approval",
+                "Type /cancel to abort",
+                &details,
+            );
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "grok_build_code".to_string(),
+                success: true,
+                message: card,
+            }));
 
             match crate::auth::grok_build::complete_device_login(&client, &authorization).await {
                 Ok(()) => {
@@ -1910,17 +2092,12 @@ impl App {
         );
         let manual_hint = "If the browser ends on a loopback/callback error page, copy the full URL from the address bar and paste it here immediately.\n";
 
-        self.push_display_message(DisplayMessage::system(format!(
-            "Antigravity OAuth Login\n\n\
-             Opening browser for authentication...\n\n\
-             If the browser didn't open, visit:\n{}\n\n\
-             {}{}{}{}\
-             Or paste the full callback URL or query string here to finish. Type /cancel to abort.{}",
-            auth_url,
+        let details = format!(
+            "{}{}{}{}{}",
             if preflight.is_empty() {
                 String::new()
             } else {
-                format!("{}\n", preflight)
+                format!("{preflight}\n")
             },
             callback_line,
             manual_hint,
@@ -1929,8 +2106,19 @@ impl App {
             } else {
                 "Manual-safe fallback is already active here.\n".to_string()
             },
-            qr_section
-        )));
+            qr_section.trim_start_matches('\n')
+        );
+
+        self.show_oauth_login_progress(
+            auth_progress::ANTIGRAVITY_LOGIN_TITLE,
+            "Antigravity",
+            None,
+            &auth_url,
+            browser_opened,
+            callback_available,
+            "Paste callback URL or query string here if needed",
+            &details,
+        );
         self.set_status_notice("Login: antigravity waiting...");
         self.begin_pending_login(PendingLogin::Antigravity {
             verifier,
@@ -1997,11 +2185,18 @@ impl App {
                     *slot = None;
                 }
             }
+            if let PendingLogin::OpenAiAccount {
+                device_fallback_cancelled: Some(cancelled),
+                ..
+            } = &pending
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
             if let Some((provider, method)) = pending.telemetry_context() {
                 crate::telemetry::record_auth_cancelled(&provider, &method);
             }
-            let replaced = matches!(&pending, PendingLogin::OpenAiAccount { .. })
-                && self.finish_openai_login_progress("OpenAI login cancelled.".to_string());
+            let replaced = auth_progress::login_card_title_for_pending(&pending)
+                .is_some_and(|title| self.finish_login_progress(title, format!("{title} cancelled.")));
             if !replaced {
                 self.push_display_message(DisplayMessage::system("Login cancelled.".to_string()));
             }
@@ -2101,17 +2296,21 @@ impl App {
                         }
                     }
                 });
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Exchanging authorization code for account {}...",
-                    label
-                )));
+                self.update_login_progress_exchange(
+                    auth_progress::CLAUDE_LOGIN_TITLE,
+                    Some(&label),
+                );
             }
             PendingLogin::OpenAiAccount {
                 verifier,
                 label,
                 expected_state,
                 redirect_uri,
+                device_fallback_cancelled,
             } => {
+                if let Some(cancelled) = device_fallback_cancelled {
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                }
                 self.pending_login = Some(PendingLogin::Exchanging {
                     provider: "openai".to_string(),
                 });
@@ -2186,9 +2385,10 @@ impl App {
                         }
                     }
                 });
-                self.push_display_message(DisplayMessage::system(
-                    "Exchanging Gemini callback for tokens...".to_string(),
-                ));
+                self.update_login_progress_exchange(
+                    auth_progress::GEMINI_LOGIN_TITLE,
+                    None,
+                );
             }
             PendingLogin::Antigravity {
                 verifier,
@@ -2225,9 +2425,10 @@ impl App {
                         }
                     }
                 });
-                self.push_display_message(DisplayMessage::system(
-                    "Exchanging Antigravity callback for tokens...".to_string(),
-                ));
+                self.update_login_progress_exchange(
+                    auth_progress::ANTIGRAVITY_LOGIN_TITLE,
+                    None,
+                );
             }
             PendingLogin::AutoApiKey => {
                 let key = crate::provider_catalog::normalize_pasted_api_key(&input);
@@ -3320,17 +3521,61 @@ impl App {
         }
     }
 
+    fn extract_device_code_from_message(message: &str) -> Option<&str> {
+        message
+            .split("Code: ")
+            .nth(1)
+            .or_else(|| message.split("Your code: ").nth(1))
+            .and_then(|s| s.split_whitespace().next())
+    }
+
     pub(super) fn handle_login_completed(&mut self, login: LoginCompleted) {
         if login.provider == "copilot_code" {
-            self.push_display_message(DisplayMessage::system(login.message.clone()));
-            if let Some(code) = login
-                .message
-                .split("Your code: ")
-                .nth(1)
-                .and_then(|s| s.split_whitespace().next())
-            {
+            if jcode_tui_messages::parse_collapsible_swarm_content(&login.message).is_some() {
+                self.upsert_login_progress_card(
+                    auth_progress::COPILOT_LOGIN_TITLE,
+                    login.message.clone(),
+                );
+            } else {
+                self.push_display_message(DisplayMessage::system(login.message.clone()));
+            }
+            if let Some(code) = Self::extract_device_code_from_message(&login.message) {
                 self.set_status_notice(format!("Login: enter {} at GitHub", code));
             }
+            return;
+        }
+        if login.provider == "openai_device_code" {
+            if !matches!(self.pending_login, Some(PendingLogin::OpenAiAccount { .. })) {
+                return;
+            }
+            self.upsert_login_progress_card(
+                auth_progress::OPENAI_LOGIN_TITLE,
+                login.message.clone(),
+            );
+            if let Some(code) = Self::extract_device_code_from_message(&login.message) {
+                self.set_status_notice(format!("Login: enter {} at OpenAI", code));
+            }
+            return;
+        }
+        if login.provider == "grok_build_code" {
+            if !matches!(self.pending_login, Some(PendingLogin::GrokBuild)) {
+                return;
+            }
+            self.upsert_login_progress_card(
+                auth_progress::GROK_BUILD_LOGIN_TITLE,
+                login.message.clone(),
+            );
+            if let Some(code) = Self::extract_device_code_from_message(&login.message) {
+                self.set_status_notice(format!("Login: enter {} at xAI", code));
+            }
+            return;
+        }
+        if login.provider == "jcode_code" {
+            self.upsert_login_progress_card(
+                auth_progress::JCODE_LOGIN_TITLE,
+                login.message.clone(),
+            );
+            self.set_status_notice("Jcode account: waiting for browser approval");
             return;
         }
         // A callback may complete while the user is still typing a URL/code.
@@ -3368,13 +3613,15 @@ impl App {
             if !is_match || is_cancelled {
                 return;
             }
-            self.push_display_message(DisplayMessage::system(login.message.clone()));
-            if let Some(code) = login
-                .message
-                .split("Your code: ")
-                .nth(1)
-                .and_then(|s| s.split_whitespace().next())
-            {
+            if jcode_tui_messages::parse_collapsible_swarm_content(&login.message).is_some() {
+                self.upsert_login_progress_card(
+                    auth_progress::MUSE_LOGIN_TITLE,
+                    login.message.clone(),
+                );
+            } else {
+                self.push_display_message(DisplayMessage::system(login.message.clone()));
+            }
+            if let Some(code) = Self::extract_device_code_from_message(&login.message) {
                 self.set_status_notice(format!("Login: enter {} at Meta", code));
             }
             return;
@@ -3415,18 +3662,27 @@ impl App {
             }
         }
         if login.success {
-            let replaced_login_card = login.provider == "openai"
-                && self.finish_openai_login_progress("✓ OpenAI login complete.".to_string());
+            let replaced_login_card = auth_progress::login_card_title_for_provider(
+                &login.provider,
+            )
+            .is_some_and(|title| {
+                let completion = if login.provider == "openai" {
+                    "✓ OpenAI login complete.".to_string()
+                } else if login.message.starts_with('✓') {
+                    login.message.clone()
+                } else {
+                    format!("✓ {}", login.message)
+                };
+                self.finish_login_progress(title, completion)
+            });
             self.recent_authenticated_provider = Some((login.provider.clone(), Instant::now()));
             // A fresh login is exactly what the credential-failure breaker is
             // waiting for: give automatic retries a fresh budget.
             self.reset_credential_failure_breaker();
             self.auth_catalog_refresh_pending = true;
             self.invalidate_model_picker_cache();
-            let progress_provider = login.provider.as_str();
             let suppress_first_run_login_noise = self.onboarding_flow_active()
-                && !(progress_provider == "copilot_code"
-                    || progress_provider.starts_with("muse_subscription_code#"));
+                && !auth_muse_helpers::is_device_code_progress(&login.provider);
             if !suppress_first_run_login_noise && !replaced_login_card {
                 self.push_display_message(DisplayMessage::system(login.message));
             }
@@ -3482,10 +3738,13 @@ impl App {
             // During onboarding we route the failure to the recovery screen
             // (which explains next steps) instead of dumping a raw error message
             // and a status notice the user can miss.
-            let replaced_login_card = login.provider == "openai"
-                && self.finish_openai_login_progress(format!(
-                    "OpenAI login failed: {message}\nRetry /login openai."
-                ));
+            let replaced_login_card = auth_progress::login_card_title_for_provider(
+                &login.provider,
+            )
+            .is_some_and(|title| {
+                let retry = auth_progress::login_retry_command_for_provider(&login.provider);
+                self.finish_login_progress(title, format!("{title} failed: {message}\nRetry {retry}."))
+            });
             if self.onboarding_flow_active() {
                 self.onboarding_handle_login_failed(Some(message));
             } else {
@@ -3505,6 +3764,13 @@ impl App {
             .and_then(PendingLogin::telemetry_context)
             .is_some_and(|(provider, _)| provider == login.provider)
         {
+            if let Some(PendingLogin::OpenAiAccount {
+                device_fallback_cancelled: Some(cancelled),
+                ..
+            }) = &self.pending_login
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
             self.pending_login = None;
         }
     }

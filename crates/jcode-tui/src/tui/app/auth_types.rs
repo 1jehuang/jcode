@@ -16,6 +16,7 @@ pub(crate) enum PendingLogin {
         label: String,
         expected_state: String,
         redirect_uri: String,
+        device_fallback_cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     },
     /// Waiting for user to paste a Gemini OAuth callback URL/query or auth code.
     Gemini {

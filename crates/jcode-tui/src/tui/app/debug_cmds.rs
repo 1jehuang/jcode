@@ -243,6 +243,7 @@ impl App {
                 label: "fixture".to_string(),
                 expected_state: "fixture".to_string(),
                 redirect_uri: "http://localhost:1455/auth/callback".to_string(),
+                device_fallback_cancelled: None,
             });
             self.follow_chat_bottom();
             serde_json::json!({"ok": true, "fixture": "login-progress"}).to_string()
