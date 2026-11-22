@@ -377,9 +377,19 @@ impl AntigravityProvider {
 
         log_canonical_input(model, &request);
 
+        // Bound the non-streaming POST so a stalled request cannot hang the
+        // turn. Reuses the shared stream-start budget; the per-stream idle
+        // timeout remains complementary for streaming routes.
+        let request_timeout = std::time::Duration::from_secs(
+            jcode_base::config::config()
+                .provider
+                .stream_start_timeout_secs
+                .max(1),
+        );
         let response = self
             .client
             .post(generate_content_api_url())
+            .timeout(request_timeout)
             .bearer_auth(&tokens.access_token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::USER_AGENT, antigravity_user_agent())
