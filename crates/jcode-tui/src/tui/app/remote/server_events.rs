@@ -2920,8 +2920,14 @@ fn handle_server_event_inner(
                     .last()
                     .is_some_and(|message| message.role == "swarm");
                 if !annotates_swarm_row && !reminder.is_empty() {
+                    // The late MCP announcement lists every tool with its
+                    // schema for the model. Show only a one-line summary.
+                    let shown = super::super::turn::system_reminder::late_mcp_announcement_summary(
+                        reminder,
+                    )
+                    .unwrap_or_else(|| reminder.to_string());
                     app.push_display_message(
-                        DisplayMessage::system(reminder).with_title("Context notification"),
+                        DisplayMessage::system(shown).with_title("Context notification"),
                     );
                 }
             } else {
