@@ -987,6 +987,10 @@ impl Provider for AntigravityProvider {
             .clone()
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // `--provider antigravity` uses this runtime directly, so session
         // restore hands it the routing spec `antigravity:<model>` rather than a
