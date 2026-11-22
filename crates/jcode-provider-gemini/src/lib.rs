@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+pub mod interactions;
+
 // Non-dated server-side alias: always resolves to the newest stable pro
 // model, so the default can never go stale or 404 into a downgrade chain
 // (2026-09-19: a transient NOT_FOUND on gemini-3.1-pro-preview silently

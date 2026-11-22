@@ -560,6 +560,41 @@ impl GeminiProvider {
     }
 }
 
+impl GeminiProvider {
+    /// Whether the active route can use Interactions tool retrieval: an
+    /// official Developer API key (Code Assist OAuth has no Interactions
+    /// endpoint) and a model that supports `defer_loading`.
+    fn native_deferred_route(model: &str) -> bool {
+        matches!(Self::auth_mode(), GeminiAuthMode::ApiKey(_))
+            && jcode_provider_gemini::interactions::model_supports_tool_retrieval(model)
+    }
+
+    /// Stateless `POST /interactions` call used when deferred tools are
+    /// present. See `jcode_provider_gemini::interactions`.
+    async fn create_interaction(
+        &self,
+        api_key: &str,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Result<jcode_provider_gemini::interactions::InteractionResponse> {
+        let system_instruction =
+            build_system_instruction_with_tool_guard(system, !tools.is_empty())
+                .and_then(|content| content.parts.into_iter().find_map(|part| part.text));
+        let body = jcode_provider_gemini::interactions::build_interaction_request(
+            model,
+            messages,
+            tools,
+            system_instruction,
+        );
+        let url = format!("{}/interactions", Self::developer_api_base_url());
+        self.post_json_api_key(&url, api_key, &body, "interactions")
+            .await
+            .context("Gemini interactions request failed")
+    }
+}
+
 // Serialize through Value to retain the legacy recursively sorted object order.
 // Keep only replayable bytes across HTTP awaits, rather than a second JSON tree.
 fn replayable_json_body(body: &impl Serialize) -> Result<bytes::Bytes> {

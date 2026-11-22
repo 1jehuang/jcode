@@ -2026,9 +2026,10 @@ impl Provider for MultiProvider {
     }
 
     fn supports_deferred_tools(&self) -> bool {
-        // Only first-party Anthropic and OpenAI Responses paths implement
-        // provider-native deferred loading. Every other route receives an
-        // eager-only tool list (see `complete_with_failover`).
+        // Anthropic, OpenAI Responses, and the Gemini Developer API
+        // Interactions path (tool retrieval) implement provider-native
+        // deferred loading. Every other route receives an eager-only tool
+        // list (see `complete_with_failover`).
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()

@@ -1,4 +1,134 @@
 use super::*;
+use jcode_provider_gemini::interactions::{
+    InteractionEvent, PROVIDER_NATIVE_GEMINI, interaction_events,
+};
+
+/// Deferred definitions need Interactions tool retrieval, and history holding
+/// replay-only Interactions steps must keep using it so their signatures are
+/// sent back unchanged.
+fn uses_interactions(messages: &[Message], tools: &[ToolDefinition]) -> bool {
+    tools.iter().any(|tool| tool.defer_loading)
+        || messages.iter().flat_map(|m| m.content.iter()).any(|block| {
+            matches!(
+                block,
+                jcode_message_types::ContentBlock::ProviderNative { provider, .. }
+                    if provider == PROVIDER_NATIVE_GEMINI
+            )
+        })
+}
+
+async fn stream_interaction(
+    provider: &GeminiProvider,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    api_key: &str,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system: &str,
+) {
+    let response = match provider
+        .create_interaction(api_key, model, messages, tools, system)
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = tx.send(Err(err)).await;
+            return;
+        }
+    };
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Streaming,
+        }))
+        .await;
+    if let Some(usage) = response.usage.as_ref() {
+        let _ = tx
+            .send(Ok(StreamEvent::TokenUsage {
+                input_tokens: usage.total_input_tokens,
+                output_tokens: usage.total_output_tokens,
+                cache_read_input_tokens: usage.total_cached_tokens,
+                cache_creation_input_tokens: None,
+            }))
+            .await;
+    }
+    let status = response.status.clone().unwrap_or_default();
+    if matches!(status.as_str(), "failed" | "cancelled") {
+        let detail = response
+            .errors
+            .as_ref()
+            .map(|errors| format!(": {errors}"))
+            .unwrap_or_default();
+        let _ = tx
+            .send(Err(anyhow::anyhow!("Gemini interaction {status}{detail}")))
+            .await;
+        return;
+    }
+    let events = interaction_events(&response);
+    let produced_output = events.iter().any(|event| {
+        matches!(
+            event,
+            InteractionEvent::Text(_) | InteractionEvent::FunctionCall { .. }
+        )
+    });
+    if !produced_output {
+        let _ = tx
+            .send(Err(anyhow::anyhow!(
+                "Gemini interaction returned no usable output (status={status})"
+            )))
+            .await;
+        return;
+    }
+    for event in events {
+        match event {
+            InteractionEvent::Text(text) => {
+                let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+            }
+            InteractionEvent::Thinking(text) => {
+                let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+                let _ = tx.send(Ok(StreamEvent::ThinkingDelta(text))).await;
+                let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+            }
+            InteractionEvent::Native(item) => {
+                let _ = tx
+                    .send(Ok(StreamEvent::ProviderNative {
+                        provider: PROVIDER_NATIVE_GEMINI.to_string(),
+                        item,
+                    }))
+                    .await;
+            }
+            InteractionEvent::FunctionCall {
+                id,
+                name,
+                arguments,
+                signature,
+            } => {
+                let raw_id = if id.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    id
+                };
+                let _ = tx
+                    .send(Ok(StreamEvent::ToolUseStart {
+                        id: jcode_message_types::sanitize_tool_id(&raw_id),
+                        name,
+                    }))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::ToolInputDelta(arguments.to_string())))
+                    .await;
+                let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
+                if let Some(signature) = signature {
+                    let _ = tx.send(Ok(StreamEvent::ToolUseSignature(signature))).await;
+                }
+            }
+        }
+    }
+    let _ = tx
+        .send(Ok(StreamEvent::MessageEnd {
+            stop_reason: Some(status),
+        }))
+        .await;
+}
 
 #[async_trait]
 impl Provider for GeminiProvider {
@@ -63,6 +193,15 @@ impl Provider for GeminiProvider {
                     phase: ConnectionPhase::WaitingForResponse,
                 }))
                 .await;
+
+            if let GeminiAuthMode::ApiKey(api_key) = GeminiProvider::auth_mode()
+                && GeminiProvider::native_deferred_route(&model)
+                && uses_interactions(&messages, &tools)
+            {
+                stream_interaction(&provider, &tx, &api_key, &model, &messages, &tools, &system)
+                    .await;
+                return;
+            }
 
             let response = match provider
                 .generate_content(
@@ -325,6 +464,10 @@ impl Provider for GeminiProvider {
 
     fn supports_image_input(&self) -> bool {
         true
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        Self::native_deferred_route(&self.model())
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
