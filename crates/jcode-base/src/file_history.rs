@@ -692,16 +692,40 @@ fn load(dir: &Path) -> Result<History> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => History::default(),
         Err(error) => return Err(error.into()),
     };
-    if let Some(pending) = history.pending.clone() {
-        let actual = state(dir, &pending.path)?;
-        let completed_new_file = pending.before.blob.is_none() && actual.blob == pending.after.blob;
-        ensure!(
-            pending.before.matches(&actual) || pending.after.matches(&actual) || completed_new_file,
-            "Interrupted file mutation conflicts with external changes: {}",
-            pending.path.display()
-        );
-        history.expected.insert(pending.path, actual);
-        history.pending = None;
+    if let Some(pending) = history.pending.take() {
+        match state(dir, &pending.path) {
+            Ok(actual) => {
+                let completed_new_file =
+                    pending.before.blob.is_none() && actual.blob == pending.after.blob;
+                if !(pending.before.matches(&actual)
+                    || pending.after.matches(&actual)
+                    || completed_new_file)
+                {
+                    // Edited externally after an interrupted mutation: keep the
+                    // user's file and stop offering to rewind it, as mutate() does.
+                    crate::logging::warn(&format!(
+                        "Interrupted file mutation conflicts with external changes; file checkpoints disabled for {}",
+                        pending.path.display()
+                    ));
+                    for checkpoint in &mut history.checkpoints {
+                        checkpoint.blocked.insert(pending.path.clone());
+                    }
+                }
+                history.expected.insert(pending.path, actual);
+            }
+            // Replaced by a symlink or directory, or unreadable: stop tracking
+            // the path, as checkpoint_with_anchor() does.
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "File checkpoints disabled for {}: {error:#}",
+                    pending.path.display()
+                ));
+                for checkpoint in &mut history.checkpoints {
+                    checkpoint.blocked.insert(pending.path.clone());
+                }
+                history.expected.remove(&pending.path);
+            }
+        }
         save(dir, &history)?;
     }
     if !history.restoring.is_empty() {
