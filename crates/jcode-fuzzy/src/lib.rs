@@ -22,6 +22,7 @@ const SUBSTITUTION: i32 = -10;
 const DELETION: i32 = -12;
 const TRANSPOSITION: i32 = 2 * MATCH - 22;
 const EXACT: i32 = 32;
+const LITERAL: i32 = 24;
 
 /// Result of a successful fuzzy match.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,6 +459,8 @@ fn fuzzy_match_impl<P: PositionTracker>(
     if !exact && floor_score(score, cell.positions.first_pos()) < score_floor(meaningful) {
         return None;
     }
+    let literal = !exact && !pat.is_empty() && hay.windows(pat.len()).any(|w| w == pat.as_slice());
+    let score = score + if literal { LITERAL } else { 0 };
     Some((score, cell.positions, hay_offset))
 }
 
@@ -741,7 +744,14 @@ fn score_prepared_word(
     if !exact && floor_score(score, cell.positions.first_pos()) < word.floor {
         return None;
     }
-    Some(score)
+    // A literal occurrence of the word must outrank typo matches, otherwise
+    // `neon` ties with `(none)` and real hits drown in near-miss noise.
+    let literal = !exact
+        && scratch
+            .hay
+            .windows(word.chars.len())
+            .any(|w| w == word.chars.as_slice());
+    Some(score + if literal { LITERAL } else { 0 })
 }
 
 /// Return matched positions for free-form picker highlighting.
@@ -819,6 +829,16 @@ mod tests {
         let typo = fuzzy_score("codxe", "codex").unwrap();
         assert!(exact > prefix);
         assert!(prefix > typo);
+    }
+
+    #[test]
+    fn literal_substring_outranks_typo_match_in_another_field() {
+        // `neon` is a one-transposition typo of `none`; the literal hit must win.
+        let literal =
+            fuzzy_score_tokens("gemini neon", "google/gemini-4-neon (high) Google").unwrap();
+        let typo =
+            fuzzy_score_tokens("gemini neon", "google/gemini-3.8-flash (none) Google").unwrap();
+        assert!(literal > typo, "{literal} <= {typo}");
     }
 
     #[test]

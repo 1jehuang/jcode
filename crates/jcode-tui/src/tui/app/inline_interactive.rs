@@ -3924,10 +3924,8 @@ impl App {
             // Prepare the query once per keystroke instead of re-parsing and
             // re-lowercasing it for every entry.
             let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
-            let query_words: Vec<String> = query
-                .split_whitespace()
-                .map(|w| w.to_lowercase())
-                .collect();
+            let query_words: Vec<String> =
+                query.split_whitespace().map(|w| w.to_lowercase()).collect();
             let mut scored: Vec<(usize, bool, i32)> = picker
                 .entries
                 .iter()
@@ -3941,17 +3939,14 @@ impl App {
                         // query buries the model the user is typing.
                         let usage_bonus = (m.usage_score / 10).min(30) as i32;
                         let name_lower = m.name.to_lowercase();
-                        let literal_name_bonus = if query_words
-                            .iter()
-                            .all(|w| name_lower.contains(w.as_str()))
-                        {
-                            80
-                        } else {
-                            0
-                        };
-                        let bonus = usage_bonus
-                            + literal_name_bonus
-                            + if m.recommended { 5 } else { 0 };
+                        let literal_name_bonus =
+                            if query_words.iter().all(|w| name_lower.contains(w.as_str())) {
+                                80
+                            } else {
+                                0
+                            };
+                        let bonus =
+                            usage_bonus + literal_name_bonus + if m.recommended { 5 } else { 0 };
                         (
                             i,
                             m.name.eq_ignore_ascii_case(query),
