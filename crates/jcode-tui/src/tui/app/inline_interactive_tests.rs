@@ -251,6 +251,27 @@ fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
 }
 
 #[test]
+fn model_picker_literal_multi_word_match_outranks_heavily_used_loose_match() {
+    let mut picker = InlineInteractiveState {
+        kind: PickerKind::Model,
+        filtered: vec![0, 1, 2],
+        entries: vec![
+            picker_entry("gemini-2.5-pro", "OpenRouter", 5000),
+            picker_entry("gpt-5.4", "OpenAI", 9000),
+            picker_entry("gemini-3-neon", "Google", 0),
+        ],
+        selected: 0,
+        column: 0,
+        filter: "gemini neon".to_string(),
+        preview: false,
+    };
+
+    App::apply_inline_interactive_filter(&mut picker);
+
+    assert_eq!(picker.filtered.first(), Some(&2));
+}
+
+#[test]
 fn model_picker_fuzzy_filter_tolerates_common_typos() {
     let mut picker = InlineInteractiveState {
         kind: PickerKind::Model,
