@@ -94,7 +94,9 @@ impl CaptureStatus {
     }
 
     #[cfg(unix)]
-    pub(super) fn private_directory(&self) -> &Path { self.path.parent().expect("status directory") }
+    pub(super) fn private_directory(&self) -> &Path {
+        self.path.parent().expect("status directory")
+    }
 
     fn retry_path(&self) -> PathBuf {
         self.path

@@ -359,8 +359,17 @@ impl Drop for AlwaysListening {
 }
 impl AlwaysListening {
     pub(super) fn queue_history(&mut self, cmd: &str) -> &'static str {
-        if self.recording.is_none() || self.session.is_none() {return "Always-on Jarvis is not ready";}
-        self.history_command = Some(if cmd.trim().is_empty() {"status"}else{cmd.trim()}.into());
+        if self.recording.is_none() || self.session.is_none() {
+            return "Always-on Jarvis is not ready";
+        }
+        self.history_command = Some(
+            if cmd.trim().is_empty() {
+                "status"
+            } else {
+                cmd.trim()
+            }
+            .into(),
+        );
         "Local audio history command queued"
     }
     fn playback_trace(&self) -> jcode_voice::speech::PlaybackTrace {
@@ -527,7 +536,9 @@ impl AlwaysListening {
                 max_audio_seconds_per_hour: cfg.max_audio_seconds_per_hour as u32,
                 max_classifications_per_hour: cfg.max_classifications_per_hour,
                 action_probability: cfg.action_probability,
-                live_action_probability: Some(|| crate::config::config().jarvis.listening.action_probability),
+                live_action_probability: Some(|| {
+                    crate::config::config().jarvis.listening.action_probability
+                }),
                 warm_nari: cfg.warm_nari,
             },
             self.capture_budget.clone(),
@@ -622,7 +633,9 @@ impl App {
             listener.detach();
             listener.session = session;
             #[cfg(unix)]
-            if let Some(status) = &listener.status {listener.history.attach(status.private_directory());}
+            if let Some(status) = &listener.status {
+                listener.history.attach(status.private_directory());
+            }
         }
         let paused = listener.status.as_ref().is_some_and(CaptureStatus::paused);
         let cue_busy = listener
@@ -660,10 +673,25 @@ impl App {
             }
         }
         if let Some(recording) = &recording {
-            if let Some(cmd) = listener.history_command.take().or_else(||listener.history.incoming()) {
-                let blocked = speech_busy || external_capture || listener.failed || listener.playback.partial.is_some() || self.voice_input.is_some();
-                let notice = listener.history.command(recording, &cmd, listener.history_request, blocked);
-                if let Some(caption) = listener.history.caption.take() { self.set_status_notice(format!("Replaying local audio: {caption}")); } else {self.set_status_notice(notice);}
+            if let Some(cmd) = listener
+                .history_command
+                .take()
+                .or_else(|| listener.history.incoming())
+            {
+                let blocked = speech_busy
+                    || external_capture
+                    || listener.failed
+                    || listener.playback.partial.is_some()
+                    || self.voice_input.is_some();
+                let notice =
+                    listener
+                        .history
+                        .command(recording, &cmd, listener.history_request, blocked);
+                if let Some(caption) = listener.history.caption.take() {
+                    self.set_status_notice(format!("Replaying local audio: {caption}"));
+                } else {
+                    self.set_status_notice(notice);
+                }
             }
             speech_busy |= listener.history.busy();
             recording.set_paused(paused || listener.failed);
