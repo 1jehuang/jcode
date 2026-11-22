@@ -628,3 +628,50 @@ fn todo_plan_user_intention_phrase_outranks_scattered_user_prompts() {
     wait(&mut picker);
     assert_eq!(ids(&picker), ["release-bugs", "ship-v1"]);
 }
+
+#[test]
+fn mid_word_prefix_phrase_keeps_intent_match_ranked_first() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut scattered = session("scattered", "Ship jcode v1", 10, &path);
+    push_mark(&mut scattered.search_index, Source::User);
+    scattered
+        .search_index
+        .push_str("fix one thing, check all logs, release later");
+
+    let mut intent_match = session("intent-hit", "Pipeline work", 500, &path);
+    intent_match.user_intention = Some("Fix all release bugs".into());
+    intent_match.search_index.push_str(" fix all release bugs");
+
+    let mut picker = SessionPicker::new(vec![scattered, intent_match]);
+    picker.search_query = "fix all rel".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["intent-hit", "scattered"]);
+}
+
+#[test]
+fn single_word_intent_match_outranks_chatty_incidental_session() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut chatty = session("chatty", "General cleanup", 0, &path);
+    push_mark(&mut chatty.search_index, Source::User);
+    chatty
+        .search_index
+        .push_str("discord discord discord discord discord");
+
+    let mut focused = session("focused", "Discord pipeline", 3600, &path);
+    focused.user_intention = Some("Fix Discord webhook delivery".into());
+    push_mark(&mut focused.search_index, Source::User);
+    focused.search_index.push_str("fix discord webhook");
+
+    let mut picker = SessionPicker::new(vec![chatty, focused]);
+    picker.search_query = "discord".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["focused", "chatty"]);
+}

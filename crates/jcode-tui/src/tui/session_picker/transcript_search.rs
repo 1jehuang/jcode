@@ -43,10 +43,10 @@ pub(super) struct SearchRank {
     source_weight: u32,
     literal: bool,
     exact_field: bool,
+    intent_terms: usize,
     /// Bounded topical evidence from indexed user text, not titles or
     /// agent/tool chatter. Repeated mentions beat a one-off incidental hit.
     user_mentions: usize,
-    intent_terms: usize,
     metadata_terms: usize,
     whole_terms: usize,
     score: i64,
@@ -410,12 +410,23 @@ impl PhraseQuery {
 
     fn rank(&self, prompt: &str) -> usize {
         let prompt = phrase_words(prompt, 2048);
+        let last_idx = self.words.len() - 1;
         if self.words.len() < 4 {
             // Short keyword queries need all words in one user message, not
             // necessarily adjacent or in the order the user remembers them.
+            // Allow prefix matching on the last token so mid-word typing keeps
+            // the phrase rank stable.
             return if self.words.iter().enumerate().all(|(i, word)| {
                 let needed = self.words[..=i].iter().filter(|w| *w == word).count();
-                prompt.iter().filter(|w| *w == word).take(needed).count() == needed
+                let is_last = i == last_idx;
+                prompt
+                    .iter()
+                    .filter(|w| {
+                        *w == word || (is_last && word.len() >= 2 && w.starts_with(word.as_str()))
+                    })
+                    .take(needed)
+                    .count()
+                    == needed
             }) {
                 self.words.len()
             } else {
@@ -437,8 +448,12 @@ impl PhraseQuery {
                     .iter()
                     .zip(&self.prepared)
                     .zip(window)
-                    .filter(|((word, prepared), candidate)| {
+                    .enumerate()
+                    .filter(|(i, ((word, prepared), candidate))| {
                         word == candidate
+                            || (*i == last_idx
+                                && word.len() >= 2
+                                && candidate.starts_with(word.as_str()))
                             || (word.len() >= 4
                                 && candidate.len() <= 128
                                 && prepared.matches_search_text(candidate))
