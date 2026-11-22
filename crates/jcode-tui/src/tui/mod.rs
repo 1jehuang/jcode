@@ -1749,6 +1749,8 @@ pub enum PickerAction {
     Login(crate::provider_catalog::LoginProviderDescriptor),
     /// Prompt to paste any API key and auto-detect the provider from its prefix.
     AutoApiKey,
+    /// Expand the collapsed `/login` starter list to show all remaining providers.
+    ExpandLoginProviders,
     /// Native SSH actions never dispatch through laptop-local authentication.
     RemoteLogin {
         provider: &'static str,
@@ -1816,6 +1818,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
         | PickerAction::AutoApiKey
+        | PickerAction::ExpandLoginProviders
         | PickerAction::RemoteLogin { .. }
         | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)

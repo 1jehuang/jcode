@@ -3613,6 +3613,20 @@ impl App {
                         self.inline_interactive_state = None;
                         self.start_auto_api_key_login();
                     }
+                    PickerAction::ExpandLoginProviders => {
+                        if let Some(picker) = self.inline_interactive_state.as_mut() {
+                            let target_row = picker.selected;
+                            picker.entries.retain(|entry| {
+                                !matches!(entry.action, PickerAction::ExpandLoginProviders)
+                            });
+                            picker.preview = false;
+                            picker.column = 0;
+                            Self::apply_inline_interactive_filter(picker);
+                            if !picker.filtered.is_empty() {
+                                picker.selected = target_row.min(picker.filtered.len() - 1);
+                            }
+                        }
+                    }
                     PickerAction::RemoteLogin { provider, import } => {
                         self.inline_interactive_state = None;
                         self.select_ssh_login_action(provider, import);

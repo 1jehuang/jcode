@@ -257,11 +257,48 @@ impl App {
         jcode_fuzzy::fuzzy_score_tokens(pattern, text)
     }
 
+    pub(in crate::tui::app) fn is_login_starter_entry(entry: &crate::tui::PickerEntry) -> bool {
+        match entry.action {
+            crate::tui::PickerAction::Account(_)
+            | crate::tui::PickerAction::AutoApiKey
+            | crate::tui::PickerAction::ExpandLoginProviders => true,
+            crate::tui::PickerAction::Login(provider) => match provider.target {
+                crate::provider_catalog::LoginProviderTarget::OpenAi
+                | crate::provider_catalog::LoginProviderTarget::Claude
+                | crate::provider_catalog::LoginProviderTarget::Copilot
+                | crate::provider_catalog::LoginProviderTarget::Gemini => true,
+                crate::provider_catalog::LoginProviderTarget::AutoImport => entry.is_current,
+                _ => {
+                    entry.is_current
+                        || entry
+                            .options
+                            .first()
+                            .is_some_and(|opt| opt.api_method == "attention")
+                }
+            },
+            _ => true,
+        }
+    }
+
     pub(in crate::tui::app) fn apply_inline_interactive_filter(
         picker: &mut InlineInteractiveState,
     ) {
         if picker.filter.is_empty() {
-            picker.filtered = (0..picker.entries.len()).collect();
+            let collapsed_login = picker.kind == crate::tui::PickerKind::Login
+                && picker
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders));
+            if collapsed_login {
+                picker.filtered = picker
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| Self::is_login_starter_entry(entry).then_some(i))
+                    .collect();
+            } else {
+                picker.filtered = (0..picker.entries.len()).collect();
+            }
         } else {
             let query = picker.filter.trim();
             // Prepare the query once per keystroke instead of re-parsing and
@@ -274,6 +311,9 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| {
+                    if matches!(m.action, crate::tui::PickerAction::ExpandLoginProviders) {
+                        return None;
+                    }
                     let filter_text = picker.filter_text(m);
                     prepared.score(&filter_text).map(|s| {
                         // Usage and recommendation only nudge ranking. They
