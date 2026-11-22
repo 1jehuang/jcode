@@ -119,6 +119,16 @@ fn unprefixed_antigravity_known_model_falls_back_to_antigravity_when_target_prov
         let provider = test_multi_provider_with_openai_and_antigravity();
 
         for model in [
+            "gemini-4-neon",
+            "gemini-4-neon-low",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-high",
+            "gemini-4-neon-xhigh",
+            "gemini-4-hydrogen",
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
             "gemini-4-carbon",
             "gemini-4-carbon-low",
             "gemini-4-carbon-medium",
@@ -189,6 +199,15 @@ fn active_antigravity_keeps_precedence_for_unprefixed_known_models_and_explicit_
         // When Antigravity is active, unprefixed Antigravity-known models stay
         // on Antigravity even if Gemini and Claude are also configured.
         for model in [
+            "neon",
+            "neon-high",
+            "neon-xhigh",
+            "gemini-4-neon",
+            "gemini-4-neon-xhigh",
+            "hydrogen",
+            "hydrogen-xhigh",
+            "gemini-4-hydrogen",
+            "gemini-4-hydrogen-high",
             "carbon",
             "carbon-low",
             "carbon-high",
@@ -209,10 +228,30 @@ fn active_antigravity_keeps_precedence_for_unprefixed_known_models_and_explicit_
             assert_eq!(provider.model(), model);
         }
 
-        // Antigravity-exclusive models (Carbon tiers, Argon tiers, Gemini 3.8
-        // Flash tiers, GPT-OSS 120B) must select Antigravity even when OpenAI is
-        // active and Gemini/Claude runtimes are also configured.
+        // Antigravity-exclusive models (Neon, Hydrogen, Carbon, Argon,
+        // Gemini 3.8 Flash tiers, GPT-OSS 120B) must select Antigravity even
+        // when OpenAI is active and Gemini/Claude runtimes are also configured.
         for model in [
+            "neon",
+            "neon-low",
+            "neon-medium",
+            "neon-high",
+            "neon-xhigh",
+            "gemini-4-neon",
+            "gemini-4-neon-low",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-high",
+            "gemini-4-neon-xhigh",
+            "hydrogen",
+            "hydrogen-low",
+            "hydrogen-medium",
+            "hydrogen-high",
+            "hydrogen-xhigh",
+            "gemini-4-hydrogen",
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
             "carbon",
             "carbon-low",
             "carbon-medium",
@@ -351,6 +390,14 @@ fn antigravity_exclusive_models_classify_to_antigravity_and_refuse_misrouting_wi
         let _runtime_guard = rt.enter();
 
         for exclusive in [
+            "gemini-4-neon-low",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-high",
+            "gemini-4-neon-xhigh",
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
             "gemini-4-carbon-low",
             "gemini-4-carbon-medium",
             "gemini-4-carbon-high",
@@ -360,9 +407,14 @@ fn antigravity_exclusive_models_classify_to_antigravity_and_refuse_misrouting_wi
             "gemini-3.8-flash-high",
             "gpt-oss-120b-medium",
             "claude-opus-4-6-thinking",
+            "neon-xhigh",
+            "hydrogen-high",
             "carbon-low",
             "argon-high",
+            "NEON-HIGH",
             "CARBON-LOW",
+            "Gemini-4-Neon",
+            "Gemini-4-Hydrogen",
             "Gemini-4-Argon",
         ] {
             assert_eq!(
@@ -426,11 +478,16 @@ fn antigravity_exclusive_models_classify_to_antigravity_and_refuse_misrouting_wi
         provider.set_active_provider(ActiveProvider::OpenAI);
 
         for exclusive in [
+            "gemini-4-neon-high",
+            "gemini-4-hydrogen-xhigh",
             "gemini-4-carbon-low",
             "gemini-4-argon-high",
             "gpt-oss-120b-medium",
             "claude-opus-4-6-thinking",
+            "neon-high",
+            "hydrogen-low",
             "carbon-low",
+            "GEMINI-4-NEON-XHIGH",
             "GEMINI-4-CARBON-HIGH",
         ] {
             let err = provider

@@ -370,19 +370,98 @@ fn catalog_cli_version_and_legacy_non_cli_checks_invalidate_stale_caches() {
     catalog.cli_version = None;
     assert!(!catalog_matches_current_cli_version(&catalog));
 
-    // Legacy non-CLI marker without Argon/Carbon models is rejected.
+    // Legacy non-CLI marker without active CLI Gemini 4 models (even if
+    // `gemini-4-hydrogen-sonar` or disabled placeholders are present) is rejected.
     catalog.models[0].id = "gemini-3.8-flash-tiered".to_string();
     assert!(!catalog_has_cli_models(&catalog));
 
-    let mut carbon_model = catalog.models[0].clone();
-    carbon_model.id = "gemini-4-carbon-medium".to_string();
-    catalog.models.push(carbon_model);
-    assert!(catalog_has_cli_models(&catalog));
+    let mut sonar_model = catalog.models[0].clone();
+    sonar_model.id = "gemini-4-hydrogen-sonar".to_string();
+    catalog.models.push(sonar_model);
+    assert!(!catalog_has_cli_models(&catalog));
+
+    let mut disabled_model = catalog.models[0].clone();
+    disabled_model.id = "gemini-4-carbon-disabled".to_string();
+    disabled_model.available = false;
+    catalog.models.push(disabled_model);
+    assert!(!catalog_has_cli_models(&catalog));
+
+    for active_cli_model in [
+        "gemini-4-neon-high",
+        "gemini-4-hydrogen-xhigh",
+        "gemini-4-carbon-medium",
+        "gemini-4-argon-medium",
+    ] {
+        let mut with_cli = catalog.clone();
+        let mut entry = catalog.models[0].clone();
+        entry.id = active_cli_model.to_string();
+        entry.available = true;
+        with_cli.models.push(entry);
+        assert!(
+            catalog_has_cli_models(&with_cli),
+            "expected {active_cli_model} to satisfy CLI catalog check"
+        );
+    }
+}
+
+#[test]
+fn parse_fetch_available_models_marks_disabled_models_unavailable() {
+    let response: FetchAvailableModelsResponse = serde_json::from_value(serde_json::json!({
+        "defaultAgentModelId": "gemini-4-neon-high",
+        "models": {
+            "gemini-4-neon-high": {
+                "displayName": "Gemini 4 Neon (High)",
+                "quotaInfo": { "remainingFraction": 0.96 },
+                "recommended": true
+            },
+            "gemini-4-carbon-disabled": {
+                "displayName": "Gemini 4 Carbon",
+                "disabled": true,
+                "tagTitle": "Unavailable"
+            }
+        }
+    }))
+    .expect("parse response");
+
+    let snapshot = parse_fetch_available_models_response(&response);
+    assert_eq!(
+        snapshot.default_model_id.as_deref(),
+        Some("gemini-4-neon-high")
+    );
+    let neon = snapshot
+        .models
+        .iter()
+        .find(|model| model.id == "gemini-4-neon-high")
+        .expect("neon entry");
+    assert!(neon.available);
+    let carbon_disabled = snapshot
+        .models
+        .iter()
+        .find(|model| model.id == "gemini-4-carbon-disabled")
+        .expect("disabled carbon entry");
+    assert!(!carbon_disabled.available);
+    assert_eq!(snapshot.models[0].id, "gemini-4-neon-high");
+    assert_eq!(
+        snapshot.models.last().map(|m| m.id.as_str()),
+        Some("gemini-4-carbon-disabled")
+    );
 }
 
 #[test]
 fn model_aliases_and_exclusivity_match_ascii_case_insensitively() {
     for (input, expected) in [
+        ("NEON", "gemini-4-neon-medium"),
+        ("neon-low", "gemini-4-neon-low"),
+        ("NEON-HIGH", "gemini-4-neon-high"),
+        ("Neon-XHigh", "gemini-4-neon-xhigh"),
+        ("Gemini-4-Neon", "gemini-4-neon-medium"),
+        ("GEMINI-4-NEON-XHIGH", "gemini-4-neon-xhigh"),
+        ("HYDROGEN", "gemini-4-hydrogen-medium"),
+        ("hydrogen-low", "gemini-4-hydrogen-low"),
+        ("HYDROGEN-HIGH", "gemini-4-hydrogen-high"),
+        ("Hydrogen-XHigh", "gemini-4-hydrogen-xhigh"),
+        ("Gemini-4-Hydrogen", "gemini-4-hydrogen-medium"),
+        ("GEMINI-4-HYDROGEN-XHIGH", "gemini-4-hydrogen-xhigh"),
         ("CARBON-LOW", "gemini-4-carbon-low"),
         ("Carbon", "gemini-4-carbon-medium"),
         ("Gemini-4-Argon", "gemini-4-argon-medium"),

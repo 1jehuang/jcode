@@ -218,6 +218,14 @@ fn model_routes_marks_omitted_static_fallbacks_unverified_in_sparse_catalog_and_
     // Static fallback models absent from the sparse fetched catalog must be
     // present as unverified fallbacks (available: false), not marked verified.
     for omitted in [
+        "gemini-4-neon-xhigh",
+        "gemini-4-neon-high",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-low",
+        "gemini-4-hydrogen-xhigh",
+        "gemini-4-hydrogen-high",
+        "gemini-4-hydrogen-medium",
+        "gemini-4-hydrogen-low",
         "gemini-4-carbon-high",
         "gemini-4-carbon-medium",
         "gemini-4-carbon-low",

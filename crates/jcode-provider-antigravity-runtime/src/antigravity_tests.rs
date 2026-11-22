@@ -360,10 +360,30 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
         provider.resolve_model_for_request("gemini-3.1-pro-low"),
         "gemini-3.1-pro-low"
     );
-    // Bare `gemini-4-carbon` and `gemini-4-argon` aliases (plus short aliases)
-    // resolve to the default medium tier served by the Cloud Code backend,
-    // while explicit tier variants pass through.
+    // Bare Gemini 4 aliases (plus short aliases) resolve to the default medium
+    // tier served by the Cloud Code backend, while explicit tier variants pass
+    // through.
     for (input, expected) in [
+        ("gemini-4-neon", "gemini-4-neon-medium"),
+        ("neon", "gemini-4-neon-medium"),
+        ("neon-xhigh", "gemini-4-neon-xhigh"),
+        ("neon-high", "gemini-4-neon-high"),
+        ("neon-medium", "gemini-4-neon-medium"),
+        ("neon-low", "gemini-4-neon-low"),
+        ("gemini-4-neon-xhigh", "gemini-4-neon-xhigh"),
+        ("gemini-4-neon-high", "gemini-4-neon-high"),
+        ("gemini-4-neon-medium", "gemini-4-neon-medium"),
+        ("gemini-4-neon-low", "gemini-4-neon-low"),
+        ("gemini-4-hydrogen", "gemini-4-hydrogen-medium"),
+        ("hydrogen", "gemini-4-hydrogen-medium"),
+        ("hydrogen-xhigh", "gemini-4-hydrogen-xhigh"),
+        ("hydrogen-high", "gemini-4-hydrogen-high"),
+        ("hydrogen-medium", "gemini-4-hydrogen-medium"),
+        ("hydrogen-low", "gemini-4-hydrogen-low"),
+        ("gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-xhigh"),
+        ("gemini-4-hydrogen-high", "gemini-4-hydrogen-high"),
+        ("gemini-4-hydrogen-medium", "gemini-4-hydrogen-medium"),
+        ("gemini-4-hydrogen-low", "gemini-4-hydrogen-low"),
         ("gemini-4-carbon", "gemini-4-carbon-medium"),
         ("carbon", "gemini-4-carbon-medium"),
         ("carbon-high", "gemini-4-carbon-high"),
@@ -390,6 +410,18 @@ fn resolve_model_for_request_maps_default_alias_to_real_model() {
 fn remap_unsupported_model_handles_pro_high_and_gemini4_aliases() {
     for (alias, canonical) in [
         ("gemini-3.1-pro-high", "gemini-pro-agent"),
+        ("gemini-4-neon", "gemini-4-neon-medium"),
+        ("neon", "gemini-4-neon-medium"),
+        ("neon-xhigh", "gemini-4-neon-xhigh"),
+        ("neon-high", "gemini-4-neon-high"),
+        ("neon-medium", "gemini-4-neon-medium"),
+        ("neon-low", "gemini-4-neon-low"),
+        ("gemini-4-hydrogen", "gemini-4-hydrogen-medium"),
+        ("hydrogen", "gemini-4-hydrogen-medium"),
+        ("hydrogen-xhigh", "gemini-4-hydrogen-xhigh"),
+        ("hydrogen-high", "gemini-4-hydrogen-high"),
+        ("hydrogen-medium", "gemini-4-hydrogen-medium"),
+        ("hydrogen-low", "gemini-4-hydrogen-low"),
         ("gemini-4-carbon", "gemini-4-carbon-medium"),
         ("carbon", "gemini-4-carbon-medium"),
         ("carbon-medium", "gemini-4-carbon-medium"),
@@ -405,6 +437,14 @@ fn remap_unsupported_model_handles_pro_high_and_gemini4_aliases() {
         assert_eq!(remap_unsupported_model(alias), canonical);
     }
     for model in [
+        "gemini-4-neon-xhigh",
+        "gemini-4-neon-high",
+        "gemini-4-neon-medium",
+        "gemini-4-neon-low",
+        "gemini-4-hydrogen-xhigh",
+        "gemini-4-hydrogen-high",
+        "gemini-4-hydrogen-medium",
+        "gemini-4-hydrogen-low",
         "gemini-4-carbon-high",
         "gemini-4-carbon-medium",
         "gemini-4-carbon-low",

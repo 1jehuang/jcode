@@ -175,7 +175,17 @@ fn model_id_for_capability_lookup(model: &str, provider: Option<&str>) -> (Strin
 fn is_antigravity_short_gemini4_alias(model: &str) -> bool {
     matches!(
         model,
-        "argon"
+        "neon"
+            | "neon-low"
+            | "neon-medium"
+            | "neon-high"
+            | "neon-xhigh"
+            | "hydrogen"
+            | "hydrogen-low"
+            | "hydrogen-medium"
+            | "hydrogen-high"
+            | "hydrogen-xhigh"
+            | "argon"
             | "argon-low"
             | "argon-medium"
             | "argon-high"
@@ -989,6 +999,16 @@ mod tests {
     #[test]
     fn context_limit_and_provider_hint_handle_gemini_4_carbon_and_argon() {
         for short_alias in [
+            "neon",
+            "neon-low",
+            "neon-medium",
+            "neon-high",
+            "neon-xhigh",
+            "hydrogen",
+            "hydrogen-low",
+            "hydrogen-medium",
+            "hydrogen-high",
+            "hydrogen-xhigh",
             "argon",
             "argon-low",
             "argon-medium",
@@ -1005,6 +1025,16 @@ mod tests {
             );
         }
         for model in [
+            "neon",
+            "neon-low",
+            "neon-medium",
+            "neon-high",
+            "neon-xhigh",
+            "hydrogen",
+            "hydrogen-low",
+            "hydrogen-medium",
+            "hydrogen-high",
+            "hydrogen-xhigh",
             "argon",
             "argon-low",
             "argon-medium",
@@ -1013,6 +1043,16 @@ mod tests {
             "carbon-low",
             "carbon-medium",
             "carbon-high",
+            "gemini-4-neon",
+            "gemini-4-neon-low",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-high",
+            "gemini-4-neon-xhigh",
+            "gemini-4-hydrogen",
+            "gemini-4-hydrogen-low",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-hydrogen-high",
+            "gemini-4-hydrogen-xhigh",
             "gemini-4-argon",
             "gemini-4-argon-low",
             "gemini-4-argon-medium",
@@ -1021,6 +1061,10 @@ mod tests {
             "gemini-4-carbon-low",
             "gemini-4-carbon-medium",
             "gemini-4-carbon-high",
+            "antigravity:gemini-4-neon-xhigh",
+            "antigravity:neon-high",
+            "antigravity:gemini-4-hydrogen-xhigh",
+            "antigravity:hydrogen-high",
             "antigravity:gemini-4-carbon-medium",
             "antigravity:carbon-high",
             "antigravity:gemini-4-argon-medium",

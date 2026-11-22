@@ -13,6 +13,14 @@ pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
 pub const AVAILABLE_MODELS: &[&str] = &[
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
+    "gemini-4-neon-xhigh",
+    "gemini-4-neon-high",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-low",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-low",
     "gemini-4-carbon-high",
     "gemini-4-carbon-medium",
     "gemini-4-carbon-low",
@@ -157,18 +165,32 @@ pub fn catalog_matches_current_cli_version(catalog: &PersistedCatalog) -> bool {
     }
 }
 
+/// Whether a model id represents a live CLI Gemini 4 tier (excluding legacy
+/// non-CLI markers such as `gemini-4-hydrogen-sonar` and disabled placeholders
+/// such as `gemini-4-carbon-disabled`).
+fn is_gemini_4_cli_tier_model(id: &str) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("gemini-4-") else {
+        return false;
+    };
+    !rest.is_empty() && !rest.ends_with("-disabled") && !rest.ends_with("-sonar")
+}
+
 /// Whether a persisted catalog omits legacy non-CLI markers or includes CLI
 /// Gemini 4 models. Legacy non-`cli/` User-Agent fetches return
-/// `gemini-3.8-flash-tiered` while omitting `gemini-4-argon*` and
-/// `gemini-4-carbon*`; such caches must never mask Gemini 4 availability.
+/// `gemini-3.8-flash-tiered` (and `gemini-4-hydrogen-sonar`) while omitting
+/// active CLI Gemini 4 tiers (`gemini-4-neon-*`, `gemini-4-hydrogen-*`,
+/// `gemini-4-argon-*`, `gemini-4-carbon-*`); such caches must never mask
+/// Gemini 4 availability.
 pub fn catalog_has_cli_models(catalog: &PersistedCatalog) -> bool {
     let has_legacy_non_cli_marker = catalog
         .models
         .iter()
         .any(|model| model.id == "gemini-3.8-flash-tiered");
-    let has_gemini_4_cli_models = catalog.models.iter().any(|model| {
-        model.id.starts_with("gemini-4-argon") || model.id.starts_with("gemini-4-carbon")
-    });
+    let has_gemini_4_cli_models = catalog
+        .models
+        .iter()
+        .any(|model| model.available && is_gemini_4_cli_tier_model(&model.id));
     !has_legacy_non_cli_marker || has_gemini_4_cli_models
 }
 
@@ -235,6 +257,8 @@ struct FetchAvailableModelEntry {
     pub max_tokens: Option<u64>,
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -544,12 +568,13 @@ pub fn parse_fetch_available_models_response(
         if id.is_empty() {
             continue;
         }
-        let available = entry
-            .quota_info
-            .as_ref()
-            .and_then(|quota| quota.remaining_fraction)
-            .map(|remaining| remaining > 0.0)
-            .unwrap_or(true);
+        let available = !entry.disabled
+            && entry
+                .quota_info
+                .as_ref()
+                .and_then(|quota| quota.remaining_fraction)
+                .map(|remaining| remaining > 0.0)
+                .unwrap_or(true);
         by_id.insert(
             id.to_string(),
             CatalogModel {
@@ -796,6 +821,18 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
 const MODEL_REMAPS: &[(&str, &str)] = &[
     ("gemini-3.1-pro-high", "gemini-pro-agent"),
     ("gemini-pro-agent", "gemini-pro-agent"),
+    ("gemini-4-neon", "gemini-4-neon-medium"),
+    ("neon", "gemini-4-neon-medium"),
+    ("neon-xhigh", "gemini-4-neon-xhigh"),
+    ("neon-high", "gemini-4-neon-high"),
+    ("neon-medium", "gemini-4-neon-medium"),
+    ("neon-low", "gemini-4-neon-low"),
+    ("gemini-4-hydrogen", "gemini-4-hydrogen-medium"),
+    ("hydrogen", "gemini-4-hydrogen-medium"),
+    ("hydrogen-xhigh", "gemini-4-hydrogen-xhigh"),
+    ("hydrogen-high", "gemini-4-hydrogen-high"),
+    ("hydrogen-medium", "gemini-4-hydrogen-medium"),
+    ("hydrogen-low", "gemini-4-hydrogen-low"),
     ("gemini-4-carbon", "gemini-4-carbon-medium"),
     ("carbon", "gemini-4-carbon-medium"),
     ("carbon-medium", "gemini-4-carbon-medium"),
