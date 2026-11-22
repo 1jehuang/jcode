@@ -886,8 +886,9 @@ impl Agent {
             return;
         }
         let mut text = String::from(
-            "<system-reminder>\nNew MCP tools are available. They are not in your tool list; \
-             call them with mcp action=call (server, tool, arguments matching input_schema).\n",
+            "<system-reminder>\nNew MCP tools are available. They are not in your tool list. \
+             Before first use, get a tool's input_schema with mcp action=search (query: tool name), \
+             then call it with mcp action=call (server, tool, arguments).\n",
         );
         for tool in fresh.iter().take(MAX_ANNOUNCED_MCP_TOOLS) {
             let (server, raw) = self
@@ -897,11 +898,22 @@ impl Agent {
                     let (server, raw) = split_mcp_dispatch_name(&tool.name);
                     (server.to_string(), raw.to_string())
                 });
+            // Names and short descriptions only: schemas stay out of the
+            // transcript and are fetched on demand through `mcp search`.
+            let description = tool.description.trim();
+            let description = description.lines().next().unwrap_or_default();
+            let description = if description.chars().count() > MAX_ANNOUNCED_DESCRIPTION_CHARS {
+                let cut: String = description
+                    .chars()
+                    .take(MAX_ANNOUNCED_DESCRIPTION_CHARS)
+                    .collect();
+                format!("{}...", cut.trim_end())
+            } else {
+                description.to_string()
+            };
             text.push_str(&format!(
-                "- {}: server: {server}  tool: {raw}  ({})\n  input_schema: {}\n",
+                "- {}: server: {server}  tool: {raw}  ({description})\n",
                 tool.name,
-                tool.description.trim(),
-                serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string()),
             ));
         }
         if fresh.len() > MAX_ANNOUNCED_MCP_TOOLS {
@@ -1439,7 +1451,9 @@ impl Agent {
 mod turn_usage;
 use turn_usage::turn_token_usage_after;
 /// Cap on tools listed in one late-MCP transcript announcement.
-const MAX_ANNOUNCED_MCP_TOOLS: usize = 32;
+const MAX_ANNOUNCED_MCP_TOOLS: usize = 64;
+/// Per-tool description budget in the late MCP announcement.
+const MAX_ANNOUNCED_DESCRIPTION_CHARS: usize = 120;
 
 /// Split a registry key `mcp__<server>__<tool>` into (server, tool).
 /// Server names cannot contain `__`, so the first separator is the split.
