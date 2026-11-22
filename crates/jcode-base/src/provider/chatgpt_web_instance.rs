@@ -375,8 +375,16 @@ fn handoff_request_path(profile: &Path) -> PathBuf {
     profile.parent().unwrap_or(profile).join("profile.wanted")
 }
 
+/// Waiters rewrite the marker every poll, so a stale one (left by a cancelled
+/// or killed waiter, or removed by another waiter's win) stops counting.
 fn handoff_requested(profile: &Path) -> bool {
-    handoff_request_path(profile).exists()
+    std::fs::metadata(handoff_request_path(profile))
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| {
+            modified
+                .elapsed()
+                .is_ok_and(|age| age < Duration::from_secs(2))
+        })
 }
 
 impl ProfileLock {
@@ -399,14 +407,12 @@ impl ProfileLock {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 break Ok(Self { _file: file });
             }
-            if !requested {
-                // Ask an idle holder (for example the daemon) to hand over.
-                let _ = std::fs::write(
-                    handoff_request_path(profile),
-                    std::process::id().to_string(),
-                );
-                requested = true;
-            }
+            // Ask an idle holder (for example the daemon) to hand over.
+            let _ = std::fs::write(
+                handoff_request_path(profile),
+                std::process::id().to_string(),
+            );
+            requested = true;
             if tokio::time::Instant::now() >= deadline {
                 break Err(anyhow::anyhow!(
                     "Another jcode process kept ChatGPT web busy for 15 minutes"
