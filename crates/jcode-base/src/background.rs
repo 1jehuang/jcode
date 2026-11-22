@@ -19,8 +19,8 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
-mod model;
 mod elapsed_review;
+mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
 

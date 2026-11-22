@@ -65,7 +65,12 @@ pub struct VoiceIndicators {
 /// Config name to evdev code. Unknown names fall back to Fn.
 pub fn jarvis_key_code(name: &str) -> usize {
     use jcode_voice::global::hotkey::{KEY_FN, KEY_RIGHTSHIFT};
-    match name.trim().to_ascii_lowercase().replace(['_', '-', ' '], "").as_str() {
+    match name
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-', ' '], "")
+        .as_str()
+    {
         "rightshift" | "rshift" => KEY_RIGHTSHIFT,
         _ => KEY_FN,
     }
@@ -185,8 +190,7 @@ fn run(mut listener: Listener, indicators: VoiceIndicators) {
                         match crate::jarvis_target::live_jarvis() {
                             Some(target) => {
                                 launched = None;
-                                capture =
-                                    start(Source::JarvisFn, Some(target.session), indicators);
+                                capture = start(Source::JarvisFn, Some(target.session), indicators);
                             }
                             None if indicators.jarvis_fn_launch => {
                                 if ensure_jarvis_launching(&mut launched) {

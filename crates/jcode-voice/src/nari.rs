@@ -1057,13 +1057,29 @@ mod tests {
     #[tokio::test]
     async fn nari_transport_categories_expose_no_provider_content() {
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
-        for (code, expected) in [(4401, VoiceError::NariNotConfigured), (4402, VoiceError::NariCreditsExhausted), (4429, VoiceError::Http(429)), (1011, VoiceError::Network)] {
-            let close = CloseFrame { code: CloseCode::from(code), reason: "private provider detail".into() };
+        for (code, expected) in [
+            (4401, VoiceError::NariNotConfigured),
+            (4402, VoiceError::NariCreditsExhausted),
+            (4429, VoiceError::Http(429)),
+            (1011, VoiceError::Network),
+        ] {
+            let close = CloseFrame {
+                code: CloseCode::from(code),
+                reason: "private provider detail".into(),
+            };
             let mut socket = futures::stream::iter([Ok(Message::Close(Some(close)))]);
             assert_eq!(receive(&mut socket).await, Err(expected));
         }
-        for (code, expected) in [("INVALID_API_KEY", VoiceError::NariNotConfigured), ("INSUFFICIENT_CREDITS", VoiceError::NariCreditsExhausted), ("RATE_LIMITED", VoiceError::Http(429)), ("private provider detail", VoiceError::NariRejected)] {
-            assert_eq!(provider_error(&json!({"error":{"code":code,"message":"private"}})), expected);
+        for (code, expected) in [
+            ("INVALID_API_KEY", VoiceError::NariNotConfigured),
+            ("INSUFFICIENT_CREDITS", VoiceError::NariCreditsExhausted),
+            ("RATE_LIMITED", VoiceError::Http(429)),
+            ("private provider detail", VoiceError::NariRejected),
+        ] {
+            assert_eq!(
+                provider_error(&json!({"error":{"code":code,"message":"private"}})),
+                expected
+            );
         }
     }
 
