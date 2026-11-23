@@ -250,6 +250,52 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
 }
 
 #[test]
+fn captured_snapshot_freezes_prompt_overlay_against_mid_session_edits() {
+    // ./.jcode/prompt-overlay.md is often a symlink into a config repo that ships mid-session.
+    // Editing it must not rewrite the cacheable prefix (full KV-cache miss) until the next snapshot.
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let overlay_dir = project_dir.path().join(".jcode");
+    std::fs::create_dir_all(&overlay_dir).unwrap();
+    let overlay = overlay_dir.join("prompt-overlay.md");
+    std::fs::write(&overlay, "overlay at session start").unwrap();
+    let snapshot = load_agents_md_files_from_dir(Some(project_dir.path()));
+    assert!(snapshot.1.prompt_overlay_chars > 0);
+
+    let build = |snap: (Option<String>, ContextInfo)| {
+        build_system_prompt_split_with_agents_md(
+            None,
+            &[],
+            false,
+            None,
+            Some(project_dir.path()),
+            snap,
+        )
+        .0
+    };
+    let before = build(snapshot.clone());
+    std::fs::write(&overlay, "overlay edited mid-session").unwrap();
+    let after = build(snapshot);
+
+    assert_eq!(
+        before.static_part, after.static_part,
+        "overlay edit must not change the cached prefix"
+    );
+    assert!(after.static_part.contains("overlay at session start"));
+    assert!(!after.static_part.contains("overlay edited mid-session"));
+    // Exactly once: the overlay is no longer also re-read outside the snapshot.
+    assert_eq!(
+        after
+            .static_part
+            .matches("overlay at session start")
+            .count(),
+        1
+    );
+
+    let next = build(load_agents_md_files_from_dir(Some(project_dir.path())));
+    assert!(next.static_part.contains("overlay edited mid-session"));
+}
+
+#[test]
 fn agents_md_missing_global_file_keeps_project_instructions() {
     let project_dir = tempfile::TempDir::new().unwrap();
     let global_dir = tempfile::TempDir::new().unwrap();
