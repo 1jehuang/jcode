@@ -707,8 +707,9 @@ fn worker_dots_prefer_complete_status_snapshot() {
     let mut member: crate::protocol::SwarmMemberStatus =
         serde_json::from_value(serde_json::json!({
             "session_id": "worker", "status": "running",
-            "todo_items": [{"content": "visible detail", "status": "in_progress"}],
-            "runtime": {"todo_statuses": ["completed", "completed", "in_progress", "pending"]}
+            "todo_items": [{"content": "visible detail", "status": "in_progress"},
+                           {"content": "retired", "status": "cancelled"}],
+            "runtime": {"todo_statuses": ["completed", "cancelled", "completed", "in_progress", "pending"]}
         }))
         .unwrap();
     let snapshot = TodoCardAgent::from_member(&member);
@@ -901,6 +902,55 @@ fn lane_row_shows_agent_emoji_and_activity() {
         "{rows:?}"
     );
     assert!(rows.iter().any(|r| r.contains("docs 🦀✗")), "{rows:?}");
+}
+
+#[test]
+fn collapsed_overflow_prioritizes_live_lanes_without_reordering_full_plan() {
+    let todos = [
+        laned("Prepare", "completed", 1, "prep"),
+        laned("Audit", "in_progress", 1, "audit"),
+        assigned(laned("Build", "in_progress", 2, "compiler"), "fox"),
+        laned("Docs", "completed", 2, "docs"),
+        assigned(laned("Test", "in_progress", 3, "checks"), "owl"),
+    ];
+    let agents = [
+        agent("fox", "running", None, None),
+        agent("owl", "running", None, None),
+    ];
+    let payload = serde_json::json!({"todos":todos,"agents":agents}).to_string();
+    let band = |expanded, height| {
+        let (lines, _) = crate::tui::ui::viewport::pinned_todo_band_lines_for_payload(
+            Some(&payload),
+            expanded,
+            crate::config::DiffDisplayMode::Off,
+            100,
+            height,
+        );
+        lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+    };
+    let short = band(false, 15);
+    assert!(
+        short[0].contains("phase 1")
+            && short[1].contains("compiler")
+            && short[2].contains("checks")
+            && short[3].contains("audit"),
+        "{short:?}"
+    );
+    assert!(short[4].contains("+2 more"));
+    for rows in [band(true, 60), band(false, 60)] {
+        let lanes: Vec<_> = rows
+            .iter()
+            .filter_map(|line| {
+                ["prep", "audit", "compiler", "docs", "checks"]
+                    .into_iter()
+                    .find(|lane| line.contains(lane))
+            })
+            .collect();
+        assert_eq!(lanes, ["prep", "audit", "compiler", "docs", "checks"]);
+    }
 }
 
 #[test]
@@ -1113,67 +1163,8 @@ fn failed_lane_blocks_its_phase_and_offers_retry() {
 #[path = "ui_todo_worker_heading_tests.rs"]
 mod worker_headings;
 
-/// Lanes that expand per todo (waiting on a swarm await) must not add a
-/// second "Waiting for ..." row under the worker's task.
-#[test]
-fn waiting_worker_reason_shares_its_todo_row() {
-    let render_at = |width: u16| {
-        let mut item = laned("M4 project loading gaps", "in_progress", 1, "Crates");
-        item.assigned_to = Some("fox".into());
-        item.waiting_on = vec!["await_1".into()];
-        let mut fox = agent("fox", "running", None, Some(12));
-        fox.wait_reason = Some("Waiting for cargo test suite".into());
-        fox.wait_age_secs = Some(1128);
-        fox.live_status = Some(crate::protocol::SwarmLiveStatus {
-            phase: "waiting".into(),
-            elapsed_ms: 12_000,
-            ..Default::default()
-        });
-        crate::tui::markdown::set_center_code_blocks(false);
-        let payload = serde_json::json!({
-            "todos": [item], "plan": {}, "goals": [], "agents": [fox],
-            "background_tasks": [{"task_id": "await_1", "label": "Swarm await"}],
-        });
-        let msg = DisplayMessage::todos(payload.to_string());
-        render_pinned_todos_message(&msg, width, crate::config::DiffDisplayMode::Off)
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-    };
-    let rows = render_at(180);
-    let joined = rows.join("\n");
-    let row = rows
-        .iter()
-        .find(|row| row.contains("M4 project loading gaps"))
-        .unwrap_or_else(|| panic!("{joined}"));
-    assert!(row.contains("Waiting for cargo test suite"), "{joined}");
-    assert!(row.contains("Swarm await"), "{joined}");
-    assert_eq!(joined.matches("Waiting for").count(), 1, "{joined}");
-    for width in 0..120 {
-        assert_fits(&render_at(width), width);
-    }
-}
-
-#[test]
-fn lane_name_shared_by_every_lane_is_not_drawn() {
-    let same = [
-        laned("a", "completed", 1, "main"),
-        laned("b", "pending", 2, "main"),
-    ];
-    let rows = render(&same, &[], 120);
-    assert!(rows.iter().all(|row| !row.contains("main")), "{rows:?}");
-    let distinct = [
-        laned("a", "completed", 1, "parser"),
-        laned("b", "pending", 2, "ship"),
-    ];
-    let rows = render(&distinct, &[], 120).join("\n");
-    assert!(rows.contains("parser") && rows.contains("ship"), "{rows}");
-}
+#[path = "ui_todo_lane_display_tests.rs"]
+mod lane_display;
 
 #[path = "ui_todo_stages_tests_additional_tests.rs"]
 mod additional_self_owned_todos_have_amber_pips_and_you_badges;

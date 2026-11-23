@@ -1160,28 +1160,21 @@ pub fn spawn_background_sync() {
     tokio::spawn(background_sync());
 }
 
-async fn background_sync() {
-    let client = reqwest::Client::new();
-    let mut ticks = tokio::time::interval(SYNC_INTERVAL);
-    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        let reconcile = tokio::select! {
-            _ = ticks.tick() => true,
-            _ = PERSISTED.notified() => {
-                // A bounded coalescing window, not a trailing debounce:
-                // continuous token saves cannot postpone sync forever.
-                let mut debounce = SyncTiming::new("debounce_wait");
-                tokio::time::sleep(SYNC_DEBOUNCE).await;
-                debounce.outcome = "success";
-                false
-            }
-        };
-        // sync_pass records failures and disabled skips without error text.
-        if sync_pass(&client, reconcile).await.is_err() {
-            crate::logging::debug("mobile sync pass failed (see stage timing)");
-        }
-    }
+/// The two daemon mobile loops use exactly reqwest's default configuration.
+/// Share their TLS configuration and connection pool, not request credentials.
+/// Initialization stays eager at loop startup even when mobile sync is disabled.
+/// Do not substitute the provider client: its defaults are intentionally different.
+pub(crate) fn daemon_http_client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
 }
+
+#[cfg(test)]
+#[path = "mobile_http_tests.rs"]
+mod mobile_http_tests;
+
+mod background;
+use background::background_sync;
 
 #[path = "mobile_sync_progress.rs"]
 mod progress;

@@ -188,6 +188,13 @@ pub async fn transform_tool_input(
             Ok(output) if output.status.success() => output,
             Ok(_) | Err(_) => continue,
         };
+        if output.stdout_truncated {
+            crate::logging::warn(&format!(
+                "Tool transformer '{command_line}' output exceeded {} bytes (leaving input unchanged)",
+                sync_runner::STDOUT_CAPTURE_LIMIT
+            ));
+            continue;
+        }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let candidate = stdout.trim();
         if candidate.is_empty() {
@@ -306,6 +313,13 @@ async fn run_pre_tool_command(
     };
 
     match output.status.code() {
+        Some(0) if output.stdout_truncated => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_tool' command '{command_line}' output exceeded {} bytes (allowing tool call)",
+                sync_runner::STDOUT_CAPTURE_LIMIT
+            ));
+            CommandVerdict::default()
+        }
         Some(0) => {
             let verdict = parse_gate_stdout(&String::from_utf8_lossy(&output.stdout));
             if let Some(reason) = &verdict.block {

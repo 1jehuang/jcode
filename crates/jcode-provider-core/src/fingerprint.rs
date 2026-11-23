@@ -91,6 +91,7 @@ fn item_fingerprints(items: &[Value]) -> (Vec<u64>, u64) {
     (hashes, input_hash)
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct CanonicalFingerprints {
     request: (u64, usize),
     items: (Vec<u64>, u64),
@@ -110,78 +111,90 @@ fn canonical_fingerprints(
     system: Option<&Value>,
     tools: Option<&Value>,
 ) -> CanonicalFingerprints {
-    let encoded = payload.as_object().and_then(|object| {
-        let mut encoded = Vec::new();
-        let mut item_result = None;
-        let mut system_result = None;
-        let mut tools_result = None;
-        encoded.push(b'{');
-        for (index, (key, value)) in object.iter().enumerate() {
-            if index > 0 {
-                encoded.push(b',');
-            }
-            if let Err(error) = serde_json::to_writer(&mut encoded, key) {
-                jcode_logging::debug(&format!("Cannot fingerprint request key: {error}"));
-                return None;
-            }
-            encoded.push(b':');
-            let start = encoded.len();
-            if item_result.is_none()
-                && value
-                    .as_array()
-                    .is_some_and(|array| std::ptr::eq(array.as_slice(), items) || array == items)
-            {
-                let mut hashes = Vec::with_capacity(items.len());
-                encoded.push(b'[');
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        encoded.push(b',');
-                    }
-                    let item_start = encoded.len();
-                    if let Err(error) = serde_json::to_writer(&mut encoded, item) {
-                        jcode_logging::debug(&format!("Cannot fingerprint request item: {error}"));
-                        return None;
-                    }
-                    hashes.push(stable_hash_bytes(&encoded[item_start..]));
+    payload
+        .as_object()
+        .and_then(|object| {
+            object_fingerprints(
+                object.iter().map(|(key, value)| (key.as_str(), value)),
+                items,
+                system,
+                tools,
+            )
+        })
+        .unwrap_or_else(|| CanonicalFingerprints {
+            request: stable_json_fingerprint(payload),
+            items: item_fingerprints(items),
+            system: system.map(stable_json_fingerprint),
+            tools: tools.map(stable_json_fingerprint),
+        })
+}
+
+fn object_fingerprints<'a>(
+    fields: impl IntoIterator<Item = (&'a str, &'a Value)>,
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+) -> Option<CanonicalFingerprints> {
+    let mut encoded = Vec::new();
+    let mut item_result = None;
+    let mut system_result = None;
+    let mut tools_result = None;
+    encoded.push(b'{');
+    for (index, (key, value)) in fields.into_iter().enumerate() {
+        if index > 0 {
+            encoded.push(b',');
+        }
+        if let Err(error) = serde_json::to_writer(&mut encoded, key) {
+            jcode_logging::debug(&format!("Cannot fingerprint request key: {error}"));
+            return None;
+        }
+        encoded.push(b':');
+        let start = encoded.len();
+        if item_result.is_none()
+            && value
+                .as_array()
+                .is_some_and(|array| std::ptr::eq(array.as_slice(), items) || array == items)
+        {
+            let mut hashes = Vec::with_capacity(items.len());
+            encoded.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    encoded.push(b',');
                 }
-                encoded.push(b']');
-                item_result = Some((hashes, stable_hash_bytes(&encoded[start..])));
-            } else if let Err(error) = serde_json::to_writer(&mut encoded, value) {
-                jcode_logging::debug(&format!("Cannot fingerprint request field: {error}"));
-                return None;
+                let item_start = encoded.len();
+                if let Err(error) = serde_json::to_writer(&mut encoded, item) {
+                    jcode_logging::debug(&format!("Cannot fingerprint request item: {error}"));
+                    return None;
+                }
+                hashes.push(stable_hash_bytes(&encoded[item_start..]));
             }
-            let matches_system = system_result.is_none()
-                && system.is_some_and(|system| std::ptr::eq(system, value) || system == value);
-            let matches_tools = tools_result.is_none()
-                && tools.is_some_and(|tools| std::ptr::eq(tools, value) || tools == value);
-            if matches_system || matches_tools {
-                let fingerprint = (stable_hash_bytes(&encoded[start..]), encoded.len() - start);
-                if matches_system {
-                    system_result = Some(fingerprint);
-                }
-                if matches_tools {
-                    tools_result = Some(fingerprint);
-                }
+            encoded.push(b']');
+            item_result = Some((hashes, stable_hash_bytes(&encoded[start..])));
+        } else if let Err(error) = serde_json::to_writer(&mut encoded, value) {
+            jcode_logging::debug(&format!("Cannot fingerprint request field: {error}"));
+            return None;
+        }
+        let matches_system = system_result.is_none()
+            && system.is_some_and(|system| std::ptr::eq(system, value) || system == value);
+        let matches_tools = tools_result.is_none()
+            && tools.is_some_and(|tools| std::ptr::eq(tools, value) || tools == value);
+        if matches_system || matches_tools {
+            let fingerprint = (stable_hash_bytes(&encoded[start..]), encoded.len() - start);
+            if matches_system {
+                system_result = Some(fingerprint);
+            }
+            if matches_tools {
+                tools_result = Some(fingerprint);
             }
         }
-        encoded.push(b'}');
-        Some((
-            (stable_hash_bytes(&encoded), encoded.len()),
-            item_result,
-            system_result,
-            tools_result,
-        ))
-    });
-    // Non-object payloads, components absent from the payload, and serialization
-    // failures keep the historical independent-serialization behavior.
-    let (request, item_result, system_result, tools_result) =
-        encoded.unwrap_or_else(|| (stable_json_fingerprint(payload), None, None, None));
-    CanonicalFingerprints {
-        request,
+    }
+    encoded.push(b'}');
+    Some(CanonicalFingerprints {
+        request: (stable_hash_bytes(&encoded), encoded.len()),
         items: item_result.unwrap_or_else(|| item_fingerprints(items)),
         system: system_result.or_else(|| system.map(stable_json_fingerprint)),
         tools: tools_result.or_else(|| tools.map(stable_json_fingerprint)),
-    }
+    })
 }
 
 fn prefix_matches(current: &[u64], previous: &[u64]) -> bool {
@@ -218,6 +231,66 @@ pub fn log_provider_canonical_input(
     extra_fields: &[(&str, String)],
 ) {
     let fingerprints = canonical_fingerprints(payload, items, system, tools);
+    log_canonical_fingerprints(
+        provider,
+        model,
+        format,
+        fingerprints,
+        items.len(),
+        tool_count,
+        extra_fields,
+    );
+}
+
+/// Log a borrowed canonical object without cloning its potentially large fields.
+///
+/// `fields` must contain unique keys in the same order as the canonical JSON
+/// object (lexicographic order for serde_json's default map). Include explicit
+/// null values for absent fields when the historical object included them.
+/// No field references or serialized payload bytes survive this call.
+#[allow(clippy::too_many_arguments)]
+pub fn log_provider_canonical_input_fields(
+    provider: &str,
+    model: &str,
+    format: &str,
+    fields: &[(&str, &Value)],
+    items: &[Value],
+    system: Option<&Value>,
+    tools: Option<&Value>,
+    tool_count: Option<usize>,
+    extra_fields: &[(&str, String)],
+) {
+    debug_assert!(fields.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    let fingerprints = object_fingerprints(fields.iter().copied(), items, system, tools)
+        .unwrap_or_else(|| CanonicalFingerprints {
+            // Value-to-Vec encoding is infallible in normal use. Match the
+            // historical empty encoding fallback rather than retaining a prefix.
+            request: (stable_hash_str(""), 0),
+            items: item_fingerprints(items),
+            system: system.map(stable_json_fingerprint),
+            tools: tools.map(stable_json_fingerprint),
+        });
+    log_canonical_fingerprints(
+        provider,
+        model,
+        format,
+        fingerprints,
+        items.len(),
+        tool_count,
+        extra_fields,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_canonical_fingerprints(
+    provider: &str,
+    model: &str,
+    format: &str,
+    fingerprints: CanonicalFingerprints,
+    item_count: usize,
+    tool_count: Option<usize>,
+    extra_fields: &[(&str, String)],
+) {
     let (request_hash, request_json_chars) = fingerprints.request;
     let (item_hashes, input_hash) = fingerprints.items;
     let item_hashes_hash = stable_hash_json(&item_hashes);
@@ -299,7 +372,7 @@ pub fn log_provider_canonical_input(
         request_hash,
         request_json_chars,
         input_hash,
-        items.len(),
+        item_count,
         previous_item_count,
         item_hashes_hash,
         first_item_hash,
@@ -320,6 +393,10 @@ pub fn log_provider_canonical_input(
         extras,
     ));
 }
+
+#[cfg(test)]
+#[path = "fingerprint_borrowed_tests.rs"]
+mod borrowed_tests;
 
 #[cfg(test)]
 #[path = "fingerprint_tests.rs"]

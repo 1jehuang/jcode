@@ -290,21 +290,55 @@ fn render_markdown_with_options(
                 image_alt.clear();
             }
             Event::End(TagEnd::Image) => {
-                let alt = if image_alt.trim().is_empty() {
+                let alt_trimmed = image_alt.trim().to_string();
+                let alt = if alt_trimmed.is_empty() {
                     "image".to_string()
                 } else {
-                    image_alt.trim().to_string()
+                    alt_trimmed.clone()
                 };
-                let label = if let Some(url) = image_url.take() {
-                    format!("[image: {}] ({})", alt, url)
-                } else {
-                    format!("[image: {}]", alt)
-                };
-                if in_table {
-                    current_cell.push_str(&label);
-                } else {
-                    ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
-                    current_spans.push(Span::styled(label, Style::default().fg(md_dim_color())));
+                let url = image_url.take();
+                let mut rendered_inline = false;
+                if !in_table
+                    && let Some(ref raw_url) = url
+                    && let Some(local_path) = resolve_local_markdown_image_path(raw_url)
+                    && mermaid::image_protocol_available()
+                    && let Some((hash, width, height)) =
+                        mermaid::register_markdown_image_with_dims(&local_path)
+                {
+                    let chat_width = max_width.unwrap_or(80).clamp(20, u16::MAX as usize) as u16;
+                    let (rows, cols) = mermaid::inline_fit_geometry(width, height, chat_width, 28);
+                    flush_current_line_with_alignment(
+                        &mut lines,
+                        &mut current_spans,
+                        structured_markdown_alignment(
+                            blockquote_depth,
+                            &list_stack,
+                            in_definition_list,
+                            in_footnote_definition,
+                        ),
+                    );
+                    lines.extend(mermaid::inline_image_placeholder_lines(hash, rows, cols));
+                    if !alt_trimmed.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", alt_trimmed),
+                            Style::default().fg(md_dim_color()),
+                        )));
+                    }
+                    rendered_inline = true;
+                }
+                if !rendered_inline {
+                    let label = if let Some(url) = url {
+                        format!("[image: {}] ({})", alt, url)
+                    } else {
+                        format!("[image: {}]", alt)
+                    };
+                    if in_table {
+                        current_cell.push_str(&label);
+                    } else {
+                        ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
+                        current_spans
+                            .push(Span::styled(label, Style::default().fg(md_dim_color())));
+                    }
                 }
                 in_image = false;
                 image_alt.clear();
@@ -1124,6 +1158,45 @@ fn render_markdown_with_options(
     lines
 }
 
+fn resolve_local_markdown_image_path(raw_url: &str) -> Option<std::path::PathBuf> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("data:")
+        || trimmed.starts_with("mailto:")
+    {
+        return None;
+    }
+
+    let without_scheme = trimmed.strip_prefix("file://").unwrap_or(trimmed);
+    let clean = without_scheme
+        .split(['#', '?'])
+        .next()
+        .unwrap_or(without_scheme)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    let expanded = if let Some(rest) = clean.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")?;
+        std::path::PathBuf::from(home).join(rest)
+    } else {
+        std::path::PathBuf::from(clean)
+    };
+
+    let ext = expanded.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg"
+    ) {
+        return None;
+    }
+
+    expanded.is_file().then_some(expanded)
+}
+
 #[cfg(test)]
 mod link_url_tests {
     use super::*;
@@ -1156,6 +1229,48 @@ mod link_url_tests {
             !default_lines
                 .iter()
                 .any(|line| line.to_string().contains("https://"))
+        );
+    }
+
+    #[test]
+    fn resolve_local_markdown_image_path_filters_remote_and_non_image_urls() {
+        assert!(resolve_local_markdown_image_path("https://example.com/a.png").is_none());
+        assert!(resolve_local_markdown_image_path("http://example.com/a.png").is_none());
+        assert!(resolve_local_markdown_image_path("data:image/png;base64,AAAA").is_none());
+        assert!(resolve_local_markdown_image_path("/nonexistent/path/image.png").is_none());
+        assert!(resolve_local_markdown_image_path("").is_none());
+    }
+
+    #[cfg(feature = "mermaid")]
+    #[test]
+    fn local_markdown_image_renders_inline_placeholder_when_protocol_available() {
+        // Minimal valid 1x1 PNG
+        const PNG_1X1: &[u8] = &[
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I', b'H',
+            b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, b'I', b'D', b'A', b'T', 0x08,
+            0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D,
+            0xB0, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let img_path = dir.path().join("sample.png");
+        std::fs::write(&img_path, PNG_1X1).expect("write png");
+
+        let md = format!("![Before / After]({})", img_path.display());
+        let lines = mermaid::with_image_protocol_override(Some(true), || {
+            render_markdown_with_width(&md, Some(80))
+        });
+        assert!(
+            lines
+                .iter()
+                .any(|line| mermaid::parse_inline_image_placeholder(line).is_some()),
+            "expected inline image placeholder for local PNG"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("Before / After")),
+            "expected alt caption below inline image"
         );
     }
 }

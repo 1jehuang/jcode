@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+pub mod interactions;
+pub mod stream;
+
 // Non-dated server-side alias: always resolves to the newest stable pro
 // model, so the default can never go stale or 404 into a downgrade chain
 // (2026-09-19: a transient NOT_FOUND on gemini-3.1-pro-preview silently
@@ -145,6 +148,206 @@ pub struct CodeAssistGenerateRequest {
     pub request: VertexGenerateContentRequest,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiThinkingConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_thoughts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+}
+
+/// Progressive fallback level for requesting Gemini thought summaries.
+///
+/// On Antigravity (Cloud Code), Gemini 2.5/3.x Flash models default their
+/// thinking budget to `0` when `thinkingConfig` sets only `includeThoughts`,
+/// emitting empty thought parts and zero thought tokens unless a dynamic
+/// budget (`thinkingBudget: -1`) or explicit `thinkingLevel` is supplied.
+/// If a backend rejects `thinkingBudget`/`thinkingLevel`, callers downgrade to
+/// `IncludeThoughtsOnly`, and finally to `Disabled` if `thinkingConfig` itself
+/// is unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeminiThinkingRequestMode {
+    Full,
+    IncludeThoughtsOnly,
+    Disabled,
+}
+
+impl GeminiThinkingRequestMode {
+    /// Step down to a less strict thinking configuration after a backend 400
+    /// rejecting the current `thinkingConfig` for `model`.
+    ///
+    /// When the backend specifically rejects `thinkingBudget` or
+    /// `thinkingLevel`, downgrade from `Full` to `IncludeThoughtsOnly` so
+    /// thought summaries remain enabled. When the backend rejects
+    /// `thinkingConfig` / `includeThoughts` / thinking as a whole, jump
+    /// straight to `Disabled` without an extra round-trip.
+    pub fn downgrade_for_error(self, model: &str, error_message: &str) -> Option<Self> {
+        if !is_thinking_config_rejected_error(error_message) {
+            return None;
+        }
+        let lowered = error_message.to_ascii_lowercase();
+        let budget_or_level_only = (lowered.contains("thinking_budget")
+            || lowered.contains("thinkingbudget")
+            || lowered.contains("thinking_level")
+            || lowered.contains("thinkinglevel"))
+            && !lowered.contains("thinking_config")
+            && !lowered.contains("thinkingconfig")
+            && !lowered.contains("include_thoughts")
+            && !lowered.contains("includethoughts")
+            && !lowered.contains("thinking is not supported")
+            && !lowered.contains("thinking mode is not supported");
+        match self {
+            Self::Full => {
+                if budget_or_level_only {
+                    let full = build_generation_config_for_thoughts_with_mode(model, Self::Full);
+                    let only = build_generation_config_for_thoughts_with_mode(
+                        model,
+                        Self::IncludeThoughtsOnly,
+                    );
+                    if full == only {
+                        Some(Self::Disabled)
+                    } else {
+                        Some(Self::IncludeThoughtsOnly)
+                    }
+                } else {
+                    Some(Self::Disabled)
+                }
+            }
+            Self::IncludeThoughtsOnly => Some(Self::Disabled),
+            Self::Disabled => None,
+        }
+    }
+}
+
+fn explicit_gemini_thinking_level(lower_model: &str) -> Option<&'static str> {
+    if lower_model.ends_with("-minimal") {
+        Some("MINIMAL")
+    } else if lower_model.ends_with("-low") {
+        Some("LOW")
+    } else if lower_model.ends_with("-medium") {
+        Some("MEDIUM")
+    } else if lower_model.ends_with("-high") {
+        Some("HIGH")
+    } else {
+        None
+    }
+}
+
+/// Whether `model` accepts `generationConfig.thinkingConfig.includeThoughts`.
+///
+/// Gemini 2.5+ (including 3.x, 4.x, future generations, and `-latest` aliases)
+/// and Antigravity's hosted Claude / GPT-OSS routes accept `includeThoughts`
+/// and stream `thought: true` parts when enabled. Older Gemini 1.x / 2.0
+/// non-thinking models and non-text media/embedding models reject
+/// `thinkingConfig` with HTTP 400.
+pub fn model_supports_thought_summaries(model: &str) -> bool {
+    let lower = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    if lower.contains("embedding")
+        || lower.contains("-tts")
+        || lower.contains("-image")
+        || lower.starts_with("imagen")
+        || lower.starts_with("veo")
+        || lower.starts_with("aqa")
+    {
+        return false;
+    }
+    if lower.starts_with("gemini-") {
+        if lower.contains("thinking") {
+            return true;
+        }
+        if lower.starts_with("gemini-1.")
+            || lower.starts_with("gemini-1-")
+            || lower.starts_with("gemini-2.0")
+        {
+            return false;
+        }
+        return true;
+    }
+    true
+}
+
+/// Build `generationConfig` requesting thought summaries for `model` at the
+/// given fallback `mode`, or `None` when disabled/unsupported.
+pub fn build_generation_config_for_thoughts_with_mode(
+    model: &str,
+    mode: GeminiThinkingRequestMode,
+) -> Option<GeminiGenerationConfig> {
+    if mode == GeminiThinkingRequestMode::Disabled || !model_supports_thought_summaries(model) {
+        return None;
+    }
+    let lower = model
+        .trim()
+        .trim_start_matches("models/")
+        .to_ascii_lowercase();
+    let thinking_config = match mode {
+        GeminiThinkingRequestMode::Full if lower.starts_with("gemini-") => {
+            if let Some(level) = explicit_gemini_thinking_level(&lower) {
+                GeminiThinkingConfig {
+                    include_thoughts: Some(true),
+                    thinking_budget: None,
+                    thinking_level: Some(level.to_string()),
+                }
+            } else {
+                GeminiThinkingConfig {
+                    include_thoughts: Some(true),
+                    thinking_budget: Some(-1),
+                    thinking_level: None,
+                }
+            }
+        }
+        GeminiThinkingRequestMode::Full | GeminiThinkingRequestMode::IncludeThoughtsOnly => {
+            GeminiThinkingConfig {
+                include_thoughts: Some(true),
+                thinking_budget: None,
+                thinking_level: None,
+            }
+        }
+        GeminiThinkingRequestMode::Disabled => unreachable!(),
+    };
+    Some(GeminiGenerationConfig {
+        thinking_config: Some(thinking_config),
+    })
+}
+
+/// Build `generationConfig` requesting thought summaries when supported by
+/// `model`, or `None` when the model does not support `thinkingConfig`.
+pub fn build_generation_config_for_thoughts(model: &str) -> Option<GeminiGenerationConfig> {
+    build_generation_config_for_thoughts_with_mode(model, GeminiThinkingRequestMode::Full)
+}
+
+/// Whether an HTTP error indicates the backend rejected `thinkingConfig` /
+/// `includeThoughts` / `thinkingBudget` / `thinkingLevel` for this model, so
+/// the caller can safely downgrade or omit `generationConfig`.
+pub fn is_thinking_config_rejected_error(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("thinking_config")
+        || lowered.contains("thinkingconfig")
+        || lowered.contains("include_thoughts")
+        || lowered.contains("includethoughts")
+        || lowered.contains("thinking_budget")
+        || lowered.contains("thinkingbudget")
+        || lowered.contains("thinking_level")
+        || lowered.contains("thinkinglevel")
+        || lowered.contains("thinking is not supported")
+        || lowered.contains("thinking mode is not supported")
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VertexGenerateContentRequest {
@@ -155,6 +358,8 @@ pub struct VertexGenerateContentRequest {
     pub tools: Option<Vec<GeminiTool>>,
     #[serde(rename = "toolConfig", skip_serializing_if = "Option::is_none")]
     pub tool_config: Option<GeminiToolConfig>,
+    #[serde(rename = "generationConfig", skip_serializing_if = "Option::is_none")]
+    pub generation_config: Option<GeminiGenerationConfig>,
     #[serde(rename = "session_id", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
@@ -177,6 +382,10 @@ pub struct GeminiContent {
 pub struct GeminiPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Whether this part contains model thought summaries rather than answer text.
+    /// Returned when `generationConfig.thinkingConfig.includeThoughts` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_data: Option<InlineData>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,6 +397,12 @@ pub struct GeminiPart {
     /// the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+}
+
+impl GeminiPart {
+    pub fn is_thought(&self) -> bool {
+        self.thought == Some(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -699,6 +914,34 @@ pub fn validate_load_code_assist_response(res: &LoadCodeAssistResponse) -> Resul
     Ok(())
 }
 
+/// Message shown when Google refuses Code Assist for individuals and points the
+/// user at Antigravity instead.
+pub const CODE_ASSIST_INDIVIDUALS_RETIRED_HINT: &str = "Google no longer serves Gemini Code Assist for individuals to third-party clients. Personal Google accounts (including Google AI Pro/Ultra) should run `jcode login --provider antigravity`. For Gemini API access, run `jcode login --provider gemini` and choose the API key option. Paid Code Assist (Standard/Enterprise) users can set GOOGLE_CLOUD_PROJECT.";
+
+/// Detects the `UNSUPPORTED_CLIENT` rejection of the individuals free tier.
+/// Without an explicit Cloud project, the remaining paid tier cannot be
+/// onboarded, so fail early with a helpful hint instead of an opaque error.
+pub fn retired_individual_tier_error(
+    res: &LoadCodeAssistResponse,
+    has_cloud_project: bool,
+) -> Option<anyhow::Error> {
+    if res.current_tier.is_some() || has_cloud_project {
+        return None;
+    }
+    let tier = res
+        .ineligible_tiers
+        .as_ref()?
+        .iter()
+        .find(|tier| tier.reason_code.as_deref() == Some("UNSUPPORTED_CLIENT"))?;
+    let reason = tier
+        .reason_message
+        .as_deref()
+        .unwrap_or("This client is no longer supported for Gemini Code Assist for individuals");
+    Some(anyhow::anyhow!(
+        "{reason}\n{CODE_ASSIST_INDIVIDUALS_RETIRED_HINT}"
+    ))
+}
+
 pub fn ineligible_or_project_error(res: &LoadCodeAssistResponse) -> anyhow::Error {
     if let Some(reasons) = res
         .ineligible_tiers
@@ -737,6 +980,32 @@ pub fn choose_onboard_tier(res: &LoadCodeAssistResponse) -> GeminiUserTier {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_client_individual_tier_points_to_antigravity() {
+        // Shape observed live from cloudcode-pa on 2026-11-21.
+        let res: super::LoadCodeAssistResponse = serde_json::from_value(serde_json::json!({
+            "allowedTiers": [{"id": "standard-tier", "isDefault": true}],
+            "ineligibleTiers": [{
+                "reasonCode": "UNSUPPORTED_CLIENT",
+                "reasonMessage": "This client is no longer supported.",
+                "tierId": "free-tier"
+            }]
+        }))
+        .unwrap();
+        let err = super::retired_individual_tier_error(&res, false)
+            .expect("retired tier detected")
+            .to_string();
+        assert!(err.contains("no longer supported"));
+        assert!(err.contains("--provider antigravity"));
+        assert!(super::retired_individual_tier_error(&res, true).is_none());
+
+        let onboarded: super::LoadCodeAssistResponse = serde_json::from_value(
+            serde_json::json!({"currentTier": {"id": "standard-tier"}, "ineligibleTiers": [{"reasonCode": "UNSUPPORTED_CLIENT"}]}),
+        )
+        .unwrap();
+        assert!(super::retired_individual_tier_error(&onboarded, false).is_none());
+    }
+
     #[test]
     fn resolved_model_only_uses_returned_model_version() {
         use jcode_message_types::StreamEvent;

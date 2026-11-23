@@ -335,6 +335,7 @@ fn cached_grouped_sessions_round_trip_from_disk_borrows_inventories() {
             session_id: "session_cache_test_1770000000000".to_string(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     };
     // Large payloads must be serialized in place, not cloned for a cache write.

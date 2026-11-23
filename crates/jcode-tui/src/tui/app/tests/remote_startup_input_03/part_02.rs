@@ -1,4 +1,45 @@
 #[test]
+fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = "test-remote-interleave-dispatch";
+
+        app.interleave_message = Some("interrupt after reload".to_string());
+        app.save_input_for_reload(session_id);
+
+        let mut restored = App::new_for_remote(Some(session_id.to_string()));
+        assert!(restored.interleave_message.is_none());
+        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
+        assert!(!restored.pending_queued_dispatch);
+        assert!(!restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Idle));
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut restored,
+            &mut remote,
+        ));
+        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
+        assert!(!restored.is_processing);
+
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut restored,
+            &mut remote,
+        ));
+
+        assert!(restored.queued_messages().is_empty());
+        assert!(restored.is_processing);
+        assert!(matches!(restored.status, ProcessingStatus::Sending));
+        assert!(restored.display_messages().iter().any(|message| {
+            message.role == "user" && message.content == "interrupt after reload"
+        }));
+    });
+}
+
+#[test]
 fn test_new_for_remote_restored_soft_interrupt_resend_triggers_dispatch_state() {
     let mut app = create_test_app();
     let session_id = format!("test-remote-soft-interrupt-dispatch-{}", std::process::id());
@@ -200,6 +241,7 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
 
         let mut app = create_test_app();
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "continue implementing the fix".to_string(),
             images: vec![],
             is_system: false,

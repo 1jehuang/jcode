@@ -13,6 +13,10 @@ impl MultiProvider {
             "claude" | "claude-oauth" | "claude-api" | "anthropic-api" | "anthropic-api-key" => {
                 "claude"
             }
+            "https" => "antigravity",
+            "code-assist-oauth" => "gemini",
+            "jcode-subscription" => "jcode",
+            "grok-build" | "grok-build-acp" => "grok-build",
             other => other,
         };
         if !models::is_agent_model_for_failover(model, provider) {
@@ -48,6 +52,10 @@ impl MultiProvider {
             match method {
                 "openai-api" | "openai-api-key" => "openai-api".to_owned(),
                 "claude-api" | "anthropic-api" | "anthropic-api-key" => "anthropic-api".to_owned(),
+                "https" => "antigravity".to_owned(),
+                "code-assist-oauth" => "gemini".to_owned(),
+                "jcode-subscription" => "jcode".to_owned(),
+                "grok-build" | "grok-build-acp" => "grok-build".to_owned(),
                 // Unqualified OAuth routes do not identify a billing account.
                 "openai" | "claude" | "openai-oauth" | "claude-oauth" => return false,
                 other => other.to_owned(),
@@ -271,18 +279,6 @@ impl MultiProvider {
                 {
                     return Some(*preferred);
                 }
-                if let Some(best) = group
-                    .iter()
-                    .filter(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                            != usize::MAX
-                    })
-                    .min_by_key(|candidate| {
-                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
-                    })
-                {
-                    return Some(*best);
-                }
                 let models: Vec<&str> = group
                     .iter()
                     .map(|candidate| candidate_model(candidate))
@@ -295,6 +291,18 @@ impl MultiProvider {
                     .find(|candidate| candidate_model(candidate) == preferred)
                 {
                     return Some(*flagship);
+                }
+                if let Some(best) = group
+                    .iter()
+                    .filter(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                            != usize::MAX
+                    })
+                    .min_by_key(|candidate| {
+                        jcode_provider_core::model_generation_rank(candidate_model(candidate))
+                    })
+                {
+                    return Some(*best);
                 }
                 // Capacity is eligibility, not quality. Never pick an unknown
                 // model by maximum context, catalog position or lexical order.

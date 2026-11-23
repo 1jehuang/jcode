@@ -151,6 +151,29 @@ async fn tool_transformer_fails_open_for_invalid_output_and_timeout() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn tool_transformer_keeps_large_replacement_input() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    // Replacement object whose single string is 2 MiB, past the stderr cap.
+    let big = write_executable_script(
+        temp.path(),
+        "big.sh",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"command\":\"'\nhead -c 2097152 /dev/zero | tr '\\0' x\nprintf '\"}'\n",
+    );
+    let _env = transform_test_config(&big.to_string_lossy(), 10_000);
+
+    let output = transform_tool_input(
+        "ses_transform",
+        None,
+        "bash",
+        serde_json::json!({"command": "original"}),
+    )
+    .await;
+    assert_eq!(output["command"].as_str().map(str::len), Some(2 * 1024 * 1024));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn tool_transformer_timeout_includes_stdin_delivery() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");

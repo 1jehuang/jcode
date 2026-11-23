@@ -164,6 +164,7 @@ pub(super) fn load_opencode_session_info(
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     };
     Ok(Some((session, search)))

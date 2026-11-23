@@ -253,7 +253,7 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
                 }
                 crate::logging::error(&format!(
                     "Server-initiated turn failed for live session {}: {}",
-                    session_id, error
+                    session_id, message
                 ));
                 update_member_status_with_report(
                     &session_id,

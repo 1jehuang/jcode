@@ -218,20 +218,68 @@ impl App {
         (provider, model)
     }
 
+    /// Available reasoning efforts for the active remote provider/model.
+    ///
+    /// For Antigravity, uses the live remote catalog routes when available so
+    /// newly discovered models expose their exact sibling effort tiers, falling
+    /// back to static inference during the pre-catalog bootstrap window.
+    pub(super) fn remote_available_efforts(&self) -> Vec<&'static str> {
+        let (provider_name, provider_model) = self.remote_effort_identity();
+        if provider_name
+            .as_deref()
+            .is_some_and(|p| p.to_ascii_lowercase().contains("antigravity"))
+            && let Some(model) = provider_model.as_deref()
+            && !model.trim().is_empty()
+            && !model.trim().eq_ignore_ascii_case("default")
+        {
+            let catalog_models: Vec<&str> = self
+                .remote_model_options
+                .iter()
+                .filter(|route| {
+                    route.available && route.provider.eq_ignore_ascii_case("antigravity")
+                })
+                .map(|route| route.model.as_str())
+                .collect();
+            if !catalog_models.is_empty() {
+                return jcode_provider_core::antigravity_efforts_from_catalog(
+                    model,
+                    catalog_models,
+                );
+            }
+        }
+        inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
     /// session will actually use instead of assuming the maximum.
     pub(super) fn remote_reasoning_effort_hint(&self) -> Option<String> {
         if crate::tui::is_ssh_remote() {
-            return self.remote_reasoning_effort.clone();
+            return self.remote_reasoning_effort.clone().or_else(|| {
+                let (provider, model) = self.remote_effort_identity();
+                if provider
+                    .as_deref()
+                    .is_some_and(|p| p.to_ascii_lowercase().contains("antigravity"))
+                {
+                    model.as_deref().and_then(|m| {
+                        jcode_provider_core::split_antigravity_model_effort(m)
+                            .map(|(_, effort)| effort.to_string())
+                    })
+                } else {
+                    None
+                }
+            });
         }
         self.remote_reasoning_effort.clone().or_else(|| {
             let (provider, model) = self.remote_effort_identity();
             let provider = provider.unwrap_or_default().to_ascii_lowercase();
             let model = model.unwrap_or_default().to_ascii_lowercase();
             let cfg = &crate::config::config().provider;
-            if provider.contains("anthropic")
+            if provider.contains("antigravity") {
+                jcode_provider_core::split_antigravity_model_effort(&model)
+                    .map(|(_, effort)| effort.to_string())
+            } else if provider.contains("anthropic")
                 || provider.contains("claude")
                 || model.starts_with("claude-")
             {
@@ -648,6 +696,17 @@ impl crate::tui::TuiState for App {
             PendingLogin::Exchanging { .. } => {
                 Some("Login only: exchanging credentials · not sent to AI · please wait")
             }
+            PendingLogin::AutoApiKey => {
+                Some("Login only: paste any API key · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyChooseProvider { .. } => {
+                Some("Login only: enter provider number or name · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyProfile { .. }
+            | PendingLogin::CursorApiKey
+            | PendingLogin::AzureApiKey { .. } => {
+                Some("Login only: paste API key · not sent to AI · /cancel")
+            }
             PendingLogin::OpenAiAccount { .. }
             | PendingLogin::Gemini { .. }
             | PendingLogin::Antigravity { .. } => {
@@ -655,6 +714,18 @@ impl crate::tui::TuiState for App {
             }
             _ => Some("Login only: authentication input · not sent to AI · /cancel"),
         }
+    }
+
+    fn login_input_is_secret(&self) -> bool {
+        matches!(
+            self.pending_login.as_ref(),
+            Some(
+                PendingLogin::AutoApiKey
+                    | PendingLogin::ApiKeyProfile { .. }
+                    | PendingLogin::CursorApiKey
+                    | PendingLogin::AzureApiKey { .. }
+            )
+        )
     }
 
     fn input(&self) -> &str {
@@ -997,6 +1068,10 @@ impl crate::tui::TuiState for App {
 
     fn connected_clients(&self) -> Option<usize> {
         self.remote_client_count
+    }
+
+    fn jarvis_transcript(&self) -> Option<&std::collections::VecDeque<crate::tui::JarvisCaption>> {
+        Some(self.jarvis_listener.captions())
     }
 
     fn voice_input_status(&self) -> Option<(bool, String)> {
@@ -2663,35 +2738,8 @@ fn has_inline_swarm_descendants(
     })
 }
 
-impl App {
-    fn inline_swarm_members_unticked(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
-        if self.debug_force_inline_gallery {
-            return self.remote_swarm_members.clone();
-        }
-        if !self.swarm_enabled {
-            return Vec::new();
-        }
-        // Scope the inline gallery to the subtree this session actually spawned.
-        // Other sessions can share the same swarm (e.g. same repo) without this
-        // session having spawned them; showing those would be noise. The spawn
-        // tree is reconstructed from each member's `report_back_to_session_id`
-        // parent edge.
-        let self_id = if self.is_remote {
-            self.remote_session_id.as_deref()
-        } else {
-            Some(self.session.id.as_str())
-        };
-        match self_id {
-            Some(self_id) => filter_inline_swarm_subtree(&self.remote_swarm_members, self_id),
-            // Session identity is not known yet (e.g. right after connect,
-            // before the History event sets `remote_session_id`). Showing all
-            // swarm members here caused the inline strip to flash on startup
-            // and then disappear once the subtree filter kicked in. Hide the
-            // strip until we know who we are.
-            None => Vec::new(),
-        }
-    }
-}
+#[path = "tui_state_inline_swarm.rs"]
+mod inline_swarm;
 
 #[cfg(test)]
 #[path = "tui_state_context_cache_tests.rs"]

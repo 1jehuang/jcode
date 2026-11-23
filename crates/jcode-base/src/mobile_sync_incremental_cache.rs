@@ -118,7 +118,7 @@ impl SourceHasher {
             }
             (start + offset).hash(self);
             matches!(message.role, Role::Assistant).hash(self);
-            message.display_role.is_some().hash(self);
+            message.has_context_display_role().hash(self);
             message.timestamp.hash(self);
             for block in &message.content {
                 // Match every variant explicitly so a new wire-visible kind

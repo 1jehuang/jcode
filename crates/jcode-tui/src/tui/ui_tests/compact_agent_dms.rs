@@ -73,7 +73,7 @@ fn token_rows(body: &PreparedMessages) -> Vec<&str> {
 }
 
 #[test]
-fn compact_dm_await_started_is_hidden_but_finished_result_stays_visible() {
+fn compact_dm_routine_await_is_hidden_but_failures_stay_visible() {
     let _guard = viewport_snapshot_test_lock();
     let before = vec![DisplayMessage::user("Wait for workers")];
     let mut after = before.clone();
@@ -96,10 +96,22 @@ fn compact_dm_await_started_is_hidden_but_finished_result_stays_visible() {
     after.push(DisplayMessage::background_task(
         "🐝 **Swarm await finished**\n\nAll members done.\n\nMember statuses:\n  ✓ fox (completed)",
     ));
-    let finished = assert_dm_rebuild_matches_full(before, after, 100);
+    after.push(DisplayMessage::swarm(
+        "🐝 Swarm await",
+        "1/2 matched · 1 ready, 1 running",
+    ));
+    let finished = assert_dm_rebuild_matches_full(before, after.clone(), 100);
     let text = finished.wrapped_plain_lines.join("\n");
-    assert!(text.contains("Swarm await"), "{text}");
-    assert!(text.contains("completed"), "{text}");
+    assert!(!text.contains("Swarm await"), "{text}");
+    let before = after.clone();
+    after.push(DisplayMessage::swarm(
+        "🐝 Swarm await",
+        "1/1 matched · 1 failed",
+    ));
+    let text = assert_dm_rebuild_matches_full(before, after, 100)
+        .wrapped_plain_lines
+        .join("\n");
+    assert!(text.contains("failed"), "{text}");
 }
 
 #[test]

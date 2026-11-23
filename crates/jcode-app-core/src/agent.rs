@@ -709,7 +709,7 @@ impl Agent {
         manager.reset();
         manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
-        manager.set_budget(budget);
+        manager.set_budget_for_provider(budget, self.provider.name());
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {
@@ -919,7 +919,7 @@ impl Agent {
         self.session.compaction = Some(Arc::new(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);

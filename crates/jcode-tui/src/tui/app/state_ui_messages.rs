@@ -33,6 +33,9 @@ fn display_message_from_stored_message(
         return Some(swarm);
     }
     match message.display_role {
+        Some(crate::session::StoredDisplayRole::JarvisUser) => {
+            Some(DisplayMessage::jarvis_user(text))
+        }
         Some(crate::session::StoredDisplayRole::FileActivity) => {
             super::remote_notifications::typed_file_activity_display_message(&text)
                 .or_else(|| Some(DisplayMessage::system(text)))
@@ -134,6 +137,7 @@ impl App {
     }
 
     pub fn push_display_message(&mut self, mut message: DisplayMessage) {
+        message.normalize_jarvis_role();
         if is_background_task_lifecycle_message(&message.content) {
             if matches!(message.role.as_str(), "user" | "system") {
                 message.role = "background_task".to_string();
@@ -177,6 +181,7 @@ impl App {
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain_mut(|message| {
+            message.normalize_jarvis_role();
             if !is_background_task_lifecycle_message(&message.content) {
                 return true;
             }
@@ -278,6 +283,13 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id);
         crate::todo::todo_requires_user_auth(todo)
+            || todo.assigned_to.as_deref().is_some_and(|assigned| {
+                assigned != session_id
+                    && self.remote_swarm_members.iter().any(|member| {
+                        member.session_id == assigned
+                            && jcode_tui_render::swarm_gallery::is_active_status(&member.status)
+                    })
+            })
             || crate::todo::todo_goal_cannot_complete(
                 todo,
                 &crate::todo::load_goals(session_id).unwrap_or_default(),

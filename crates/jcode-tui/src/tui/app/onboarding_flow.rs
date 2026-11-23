@@ -377,17 +377,14 @@ pub(crate) enum OnboardingPhase {
     /// When `None`, there was nothing to import and we prompt the user to pick a
     /// provider manually (Enter opens the login picker).
     Login { import: Option<ImportReview> },
-    /// Ask the user whether to log in to OpenAI. Shown on a fresh install when
-    /// no importable external logins were detected. A highlightable Yes/No
-    /// selector (default "Yes") matching the import walkthrough: Yes starts the
-    /// OpenAI sign-in, No exits onboarding to the normal new-session screen with
-    /// a system message telling the user to run `/login` when ready (we avoid the
-    /// inline provider picker here). Unlike the import/telemetry prompts this one
-    /// has no auto-timeout: logging in is a meaningful first step, so we wait for
-    /// the user rather than opening a browser on a countdown.
+    /// Ask the user how to log in on a fresh install when no importable
+    /// external logins were detected: OpenAI, Claude, API key, or Skip.
+    /// Defaults to OpenAI. Unlike the import/telemetry prompts this one has no
+    /// auto-timeout: logging in is a meaningful first step, so we wait for the
+    /// user rather than opening a browser on a countdown.
     LoginOpenAi {
-        /// Which option is highlighted (true = "Yes, log in to OpenAI").
-        yes_highlighted: bool,
+        /// Which sign-in option is highlighted (default `OpenAi`).
+        choice: crate::tui::OnboardingLoginChoice,
     },
     /// Legacy phase kept for compatibility with older replay/test fixtures.
     /// New onboarding skips explicit model selection and uses the default route;
@@ -500,7 +497,7 @@ impl OnboardingFlow {
                 import: Some(review),
             },
             None => OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true,
+                choice: crate::tui::OnboardingLoginChoice::OpenAi,
             },
         };
         Self { phase }

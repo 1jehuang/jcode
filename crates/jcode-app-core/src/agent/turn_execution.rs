@@ -1,6 +1,8 @@
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_println as println};
 
+#[path = "session_memory_extraction.rs"]
+mod session_memory_extraction;
 #[path = "session_restore.rs"]
 mod session_restore;
 
@@ -208,7 +210,11 @@ impl Agent {
             display_role,
             continues_turn,
         )?;
-        if continues_turn || display_role.is_some() {
+        // Jarvis input already has a user echo (or a turn-start pickup).
+        if continues_turn
+            || display_role
+                .is_some_and(|role| role != crate::session::StoredDisplayRole::JarvisUser)
+        {
             self.emit_context_messages_since(input_start, &event_tx);
         }
         // The per-turn reminder (swarm DM wake, mission continuation, ...) goes
@@ -278,6 +284,7 @@ impl Agent {
                     content,
                     display_role: Some(
                         match message.display_role {
+                            Some(crate::session::StoredDisplayRole::JarvisUser) => "jarvis_user",
                             Some(crate::session::StoredDisplayRole::FileActivity) => {
                                 "file_activity"
                             }
@@ -737,6 +744,18 @@ impl Agent {
             .map(|names| names.iter().cloned().collect());
         let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
         let mut tools = self.registry.definitions(allowed).await;
+        if sdk
+            .as_ref()
+            .is_some_and(|config| self.is_jarvis_root(config))
+            && let Some(swarm) = tools.iter_mut().find(|tool| tool.name == "swarm")
+        {
+            // Replace only the stock policy. Preserve a user's swarm-prompt.md
+            // and let the SDK overlay below retain any custom tool definition.
+            swarm.description = swarm.description.replace(
+                crate::prompt::DEFAULT_SWARM_PROMPT.trim(),
+                "Follow Jarvis root coordination. Delegate substantive execution, including single-lane work. Worker-owned todo lanes launch automatically, so do not spawn another worker for the same lane.",
+            );
+        }
         if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
                 !self
@@ -867,8 +886,9 @@ impl Agent {
             return;
         }
         let mut text = String::from(
-            "<system-reminder>\nNew MCP tools are available. They are not in your tool list; \
-             call them with mcp action=call (server, tool, arguments matching input_schema).\n",
+            "<system-reminder>\nNew MCP tools are available. They are not in your tool list. \
+             Before first use, get a tool's input_schema with mcp action=search (query: tool name), \
+             then call it with mcp action=call (server, tool, arguments).\n",
         );
         for tool in fresh.iter().take(MAX_ANNOUNCED_MCP_TOOLS) {
             let (server, raw) = self
@@ -878,11 +898,22 @@ impl Agent {
                     let (server, raw) = split_mcp_dispatch_name(&tool.name);
                     (server.to_string(), raw.to_string())
                 });
+            // Names and short descriptions only: schemas stay out of the
+            // transcript and are fetched on demand through `mcp search`.
+            let description = tool.description.trim();
+            let description = description.lines().next().unwrap_or_default();
+            let description = if description.chars().count() > MAX_ANNOUNCED_DESCRIPTION_CHARS {
+                let cut: String = description
+                    .chars()
+                    .take(MAX_ANNOUNCED_DESCRIPTION_CHARS)
+                    .collect();
+                format!("{}...", cut.trim_end())
+            } else {
+                description.to_string()
+            };
             text.push_str(&format!(
-                "- {}: server: {server}  tool: {raw}  ({})\n  input_schema: {}\n",
+                "- {}: server: {server}  tool: {raw}  ({description})\n",
                 tool.name,
-                tool.description.trim(),
-                serde_json::to_string(&tool.input_schema).unwrap_or_else(|_| "{}".to_string()),
             ));
         }
         if fresh.len() > MAX_ANNOUNCED_MCP_TOOLS {
@@ -1414,123 +1445,15 @@ impl Agent {
 
         Ok(())
     }
-
-    /// Extract memories from the session transcript
-    /// Returns the number of memories extracted, or 0 if none/skipped
-    pub async fn extract_session_memories(&self) -> usize {
-        if !self.memory_enabled {
-            return 0;
-        }
-
-        // Need at least 4 messages for meaningful extraction
-        if self.session.messages.len() < 4 {
-            return 0;
-        }
-
-        logging::info(&format!(
-            "Extracting memories from {} messages",
-            self.session.messages.len()
-        ));
-
-        // Build transcript
-        let mut transcript = String::new();
-        for msg in &self.session.messages {
-            let role = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            transcript.push_str(&format!("**{}:**\n", role));
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        if text.trim_start().starts_with("<system-reminder>") {
-                            continue;
-                        }
-                        transcript.push_str(text);
-                        transcript.push('\n');
-                    }
-                    ContentBlock::ToolUse { name, .. } => {
-                        transcript.push_str(&format!("[Used tool: {}]\n", name));
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        let preview = if content.len() > 200 {
-                            format!("{}...", crate::util::truncate_str(content, 200))
-                        } else {
-                            content.clone()
-                        };
-                        transcript.push_str(&format!("[Result: {}]\n", preview));
-                    }
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ReasoningTrace { .. }
-                    | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
-                    ContentBlock::Image { .. } => {
-                        transcript.push_str("[Image]\n");
-                    }
-                    ContentBlock::OpenAICompaction { .. } => {
-                        transcript.push_str("[OpenAI native compaction]\n");
-                    }
-                }
-            }
-            transcript.push('\n');
-        }
-
-        if !crate::memory::memory_llm_judge_available() {
-            logging::info("Memory extraction skipped: LLM judge unavailable");
-            return 0;
-        }
-
-        // Extract using sidecar
-        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
-        match sidecar.extract_memories(&transcript).await {
-            Ok(extracted) if !extracted.is_empty() => {
-                let manager = self
-                    .session
-                    .working_dir
-                    .as_deref()
-                    .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
-                    .unwrap_or_default();
-                let mut stored_count = 0;
-
-                for memory in &extracted {
-                    let category = crate::memory::MemoryCategory::from_extracted(&memory.category);
-
-                    let trust = match memory.trust.as_str() {
-                        "high" => crate::memory::TrustLevel::High,
-                        "low" => crate::memory::TrustLevel::Low,
-                        _ => crate::memory::TrustLevel::Medium,
-                    };
-
-                    let entry = crate::memory::MemoryEntry::new(category, &memory.content)
-                        .with_source(&self.session.id)
-                        .with_trust(trust);
-
-                    if manager.remember_project(entry).is_ok() {
-                        stored_count += 1;
-                    }
-                }
-
-                if stored_count > 0 {
-                    logging::info(&format!("Extracted {} memories from session", stored_count));
-                }
-                stored_count
-            }
-            Ok(_) => 0,
-            Err(e) => {
-                logging::info(&format!("Memory extraction skipped: {}", e));
-                0
-            }
-        }
-    }
 }
 
 #[path = "turn_usage.rs"]
 mod turn_usage;
 use turn_usage::turn_token_usage_after;
 /// Cap on tools listed in one late-MCP transcript announcement.
-const MAX_ANNOUNCED_MCP_TOOLS: usize = 32;
+const MAX_ANNOUNCED_MCP_TOOLS: usize = 64;
+/// Per-tool description budget in the late MCP announcement.
+const MAX_ANNOUNCED_DESCRIPTION_CHARS: usize = 120;
 
 /// Split a registry key `mcp__<server>__<tool>` into (server, tool).
 /// Server names cannot contain `__`, so the first separator is the split.

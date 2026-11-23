@@ -16,9 +16,10 @@ pub(super) fn render_message_into(
     let centered = ctx.centered;
     let diff_mode = ctx.diff_mode;
     let role = msg.effective_role();
-    // Keep redundant await-start notices and pinned todo tool messages in
+    // Keep routine await notices and pinned todo tool messages in
     // display_messages for history fidelity, but omit their transcript cards.
     if super::super::messages::is_swarm_await_started(msg)
+        || super::super::messages::is_routine_swarm_await_result(msg)
         || (role == "tool"
             && crate::config::config().display.pin_todos
             && msg
@@ -48,10 +49,30 @@ pub(super) fn render_message_into(
     match role {
         "user" => {
             acc.prompt_num += 1;
-            acc.user_prompt_texts.push(msg.content.clone());
+            let config = &crate::config::config().jarvis;
+            let visible = if config.show_exact_request_payload {
+                std::borrow::Cow::Borrowed(msg.content.as_str())
+            } else {
+                msg.user_row_text(config.show_raw_requests)
+            };
+            acc.user_prompt_texts.push(visible.to_string());
             let distance = ctx.total_prompts + ctx.pending_count + 1 - acc.prompt_num;
             let num_color = rainbow_prompt_color(distance);
             let displayed_prompt_num = acc.prompt_num + ctx.prompt_number_offset;
+            // Only traditional dictation uses transcription tags. Never reinterpret
+            // the words or JSON inside a trusted Jarvis row.
+            let marked;
+            let prompt_text: &str = if msg.is_jarvis_user() {
+                &visible
+            } else {
+                let (text, transcribed) = jcode_session_types::strip_transcription(&visible);
+                if transcribed {
+                    marked = format!("🎙 {text}");
+                    &marked
+                } else {
+                    &visible
+                }
+            };
             push_user_prompt_lines(
                 &mut acc.lines,
                 &mut acc.raw_plain_lines,
@@ -60,7 +81,7 @@ pub(super) fn render_message_into(
                 &mut acc.user_line_indices,
                 displayed_prompt_num,
                 num_color,
-                &msg.content,
+                prompt_text,
                 align,
             );
             if !crate::session::is_attached_image_label_text(&msg.content) {
