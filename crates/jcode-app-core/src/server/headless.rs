@@ -53,6 +53,10 @@ pub(super) async fn create_headless_session(
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
     worker_identity: Option<crate::hooks::SwarmIdentity>,
+    definition: Option<(
+        &crate::agent_def::AgentDefinition,
+        &super::swarm::swarm_agent_policy::AppliedPolicy,
+    )>,
 ) -> Result<String> {
     let _runtime_activity = crate::runtime_activity::global().try_enter()?;
     let memory_enabled = crate::config::config().features.memory;
@@ -198,6 +202,17 @@ pub(super) async fn create_headless_session(
         crate::hooks::register_swarm_identity(&client_session_id, identity);
     }
     new_agent.fire_session_start_hook();
+
+    // Persona and tool limits go on before the worker is registered, so no
+    // assignment can start a turn without them.
+    if let Some((definition, policy)) = definition {
+        super::swarm::swarm_agent_defs::apply_to_headless_worker(
+            &mut new_agent,
+            definition,
+            policy,
+        )
+        .await;
+    }
 
     let agent = Arc::new(Mutex::new(new_agent));
     if let Err(error) = sessions

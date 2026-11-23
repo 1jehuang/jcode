@@ -321,6 +321,58 @@ async fn definition_tool_restriction_survives_a_resume() {
     assert_eq!(tools, vec!["read".to_string()], "tools: {tools:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_is_not_assignable_before_its_definition_is_applied() {
+    let _env = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    write_definition(
+        home.path(),
+        "agents",
+        "---\nname: policy-agent\ndescription: d\ntools: [read]\n---\nbody\n",
+    );
+    let fx = Arc::new(PolicyFx::new(project.path().to_string_lossy().into_owned()));
+    let spawner = {
+        let fx = Arc::clone(&fx);
+        tokio::spawn(async move { fx.spawn("policy-agent").await })
+    };
+    // Watch for the first moment the worker can be picked up, and record what
+    // it looks like then.
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let agent = fx.sessions.read().await.values().next().cloned();
+            if let Some(agent) = agent {
+                let agent = agent.lock().await;
+                let persona = agent
+                    .messages()
+                    .iter()
+                    .any(|m| format!("{:?}", m.content).contains("Agent persona"));
+                let mut tools = agent.tool_names().await;
+                tools.sort();
+                break (persona, tools);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let id = spawner.await.unwrap();
+    crate::hooks::forget_swarm_identity(&id);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    let (persona, tools) = seen.expect("worker published");
+    assert!(persona, "worker was published without its persona");
+    assert_eq!(
+        tools,
+        vec!["read".to_string()],
+        "worker was published without its tool limits"
+    );
+}
+
 #[tokio::test]
 async fn project_definition_policy_is_ignored_until_trusted() {
     let _env = crate::storage::lock_test_env();

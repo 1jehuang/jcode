@@ -506,6 +506,8 @@ pub(super) async fn spawn_swarm_agent(
                     label.as_deref(),
                     definition.as_ref().map(|d| d.name.as_str()),
                 )),
+                // Applied before the worker is published for assignment.
+                definition.as_ref().map(|d| (d, &applied_policy)),
             )
             .await
             .and_then(|result_json| {
@@ -569,15 +571,6 @@ pub(super) async fn spawn_swarm_agent(
     // spawn `label` wins; otherwise the label is derived from the initial prompt.
     if let Some(label_text) = label.as_deref().or(initial_message.as_deref()) {
         set_member_task_label(&new_session_id, label_text, swarm_members).await;
-    }
-    if is_headless_fallback {
-        super::swarm::swarm_agent_defs::apply_to_headless_worker(
-            sessions,
-            &new_session_id,
-            definition.as_ref(),
-            &applied_policy,
-        )
-        .await;
     }
     // Observers run in the coordinator's context, so use its directory rather
     // than the worker's.

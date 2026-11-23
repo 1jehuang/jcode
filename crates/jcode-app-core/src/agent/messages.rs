@@ -27,21 +27,26 @@ impl Agent {
     }
 
     /// Narrow this worker's tool surface to an agent definition's policy. The
-    /// result never widens what the global policy allows: the current effective
-    /// set is intersected with `allow` (when given) and `deny` is removed. The
-    /// tool list is unlocked so the next request picks the change up.
+    /// result never widens what the global policy allows: the configured
+    /// allowlist (not the displayed tool names, which list the broad `mcp`
+    /// tool whenever any MCP tool is allowed) is intersected with `allow`
+    /// (when given) and `deny` joins the disabled set. The tool list is
+    /// unlocked so the next request picks the change up.
     pub(crate) async fn narrow_tools(&mut self, allow: Option<&[String]>, deny: &[String]) {
-        let mut names: HashSet<String> = self.tool_names().await.into_iter().collect();
-        if let Some(allow) = allow {
-            names.retain(|name| allow.iter().any(|allowed| allowed == name));
-        }
-        for denied in deny {
-            names.remove(denied);
-        }
+        let names: Option<HashSet<String>> = match (self.allowed_tools.as_ref(), allow) {
+            (base, None) => base.cloned(),
+            (None, Some(allow)) => Some(allow.iter().cloned().collect()),
+            (Some(base), Some(allow)) => Some(crate::tool::intersect_allowed(
+                base,
+                &allow.iter().cloned().collect(),
+            )),
+        };
         // Persist the restriction so a revived or resumed worker keeps it.
-        let mut persisted: Vec<String> = names.iter().cloned().collect();
-        persisted.sort();
-        self.session.tool_allowlist = Some(persisted);
+        if let Some(names) = names.as_ref() {
+            let mut persisted: Vec<String> = names.iter().cloned().collect();
+            persisted.sort();
+            self.session.tool_allowlist = Some(persisted);
+        }
         // Names alone cannot express "all MCP tools except one": the `mcp`
         // entry stays allowed, so keep the deny list as live and saved policy.
         self.disabled_tools.extend(deny.iter().cloned());
@@ -50,7 +55,7 @@ impl Agent {
             denied.sort();
             self.session.tool_denylist = Some(denied);
         }
-        self.allowed_tools = Some(names);
+        self.allowed_tools = names;
         self.locked_tools = None;
         // Nested calls (batch and friends) are checked against the registered
         // session policy, so it must narrow with the agent's own filter.

@@ -687,12 +687,10 @@ impl Agent {
         // A restriction an agent definition put on this session survives a
         // resume, and only ever narrows the selection.
         let allowed_tools = match (&session.tool_allowlist, tool_selection.allowed_tools) {
-            (Some(restricted), Some(selected)) => Some(
-                selected
-                    .into_iter()
-                    .filter(|name| restricted.contains(name))
-                    .collect(),
-            ),
+            (Some(restricted), Some(selected)) => Some(crate::tool::intersect_allowed(
+                &selected,
+                &restricted.iter().cloned().collect(),
+            )),
             (Some(restricted), None) => Some(restricted.iter().cloned().collect()),
             (None, selected) => selected,
         };

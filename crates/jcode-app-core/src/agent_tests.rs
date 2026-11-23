@@ -329,6 +329,54 @@ async fn narrowed_agent_keeps_denied_mcp_tool_blocked_while_mcp_stays_allowed() 
     assert!(allowed(&resumed_id, "mcp__server__safe"));
 }
 
+#[tokio::test]
+async fn narrowing_never_grants_mcp_tools_the_operator_excluded() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    for name in ["danger", "safe"] {
+        registry
+            .register(
+                format!("mcp__server__{name}"),
+                Arc::new(VerboseFakeMcpTool {
+                    name: name.to_string(),
+                    description: String::new(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+    // Operator policy: `read` and one specific MCP tool.
+    let operator: HashSet<String> = ["read", "mcp__server__safe"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let session = Session::create(None, None);
+    let session_id = session.id.clone();
+    let mut agent = Agent::new_with_session(
+        provider.clone(),
+        registry.clone(),
+        session,
+        Some(operator.clone()),
+    );
+    // A definition with only `disallowedTools: Bash`.
+    agent.narrow_tools(None, &["bash".to_string()]).await;
+
+    let allowed = |id: &str, alias: &str| {
+        crate::tool::session_mcp_alias_is_allowed(id, alias, alias, "mcp_call")
+    };
+    assert!(!allowed(&session_id, "mcp__server__danger"));
+    assert!(allowed(&session_id, "mcp__server__safe"));
+
+    // The saved restriction must not widen the operator policy on resume.
+    let saved = agent.session.clone();
+    drop(agent);
+    let resumed_id = saved.id.clone();
+    let _resumed = Agent::new_with_session(provider, registry, saved, Some(operator));
+    assert!(!allowed(&resumed_id, "mcp__server__danger"));
+    assert!(allowed(&resumed_id, "mcp__server__safe"));
+}
+
 #[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
