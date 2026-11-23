@@ -89,8 +89,11 @@ Write in natural language with these sections:
 - **What we did:** Key actions taken, files changed, problems solved
 - **Current state:** What works, what's broken, what's next
 - **User preferences:** Specific requirements or decisions they made
+- **Active goals and skills:** What todo plan/phase you are executing, which skills are loaded, and any autonomy directives (e.g. "don't ask, just execute") that must survive compaction
 
-Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;
+Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets.
+
+IMPORTANT: After compaction you must continue autonomously. Never pause to ask the user what to do next. Resume the plan from the current state."#;
 
 /// A completed summary covering turns up to a certain point
 #[derive(Debug, Clone)]

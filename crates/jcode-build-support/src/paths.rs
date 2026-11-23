@@ -19,7 +19,15 @@ pub fn get_repo_dir() -> Option<PathBuf> {
         }
     }
 
-    // First try: compile-time directory
+    // Prefer current working directory (most specific: picks the right worktree
+    // when `selfdev build` is invoked from ~/jcode/.wt/<name>).
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(repo) = find_repo_in_ancestors(&cwd)
+    {
+        return Some(repo);
+    }
+
+    // Then try compile-time directory (baked path of the binary's own build)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir);
     if let Some(repo) = find_repo_in_ancestors(&path) {
@@ -37,16 +45,6 @@ pub fn get_repo_dir() -> Option<PathBuf> {
         {
             return Some(repo.to_path_buf());
         }
-    }
-
-    // Final fallback: search upward from current working directory.
-    // This matters for self-dev sessions launched from the repo but running
-    // from an installed canary/stable binary whose current_exe() is outside
-    // the source tree.
-    if let Ok(cwd) = std::env::current_dir()
-        && let Some(repo) = find_repo_in_ancestors(&cwd)
-    {
-        return Some(repo);
     }
 
     None

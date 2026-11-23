@@ -233,6 +233,7 @@ pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Res
         std::fs::copy(source, &dest)?;
     }
     crate::platform_support::set_permissions_executable(&dest)?;
+    crate::platform_support::adhoc_codesign(&dest)?;
 
     Ok(dest)
 }
