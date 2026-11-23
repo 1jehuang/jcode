@@ -190,8 +190,8 @@ impl Drop for DependencyTaskFixture {
 }
 
 fn live_dependency_fixture(app: &App, task: &str) -> DependencyTaskFixture {
-    let path = crate::background::global().status_path_for(task);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let manager = crate::background::BackgroundTaskManager::new();
+    let path = manager.status_path_for(task);
     std::fs::write(
         &path,
         serde_json::to_vec(&serde_json::json!({
@@ -374,8 +374,8 @@ fn background_dependency_reload_reads_session_scoped_task_state() {
     with_temp_jcode_home(|| {
         let mut app = waiting_dependency_test_app();
         let task = format!("tui-wait-{}", app.session.id);
-        let path = crate::background::global().status_path_for(&task);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let manager = crate::background::BackgroundTaskManager::new();
+        let path = manager.status_path_for(&task);
         let mut status = serde_json::json!({
             "task_id": task, "tool_name": "bash", "session_id": app.session.id,
             "status": "running", "started_at": "2026-10-24T09:00:00Z",

@@ -548,8 +548,15 @@ fn test_same_session_fast_path_disabled_when_reload_needs_server_history() {
 
 #[test]
 fn test_reload_persisted_background_tasks_note_mentions_running_task() {
+    with_temp_jcode_home(|| {
+        let _ = crate::background::global();
+    });
+    with_temp_jcode_home(assert_reload_note_mentions_running_task);
+}
+
+fn assert_reload_note_mentions_running_task() {
     let session_id = crate::id::new_id("ses_bg_note");
-    let manager = crate::background::global();
+    let manager = crate::background::BackgroundTaskManager::new();
     let info = manager.reserve_task_info();
     let started_at = chrono::Utc::now().to_rfc3339();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -567,16 +574,18 @@ fn test_reload_persisted_background_tasks_note_mentions_running_task() {
 
     let note = reload_persisted_background_tasks_note(&session_id);
 
+    assert!(manager.status_path_for(&info.task_id).is_file());
     assert!(note.contains(&info.task_id));
     assert!(note.contains("Do not rerun those commands"));
     assert!(note.contains("wait for completion rather than repeatedly polling"));
-
-    cleanup_background_task_files(&info.task_id);
 }
 
 #[test]
 fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
-    let _guard = crate::storage::lock_test_env();
+    with_temp_jcode_home(assert_finalize_reload_reconnect_mentions_persisted_background_task);
+}
+
+fn assert_finalize_reload_reconnect_mentions_persisted_background_task() {
     let mut app = create_test_app();
     let session_id = crate::id::new_id("ses_reload_bg");
     let reload_ctx = crate::tool::selfdev::ReloadContext {
@@ -588,7 +597,7 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
     };
     reload_ctx.save().expect("save reload context");
 
-    let manager = crate::background::global();
+    let manager = crate::background::BackgroundTaskManager::new();
     let info = manager.reserve_task_info();
     let started_at = chrono::Utc::now().to_rfc3339();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -619,9 +628,6 @@ fn test_finalize_reload_reconnect_mentions_persisted_background_task() {
     assert!(continuation.contains(&info.task_id));
     assert!(continuation.contains("Do not rerun those commands"));
     assert!(continuation.contains("wait for completion rather than repeatedly polling"));
-
-    cleanup_background_task_files(&info.task_id);
-    cleanup_reload_context_file(&session_id);
 }
 
 #[test]

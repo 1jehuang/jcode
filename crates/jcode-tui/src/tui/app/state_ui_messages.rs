@@ -328,7 +328,8 @@ impl App {
         }) {
             return None;
         }
-        let bytes = match std::fs::read(crate::background::global().status_path_for(task_id)) {
+        let path = crate::background::BackgroundTaskManager::configured_status_path_for(task_id);
+        let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
             Err(error) => {

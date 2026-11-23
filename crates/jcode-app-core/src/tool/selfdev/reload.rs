@@ -185,7 +185,9 @@ pub fn persisted_background_tasks_note(session_id: &str) -> String {
     let mut notes = String::new();
 
     let tasks =
-        crate::background::global().persisted_detached_running_tasks_for_session(session_id);
+        crate::background::BackgroundTaskManager::persisted_detached_running_tasks_for_session(
+            session_id,
+        );
     if !tasks.is_empty() {
         let task_list = tasks
             .iter()
