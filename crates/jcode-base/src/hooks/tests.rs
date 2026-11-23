@@ -169,7 +169,10 @@ async fn tool_transformer_keeps_large_replacement_input() {
         serde_json::json!({"command": "original"}),
     )
     .await;
-    assert_eq!(output["command"].as_str().map(str::len), Some(2 * 1024 * 1024));
+    assert_eq!(
+        output["command"].as_str().map(str::len),
+        Some(2 * 1024 * 1024)
+    );
 }
 
 #[cfg(unix)]
