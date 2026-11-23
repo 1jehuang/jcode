@@ -35,7 +35,7 @@ pub(super) fn apply_agent_definitions_for(schema: &mut Value, user_level: Vec<(S
         return;
     };
     let mut description = String::from(
-        "For spawn: name of an agent definition for the worker (.jcode/agents or .claude/agents in the coordinator's project, or ~/.jcode/agents).",
+        "For spawn: agent definition name (coordinator's .jcode/agents, .claude/agents, or ~/.jcode/agents).",
     );
     if !user_level.is_empty() {
         let listing = user_level
@@ -94,7 +94,7 @@ mod tests {
         let description = schema["properties"]["agent"]["description"]
             .as_str()
             .unwrap();
-        assert!(description.contains("coordinator's project"));
+        assert!(description.contains("coordinator's .jcode/agents"));
         assert!(!description.contains("User-level definitions"));
         assert!(schema["properties"].get("label").is_some());
     }
