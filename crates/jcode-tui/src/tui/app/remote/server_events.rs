@@ -1230,12 +1230,15 @@ fn handle_server_event_inner(
                 })
             {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                let (rate_limit_line, nudged) =
+                    app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                 app.push_display_message(DisplayMessage::system(rate_limit_line));
-                if is_system {
-                    app.set_status_notice("Rate limited; queued system retry");
-                } else {
-                    app.set_status_notice("Rate limited; queued retry");
+                if !nudged {
+                    if is_system {
+                        app.set_status_notice("Rate limited; queued system retry");
+                    } else {
+                        app.set_status_notice("Rate limited; queued retry");
+                    }
                 }
                 app.is_processing = false;
                 app.status = ProcessingStatus::Idle;
@@ -1367,6 +1370,7 @@ fn handle_server_event_inner(
             if is_connectivity_error
                 && app.schedule_pending_remote_network_wait_with_force(&message, true)
             {
+                app.note_turn_interrupted_for_subscribe_nudge();
                 return false;
             }
             if is_connectivity_error && app.rate_limit_pending_message.is_some() {

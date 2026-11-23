@@ -547,7 +547,7 @@ impl App {
         self.start_claude_login_for_account(&label);
     }
 
-    fn start_jcode_login(&mut self) {
+    pub(super) fn start_jcode_login(&mut self) {
         self.upsert_login_progress_card(
             auth_progress::JCODE_LOGIN_TITLE,
             "Jcode login: requesting browser approval...".to_string(),
