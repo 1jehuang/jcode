@@ -61,10 +61,10 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 #[allow(unused_imports)]
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
-    begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
-    submit_prepared_remote_input, submit_remote_slash_input, submit_remote_voice_transcript,
-    submit_voice_transcript,
+    begin_remote_send_with_origin, begin_remote_split_launch, finish_remote_split_launch,
+    history_matches_pending_startup_prompt, route_prepared_input_to_new_remote_session,
+    stage_turn_for_remote_tick_loop, submit_prepared_remote_input, submit_remote_slash_input,
+    submit_remote_voice_transcript, submit_voice_transcript,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -561,7 +561,7 @@ pub(super) async fn dispatch_due_remote_retry(
         "RECOVERY_RETRY_DISPATCH",
         "deadline_elapsed",
     );
-    if let Err(error) = begin_remote_send(
+    if let Err(error) = begin_remote_send_with_origin(
         app,
         remote,
         pending.content,
@@ -570,6 +570,7 @@ pub(super) async fn dispatch_due_remote_retry(
         pending.system_reminder,
         pending.auto_retry,
         pending.retry_attempts,
+        pending.jarvis_voice,
     )
     .await
     {
@@ -1226,6 +1227,7 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
         "frame"
             | "frame-normalized"
             | "screen"
+            | "cells"
             | "screen-json"
             | "screen-json-normalized"
             | "layout"
@@ -1680,10 +1682,13 @@ fn format_stall_duration(timeout: Duration) -> String {
     }
 }
 
-async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
+pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
     let stall_timeout = stall_timeout();
-    let is_running_tool = matches!(app.status, ProcessingStatus::RunningTool(_));
-    if app.is_processing && !is_running_tool {
+    let exempt_from_stall_guard = matches!(
+        app.status,
+        ProcessingStatus::RunningTool(_) | ProcessingStatus::WaitingForNetwork { .. }
+    );
+    if app.is_processing && !exempt_from_stall_guard {
         let stalled = app
             .last_stream_activity
             .map(|t| t.elapsed() > stall_timeout)

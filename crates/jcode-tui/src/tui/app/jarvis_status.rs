@@ -9,6 +9,8 @@ use std::{
 };
 
 pub(super) struct CaptureStatus {
+    #[cfg(unix)]
+    directory: PathBuf,
     path: PathBuf,
     temporary: PathBuf,
     pause: PathBuf,
@@ -76,6 +78,7 @@ impl CaptureStatus {
             );
             let pid = std::process::id();
             Ok(Self {
+                directory: directory.to_path_buf(),
                 path: directory.join(format!("{pid}.json")),
                 temporary: directory.join(format!("{pid}.tmp")),
                 pause: directory.join(format!("{pid}.paused")),
@@ -91,6 +94,11 @@ impl CaptureStatus {
         }
         #[cfg(not(unix))]
         anyhow::bail!("Always-on capture status currently requires Unix")
+    }
+
+    #[cfg(unix)]
+    pub(super) fn private_directory(&self) -> &Path {
+        &self.directory
     }
 
     fn retry_path(&self) -> PathBuf {
@@ -130,6 +138,33 @@ impl CaptureStatus {
     /// Consume a pending manual trigger request.
     pub(super) fn take_wake(&self) -> bool {
         fs::remove_file(&self.wake).is_ok()
+    }
+
+    /// True while another process (e.g. `jcode companion` global push-to-talk)
+    /// holds a shared advisory lock on `dictation.lock` in the Jarvis runtime dir.
+    pub(super) fn external_dictation_active(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let Ok(file) = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(self.directory.join("dictation.lock"))
+            else {
+                return false;
+            };
+            match file.try_lock() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    false
+                }
+                Err(std::fs::TryLockError::WouldBlock) => true,
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        false
     }
 
     pub(super) fn paused(&self) -> bool {

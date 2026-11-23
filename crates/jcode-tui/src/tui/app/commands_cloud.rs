@@ -1020,6 +1020,17 @@ fn show_cloud_account_guidance(app: &mut App, issue: CloudAccountIssue) {
     let (message, notice) = cloud_account_guidance(issue);
     app.push_display_message(DisplayMessage::system(message).with_title("Jcode Cloud setup"));
     app.set_status_notice(notice);
+    if cfg!(test) {
+        return;
+    }
+    match issue {
+        CloudAccountIssue::SignedOut | CloudAccountIssue::SignInExpired => {
+            app.start_jcode_login();
+        }
+        CloudAccountIssue::NotEntitled => {
+            let _ = App::open_auth_browser(crate::subscription_catalog::JCODE_PRICING_URL);
+        }
+    }
 }
 
 fn show_cloud_failure(

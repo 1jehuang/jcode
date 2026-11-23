@@ -1,8 +1,23 @@
 {
   "version": "1.0.3",
-  "date": "2026-11-19",
-  "title": "Keep macOS menu bar counts visible",
-  "highlights": ["The macOS menu bar shows session counts using native text contrast, including 0/0 when no sessions are running."],
-  "improvements": [],
-  "fixes": []
+  "date": "2026-11-22",
+  "title": "Antigravity Google login, scriptable API-key setup, and always-on Jarvis voice",
+  "highlights": [
+    "Google personal accounts now sign in through Antigravity with Gemini 4 (Neon) as the default model and pooled Gemini, Argon, and Claude quota bars in the account router.",
+    "Every API-key provider now supports non-interactive login with --api-key, --api-key-env, and --json, including scripted AWS Bedrock and Azure OpenAI setup.",
+    "Always-on Jarvis voice now streams live captions as you speak, recovers automatically after network outages, and keeps a session-only replay history of accepted requests."
+  ],
+  "improvements": [
+    "Model and fuzzy pickers now rank literal substring matches ahead of typo and usage-boosted loose matches.",
+    "Todo lists now support withdrawing tasks by name with archived reasons while keeping retired and delegated work out of active reminders.",
+    "Queued follow-up messages now preserve image attachments and are delivered before retrying empty post-tool answers.",
+    "Long-running background tasks now trigger a one-time review after five minutes, while routine swarm wait receipts stay hidden from the transcript.",
+    "macOS menu bar session counts now render with native contrast, including 0/0 when idle."
+  ],
+  "fixes": [
+    "Reading a 13th screenshot no longer drops earlier images or invalidates the prompt cache just because of image count (retains tool images up to 48 MiB).",
+    "Retired Gemini Code Assist personal OAuth entries are hidden from login pickers and routed to Antigravity instead.",
+    "Jarvis speech playback waits until the microphone is quiet and keeps live captions, provisional turns, and final transcripts ordered per utterance.",
+    "Coordinator interrupts in swarms now stay scoped to the addressed session rather than interrupting unrelated workers."
+  ]
 }

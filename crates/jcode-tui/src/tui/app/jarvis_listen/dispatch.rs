@@ -22,14 +22,24 @@ pub(super) async fn submit(
 ) -> anyhow::Result<u64> {
     if interleave {
         let id = remote
-            .soft_interrupt(text.to_owned(), vec![], false)
+            .soft_interrupt_with_origin(text.to_owned(), vec![], false, true)
             .await?;
         app.track_pending_soft_interrupt(id, text.to_owned());
         Ok(id)
     } else {
-        app.push_display_message(super::DisplayMessage::user(text.to_owned()));
-        app.begin_remote_send(remote, text.to_owned(), vec![], false)
-            .await
+        app.push_display_message(super::DisplayMessage::jarvis_user(text.to_owned()));
+        super::super::remote::begin_remote_send_with_origin(
+            app,
+            remote,
+            text.to_owned(),
+            vec![],
+            false,
+            None,
+            false,
+            0,
+            true,
+        )
+        .await
     }
 }
 
@@ -91,7 +101,13 @@ impl Dispatch {
             return "unmatched_final";
         };
         self.open.remove(pos);
-        self.queue.push_back(Request {id, at: Instant::now(), text: format!("(The user finished speaking. Full request: {text:?}. Now complete any necessary actions. Your held acknowledgement plays only if the request is unchanged, so speak again only if it no longer fits or you gave none.)"), provisional:false, continuation:true});
+        self.queue.push_back(Request {
+            id,
+            at: Instant::now(),
+            text: jcode_tui_messages::jarvis::jarvis_final_payload(&text),
+            provisional: false,
+            continuation: true,
+        });
         "queued_final"
     }
     pub fn sent(&mut self, r: &Request) {
@@ -191,6 +207,7 @@ mod tests {
                     .unwrap();
                 let v: Value = serde_json::from_str(&record).unwrap();
                 assert_eq!(v["content"], text);
+                assert_eq!(v["jarvis_voice"], true);
                 assert_eq!(v["id"], id);
             }
             assert_eq!(ids.len(), 2);
@@ -201,6 +218,52 @@ mod tests {
                 .map(|(id, _)| *id)
                 .collect();
             assert_eq!(tracked, ids);
+        });
+    }
+    #[test]
+    fn direct_voice_preserves_payload_and_provenance_but_typed_lookalike_has_none() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut app = crate::tui::app::tests::create_test_app();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut remote = super::super::RemoteConnection::dummy();
+            let mut lines = BufReader::new(remote.take_dummy_peer().unwrap()).lines();
+            let payload = env("hello\n\"again\"");
+            let voice_id = submit(&mut app, &mut remote, &payload, false)
+                .await
+                .unwrap();
+            assert!(
+                app.rate_limit_pending_message
+                    .as_ref()
+                    .unwrap()
+                    .jarvis_voice
+            );
+            let row = app.display_messages().last().unwrap();
+            assert_eq!(row.user_row_text(false), "hello\n\"again\"");
+            assert_eq!(row.content, payload);
+            let typed_id = remote
+                .send_message_with_images_reminder_and_skill(payload.clone(), vec![], None, None)
+                .await
+                .unwrap();
+            for (id, voice) in [(voice_id, true), (typed_id, false)] {
+                loop {
+                    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    let frame: Value = serde_json::from_str(&line).unwrap();
+                    if frame["id"] != id {
+                        continue;
+                    }
+                    assert_eq!(frame["type"], "message");
+                    assert_eq!(frame["content"], payload);
+                    assert_eq!(
+                        frame.get("jarvis_voice").and_then(Value::as_bool),
+                        voice.then_some(true)
+                    );
+                    break;
+                }
+            }
         });
     }
     #[test]

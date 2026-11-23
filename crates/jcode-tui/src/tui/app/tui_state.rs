@@ -218,20 +218,68 @@ impl App {
         (provider, model)
     }
 
+    /// Available reasoning efforts for the active remote provider/model.
+    ///
+    /// For Antigravity, uses the live remote catalog routes when available so
+    /// newly discovered models expose their exact sibling effort tiers, falling
+    /// back to static inference during the pre-catalog bootstrap window.
+    pub(super) fn remote_available_efforts(&self) -> Vec<&'static str> {
+        let (provider_name, provider_model) = self.remote_effort_identity();
+        if provider_name
+            .as_deref()
+            .is_some_and(|p| p.to_ascii_lowercase().contains("antigravity"))
+            && let Some(model) = provider_model.as_deref()
+            && !model.trim().is_empty()
+            && !model.trim().eq_ignore_ascii_case("default")
+        {
+            let catalog_models: Vec<&str> = self
+                .remote_model_options
+                .iter()
+                .filter(|route| {
+                    route.available && route.provider.eq_ignore_ascii_case("antigravity")
+                })
+                .map(|route| route.model.as_str())
+                .collect();
+            if !catalog_models.is_empty() {
+                return jcode_provider_core::antigravity_efforts_from_catalog(
+                    model,
+                    catalog_models,
+                );
+            }
+        }
+        inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
     /// session will actually use instead of assuming the maximum.
     pub(super) fn remote_reasoning_effort_hint(&self) -> Option<String> {
         if crate::tui::is_ssh_remote() {
-            return self.remote_reasoning_effort.clone();
+            return self.remote_reasoning_effort.clone().or_else(|| {
+                let (provider, model) = self.remote_effort_identity();
+                if provider
+                    .as_deref()
+                    .is_some_and(|p| p.to_ascii_lowercase().contains("antigravity"))
+                {
+                    model.as_deref().and_then(|m| {
+                        jcode_provider_core::split_antigravity_model_effort(m)
+                            .map(|(_, effort)| effort.to_string())
+                    })
+                } else {
+                    None
+                }
+            });
         }
         self.remote_reasoning_effort.clone().or_else(|| {
             let (provider, model) = self.remote_effort_identity();
             let provider = provider.unwrap_or_default().to_ascii_lowercase();
             let model = model.unwrap_or_default().to_ascii_lowercase();
             let cfg = &crate::config::config().provider;
-            if provider.contains("anthropic")
+            if provider.contains("antigravity") {
+                jcode_provider_core::split_antigravity_model_effort(&model)
+                    .map(|(_, effort)| effort.to_string())
+            } else if provider.contains("anthropic")
                 || provider.contains("claude")
                 || model.starts_with("claude-")
             {
@@ -648,6 +696,17 @@ impl crate::tui::TuiState for App {
             PendingLogin::Exchanging { .. } => {
                 Some("Login only: exchanging credentials · not sent to AI · please wait")
             }
+            PendingLogin::AutoApiKey => {
+                Some("Login only: paste any API key · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyChooseProvider { .. } => {
+                Some("Login only: enter provider number or name · not sent to AI · /cancel")
+            }
+            PendingLogin::ApiKeyProfile { .. }
+            | PendingLogin::CursorApiKey
+            | PendingLogin::AzureApiKey { .. } => {
+                Some("Login only: paste API key · not sent to AI · /cancel")
+            }
             PendingLogin::OpenAiAccount { .. }
             | PendingLogin::Gemini { .. }
             | PendingLogin::Antigravity { .. } => {
@@ -655,6 +714,18 @@ impl crate::tui::TuiState for App {
             }
             _ => Some("Login only: authentication input · not sent to AI · /cancel"),
         }
+    }
+
+    fn login_input_is_secret(&self) -> bool {
+        matches!(
+            self.pending_login.as_ref(),
+            Some(
+                PendingLogin::AutoApiKey
+                    | PendingLogin::ApiKeyProfile { .. }
+                    | PendingLogin::CursorApiKey
+                    | PendingLogin::AzureApiKey { .. }
+            )
+        )
     }
 
     fn input(&self) -> &str {

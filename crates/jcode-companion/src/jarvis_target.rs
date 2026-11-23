@@ -37,6 +37,29 @@ pub(crate) fn request_wake(pid: u32) -> std::io::Result<()> {
         .map(drop)
 }
 
+/// Hold a shared advisory lock on `$XDG_RUNTIME_DIR/jcode-jarvis/dictation.lock`
+/// while push-to-talk dictation is active so always-on Jarvis suppresses its
+/// own capture and does not double-transcribe speech meant for another window.
+/// Dropping the returned file releases the lock automatically, even on crash.
+pub(crate) fn acquire_dictation_suppress() -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = status_dir()?;
+    if !dir.is_dir() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(0o400000) // O_NOFOLLOW on Linux
+        .open(dir.join("dictation.lock"))
+        .ok()?;
+    file.try_lock_shared().ok()?;
+    Some(file)
+}
+
 /// The most recently active always-on Jarvis client with a registered session.
 pub(crate) fn live_jarvis() -> Option<JarvisTarget> {
     find(

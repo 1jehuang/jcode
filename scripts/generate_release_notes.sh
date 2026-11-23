@@ -38,35 +38,125 @@ repo_slug() {
 
 REPO="$(repo_slug)"
 
-# Prefer the published release index: replayed history can make the nearest
-# ancestor tag much older than the actual preceding release. This also works
-# while preparing notes before the new tag exists.
+# Prefer the latest *published* stable release on GitHub so unpublished drafts
+# (such as aborted release attempts) are never used as the baseline and cannot
+# hide bundled commits from the next release's notes or compare link. When the
+# GitHub API is unavailable, fall back to changelog/index.json (skipping entries
+# explicitly marked unpublished/draft), then local git tag history.
 if [[ -z "$PREV_TAG" ]]; then
-    PREV_TAG="$(python3 - "$VERSION_NUM" << 'PY'
+    PREV_TAG="$(python3 - "$VERSION_NUM" "$REPO" << 'PY'
 import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 def version(value):
+    value = value.lstrip("v")
     if re.fullmatch(r"\d+\.\d+\.\d+", value):
         return tuple(map(int, value.split(".")))
     return None
 
+def local_tag_exists(tag):
+    return subprocess.run(
+        ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+def published_tags_from_github(repo, current):
+    if os.environ.get("JCODE_SKIP_GITHUB_API") == "1":
+        return []
+    fixture = os.environ.get("JCODE_PUBLISHED_RELEASES_JSON")
+    if fixture is not None:
+        releases = json.loads(fixture)
+        return [
+            r.get("tag_name") or r.get("tagName") or ""
+            for r in releases
+            if not r.get("draft") and not r.get("prerelease")
+        ]
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        tags = []
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "jcode-release-notes/1.0",
+        }
+        for page in range(1, 6):
+            url = f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    batch = json.load(resp)
+            except (urllib.error.URLError, TimeoutError, ValueError):
+                return []
+            if not batch:
+                break
+            found_older = False
+            for rel in batch:
+                if rel.get("draft") or rel.get("prerelease"):
+                    continue
+                tag_name = rel.get("tag_name") or ""
+                ver = version(tag_name)
+                if ver is not None:
+                    tags.append(tag_name)
+                    if ver < current:
+                        found_older = True
+            if found_older or len(batch) < 100:
+                break
+        return tags
+    if shutil.which("gh"):
+        try:
+            out = subprocess.check_output(
+                [
+                    "gh", "release", "list",
+                    "--repo", repo,
+                    "--exclude-drafts",
+                    "--exclude-pre-releases",
+                    "--limit", "50",
+                    "--json", "tagName",
+                ],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            )
+            return [r.get("tagName") or "" for r in json.loads(out)]
+        except (subprocess.SubprocessError, ValueError):
+            return []
+    return []
+
 current = version(sys.argv[1])
-index = pathlib.Path("changelog/index.json")
-if current and index.exists():
-    entries = json.loads(index.read_text())["entries"]
-    candidates = [entry["version"] for entry in entries
-                  if version(entry["version"]) is not None
-                  and version(entry["version"]) < current]
-    if candidates:
-        print("v" + max(candidates, key=version))
+repo = sys.argv[2]
+if current:
+    gh_candidates = [
+        tag for tag in published_tags_from_github(repo, current)
+        if version(tag) is not None and version(tag) < current and local_tag_exists(tag)
+    ]
+    if gh_candidates:
+        print(max(gh_candidates, key=version))
+        sys.exit(0)
+
+    index = pathlib.Path("changelog/index.json")
+    if index.exists():
+        entries = json.loads(index.read_text())["entries"]
+        candidates = [
+            "v" + entry["version"].lstrip("v")
+            for entry in entries
+            if entry.get("published", True) is not False
+            and entry.get("draft", False) is not True
+            and version(entry["version"]) is not None
+            and version(entry["version"]) < current
+            and local_tag_exists("v" + entry["version"].lstrip("v"))
+        ]
+        if candidates:
+            print(max(candidates, key=version))
 PY
 )"
-    if [[ -n "$PREV_TAG" ]] && ! git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null; then
-        PREV_TAG=""
-    fi
     if [[ -z "$PREV_TAG" ]] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
         PREV_TAG="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
     fi

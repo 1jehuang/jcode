@@ -116,6 +116,7 @@ def summarize(lines, session=None):
                            endpoint_to_first_send_ms=delta(endpoint, sent, signed=True),
                            endpoint_to_final_send_ms=delta(endpoint, final_request),
                            endpoint_to_first_speak_callback_ms=delta(endpoint, deferred),
+                           final_send_to_first_speak_callback_ms=delta(final_request, deferred),
                            acceptance_to_send_ms=delta(accept, sent),
                            queue_to_send_ms=(int(sent[3]['queue_ms']) if sent and sent[3].get('queue_ms', '').isdigit() else delta(queued, sent)),
                            endpoint_to_speech_enqueue_ms=delta(endpoint, playback),
@@ -125,7 +126,7 @@ def summarize(lines, session=None):
                            enqueue_to_synthesis_ms=delta(playback, synth),
                            synthesis_to_player_ms=delta(synth, player),
                            endpoint_to_player_ms=delta(endpoint, player),
-                           playback_boundary=('player_process_started' if player else 'speech_enqueue' if playback else None)))
+                           playback_boundary=('player_process_started' if player else 'synthesis_started' if synth else 'speech_enqueue' if playback else None)))
     return result
 
 

@@ -772,6 +772,7 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
                 ));
             }
             app.save_input_for_reload(&session_id);
+            super::server_events::record_auto_reload_attempt();
             app.reload_requested = Some(session_id);
             app.should_quit = true;
             return Ok(PostConnectOutcome::Quit);

@@ -487,8 +487,15 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             return Ok(());
         }
 
-        if trimmed == "/update" {
-            handle_remote_update_command(app, remote).await?;
+        if let Some(parsed) = App::parse_update_command_channel(trimmed) {
+            match parsed {
+                Ok(explicit_channel) => {
+                    handle_remote_update_command(app, remote, explicit_channel).await?;
+                }
+                Err(usage) => {
+                    app.set_status_notice(usage);
+                }
+            }
             return Ok(());
         }
 
@@ -645,11 +652,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             let label = current
                 .map(app_mod::effort_display_label)
                 .unwrap_or("default");
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.is_empty() {
                 app.push_display_message(DisplayMessage::system(
                     "Reasoning effort not available for this provider.".to_string(),
@@ -681,11 +684,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                 return Ok(());
             }
-            let (provider_name, provider_model) = app.remote_effort_identity();
-            let efforts = app_mod::inferred_reasoning_efforts(
-                provider_name.as_deref(),
-                provider_model.as_deref(),
-            );
+            let efforts = app.remote_available_efforts();
             if efforts.contains(&level) {
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();

@@ -10,11 +10,15 @@ pub(super) async fn run(
     recorder: String,
     config: ContinuousConfig,
     budget: ContinuousBudget,
+    restoration: RestorationWait,
     paused: Arc<AtomicBool>,
     capturing: Arc<AtomicBool>,
     gate: Option<jcode_base::jev::JevClient>,
 ) -> Result<(), VoiceError> {
     emit(&events, ContinuousEvent::State(VoiceState::Starting));
+    jcode_base::logging::info(&format!(
+        "JARVIS_CAPTURE settings pause_ms={PAUSE_MS} commit_grace_ms={COMMIT_GRACE_MS} hard_limit_ms={HARD_LIMIT_MS}"
+    ));
     let mut segmenter = Segmenter::default();
     let mut generation = epoch.load(Ordering::SeqCst);
     let mut resume_at = Instant::now();
@@ -26,7 +30,11 @@ pub(super) async fn run(
         u64,
     )> = VecDeque::new();
     // Audio sink of the utterance currently streaming to Nari.
-    let mut live: Option<(u64, tokio::sync::mpsc::UnboundedSender<Vec<i16>>)> = None;
+    let mut live: Option<(
+        u64,
+        tokio::sync::mpsc::UnboundedSender<Vec<i16>>,
+        Arc<Mutex<history::Candidate>>,
+    )> = None;
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -100,33 +108,32 @@ pub(super) async fn run(
                                 trace_turn(id, "speech_onset");
                                 let token = Arc::new(AtomicBool::new(false));
                                 let gate = gate.clone();
-                                let threshold = config.action_probability;
+                                let threshold = config.live_action_probability.map(|read| read()).filter(|p| (0.5..=1.0).contains(p)).unwrap_or(config.action_probability);
                                 let require_jev = config.require_jev;
                                 let key = key.clone();
                                 let child = token.clone();
                                 let warm_session = warm.take().and_then(Warm::take);
                                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                let mut candidate = events.lock().unwrap_or_else(|e| e.into_inner()).history.begin();
+                                candidate.append(&audio);
+                                let candidate = Arc::new(Mutex::new(candidate));
                                 tx.send(audio).map_err(|_| VoiceError::CaptureFailed)?;
-                                live = Some((id, tx));
+                                live = Some((id, tx, candidate.clone()));
                                 let (events, epoch, paused, suppressed, stopped) = (events.clone(), epoch.clone(), paused.clone(), suppressed.clone(), cancel.clone());
                                 jobs.push_back((tokio::spawn(async move {
                                     let (partial_tx, partial_rx) = tokio::sync::watch::channel(String::new());
-                                    // Show Nari's revisions as they stream, word by word.
-                                    let mut live_rx = partial_tx.subscribe();
-                                    let live_events = events.clone();
-                                    let caption_feed = tokio::spawn(async move {
-                                        while live_rx.changed().await.is_ok() {
-                                            let text: String = live_rx.borrow_and_update().trim().chars().take(256).collect();
-                                            if text.is_empty() { continue; }
-                                            emit(&live_events, ContinuousEvent::Caption { id, text });
-                                        }
-                                    });
                                     let early = early_trigger(partial_rx, gate.clone(), threshold, require_jev, id, events.clone(), {
                                         let (epoch, paused, suppressed, stopped) = (epoch.clone(), paused.clone(), suppressed.clone(), stopped.clone());
                                         move || !(stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst))
                                     });
                                     tokio::pin!(early);
-                                    let stream = stream_job(warm_session, key, rx, child, partial_tx);
+                                    let stream = stream_job(warm_session, key, rx, child, |text| {
+                                        let mut output = events.lock().unwrap_or_else(|e| e.into_inner());
+                                        if generation == epoch.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) && !paused.load(Ordering::SeqCst) && !suppressed.load(Ordering::SeqCst) && !text.trim().is_empty() {
+                                            output.push(ContinuousEvent::Caption { id, text: text.trim().chars().take(256).collect() });
+                                        }
+                                        partial_tx.send_replace(text);
+                                    });
                                     tokio::pin!(stream);
                                     // Gate partials while audio streams. Once the final
                                     // transcript lands, any in-flight partial gate is stale.
@@ -144,18 +151,19 @@ pub(super) async fn run(
                                             }
                                         }
                                     };
-                                    caption_feed.abort();
                                     trace_turn(id, "transcription_finished");
                                     if let Some(trigger) = fired {
                                         pending_final.0 = None;
                                         // Always close a provisional request, even when
                                         // nothing was added, so Jarvis knows to answer.
+                                        let nonempty_final = !text.trim().is_empty();
                                         let full = if text.trim().is_empty() { trigger } else { text };
                                         let mut output = events.lock().unwrap_or_else(|e|e.into_inner());
                                         if stopped.load(Ordering::SeqCst) || generation != epoch.load(Ordering::SeqCst) || paused.load(Ordering::SeqCst) || suppressed.load(Ordering::SeqCst) {
                                             trace_discard(id, "continuation_discarded", "epoch_changed");
                                             return Ok(None);
                                         }
+                                        if nonempty_final {output.history.accept(std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())), id, &full);}
                                         trace_turn(id, "continuation_ready");
                                         output.push(ContinuousEvent::Continuation { id, text: full.trim().chars().take(4096).collect() });
                                         return Ok(None);
@@ -171,17 +179,23 @@ pub(super) async fn run(
                                     let gate = gate.as_ref().ok_or(VoiceError::NotConfigured)?;
                                     let score = semantic_gate(gate,&text,threshold,state).await?;
                                     trace_turn(id, "final_gate_decided");
-                                    Ok(Some(ClassifiedCaption { id, text, score }))
+                                    Ok(Some(ClassifiedCaption { id, text, score, audio: std::mem::take(&mut *candidate.lock().unwrap_or_else(|e| e.into_inner())) }))
                                 }),token,generation));
                             }
                             Seg::Audio(audio) => {
-                                if let Some((_, tx)) = &live {
+                                if let Some((_, tx, candidate)) = &live {
+                                    candidate.lock().unwrap_or_else(|e| e.into_inner()).append(&audio);
                                     budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
+                            event @ (Seg::Pause | Seg::Resume) => {
+                                if let Some((id, _, _)) = &live {
+                                    trace_turn(*id, if event == Seg::Pause { "speech_pause" } else { "speech_resumed" });
+                                }
+                            }
                             Seg::End => {
-                                if let Some((id, tx)) = live.take() {
+                                if let Some((id, tx, _)) = live.take() {
                                     trace_turn(id, "speech_endpoint");
                                     drop(tx);
                                 }
@@ -294,16 +308,16 @@ pub(super) async fn run(
                     return Err(error);
                 };
                 capture?;
-                consecutive_failures += 1;
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let watch_network = matches!(error, VoiceError::Network | VoiceError::Timeout);
                 emit(&events, ContinuousEvent::Recovering { error, delay });
                 emit(&events, ContinuousEvent::State(VoiceState::Suppressed));
                 level.store(0, Ordering::Relaxed);
                 segmenter = Segmenter::default();
                 permitted = false;
-                tokio::select! {
-                    _ = crate::nari::cancelled(&cancel) => return Err(VoiceError::Cancelled),
-                    _ = tokio::time::sleep(delay) => continue,
-                }
+                wait_for_recovery(&cancel, delay, watch_network, async { restoration().await })
+                    .await?;
+                continue;
             }
             capture?;
         }

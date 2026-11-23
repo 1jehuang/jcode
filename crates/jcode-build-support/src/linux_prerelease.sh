@@ -13,6 +13,9 @@ remote=$(gh api --hostname github.com repos/1jehuang/jcode/git/ref/heads/master 
 [ "$remote" = "$sha" ] || exit 0
 eligible || exit 0
 notes=${2-}
+if [ "${JCODE_LINUX_RELEASE_VIA_CI:-0}" != 1 ] && [ -x scripts/publish_linux_release_direct.sh ] && command -v justrust >/dev/null 2>&1; then
+    exec bash scripts/publish_linux_release_direct.sh "$sha" "$notes"
+fi
 set -- -f "sha=$sha"
 if [ -n "$notes" ]; then set -- "$@" -f "release_notes=$notes"; fi
 exec gh workflow run selfdev-linux.yml --repo 1jehuang/jcode --ref master "$@"

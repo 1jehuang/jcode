@@ -16,6 +16,7 @@ pub(crate) enum PendingLogin {
         label: String,
         expected_state: String,
         redirect_uri: String,
+        device_fallback_cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     },
     /// Waiting for user to paste a Gemini OAuth callback URL/query or auth code.
     Gemini {
@@ -28,6 +29,13 @@ pub(crate) enum PendingLogin {
         verifier: String,
         expected_state: String,
         redirect_uri: String,
+    },
+    /// Waiting for user to paste any API key (provider auto-detected from prefix).
+    AutoApiKey,
+    /// Waiting for user to disambiguate or name the provider for an already-pasted API key.
+    ApiKeyChooseProvider {
+        key: String,
+        candidates: &'static [&'static str],
     },
     /// Waiting for user to paste an API key for an OpenAI-compatible provider.
     ApiKeyProfile {
@@ -90,6 +98,9 @@ impl PendingLogin {
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),
             Self::Antigravity { .. } => Some(("antigravity".to_string(), "oauth".to_string())),
+            Self::AutoApiKey | Self::ApiKeyChooseProvider { .. } => {
+                Some(("api-key".to_string(), "api_key".to_string()))
+            }
             Self::ApiKeyProfile {
                 provider_id,
                 auth_method,

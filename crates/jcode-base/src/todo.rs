@@ -120,6 +120,38 @@ pub fn load_goals(session_id: &str) -> Result<Vec<TodoGoal>> {
     storage::read_json(&path).or_else(|_| Ok(Vec::new()))
 }
 
+/// Summary of a session's persisted todo state for picker display and search.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionTodoSummary {
+    pub title: Option<String>,
+    pub user_intention: Option<String>,
+    pub todo_statuses: Vec<String>,
+}
+
+/// Load todo state for a session once and derive its title hint, user intention,
+/// and non-cancelled todo statuses.
+pub fn load_session_todo_summary(session_id: &str) -> SessionTodoSummary {
+    let todos = load_todos(session_id).unwrap_or_default();
+    let plan = load_plan(session_id).unwrap_or_default();
+    let title = derive_session_title(&todos, &plan);
+    let user_intention = plan
+        .user_intention
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let todo_statuses = todos
+        .into_iter()
+        .filter(|todo| !todo_status_is_cancelled(&todo.status))
+        .map(|todo| todo.status)
+        .collect();
+    SessionTodoSummary {
+        title,
+        user_intention,
+        todo_statuses,
+    }
+}
+
 /// Load todo state for a session and derive its best title hint.
 pub fn load_session_title(session_id: &str) -> Option<String> {
     let todos = load_todos(session_id).ok()?;

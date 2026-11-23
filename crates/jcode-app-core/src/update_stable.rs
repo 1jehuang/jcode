@@ -91,10 +91,16 @@ fn sums_list_asset(
         .unwrap_or(false)
 }
 
-fn fetch_recent_releases_blocking(
+const MAX_FALLBACK_PAGES: usize = 5;
+const FALLBACK_PAGE_SIZE: usize = 100;
+
+fn fetch_releases_page_blocking(
     client: &reqwest::blocking::Client,
+    page: usize,
 ) -> Result<Vec<ListedRelease>> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30");
+    let url = format!(
+        "https://api.github.com/repos/{GITHUB_REPO}/releases?per_page={FALLBACK_PAGE_SIZE}&page={page}"
+    );
     let response = github_api_request(client, &url)
         .send()
         .context("Failed to fetch releases")?;
@@ -137,11 +143,26 @@ pub(super) fn find_stable_update_with(
         "Latest release {} is not yet installable on this platform; checking older releases",
         latest.tag_name
     ));
-    let releases = fetch_recent_releases_blocking(&client)?;
-    clear_rate_limit_backoff();
-    select_installable_stable(releases, is_update, |release, asset| {
-        sums_list_asset(&client, release, asset)
-    })
+    for page in 1..=MAX_FALLBACK_PAGES {
+        let releases = fetch_releases_page_blocking(&client, page)?;
+        clear_rate_limit_backoff();
+        let page_len = releases.len();
+        let reached_installed = releases.iter().any(|r| {
+            !r.draft
+                && !r.prerelease
+                && is_stable_tag(&r.release.tag_name)
+                && matches!(is_update(&r.release), Ok(false))
+        });
+        if let Some(found) = select_installable_stable(releases, &mut is_update, |release, asset| {
+            sums_list_asset(&client, release, asset)
+        })? {
+            return Ok(Some(found));
+        }
+        if page_len < FALLBACK_PAGE_SIZE || reached_installed {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

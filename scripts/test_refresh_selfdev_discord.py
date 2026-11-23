@@ -52,10 +52,68 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(self.methods(), ['GET', 'PATCH'])
 
     def test_invalid_inputs(self):
-        for changes in [dict(message_id='12/34'), dict(tag='v1.0.0')]:
+        for changes in [dict(message_id='12/34'), dict(tag='not-a-tag'), dict(tag='v1.0.0-alpha')]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 refresh.refresh(**{**self.args, **changes})
         self.fetch.assert_not_called()
+
+    def test_refresh_stable_release_by_url_and_heading(self):
+        tag = 'v1.0.3'
+        url = 'https://github.com/1jehuang/jcode/releases/tag/' + tag
+        release = dict(
+            tag_name=tag,
+            name=tag,
+            html_url=url,
+            prerelease=False,
+            draft=False,
+            body='### Highlights\n\n- Great feature.\n\n' + refresh.announcements.announcement_marker(tag),
+        )
+        self.fetch.return_value = release
+        stable_args = {**self.args, 'tag': tag}
+
+        # 1. Existing message matching release URL uses single-part override when available.
+        self.message['content'] = f'# jcode {tag}\nOld blurb\nDownload: <{url}>'
+        with patch.object(refresh.announcements, 'load_announcement', return_value=['# jcode v1.0.3\n\nSynced!']):
+            refresh.refresh(**stable_args)
+        self.assertEqual(self.methods(), ['GET', 'PATCH'])
+        req = self.http.call_args.args[0]
+        self.assertEqual(json.loads(req.data)['content'], '# jcode v1.0.3\n\nSynced!')
+
+        # 2. Existing message matching heading falls back to format_message when no override.
+        self.http.reset_mock()
+        self.message['content'] = f'## {tag}\nOld auto-formatted body'
+        with patch.object(refresh.announcements, 'load_announcement', return_value=None):
+            refresh.refresh(**stable_args)
+        self.assertEqual(self.methods(), ['GET', 'PATCH'])
+        req = self.http.call_args.args[0]
+        self.assertEqual(
+            json.loads(req.data)['content'],
+            refresh.announcements.format_message(tag=tag, name=tag, body=release['body'], url=url),
+        )
+
+        # 3. Prefix collision (v1.0.30) must be rejected.
+        self.http.reset_mock()
+        self.message['content'] = '## v1.0.30\nDifferent release'
+        with self.assertRaises(ValueError):
+            refresh.refresh(**stable_args)
+        self.assertEqual(self.methods(), ['GET'])
+
+        # 4. Multi-part override cannot be patched into one message ID.
+        self.http.reset_mock()
+        self.message['content'] = f'## {tag}\nOld body'
+        with (
+            patch.object(refresh.announcements, 'load_announcement', return_value=['part 1', 'part 2']),
+            self.assertRaises(ValueError),
+        ):
+            refresh.refresh(**stable_args)
+        self.assertEqual(self.methods(), ['GET'])
+
+        # 5. Stable tag with prerelease=True must be rejected.
+        self.http.reset_mock()
+        self.fetch.return_value = {**release, 'prerelease': True}
+        with self.assertRaises(ValueError):
+            refresh.refresh(**stable_args)
+        self.http.assert_not_called()
 
     def test_unrelated_messages(self):
         for changes in [dict(content=self.url + 'a'), dict(content=''), dict(id='different'),

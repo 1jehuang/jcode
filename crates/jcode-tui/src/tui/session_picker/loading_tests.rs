@@ -140,6 +140,7 @@ fn global_recency_budget_merges_sources_without_counting_test_sessions() {
                 session_id: id.into(),
             },
             external_path: None,
+            user_intention: None,
             todo_statuses: Vec::new(),
         }
     };

@@ -26,17 +26,23 @@ fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
     for error in [
         VoiceError::Network,
-        VoiceError::NariRejected,
         VoiceError::Timeout,
         VoiceError::Http(503),
         VoiceError::Http(429),
     ] {
         assert!(recovery_delay(&error, 0) < recovery_delay(&error, 1));
-        assert_eq!(recovery_delay(&error, 2), None);
+        assert_eq!(
+            recovery_delay(&error, usize::MAX),
+            Some(Duration::from_secs(60))
+        );
     }
+    assert_eq!(recovery_delay(&VoiceError::NariRejected, 2), None);
     for error in [
         VoiceError::NariNotConfigured,
         VoiceError::NariCreditsExhausted,
+        VoiceError::Http(401),
+        VoiceError::Http(402),
+        VoiceError::Http(403),
         VoiceError::Http(400),
         VoiceError::Cancelled,
         VoiceError::CaptureFailed,
@@ -62,7 +68,9 @@ async fn rejected_warm_session_never_opens_a_second_connection() {
             String::new(),
             rx,
             Arc::new(AtomicBool::new(false)),
-            partial,
+            |text| {
+                partial.send_replace(text);
+            },
         )
         .await;
         assert_eq!(result, Err(expected));
@@ -349,10 +357,129 @@ fn speech_has_preroll_and_trailing_silence() {
     let mut s = Segmenter::default();
     s.push(&[0; 4800]);
     assert!(s.push(&[3000; 16000]).is_empty());
-    let out = s.push(&[0; 11200]);
+    let out = s.push(&[0; (PAUSE_MS + COMMIT_GRACE_MS) * 16]);
     assert_eq!(out.len(), 1);
     assert!(out[0].len() <= 320000);
     assert!(!s.active);
+}
+#[test]
+fn resumed_speech_cancels_commit_without_opening_another_stream() {
+    let mut s = Segmenter::default();
+    let mut transitions = Vec::new();
+    for (value, ms) in [(3000, 400), (0, 1280), (3000, 200), (0, 1280)] {
+        transitions.extend(s.push_stream(&vec![value; ms * 16]));
+    }
+    transitions.retain(|e| !matches!(e, Seg::Audio(_)));
+    assert!(matches!(
+        transitions.as_slice(),
+        [Seg::Start(_), Seg::Pause, Seg::Resume, Seg::Pause]
+    ));
+    assert!(matches!(
+        s.push_stream(&[0; 320]).as_slice(),
+        [Seg::Audio(_), Seg::End]
+    ));
+    assert!(s.push_stream(&[0; 16000]).is_empty());
+}
+#[tokio::test]
+async fn long_network_outage_then_pause_resume_commits_only_fresh_audio() {
+    use futures::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/voice/realtime", listener.local_addr().unwrap());
+    const OFFLINE_ATTEMPTS: usize = 8;
+    let server = tokio::spawn(async move {
+        // Drop each TCP connection before the upgrade while the provider is offline.
+        for _ in 0..OFFLINE_ATTEMPTS {
+            drop(listener.accept().await.unwrap().0);
+        }
+        let mut ws = tokio_tungstenite::accept_async(listener.accept().await.unwrap().0)
+            .await
+            .unwrap();
+        let mut samples = 0;
+        while let Some(msg) = ws.next().await {
+            let v: Value = serde_json::from_str(msg.unwrap().to_text().unwrap()).unwrap();
+            let response = match v["type"].as_str().unwrap() {
+                "session.configure" => json!({"type":"session.configured"}),
+                "input_audio_buffer.append" => {
+                    use base64::Engine;
+                    samples += base64::engine::general_purpose::STANDARD
+                        .decode(v["audio"].as_str().unwrap())
+                        .unwrap()
+                        .len()
+                        / 2;
+                    continue;
+                }
+                "input_audio_buffer.commit" => {
+                    assert_eq!(samples, (400 + 1000 + 200 + 1300) * 16);
+                    ws.send(Message::Text(json!({"type":"input_audio_buffer.committed","item_id":"a","client_event_id":v["event_id"]}).to_string())).await.unwrap();
+                    json!({"type":"transcript.completed","item_id":"a","transcript":"both halves"})
+                }
+                other => panic!("unexpected message {other}"),
+            };
+            ws.send(Message::Text(response.to_string())).await.unwrap();
+            if v["type"] == "input_audio_buffer.commit" {
+                return;
+            }
+        }
+        panic!("stream closed before final commit");
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    for failure in 0..OFFLINE_ATTEMPTS {
+        let endpoint = url.clone();
+        let stopped = cancel.clone();
+        let warm =
+            tokio::spawn(async move { NariSession::connect_to(&endpoint, "test", stopped).await });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(vec![42; 320]).unwrap();
+        drop(tx);
+        let error = stream_job(Some(warm), String::new(), rx, cancel.clone(), |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error, VoiceError::Network);
+        assert_eq!(
+            recovery_delay(&error, failure).unwrap().as_secs(),
+            [2, 8, 60][failure.min(2)]
+        );
+    }
+    let connect_cancel = cancel.clone();
+    let mut warm = Some(tokio::spawn(async move {
+        NariSession::connect_relay(&url, "test", connect_cancel).await
+    }));
+    let mut segmenter = Segmenter::default();
+    let mut live = None;
+    let mut job = None;
+    for (value, ms) in [(3000, 400), (0, 1000), (3000, 200), (0, 1300)] {
+        for event in segmenter.push_stream(&vec![value; ms * 16]) {
+            match event {
+                Seg::Start(audio) => {
+                    assert!(job.is_none());
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    tx.send(audio).unwrap();
+                    live = Some(tx);
+                    let warm = warm.take().unwrap();
+                    let cancel = cancel.clone();
+                    job = Some(tokio::spawn(async move {
+                        stream_job(Some(warm), String::new(), rx, cancel, |_| {}).await
+                    }));
+                }
+                Seg::Audio(audio) => live.as_ref().unwrap().send(audio).unwrap(),
+                Seg::Pause | Seg::Resume => assert!(live.is_some()),
+                Seg::End => drop(live.take().unwrap()),
+            }
+        }
+    }
+    assert!(live.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), job.unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        "both halves"
+    );
+    server.await.unwrap();
 }
 #[test]
 fn brief_noise_is_not_speech() {
@@ -395,19 +522,24 @@ fn gate_separates_candidate_history_and_chat() {
         ctx.remember(i, &i.to_string());
     }
     let trigger = "  The \"second\" one.  ";
-    let state = ctx.state(trigger, false);
+    let wire = ctx.state(trigger, false);
+    let state: serde_json::Value = serde_json::from_str(wire.as_str().unwrap()).unwrap();
     assert_eq!(state["candidate"], trigger);
-    assert_eq!(state["recent_chat"][0]["text"], "Which one?");
-    assert_eq!(state["background_transcript"][0], "4");
-    // Jev judges one continuous stream ending with the newest segment.
+    assert_eq!(state["recent_chat"][0][1], "Which one?");
     assert_eq!(
-        state["continuous_transcript"],
-        "4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 The \"second\" one."
+        state["background_transcript"],
+        serde_json::json!(["16", "17", "18", "19"])
+    );
+    let next = ctx.state("changed", false);
+    let prefix = |s: &str| s.rsplit_once(",\"candidate\":").unwrap().0.to_owned();
+    assert_eq!(
+        prefix(wire.as_str().unwrap()),
+        prefix(next.as_str().unwrap())
     );
     let payload: serde_json::Value = serde_json::from_str(&ctx.accepted(trigger.into())).unwrap();
     assert_eq!(
         payload,
-        serde_json::json!({"background_transcript": state["background_transcript"], "trigger":trigger})
+        serde_json::json!({"background_transcript": (4..20).map(|i| i.to_string()).collect::<Vec<_>>(), "trigger":trigger})
     );
     assert!(ctx.background.is_empty());
     assert_eq!(ctx.chat.len(), 1);
@@ -415,11 +547,13 @@ fn gate_separates_candidate_history_and_chat() {
 #[test]
 fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
     let mut events = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
         notify: Arc::new(tokio::sync::Notify::new()),
     };
+    events.history.reset(Some(true));
     for (id, text, raw) in [
         (1, "ambient", Some(0.943)),
         (2, "unscored", None),
@@ -436,7 +570,10 @@ fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
             )
             .unwrap()
         });
+        let mut audio = events.history.begin();
+        audio.append(&[id as i16, -9]);
         events.classified(ClassifiedCaption {
+            audio,
             id,
             text: text.into(),
             score,
@@ -464,6 +601,11 @@ fn scored_captions_precede_dispatch_and_unscored_speech_stays_background() {
         }
         assert!(events.queue.is_empty());
     }
+    assert_eq!(events.history.status().1, [3]);
+    assert_eq!(
+        events.history.clip(3).unwrap(),
+        (vec![3, -9], "request".into())
+    );
 }
 #[test]
 fn manual_trigger_sends_only_recent_speech() {
@@ -485,8 +627,19 @@ fn manual_trigger_sends_only_recent_speech() {
         serde_json::json!({"trigger":"latest","background_transcript":["first"]})
     );
     assert!(ctx.manual(now).is_none(), "each utterance is sent once");
+    let probe = |ctx: &GateContext| {
+        let wire = ctx.state("and the second?", false);
+        serde_json::from_str::<serde_json::Value>(wire.as_str().unwrap()).unwrap()
+    };
+    assert_eq!(probe(&ctx)["recent_acceptance"], true);
+    assert_eq!(probe(&ctx)["background_transcript"], serde_json::json!([]));
+    assert!(!probe(&ctx).to_string().contains("latest"));
+    ctx.last_acceptance = Some(now - MANUAL_TRIGGER_WINDOW - Duration::from_secs(1));
+    assert_eq!(probe(&ctx)["recent_acceptance"], false);
+    assert_eq!(probe(&GateContext::default())["recent_acceptance"], false);
     // Speech still at the gate is claimed, and its later score dropped.
     let mut events = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -507,6 +660,7 @@ fn manual_trigger_sends_only_recent_speech() {
         serde_json::json!({"trigger":"just said","background_transcript":["before"]})
     );
     events.classified(ClassifiedCaption {
+        audio: Default::default(),
         id: 7,
         text: "just said".into(),
         score: Some((0.99, true)),
@@ -684,6 +838,7 @@ fn live_e2e_latency() {
 #[test]
 fn pending_requests_survive_telemetry_but_not_invalidation() {
     let mut e = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -730,8 +885,49 @@ fn pending_requests_survive_telemetry_but_not_invalidation() {
     assert!(e.queue.is_empty());
 }
 #[test]
+fn caption_revision_keeps_score_after_row_even_before_poll() {
+    use super::*;
+    let mut e = Events {
+        history: history::History::default(),
+        context: GateContext::default(),
+        queue: VecDeque::new(),
+        quiet: QuietWindow::default(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+    };
+    let caption = |id, text: &str| ContinuousEvent::Caption {
+        id,
+        text: text.into(),
+    };
+    e.push(caption(1, "start"));
+    e.push(ContinuousEvent::CaptionScore {
+        id: 1,
+        probability: 0.98,
+        accepted: true,
+    });
+    e.push(caption(2, "another"));
+    e.push(caption(1, "revised"));
+    assert!(
+        matches!(e.queue.pop_front(), Some(ContinuousEvent::Caption { id: 1, text }) if text == "revised")
+    );
+    assert!(matches!(
+        e.queue.pop_front(),
+        Some(ContinuousEvent::CaptionScore {
+            id: 1,
+            accepted: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        e.queue.pop_front(),
+        Some(ContinuousEvent::Caption { id: 2, .. })
+    ));
+    assert!(e.queue.is_empty());
+}
+
+#[test]
 fn bounded_events() {
     let mut e = Events {
+        history: history::History::default(),
         context: GateContext::default(),
         queue: VecDeque::new(),
         quiet: QuietWindow::default(),
@@ -760,4 +956,36 @@ fn bounded_events() {
             .count(),
         1
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_wake_respects_deadline_and_cancellation() {
+    let stopped = AtomicBool::new(false);
+    let delay = Duration::from_secs(60);
+    for (watch, expected) in [(true, 3), (false, 60)] {
+        let start = tokio::time::Instant::now();
+        wait_for_recovery(
+            &stopped,
+            delay,
+            watch,
+            tokio::time::sleep(Duration::from_secs(3)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(expected));
+    }
+    let start = tokio::time::Instant::now();
+    wait_for_recovery(&stopped, delay, true, std::future::pending())
+        .await
+        .unwrap();
+    assert_eq!(start.elapsed(), delay);
+    let (result, ()) = tokio::join!(
+        wait_for_recovery(&stopped, delay, true, std::future::pending()),
+        async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            stopped.store(true, Ordering::SeqCst);
+        }
+    );
+    assert_eq!(result, Err(VoiceError::Cancelled));
+    assert!(start.elapsed() < delay + Duration::from_secs(2));
 }

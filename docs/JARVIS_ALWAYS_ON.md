@@ -57,6 +57,21 @@ are invalidated, and a short cooldown avoids loudspeaker feedback. This is not
 full acoustic echo cancellation or simultaneous barge-in. Use the normal stop
 controls or pause the microphone before media playback or private conversations.
 
+## What appears in the chat
+
+By default, the TUI shows the spoken trigger or final request for each Jarvis user turn. A partial already sent and its later final remain two turns. Typed messages and old sessions without voice provenance are displayed as originally recorded, even if they resemble a voice envelope.
+
+To expand each voice row into transcript, status, nonempty background (one utterance per line) and any injected instructions, set the following and restart the TUI:
+
+```toml
+[jarvis]
+show_raw_requests = true
+```
+
+This multiline view is formatted for reading. For the original user payload instead, set `show_exact_request_payload = true` in the same section. It takes precedence over the other setting.
+
+This is a display preference, not a privacy setting. The agent still receives the original JSON with its trigger, bounded background speech and optional `still_speaking` flag, or the final-transcript control message. That message is only one part of a provider call: system instructions, earlier conversation and tool results can also be in context. The toggle neither reveals that full context nor removes anything from saved history.
+
 ## Voice latency and recovery
 
 Run `python3 scripts/jarvis_latency_report.py --session SESSION_ID` from the checkout.
@@ -71,8 +86,10 @@ Local playback waits for a quiet microphone. New input can supersede a held
 reply. In Handterm the default trigger cue says “On it” in the configured
 Jarvis voice instead of playing a ding. A ready spoken reply takes precedence.
 A custom `trigger_sound` still plays its file, and `trigger_sound = ""` disables
-the cue. Temporary provider
-failures release the microphone for a bounded cooldown. Repeat the utterance
+the cue. Network outages release the microphone for 2 seconds, then 8 seconds,
+then 60 seconds between attempts until connectivity returns. Rate limits start
+with a 15-second cooldown. An automatic retry respects pause and screen lock.
+Repeat the utterance
 after listening resumes: failed audio is not replayed. A known credential or
 credit failure stops capture. Correct the issue, then use `/voice` to retry
 without restarting the conversation or resetting the hourly allowance. On updated
@@ -87,12 +104,14 @@ Defaults are deliberately conservative:
 [jarvis.listening]
 max_audio_seconds_per_hour = 600
 max_classifications_per_hour = 120
-max_agent_turns_per_hour = 20
+max_agent_turns_per_hour = 0
 action_probability = 0.97
 ```
 
-The limits bound submitted audio, utterance/classification work, and agent turn
-starts. They do not establish a dollar limit or cap the tokens of an accepted
+Audio and classification limits remain active independently. Agent turns are
+uncapped by default. Set `max_agent_turns_per_hour` to 1 through 120 to cap
+newly dispatched voice requests in a rolling hour, or 0 to disable only this
+cap. Finishing a partial utterance does not consume another turn. They do not establish a dollar limit or cap the tokens of an accepted
 coding task. Pause/resume and device rotation must not reset the rolling engine
 budget. Restarting the client starts a new in-memory budget. Provider billing,
 rounding and provider-side retention policies remain external to Jcode.

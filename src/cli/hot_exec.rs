@@ -417,7 +417,7 @@ pub fn run_auto_update() -> Result<()> {
 
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
-pub fn run_update(channel: Option<&str>) -> Result<()> {
+pub fn run_update(channel: Option<&str>, set_channel_only: bool) -> Result<()> {
     let explicit_channel = channel
         .map(|value| {
             crate::config::UpdateChannel::parse(value)
@@ -426,9 +426,19 @@ pub fn run_update(channel: Option<&str>) -> Result<()> {
         .transpose()?;
     if let Some(channel) = explicit_channel {
         crate::config::Config::set_update_channel(channel)?;
+        if set_channel_only {
+            return Ok(());
+        }
         super::output::print_centered(&format!("Update channel: {channel}"));
+    } else if set_channel_only {
+        anyhow::bail!("--set-channel-only requires --channel, --prerelease, or --stable");
     }
-    super::output::print_centered("Checking GitHub for latest release...");
+    let check_label =
+        match explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel) {
+            crate::config::UpdateChannel::Preview => "Checking GitHub for latest prerelease...",
+            _ => "Checking GitHub for latest release...",
+        };
+    super::output::print_centered(check_label);
     match update::check_for_update_with_channel_blocking(explicit_channel) {
         Ok(Some(release)) => {
             super::output::print_centered(&format!(
@@ -445,8 +455,13 @@ pub fn run_update(channel: Option<&str>) -> Result<()> {
                     ));
                 })?;
             super::output::print_centered(&format!("✅ Updated to {}", release.tag_name));
-            reload_server_after_update("installed update");
-            super::output::print_centered("Restart jcode to use the new version.");
+            if reload_server_after_update("installed update") {
+                super::output::print_centered(
+                    "Live-reloaded running jcode server and connected sessions.",
+                );
+            } else {
+                super::output::print_centered("Next launch will use the new version.");
+            }
         }
         Ok(None) => {
             if repair_stale_shared_server_after_update_check() {
@@ -494,24 +509,29 @@ fn repair_stale_shared_server_after_update_check() -> bool {
     }
 }
 
-fn reload_server_after_update(reason: &str) {
+fn reload_server_after_update(reason: &str) -> bool {
     let exe = build::client_update_candidate(false)
         .map(|(path, _)| path)
         .or_else(|| std::env::current_exe().ok());
     let Some(exe) = exe else {
         crate::logging::warn("update: could not find jcode binary to reload stale server");
-        return;
+        return false;
     };
 
     let output = ProcessCommand::new(&exe)
-        .args(["--no-update", "server", "reload", "--force"])
+        .args(["--no-update", "server", "reload", "--force", "--json"])
         .output();
     match output {
         Ok(output) if output.status.success() => {
+            let reloaded = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .and_then(|v| v.get("reloaded").and_then(|flag| flag.as_bool()))
+                .unwrap_or(false);
             crate::logging::info(&format!(
-                "update: requested server reload after {} via {:?}",
-                reason, exe
+                "update: requested server reload after {} via {:?} (reloaded={})",
+                reason, exe, reloaded
             ));
+            reloaded
         }
         Ok(output) => {
             crate::logging::warn(&format!(
@@ -520,12 +540,14 @@ fn reload_server_after_update(reason: &str) {
                 output.status.code(),
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
+            false
         }
         Err(error) => {
             crate::logging::warn(&format!(
                 "update: failed to request server reload after {} via {:?}: {}",
                 reason, exe, error
             ));
+            false
         }
     }
 }

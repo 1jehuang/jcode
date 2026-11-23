@@ -138,8 +138,8 @@ session_picker_enter = "current-terminal"
 # [jarvis.listening]
 # max_audio_seconds_per_hour = 600
 # max_classifications_per_hour = 120
-# max_agent_turns_per_hour = 20
-# action_probability = 0.97  # 0.5..1; Fn tap sends recent speech without the gate
+# max_agent_turns_per_hour = 0 # 0 disables the agent-turn cap
+# action_probability = 0.5  # 0.5..1; Fn tap sends recent speech without the gate
 # trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
 # warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
 
@@ -513,6 +513,9 @@ reactive_threshold_tokens = 400000
 proactive_floor = 0.40
 proactive_floor_tokens = 150000
 # Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Per-provider threshold overrides (unset fields inherit from [compaction]):
+# [compaction.providers.gemini]
+# reactive_threshold_tokens = 300000
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.

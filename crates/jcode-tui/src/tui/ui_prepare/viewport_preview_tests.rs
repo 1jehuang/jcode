@@ -11,6 +11,24 @@ fn message(role: &str, content: String) -> DisplayMessage {
     }
 }
 
+#[test]
+fn jarvis_detail_wraps_at_narrow_width_without_losing_sections() {
+    let voice = DisplayMessage::jarvis_user(jcode_tui_messages::jarvis::jarvis_final_payload(
+        "first line\na longer second line with \"quotes\"",
+    ));
+    let detail = voice.user_row_text(true).into_owned();
+    let prepared = prepare_history_preview(
+        &[DisplayMessage::user(detail.clone())],
+        0,
+        14,
+        crate::config::DiffDisplayMode::Inline,
+    );
+    assert_eq!(prepared.user_prompt_texts.as_slice(), &[detail.clone()]);
+    assert_eq!(prepared.raw_plain_lines.join("\n"), detail);
+    assert!(prepared.wrapped_lines.len() > prepared.raw_plain_lines.len());
+    assert_eq!(prepared.wrapped_user_prompt_starts.len(), 1);
+}
+
 fn transcript(turns: usize) -> Vec<DisplayMessage> {
     (0..turns).flat_map(|n| [
         message("user", format!("Review request {n}: Unicode 界 👩‍💻 e\u{301} and the saved transcript wrapping behavior.\nPreserve all metadata.")),

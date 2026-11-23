@@ -669,6 +669,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -1192,6 +1193,7 @@ impl App {
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
