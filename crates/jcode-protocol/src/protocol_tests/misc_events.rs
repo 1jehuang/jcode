@@ -570,6 +570,7 @@ fn test_resume_all_result_event_roundtrip() -> Result<()> {
 fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Result<()> {
     let req = Request::Message {
         id: 88,
+        jarvis_voice: false,
         content: "inspect this".to_string(),
         images: vec![
             ("image/png".to_string(), "AAA".to_string()),
@@ -584,12 +585,14 @@ fn test_message_request_roundtrip_preserves_images_and_system_reminder() -> Resu
     let decoded = parse_request_json(&json)?;
     let Request::Message {
         id,
+        jarvis_voice: false,
         content,
         images,
         system_reminder,
         active_skill,
         origin: _,
         no_reply,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Message"));

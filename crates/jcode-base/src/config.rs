@@ -10,9 +10,10 @@ pub use jcode_config_types::{
     GatewayConfig, HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode,
     LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig, NamedProviderAuth,
     NamedProviderConfig, NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig,
-    NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode, ResumeOpenElsewhere,
-    ResumeTimeMode, SafetyConfig, SessionConfig, SessionPickerResumeAction, SponsorsConfig,
-    SwarmSpawnMode, TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
+    NotificationsConfig, PowerConfig, ProviderCompactionConfig, ProviderConfig,
+    ReasoningDisplayMode, ResumeOpenElsewhere, ResumeTimeMode, SafetyConfig, SessionConfig,
+    SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, TerminalConfig, UpdateChannel,
+    WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -1010,6 +1011,21 @@ pub struct CompanionConfig {
     pub voice_waveform: bool,
     /// Show desktop notifications for companion voice state.
     pub voice_notifications: bool,
+    /// Hold the laptop Fn key (Linux, `KEY_FN` on a `global_devices` keyboard)
+    /// to talk to the running always-on Jarvis session from any window.
+    /// Fn shortcuts (Fn+F-keys, Fn+arrows) never record. Off by default.
+    pub jarvis_fn_key: bool,
+    /// Key used by `jarvis_fn_key`: `"fn"` (default) or `"rightshift"`.
+    /// Right Shift helps on laptops whose Fn never reaches Linux. Tap and
+    /// hold work the same; Right Shift with another key types normally.
+    pub jarvis_key: String,
+    /// With `jarvis_fn_key`, an Fn hold while no always-on Jarvis runs opens
+    /// one in a new terminal, records meanwhile, and sends the words once it
+    /// is ready.
+    pub jarvis_fn_launch: bool,
+    /// Extra flags for a Jarvis opened by `jarvis_fn_launch`, after
+    /// `--jarvis-always-on`, e.g. `["--jarvis-screen"]`.
+    pub jarvis_fn_launch_args: Vec<String>,
     /// Open URLs and files for the server.
     pub open: bool,
     /// Open new terminal windows for the server.
@@ -1027,6 +1043,10 @@ impl Default for CompanionConfig {
             voice: true,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
+            jarvis_key: "fn".to_string(),
+            jarvis_fn_launch: true,
+            jarvis_fn_launch_args: Vec::new(),
             open: true,
             spawn_terminal: true,
             lid: true,
@@ -1040,6 +1060,10 @@ impl Default for CompanionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JarvisConfig {
+    /// Expand Jarvis requests into readable transcript, status, context and instruction sections.
+    pub show_raw_requests: bool,
+    /// Show the original user payload instead of the clean or expanded presentation.
+    pub show_exact_request_payload: bool,
     pub speech: JarvisSpeechConfig,
     pub listening: JarvisListeningConfig,
 }
@@ -1053,6 +1077,11 @@ pub struct JarvisListeningConfig {
     pub max_classifications_per_hour: u32,
     pub max_agent_turns_per_hour: u32,
     pub action_probability: f64,
+    /// Sound played when speech triggers Jarvis. Empty string disables it.
+    pub trigger_sound: String,
+    /// Keep one idle Nari connection ready so speech onset skips the handshake.
+    /// It carries no audio while idle.
+    pub warm_nari: bool,
 }
 
 impl Default for JarvisListeningConfig {
@@ -1060,8 +1089,10 @@ impl Default for JarvisListeningConfig {
         Self {
             max_audio_seconds_per_hour: 600,
             max_classifications_per_hour: 120,
-            max_agent_turns_per_hour: 20,
-            action_probability: 0.97,
+            max_agent_turns_per_hour: 0,
+            action_probability: 0.5,
+            trigger_sound: "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga".into(),
+            warm_nari: false,
         }
     }
 }
@@ -1090,47 +1121,7 @@ impl Default for JarvisSpeechConfig {
 }
 
 #[cfg(test)]
-mod jarvis_config_tests {
-    use super::*;
-
-    #[test]
-    fn listening_limits_are_bounded_defaults_and_can_be_overridden() {
-        let limits = Config::default().jarvis.listening;
-        assert_eq!(limits.max_audio_seconds_per_hour, 600);
-        assert_eq!(limits.max_classifications_per_hour, 120);
-        assert_eq!(limits.max_agent_turns_per_hour, 20);
-        let config: Config = toml::from_str(
-            "[jarvis.listening]\nmax_agent_turns_per_hour = 3\naction_probability = 0.99",
-        )
-        .unwrap();
-        assert_eq!(config.jarvis.listening.max_agent_turns_per_hour, 3);
-        assert_eq!(config.jarvis.listening.action_probability, 0.99);
-    }
-
-    #[test]
-    fn jarvis_endpoint_is_optional_and_serializes() {
-        assert!(Config::default().jarvis.speech.endpoint.is_none());
-        let config: Config = toml::from_str(
-            "[jarvis.speech]\nendpoint = 'http://127.0.0.1:8765/v1/audio/speech'\nmodel = 'custom-model'\nvoice = 'custom-voice'\napi_key_env = 'MY_TTS_KEY'",
-        ).unwrap();
-        assert_eq!(
-            config.jarvis.speech.endpoint.as_deref(),
-            Some("http://127.0.0.1:8765/v1/audio/speech")
-        );
-        assert_eq!(config.jarvis.speech.model, "custom-model");
-        assert_eq!(config.jarvis.speech.voice, "custom-voice");
-        assert_eq!(
-            config.jarvis.speech.api_key_env.as_deref(),
-            Some("MY_TTS_KEY")
-        );
-        let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-        assert_eq!(
-            roundtrip.jarvis.speech.endpoint,
-            config.jarvis.speech.endpoint
-        );
-        assert!(CONFIG_ENV_KEYS.contains(&"JCODE_JARVIS_SPEECH_ENDPOINT"));
-    }
-}
+mod jarvis_config_tests;
 
 /// External dictation / speech-to-text integration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

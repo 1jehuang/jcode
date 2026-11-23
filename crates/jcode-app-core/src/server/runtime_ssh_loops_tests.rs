@@ -65,6 +65,34 @@ fn paused_plan_and_unregistered_sessions_never_continue() {
 }
 
 #[test]
+fn delegated_work_waits_without_nagging_the_root_or_hiding_independent_work() {
+    let mut snapshot = open_snapshot();
+    let mut state = enabled_state();
+    snapshot.todos[0].assigned_to = Some("worker".into());
+    snapshot.running_workers.push("worker".into());
+    for _ in 0..5 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    let mut independent = open_snapshot().todos.remove(0);
+    independent.content = "root work".into();
+    snapshot.todos.push(independent);
+    let message = next_followup(&mut state, &snapshot)
+        .follow_up
+        .unwrap()
+        .message;
+    assert!(message.contains("root work"));
+    assert!(!message.contains("finish remote work"));
+    snapshot.running_workers.clear();
+    assert!(
+        next_followup(&mut state, &snapshot)
+            .follow_up
+            .unwrap()
+            .message
+            .contains("finish remote work")
+    );
+}
+
+#[test]
 fn blockers_and_running_tasks_pause_without_consuming_retry_budget() {
     let mut snapshot = open_snapshot();
     let mut state = enabled_state();
@@ -240,6 +268,37 @@ async fn productive_remote_campaign_exceeds_old_turn_cap_then_stops_on_no_progre
         43,
         "no-progress budget survives reattach"
     );
+}
+
+#[tokio::test]
+async fn delegated_work_durable_await_survives_process_task_refresh() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session = agent.session_id().to_owned();
+    let key = format!("loop-{session}");
+    let wait = todo::await_dependency::dependency_id(&key, 1);
+    let path = crate::storage::runtime_dir()
+        .join(todo::await_dependency::STATE_DIR)
+        .join(format!("{key}.json"));
+    crate::storage::write_json_fast(&path, &json!({"key":key,"session_id":session,"created_at_unix_ms":1,"deadline_unix_ms":u64::MAX,"background":true})).unwrap();
+    let mut todos = open_snapshot().todos;
+    todos[0].waiting_on = vec![wait];
+    todo::save_todos(&session, &todos).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    run_followups(&mut agent, tx).await.unwrap();
+    assert!(provider.calls.load(Ordering::SeqCst) > 0);
 }
 
 #[tokio::test]

@@ -274,7 +274,7 @@ impl App {
             );
         } else {
             self.set_status_notice(
-                "Log in to OpenAI? Yes/No - hl to move, Enter to choose (No skips for now)",
+                "How would you like to log in? [OpenAI] - arrows/Tab to move, Enter to choose",
             );
         }
     }
@@ -372,9 +372,9 @@ impl App {
     /// - `ModelSelect`: we tell the user to run /model; Enter is also a
     ///   shortcut that opens the model picker from the welcome screen.
     /// - `ContinuePrompt`: Y/Enter continues, N/Esc declines.
-    /// - `LoginOpenAi`: Left/h -> Yes, Right/l -> No, toggle with
-    ///   Up/Down/k/j/Tab; y/n commit directly, Enter/Space commit the
-    ///   highlighted default (Yes -> OpenAI sign-in, No -> finish onboarding).
+    /// - `LoginOpenAi`: arrows/hl/jk/Tab move between OpenAI, Claude, API key,
+    ///   and Skip; 1/2/3/4 or o/c/a/s (plus y/n) commit directly; Enter/Space
+    ///   commit the highlighted choice.
     ///
     /// Returns true if the key was consumed.
     pub(super) fn handle_onboarding_continue_prompt_key(&mut self, code: KeyCode) -> bool {
@@ -672,94 +672,136 @@ impl App {
     }
 
     /// Handle a key while the "Log in to OpenAI?" prompt is up. Yes/No sit side
-    /// by side (default highlight is "Yes"):
-    ///   - Left / h  -> highlight "Yes"
-    ///   - Right / l -> highlight "No"
-    ///   - Up / Down / k / j / Tab -> toggle
-    ///   - y / Y -> log in to OpenAI;  n / N -> skip and finish onboarding
-    ///   - Enter / Space -> commit the highlighted choice
+    /// Handle keys while on the first-run login choice screen. Four options are
+    /// offered (default highlight is "OpenAI"):
+    ///   - Left / h / Up / k / BackTab -> previous option
+    ///   - Right / l / Down / j / Tab  -> next option
+    ///   - 1 / o / O / y / Y -> OpenAI
+    ///   - 2 / c / C         -> Claude
+    ///   - 3 / a / A         -> Paste any API key
+    ///   - 4 / s / S / n / N -> Skip and finish onboarding
+    ///   - Enter / Space     -> commit the highlighted choice
     fn handle_onboarding_login_openai_key(&mut self, code: KeyCode) -> bool {
+        use crate::tui::OnboardingLoginChoice;
         let Some(flow) = self.onboarding_flow.as_mut() else {
             return false;
         };
-        let OnboardingPhase::LoginOpenAi { yes_highlighted } = &mut flow.phase else {
+        let OnboardingPhase::LoginOpenAi { choice } = &mut flow.phase else {
             return false;
         };
         match code {
-            KeyCode::Left | KeyCode::Char('h') => {
-                *yes_highlighted = true;
-                self.update_onboarding_login_openai_status();
-                true
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
-                *yes_highlighted = false;
-                self.update_onboarding_login_openai_status();
-                true
-            }
-            KeyCode::Up
-            | KeyCode::Down
+            KeyCode::Left
+            | KeyCode::Char('h')
+            | KeyCode::Up
             | KeyCode::Char('k')
+            | KeyCode::BackTab => {
+                *choice = choice.prev();
+                self.update_onboarding_login_openai_status();
+                true
+            }
+            KeyCode::Right
+            | KeyCode::Char('l')
+            | KeyCode::Down
             | KeyCode::Char('j')
             | KeyCode::Tab => {
-                *yes_highlighted = !*yes_highlighted;
+                *choice = choice.next();
                 self.update_onboarding_login_openai_status();
                 true
             }
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.onboarding_answer_login_openai(true);
+            KeyCode::Char('1')
+            | KeyCode::Char('o')
+            | KeyCode::Char('O')
+            | KeyCode::Char('y')
+            | KeyCode::Char('Y') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::OpenAi);
                 true
             }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.onboarding_answer_login_openai(false);
+            KeyCode::Char('2') | KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::Claude);
+                true
+            }
+            KeyCode::Char('3') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::ApiKey);
+                true
+            }
+            KeyCode::Char('4')
+            | KeyCode::Char('s')
+            | KeyCode::Char('S')
+            | KeyCode::Char('n')
+            | KeyCode::Char('N') => {
+                self.onboarding_choose_login(OnboardingLoginChoice::Skip);
                 true
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                let wants_openai = *yes_highlighted;
-                self.onboarding_answer_login_openai(wants_openai);
+                let selected = *choice;
+                self.onboarding_choose_login(selected);
                 true
             }
             _ => false,
         }
     }
 
-    /// Answer the "Log in to OpenAI?" prompt. Yes starts the OpenAI sign-in;
-    /// No exits onboarding and drops the user on the normal new-session screen
-    /// with a system message telling them to run `/login` when they're ready.
-    ///
-    /// We intentionally do NOT open the inline provider picker on "No": that
-    /// flow has a flaky input widget (typed characters were not echoed), and
-    /// finishing onboarding straight to the usual screen is simpler and more
-    /// robust. The user can pick any provider via `/login` at their own pace.
+    /// Compatibility helper mapping Yes/No to OpenAI vs Skip.
+    #[cfg(test)]
     pub(super) fn onboarding_answer_login_openai(&mut self, wants_openai: bool) {
+        use crate::tui::OnboardingLoginChoice;
+        self.onboarding_choose_login(if wants_openai {
+            OnboardingLoginChoice::OpenAi
+        } else {
+            OnboardingLoginChoice::Skip
+        });
+    }
+
+    /// Execute the user's choice on the first-run login screen.
+    pub(super) fn onboarding_choose_login(&mut self, choice: crate::tui::OnboardingLoginChoice) {
+        use crate::tui::OnboardingLoginChoice;
         if !matches!(
             self.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi { .. })
         ) {
             return;
         }
-        if wants_openai && Self::openai_already_connected() {
-            // Re-running onboarding with OpenAI already signed in: there is
-            // nothing to sign in to, so continue as if the sign-in just
-            // finished instead of asking the user to log in again.
-            self.onboarding_after_login();
-            self.set_status_notice("OpenAI is already connected");
-        } else if wants_openai {
-            self.onboarding_start_default_login();
-        } else {
-            self.onboarding_finish();
-            let login = Self::onboarding_login_suggestion();
-            let hint = if login == "/login" {
-                "No problem. When you're ready to log in, run /login to pick a provider \
-                 (OpenAI, Anthropic, Gemini, OpenRouter, and more)."
-                    .to_string()
-            } else {
-                format!(
-                    "No problem. When you're ready, run {login} to reuse the credentials \
-                     already on this machine, or /login to pick another provider."
-                )
-            };
-            self.push_display_message(DisplayMessage::system(hint));
-            self.set_status_notice(format!("Run {login} when you're ready"));
+        match choice {
+            OnboardingLoginChoice::OpenAi => {
+                if Self::openai_already_connected() {
+                    self.onboarding_after_login();
+                    self.set_status_notice("OpenAI is already connected");
+                } else {
+                    self.onboarding_start_default_login();
+                }
+            }
+            OnboardingLoginChoice::Claude => {
+                if Self::claude_already_connected() {
+                    self.onboarding_after_login();
+                    self.set_status_notice("Claude is already connected");
+                } else {
+                    crate::telemetry::record_setup_step_once("login_picker_opened");
+                    self.start_claude_login();
+                    self.set_status_notice(
+                        "Login: opening Claude sign-in (or type /login for others)",
+                    );
+                }
+            }
+            OnboardingLoginChoice::ApiKey => {
+                crate::telemetry::record_setup_step_once("login_picker_opened");
+                self.start_auto_api_key_login();
+            }
+            OnboardingLoginChoice::Skip => {
+                self.onboarding_finish();
+                let login = Self::onboarding_login_suggestion();
+                let hint = if login == "/login" {
+                    "No problem. When you're ready to log in, run /login to pick a provider \
+                     (OpenAI, Anthropic, Gemini, OpenRouter, and more)."
+                        .to_string()
+                } else {
+                    format!(
+                        "No problem. When you're ready, run {login} to reuse the credentials \
+                         already on this machine, or /login to pick another provider."
+                    )
+                };
+                self.push_display_message(DisplayMessage::system(hint));
+                self.set_status_notice(format!("Run {login} when you're ready"));
+            }
         }
     }
 
@@ -771,17 +813,22 @@ impl App {
         )
     }
 
-    /// Refresh the status notice for the "Log in to OpenAI?" prompt.
+    /// Whether jcode already has a working Claude/Anthropic login.
+    fn claude_already_connected() -> bool {
+        crate::external_auth::provider_connected_in_jcode(
+            &crate::auth::AuthStatus::check_fast(),
+            "anthropic",
+        )
+    }
+
+    /// Refresh the status notice for the first-run login choice screen.
     fn update_onboarding_login_openai_status(&mut self) {
-        let yes = matches!(
-            self.onboarding_phase(),
-            Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
-            })
-        );
-        let choice = if yes { "Yes" } else { "No" };
+        let label = match self.onboarding_phase() {
+            Some(OnboardingPhase::LoginOpenAi { choice }) => choice.label(),
+            _ => crate::tui::OnboardingLoginChoice::OpenAi.label(),
+        };
         self.set_status_notice(format!(
-            "Log in to OpenAI? [{choice}] - hl to move, Enter to choose (No skips for now)"
+            "How would you like to log in? [{label}] - arrows/Tab to move, Enter to choose"
         ));
     }
 

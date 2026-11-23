@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 mod display;
 mod update_policy;
@@ -344,6 +345,89 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+
+    /// Per-provider threshold overrides keyed by provider name (case-insensitive,
+    /// e.g. `gemini`, `claude`, `openai`, `copilot`, `openrouter`, `bedrock`, `cursor`).
+    /// Unset fields inside a provider override inherit from the top-level `[compaction]` table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderCompactionConfig>,
+}
+
+/// Per-provider compaction threshold overrides under `[compaction.providers.<name>]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProviderCompactionConfig {
+    /// Override `[compaction] reactive_threshold` for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_threshold: Option<f32>,
+
+    /// Override `[compaction] reactive_threshold_tokens` for this provider.
+    /// Zero disables the absolute token threshold for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_threshold_tokens: Option<usize>,
+
+    /// Override `[compaction] proactive_floor` for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_floor: Option<f32>,
+
+    /// Override `[compaction] proactive_floor_tokens` for this provider.
+    /// Zero disables the absolute token floor for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_floor_tokens: Option<usize>,
+
+    /// Override `[compaction] max_context_tokens` for this provider.
+    /// Zero disables the cap for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// Look up a per-provider override by provider name (case-insensitive).
+    pub fn provider_override(&self, provider: &str) -> Option<&ProviderCompactionConfig> {
+        let needle = provider.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        self.providers
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(needle))
+            .map(|(_, value)| value)
+    }
+
+    pub fn effective_reactive_threshold(&self, provider: Option<&str>) -> f32 {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.reactive_threshold)
+            .unwrap_or(self.reactive_threshold)
+    }
+
+    pub fn effective_reactive_threshold_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.reactive_threshold_tokens)
+            .unwrap_or(self.reactive_threshold_tokens)
+    }
+
+    pub fn effective_proactive_floor(&self, provider: Option<&str>) -> f32 {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.proactive_floor)
+            .unwrap_or(self.proactive_floor)
+    }
+
+    pub fn effective_proactive_floor_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.proactive_floor_tokens)
+            .unwrap_or(self.proactive_floor_tokens)
+    }
+
+    pub fn effective_max_context_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.max_context_tokens)
+            .unwrap_or(self.max_context_tokens)
+    }
 }
 
 impl Default for CompactionConfig {
@@ -363,6 +447,7 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            providers: BTreeMap::new(),
         }
     }
 }

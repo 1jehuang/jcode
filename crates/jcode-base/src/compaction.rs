@@ -188,6 +188,9 @@ pub struct CompactionManager {
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
 
+    /// Active provider name for resolving `[compaction.providers.<name>]` overrides
+    active_provider: Option<String>,
+
     // ── Proactive mode state ───────────────────────────────────────────────
     /// Rolling window of observed token counts, one entry per turn snapshot.
     /// Used to compute EWMA growth rate for proactive compaction.
@@ -232,6 +235,7 @@ impl CompactionManager {
             last_compaction: None,
             mode,
             compaction_config: cfg,
+            active_provider: None,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
@@ -256,6 +260,36 @@ impl CompactionManager {
         self.refresh_context_cap();
     }
 
+    /// Update the active provider name used to resolve `[compaction.providers.<name>]` overrides.
+    pub fn set_provider(&mut self, provider: &str) {
+        let trimmed = provider.trim();
+        let next = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        if self.active_provider != next {
+            self.active_provider = next;
+        }
+        self.refresh_context_cap();
+    }
+
+    /// Convenience helper to update both token budget and active provider together.
+    pub fn set_budget_for_provider(&mut self, budget: usize, provider: &str) {
+        let trimmed = provider.trim();
+        self.active_provider = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self.model_token_budget = budget;
+        self.refresh_context_cap();
+    }
+
+    pub fn active_provider(&self) -> Option<&str> {
+        self.active_provider.as_deref()
+    }
+
     /// Set the per-session context ceiling. `None` or zero restores the global cap.
     pub fn set_context_cap_override(&mut self, cap: Option<usize>) {
         self.context_cap_override = cap.filter(|cap| *cap > 0);
@@ -268,11 +302,13 @@ impl CompactionManager {
     }
 
     fn refresh_context_cap(&mut self) {
-        self.compaction_config.max_context_tokens =
-            crate::config::config().compaction.max_context_tokens;
-        let cap = self
-            .context_cap_override
-            .unwrap_or(self.compaction_config.max_context_tokens);
+        let live_cfg = &crate::config::config().compaction;
+        self.compaction_config.max_context_tokens = live_cfg.max_context_tokens;
+        self.compaction_config.providers = live_cfg.providers.clone();
+        let cap = self.context_cap_override.unwrap_or_else(|| {
+            self.compaction_config
+                .effective_max_context_tokens(self.active_provider.as_deref())
+        });
         self.token_budget = if cap > 0 {
             self.model_token_budget.min(cap)
         } else {
@@ -288,6 +324,26 @@ impl CompactionManager {
         } else {
             budget
         }
+    }
+
+    fn effective_reactive_threshold(&self) -> f32 {
+        self.compaction_config
+            .effective_reactive_threshold(self.active_provider.as_deref())
+    }
+
+    fn effective_reactive_threshold_tokens(&self) -> usize {
+        self.compaction_config
+            .effective_reactive_threshold_tokens(self.active_provider.as_deref())
+    }
+
+    fn effective_proactive_floor(&self) -> f32 {
+        self.compaction_config
+            .effective_proactive_floor(self.active_provider.as_deref())
+    }
+
+    fn effective_proactive_floor_tokens(&self) -> usize {
+        self.compaction_config
+            .effective_proactive_floor_tokens(self.active_provider.as_deref())
     }
 
     /// Get current token budget
@@ -534,9 +590,11 @@ impl CompactionManager {
 
         // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        let token_floor_reached = cfg.proactive_floor_tokens > 0
-            && self.effective_token_count_with(all_messages) >= cfg.proactive_floor_tokens;
-        if usage < cfg.proactive_floor && !token_floor_reached {
+        let proactive_floor = self.effective_proactive_floor();
+        let proactive_floor_tokens = self.effective_proactive_floor_tokens();
+        let token_floor_reached = proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= proactive_floor_tokens;
+        if usage < proactive_floor && !token_floor_reached {
             return true;
         }
 
@@ -905,12 +963,13 @@ impl CompactionManager {
         let active = self.active_messages(all_messages);
         match self.mode {
             CompactionMode::Reactive => {
+                let reactive_threshold = self.effective_reactive_threshold();
+                let reactive_threshold_tokens = self.effective_reactive_threshold_tokens();
                 self.pending_task.is_none()
-                    && (self.context_usage_with(all_messages)
-                        >= self.compaction_config.reactive_threshold
-                        || (self.compaction_config.reactive_threshold_tokens > 0
+                    && (self.context_usage_with(all_messages) >= reactive_threshold
+                        || (reactive_threshold_tokens > 0
                             && self.effective_token_count_with(all_messages)
-                                >= self.compaction_config.reactive_threshold_tokens))
+                                >= reactive_threshold_tokens))
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {

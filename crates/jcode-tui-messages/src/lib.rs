@@ -1,5 +1,6 @@
 mod anchor;
 mod cache;
+pub mod jarvis;
 mod message;
 mod prepared;
 mod swarm_collapse;

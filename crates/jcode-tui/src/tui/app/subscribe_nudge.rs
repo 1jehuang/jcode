@@ -24,9 +24,22 @@ const NUDGE_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// "long task" for the goodwill trigger.
 const LONG_TASK_MIN_ELAPSED: Duration = Duration::from_secs(60 * 60);
 
+/// Minimum duration (in seconds) for a `cargo` build/test/check command to
+/// count as a slow Rust build for the justrust nudge.
+const SLOW_CARGO_BUILD_MIN_SECS: f32 = 45.0;
+
 /// Copy appended to the rate-limit system message (trigger A).
 pub(super) const RATE_LIMIT_NUDGE_LINE: &str =
     "Avoid provider rate limits with Jcode hosted models: /hosted";
+/// Status-line notice for rate-limit / token exhaustion.
+pub(super) const RATE_LIMIT_NUDGE_NOTICE: &str =
+    "Hit rate limit? Keep going with Jcode Inference: /subscribe";
+/// Status-line notice for turn interrupted by sleep or disconnect.
+pub(super) const CLOUD_DISCONNECT_NUDGE_NOTICE: &str =
+    "Turn interrupted? Keep sessions running in Jcode Cloud: /cloud";
+/// Status-line notice for slow or OOM Rust compiles.
+pub(super) const SLOW_RUST_BUILD_NUDGE_NOTICE: &str =
+    "Slow Rust build? Offload builds with justrust in Jcode Sub: /subscribe";
 /// Status-line tail shared by trigger B.
 const SUPPORT_NUDGE_NOTICE: &str = "Try Jcode hosted models: /hosted";
 
@@ -38,6 +51,10 @@ pub(super) enum SubscribeNudgeTrigger {
     RateLimited,
     /// A 1h+ todo group completed with all items passing the quality gate.
     LongTaskCompleted,
+    /// An in-flight turn was interrupted by a network drop or laptop sleep.
+    TurnInterrupted,
+    /// A local `cargo` build/test/check took a long time or ran out of memory.
+    SlowRustBuild,
 }
 
 impl SubscribeNudgeTrigger {
@@ -45,6 +62,8 @@ impl SubscribeNudgeTrigger {
         match self {
             SubscribeNudgeTrigger::RateLimited => "rate_limited",
             SubscribeNudgeTrigger::LongTaskCompleted => "long_task_completed",
+            SubscribeNudgeTrigger::TurnInterrupted => "turn_interrupted",
+            SubscribeNudgeTrigger::SlowRustBuild => "slow_rust_build",
         }
     }
 }
@@ -164,11 +183,92 @@ pub(super) fn subscribe_pitch_markdown() -> String {
     message
 }
 
+/// Contextual pitch tailored to the pain point the user just hit, with clear
+/// subscribe-and-use steps. Falls back to [`subscribe_pitch_markdown`] when no
+/// contextual trigger fired in this session.
+pub(super) fn subscribe_pitch_for_trigger(trigger: Option<SubscribeNudgeTrigger>) -> String {
+    let pricing = crate::subscription_catalog::JCODE_PRICING_URL;
+    let lead = match trigger {
+        Some(SubscribeNudgeTrigger::RateLimited) => Some(format!(
+            "Jcode Inference (keep going past provider rate limits)\n\n\
+             1. Sign in via the browser window we open (or run `/login jcode`) to link your account automatically.\n\
+             2. Choose a plan at {pricing}.\n\
+             3. Run `/model` to switch to Jcode hosted models (or let failover route automatically).\n\n---\n\n"
+        )),
+        Some(SubscribeNudgeTrigger::TurnInterrupted) => Some(format!(
+            "Jcode Cloud (keep sessions running through sleep & disconnects)\n\n\
+             1. Sign in via the browser window we open (or run `/login jcode`) to link your account automatically.\n\
+             2. Choose a plan at {pricing}.\n\
+             3. Run `/cloud` to move this session to your managed cloud VM.\n\n---\n\n"
+        )),
+        Some(SubscribeNudgeTrigger::SlowRustBuild) => Some(format!(
+            "justrust Remote Builds (included with Jcode Subscription)\n\n\
+             1. Sign in via the browser window we open (or run `/login jcode`) to link your account automatically.\n\
+             2. Choose a plan at {pricing}.\n\
+             3. Run `justrust check`, `justrust test`, or `justrust build` to offload Rust compiles automatically.\n\n---\n\n"
+        )),
+        Some(SubscribeNudgeTrigger::LongTaskCompleted) | None => None,
+    };
+    match lead {
+        Some(prefix) => format!("{prefix}{}", subscribe_pitch_markdown()),
+        None => subscribe_pitch_markdown(),
+    }
+}
+
+/// Whether a completed tool call was a slow or OOM local `cargo` build/test/check
+/// (and not already using `justrust`).
+pub(super) fn is_slow_or_oom_cargo_build(
+    tool_call: &crate::message::ToolCall,
+    duration_secs: Option<f32>,
+    output: &str,
+    is_error: bool,
+) -> bool {
+    let name = tool_call.name.to_ascii_lowercase();
+    if !matches!(name.as_str(), "bash" | "shell" | "shell_exec" | "run_shell") {
+        return false;
+    }
+    let Some(command) = tool_call.input.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let lower_cmd = command.to_ascii_lowercase();
+    if lower_cmd.contains("justrust") {
+        return false;
+    }
+    let is_cargo_compile = [
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo run",
+    ]
+    .iter()
+    .any(|needle| lower_cmd.contains(needle));
+    if !is_cargo_compile {
+        return false;
+    }
+    if duration_secs.is_some_and(|secs| secs >= SLOW_CARGO_BUILD_MIN_SECS) {
+        return true;
+    }
+    if is_error {
+        let lower_out = output.to_ascii_lowercase();
+        if lower_out.contains("signal: 9")
+            || lower_out.contains("sigkill")
+            || lower_out.contains("out of memory")
+            || lower_out.contains("cannot allocate memory")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Per-session state for the subscribe nudge.
 #[derive(Default)]
 pub(super) struct SubscribeNudgeState {
     /// Whether the nudge already fired this session.
     shown_this_session: bool,
+    /// Last trigger that fired in this session, used to tailor `/subscribe`.
+    last_trigger: Option<SubscribeNudgeTrigger>,
     /// When this session's todo list first showed incomplete work, for the
     /// 1h+ long-task nudge.
     todo_started: Option<std::time::Instant>,
@@ -204,6 +304,7 @@ impl App {
         state.last_trigger = trigger.as_str().to_string();
         store_state(&state);
         self.subscribe_nudge.shown_this_session = true;
+        self.subscribe_nudge.last_trigger = Some(trigger);
         true
     }
 
@@ -248,25 +349,72 @@ impl App {
         self.set_status_notice(SUPPORT_NUDGE_NOTICE);
     }
 
-    /// Render the `/subscribe` pitch into the transcript.
+    /// Render the `/subscribe` pitch into the transcript and immediately kick
+    /// off browser sign-in / account linking (or open pricing if already signed in)
+    /// so the user can subscribe and start using the feature in one step.
     pub(super) fn show_subscribe_pitch(&mut self) {
-        self.push_display_message(DisplayMessage::system(subscribe_pitch_markdown()));
-        self.set_status_notice("Hosted models: /login jcode to start");
+        let trigger = self.subscribe_nudge.last_trigger;
+        self.push_display_message(DisplayMessage::system(subscribe_pitch_for_trigger(trigger)));
+        if cfg!(test) {
+            self.set_status_notice("Hosted models: /login jcode to start");
+            return;
+        }
+        if crate::subscription_catalog::has_credentials() {
+            let opened = App::open_auth_browser(crate::subscription_catalog::JCODE_PRICING_URL);
+            if opened {
+                self.set_status_notice("Opened jcode.sh/pricing in your browser");
+            } else {
+                self.set_status_notice("Manage plan: /account jcode manage");
+            }
+        } else {
+            self.start_jcode_login();
+        }
+    }
+
+    /// Trigger for slow or OOM local `cargo` builds: suggests `justrust` in the
+    /// status line when the weekly/session gate allows.
+    pub(super) fn note_tool_completed_for_subscribe_nudge(
+        &mut self,
+        tool_call: &crate::message::ToolCall,
+        duration_secs: Option<f32>,
+        output: &str,
+        is_error: bool,
+    ) {
+        if !is_slow_or_oom_cargo_build(tool_call, duration_secs, output, is_error) {
+            return;
+        }
+        if self.claim_subscribe_nudge(SubscribeNudgeTrigger::SlowRustBuild) {
+            self.set_status_notice(SLOW_RUST_BUILD_NUDGE_NOTICE);
+        }
+    }
+
+    /// Trigger for an in-flight turn interrupted by disconnect or laptop sleep:
+    /// suggests Jcode Cloud in the status line when not already on a remote host.
+    pub(super) fn note_turn_interrupted_for_subscribe_nudge(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
+        if self.claim_subscribe_nudge(SubscribeNudgeTrigger::TurnInterrupted) {
+            self.set_status_notice(CLOUD_DISCONNECT_NUDGE_NOTICE);
+        }
     }
 }
 
 impl App {
     /// Rate-limit notice line, with the weekly-gated subscribe nudge appended
     /// when the gate allows (user is blocked on tokens right now).
-    pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
+    /// Returns `(message, nudged)` so the caller can preserve the status notice.
+    pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> (String, bool) {
         let mut line = format!(
             "⏳ Rate limit hit. Will auto-retry in {} seconds...",
             reset_secs
         );
-        if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {
+        let nudged = self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited);
+        if nudged {
             line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
+            self.set_status_notice(RATE_LIMIT_NUDGE_NOTICE);
         }
-        line
+        (line, nudged)
     }
 }
 
@@ -364,5 +512,87 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(60 * 61)), "1h 1m");
         assert_eq!(format_elapsed(Duration::from_secs(7200)), "2h");
         assert_eq!(format_elapsed(Duration::from_secs(60 * 45)), "45m");
+    }
+
+    #[test]
+    fn slow_or_oom_cargo_detection_matches_only_local_cargo_compiles() {
+        let bash_call = |cmd: &str| crate::message::ToolCall {
+            id: "1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({ "command": cmd }),
+            intent: None,
+            thought_signature: None,
+        };
+        assert!(is_slow_or_oom_cargo_build(
+            &bash_call("cargo build --release"),
+            Some(50.0),
+            "",
+            false
+        ));
+        assert!(!is_slow_or_oom_cargo_build(
+            &bash_call("cargo build"),
+            Some(12.0),
+            "",
+            false
+        ));
+        assert!(is_slow_or_oom_cargo_build(
+            &bash_call("cargo test -p jcode"),
+            Some(10.0),
+            "error: process didn't exit successfully (signal: 9, SIGKILL: kill)",
+            true
+        ));
+        assert!(!is_slow_or_oom_cargo_build(
+            &bash_call("justrust test -p jcode"),
+            Some(90.0),
+            "",
+            false
+        ));
+        assert!(!is_slow_or_oom_cargo_build(
+            &bash_call("ls -la"),
+            Some(60.0),
+            "",
+            false
+        ));
+    }
+
+    #[test]
+    fn contextual_subscribe_pitch_explains_subscribe_and_use_steps() {
+        let pricing = crate::subscription_catalog::JCODE_PRICING_URL;
+
+        let inference = subscribe_pitch_for_trigger(Some(SubscribeNudgeTrigger::RateLimited));
+        assert!(inference.contains("Jcode Inference"));
+        assert!(inference.contains(pricing));
+        assert!(inference.contains("/model"));
+
+        let cloud = subscribe_pitch_for_trigger(Some(SubscribeNudgeTrigger::TurnInterrupted));
+        assert!(cloud.contains("Jcode Cloud"));
+        assert!(cloud.contains(pricing));
+        assert!(cloud.contains("/cloud"));
+
+        let justrust = subscribe_pitch_for_trigger(Some(SubscribeNudgeTrigger::SlowRustBuild));
+        assert!(justrust.contains("justrust"));
+        assert!(justrust.contains(pricing));
+        assert!(justrust.contains("justrust check"));
+
+        assert_eq!(
+            subscribe_pitch_for_trigger(None),
+            subscribe_pitch_markdown()
+        );
+    }
+
+    #[test]
+    fn contextual_status_notices_are_single_line_and_compact() {
+        for notice in [
+            RATE_LIMIT_NUDGE_NOTICE,
+            CLOUD_DISCONNECT_NUDGE_NOTICE,
+            SLOW_RUST_BUILD_NUDGE_NOTICE,
+        ] {
+            assert!(!notice.contains('\n'), "notice must be single-line: {notice}");
+            assert!(
+                notice.len() <= 75,
+                "notice too wide ({} chars): {notice}",
+                notice.len()
+            );
+        }
     }
 }

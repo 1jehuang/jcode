@@ -2382,8 +2382,15 @@ impl BridgeState {
                 // none (e.g. `none` normalised away), which is also a change.
                 let changed = event["error"].as_str().is_none() && {
                     let effort = event["effort"].as_str().map(str::to_string);
-                    let moved = self.current_effort != effort;
+                    let model = event["model"].as_str().map(str::to_string);
+                    let moved = self.current_effort != effort
+                        || model
+                            .as_ref()
+                            .is_some_and(|m| self.current_model.as_ref() != Some(m));
                     self.current_effort = effort;
+                    if let Some(model) = model {
+                        self.current_model = Some(model);
+                    }
                     moved
                 };
                 // A successful change is also broadcast as identity, mirroring
