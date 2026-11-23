@@ -588,6 +588,7 @@ mod tests {
         let gate = Arc::new(ActivityGate::default());
         let selected = BTreeSet::from(["selected".into()]);
         let other_gate = gate.clone();
+        #[allow(clippy::async_yields_async)] // the handle itself is the result under test
         let child = gate
             .spawn_session("selected", async move {
                 other_gate.spawn(std::future::pending::<()>()).unwrap()
