@@ -1,5 +1,4 @@
 use super::{BACKGROUND_WAIT_GUIDANCE, Tool, ToolContext, ToolOutput};
-use crate::background::TaskResult;
 use crate::bus::{
     BackgroundTaskProgress, BackgroundTaskProgressKind, BackgroundTaskProgressSource,
 };
@@ -21,7 +20,7 @@ use std::time::Duration;
 use std::time::Instant;
 #[cfg(unix)]
 use tokio::io::AsyncReadExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 const MAX_OUTPUT_LEN: usize = 30000;
@@ -65,33 +64,6 @@ export -f cargo
     ))
 }
 
-/// Build a clear timeout message. The `timeout` param is in milliseconds, which
-/// agents frequently mistake for seconds (e.g. passing 1000 thinking it means
-/// 1000s when it is 1s). Spell out the seconds equivalent and, for suspiciously
-/// short timeouts, hint that the unit is milliseconds so the next attempt uses a
-/// sane value instead of repeating the same mistake.
-fn timeout_message(timeout_ms: u64) -> String {
-    let secs = timeout_ms as f64 / 1000.0;
-    let mut msg = format!("Command timed out after {}ms ({:.1}s)", timeout_ms, secs);
-    if timeout_ms <= 5000 {
-        msg.push_str(
-            ". Note: the `timeout` parameter is in MILLISECONDS, not seconds. \
-             If you meant a longer limit, pass a larger value (e.g. 600000 = 10min) or omit `timeout`.",
-        );
-    }
-    msg
-}
-
-/// Timeout applied to a background command.
-///
-/// An explicit timeout is honored as given. The 10 minute cap only bounds how
-/// long a foreground call may hold the turn; a background task has no such
-/// limit (and none at all when `timeout` is omitted), so clamping a requested
-/// 30 minutes down to 10 killed long test runs early with a misleading
-/// "timed out after 600000ms".
-fn background_timeout_ms(requested: Option<u64>) -> Option<u64> {
-    requested
-}
 
 fn progress_ratio_regex() -> Result<&'static regex::Regex> {
     static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
@@ -152,10 +124,6 @@ struct ProgressMarker {
     kind: Option<String>,
     #[serde(default)]
     checkpoint: Option<bool>,
-}
-
-fn task_id_from_output_path(path: &Path) -> Option<&str> {
-    path.file_stem()?.to_str()
 }
 
 fn parse_progress_kind(kind: Option<&str>) -> BackgroundTaskProgressKind {
@@ -439,36 +407,6 @@ pub(super) fn parse_heuristic_progress(line: &str) -> Result<Option<BackgroundTa
     Ok(None)
 }
 
-async fn handle_background_output_line(
-    output_path: &Path,
-    file: &mut tokio::fs::File,
-    raw_line: &str,
-    stderr: bool,
-) {
-    match parse_progress_line(raw_line) {
-        Ok(Some(update)) => {
-            if let Some(task_id) = task_id_from_output_path(output_path) {
-                apply_progress_update(task_id, update).await;
-            }
-            return;
-        }
-        Ok(None) => {}
-        Err(err) => {
-            let warning = format!("[jcode warning] failed to parse background progress: {err}\n");
-            file.write_all(warning.as_bytes()).await.ok();
-            file.flush().await.ok();
-        }
-    }
-
-    let rendered = if stderr {
-        format!("[stderr] {}\n", raw_line)
-    } else {
-        format!("{}\n", raw_line)
-    };
-    file.write_all(rendered.as_bytes()).await.ok();
-    file.flush().await.ok();
-}
-
 /// A progress or checkpoint update parsed from one line of command output.
 #[derive(Debug)]
 pub(super) enum ProgressLineUpdate {
@@ -670,30 +608,6 @@ fn configure_tool_scratch(command: &mut TokioCommand) {
     }
 }
 
-#[cfg(unix)]
-struct ProcessGroupKillGuard {
-    pid: Option<u32>,
-}
-
-#[cfg(unix)]
-impl ProcessGroupKillGuard {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
-    }
-
-    fn disarm(&mut self) {
-        self.pid = None;
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ProcessGroupKillGuard {
-    fn drop(&mut self) {
-        if let Some(pid) = self.pid {
-            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-        }
-    }
-}
 
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
@@ -721,13 +635,6 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
         configure_non_interactive(&mut cmd);
         cmd
     }
-}
-
-fn configure_background_command_stdio(command: &mut TokioCommand) {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
 }
 
 /// Keep cloud environment values out of tool arguments and transcript output.
