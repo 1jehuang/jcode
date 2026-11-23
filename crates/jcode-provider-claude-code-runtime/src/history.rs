@@ -185,10 +185,18 @@ impl NativeHistory {
                         content,
                         is_error,
                     } => {
-                        if !self.results.contains(
-                            &fingerprint(&(tool_use_id, content, is_error.unwrap_or(false)))
-                                .digest(),
-                        ) {
+                        let seen = |content: &str| {
+                            self.results.contains(
+                                &fingerprint(&(tool_use_id, content, is_error.unwrap_or(false)))
+                                    .digest(),
+                            )
+                        };
+                        // jcode's message_timestamps prepends "[...] " to results.
+                        let unstamped = content
+                            .strip_prefix('[')
+                            .and_then(|rest| rest.split_once("] "))
+                            .map(|(_, rest)| rest);
+                        if !seen(content) && !unstamped.is_some_and(seen) {
                             return false;
                         }
                     }

@@ -210,6 +210,9 @@ async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
     assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
         block, ContentBlock::ToolUse { thought_signature: Some(signature), .. } if signature == "test-thought-signature"
     )), "second request must replay the persisted signature");
+    assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
+        block, ContentBlock::ToolResult { tool_use_id, content, .. } if tool_use_id == "signed-call" && content.ends_with("done") && !content.contains("missing")
+    )), "provider-run tool result must be kept, not replaced by a missing-output placeholder");
     let saved_json = serde_json::to_value(&saved).unwrap();
     assert!(saved_json.to_string().contains("test-thought-signature"));
 }

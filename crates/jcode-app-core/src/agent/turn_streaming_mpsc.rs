@@ -1450,6 +1450,7 @@ impl Agent {
             ));
 
             if self.provider.handles_tools_internally() {
+                self.add_provider_tool_results(&tool_calls, &mut sdk_tool_results);
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     // === INJECTION POINT D: After provider-handled tools, before next API call ===
