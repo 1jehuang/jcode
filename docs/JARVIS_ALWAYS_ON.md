@@ -102,19 +102,16 @@ Defaults are deliberately conservative:
 
 ```toml
 [jarvis.listening]
-max_audio_seconds_per_hour = 600
-max_classifications_per_hour = 120
 max_agent_turns_per_hour = 0
 action_probability = 0.97
 ```
 
-Audio and classification limits remain active independently. Agent turns are
-uncapped by default. Set `max_agent_turns_per_hour` to 1 through 120 to cap
-newly dispatched voice requests in a rolling hour, or 0 to disable only this
-cap. Finishing a partial utterance does not consume another turn. They do not establish a dollar limit or cap the tokens of an accepted
-coding task. Pause/resume and device rotation must not reset the rolling engine
-budget. Restarting the client starts a new in-memory budget. Provider billing,
-rounding and provider-side retention policies remain external to Jcode.
+Agent turns are uncapped by default. Set `max_agent_turns_per_hour` to 1 through
+120 to cap newly dispatched voice requests in a rolling hour, or 0 to disable
+this cap. Finishing a partial utterance does not consume another turn. This does
+not establish a dollar limit or cap the tokens of an accepted coding task.
+Provider billing, rounding and provider-side retention policies remain external
+to Jcode.
 
 Audio and classifier work require configured Nari and Jev credentials/access.
 No model weights or voice clones are embedded in Jcode. The configured external

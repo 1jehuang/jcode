@@ -1,28 +1,4 @@
 #[test]
-fn deliberate_retry_cannot_reset_rolling_audio_or_classification_usage() {
-    for (seconds, classifications) in [(1, 10), (3600, 1)] {
-        let config = ContinuousConfig {
-            max_audio_seconds_per_hour: seconds,
-            max_classifications_per_hour: classifications,
-            ..Default::default()
-        };
-        let original = ContinuousBudget::default();
-        let retry = original.clone();
-        let now = Instant::now();
-        assert!(original.0.lock().unwrap().reserve(now, 16_000, &config));
-        drop(original);
-        assert!(!retry.0.lock().unwrap().reserve(now, 1, &config));
-        assert!(
-            retry
-                .0
-                .lock()
-                .unwrap()
-                .reserve(now + Duration::from_secs(3600), 1, &config)
-        );
-    }
-}
-
-#[test]
 fn recovery_is_bounded_and_never_retries_known_permanent_errors() {
     for error in [
         VoiceError::Network,
@@ -293,26 +269,6 @@ fn silent_external_capture_has_heartbeat_suppresses_and_stops_without_network() 
     assert!(stopped);
 }
 
-#[test]
-fn rolling_budgets_reserve_before_upload_and_expire() {
-    let cfg = ContinuousConfig {
-        max_audio_seconds_per_hour: 1,
-        max_classifications_per_hour: 2,
-        ..Default::default()
-    };
-    let mut budget = Budget::default();
-    let now = Instant::now();
-    assert!(budget.reserve(now, 8000, &cfg));
-    assert!(!budget.reserve(now, 8001, &cfg));
-    assert!(budget.reserve(now, 8000, &cfg));
-    assert!(!budget.reserve(now, 1, &cfg));
-    assert!(!budget.reserve(now + Duration::from_secs(3599), 1, &cfg));
-    assert!(budget.reserve(now + Duration::from_secs(3600), 16000, &cfg));
-    let mut budget = Budget::default();
-    assert!(budget.reserve(now, 1, &cfg));
-    assert!(budget.reserve(now, 1, &cfg));
-    assert!(!budget.reserve(now, 1, &cfg));
-}
 #[test]
 fn gate_response_is_typed_and_fail_closed() {
     for bad in [

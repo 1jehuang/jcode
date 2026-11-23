@@ -9,7 +9,6 @@ pub(super) async fn run(
     key: String,
     recorder: String,
     config: ContinuousConfig,
-    budget: ContinuousBudget,
     restoration: RestorationWait,
     paused: Arc<AtomicBool>,
     capturing: Arc<AtomicBool>,
@@ -38,9 +37,7 @@ pub(super) async fn run(
     let mut warm: Option<Warm> = None;
     let mut warm_retry_at = Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    // Device rotation and manual retry share the listener's original hourly ledger.
     let mut consecutive_failures = 0;
-    let mut budget_limited = false;
     let mut permission_at = Instant::now();
     let mut permitted = false;
     loop {
@@ -98,12 +95,6 @@ pub(super) async fn run(
                                 live = None;
                                 // Bounded: drop speech rather than build an upload backlog.
                                 if jobs.len() >= 2 { continue; }
-                                if !budget.0.lock().unwrap_or_else(|e| e.into_inner()).reserve(Instant::now(), audio.len(), &config) {
-                                    budget_limited = true;
-                                    emit(&events, ContinuousEvent::State(VoiceState::BudgetLimited));
-                                    continue;
-                                }
-                                budget_limited = false;
                                 let id = NEXT_ID.get_or_init(|| AtomicU64::new(rand::random())).fetch_add(1, Ordering::Relaxed);
                                 trace_turn(id, "speech_onset");
                                 let token = Arc::new(AtomicBool::new(false));
@@ -185,7 +176,6 @@ pub(super) async fn run(
                             Seg::Audio(audio) => {
                                 if let Some((_, tx, candidate)) = &live {
                                     candidate.lock().unwrap_or_else(|e| e.into_inner()).append(&audio);
-                                    budget.0.lock().unwrap_or_else(|e| e.into_inner()).extend(audio.len());
                                     if tx.send(audio).is_err() { live = None; }
                                 }
                             }
@@ -257,7 +247,6 @@ pub(super) async fn run(
                     }
                     if let Some(error) = failed { break Err(error); }
                     let state = if suppressed.load(Ordering::SeqCst) { VoiceState::Suppressed }
-                        else if budget_limited { VoiceState::BudgetLimited }
                         else if segmenter.active { VoiceState::Speaking }
                         else if !jobs.is_empty() { VoiceState::Transcribing } else { VoiceState::Listening };
                     emit(&events,ContinuousEvent::State(state));

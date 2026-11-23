@@ -31,10 +31,6 @@ pub struct ContinuousConfig {
     /// Require a Jarvis/Jev address in addition to semantic request intent.
     /// False by default: natural directed requests do not need a wake word.
     pub require_jev: bool,
-    /// Rolling upload allowance, reserved before opening a transcription session.
-    pub max_audio_seconds_per_hour: u32,
-    /// Rolling one-shot classifier allowance. Failed/cancelled jobs still count.
-    pub max_classifications_per_hour: u32,
     /// Minimum typed Jev probability for accepting a directed request (0.5..=1).
     pub action_probability: f64,
     /// Read once per utterance so partial and final decisions share one cutoff.
@@ -49,8 +45,6 @@ impl Default for ContinuousConfig {
     fn default() -> Self {
         Self {
             require_jev: false,
-            max_audio_seconds_per_hour: 600,
-            max_classifications_per_hour: 120,
             action_probability: 0.5,
             live_action_probability: None,
             warm_nari: false,
@@ -66,7 +60,6 @@ pub enum VoiceState {
     Speaking,
     Transcribing,
     Suppressed,
-    BudgetLimited,
 }
 #[derive(Clone)]
 pub enum ContinuousEvent {
@@ -410,23 +403,20 @@ impl ContinuousRecording {
         recorder: &str,
         config: ContinuousConfig,
     ) -> Result<Self, VoiceError> {
-        Self::start_auto_with_budget(
+        Self::start_auto_with_restoration(
             cancel,
             key,
             recorder,
             config,
-            ContinuousBudget::default(),
             || Box::pin(std::future::pending()),
         )
     }
 
-    /// Keep the same ledger when a user explicitly retries a stopped listener.
-    pub fn start_auto_with_budget(
+    pub fn start_auto_with_restoration(
         cancel: Arc<AtomicBool>,
         key: &str,
         recorder: &str,
         config: ContinuousConfig,
-        budget: ContinuousBudget,
         restoration: RestorationWait,
     ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
@@ -435,11 +425,7 @@ impl ContinuousRecording {
         if key.trim().is_empty() {
             return Err(VoiceError::NariNotConfigured);
         }
-        if config.max_audio_seconds_per_hour == 0
-            || config.max_audio_seconds_per_hour > 3600
-            || config.max_classifications_per_hour == 0
-            || config.max_classifications_per_hour > 600
-            || !config.action_probability.is_finite()
+        if !config.action_probability.is_finite()
             || !(0.5..=1.0).contains(&config.action_probability)
         {
             return Err(VoiceError::InvalidResponse);
@@ -492,7 +478,6 @@ impl ContinuousRecording {
                             key,
                             recorder,
                             config,
-                            budget,
                             restoration,
                             p,
                             a.clone(),
@@ -549,7 +534,6 @@ impl ContinuousRecording {
         output.context.chat.reverse();
     }
     /// Closes capture asynchronously and invalidates queued/in-flight speech.
-    /// Resuming preserves the rolling upload and classifier budgets.
     pub fn set_paused(&self, value: bool) {
         if self.paused.swap(value, Ordering::SeqCst) != value {
             self.epoch.fetch_add(1, Ordering::SeqCst);
@@ -863,37 +847,6 @@ async fn session_permitted(_config: &ContinuousConfig) -> bool {
         return true;
     }
     crate::global::session::permitted().await
-}
-
-#[derive(Default, Clone)]
-pub struct ContinuousBudget(Arc<Mutex<Budget>>);
-
-#[derive(Default)]
-struct Budget(VecDeque<(Instant, usize)>);
-impl Budget {
-    fn reserve(&mut self, now: Instant, samples: usize, config: &ContinuousConfig) -> bool {
-        while self
-            .0
-            .front()
-            .is_some_and(|(at, _)| now.duration_since(*at) >= Duration::from_secs(3600))
-        {
-            self.0.pop_front();
-        }
-        let used: usize = self.0.iter().map(|(_, n)| *n).sum();
-        if self.0.len() >= config.max_classifications_per_hour as usize
-            || used + samples > config.max_audio_seconds_per_hour as usize * 16000
-        {
-            return false;
-        }
-        self.0.push_back((now, samples));
-        true
-    }
-    /// Charges audio streamed after the onset reservation.
-    fn extend(&mut self, samples: usize) {
-        if let Some((_, n)) = self.0.back_mut() {
-            *n += samples;
-        }
-    }
 }
 
 fn gate_answer(response: &serde_json::Value, threshold: f64) -> Result<(f64, bool), VoiceError> {

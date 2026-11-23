@@ -285,7 +285,6 @@ pub(super) struct AlwaysListening {
     session: Option<String>,
     dispatch: dispatch::Dispatch,
     turns: VecDeque<Instant>,
-    capture_budget: jcode_voice::continuous::ContinuousBudget,
     state: Option<VoiceState>,
     failed: bool,
     captions: VecDeque<JarvisCaption>,
@@ -451,7 +450,6 @@ impl AlwaysListening {
                 Some(VoiceState::Transcribing) => "transcribing",
                 Some(VoiceState::Speaking) => "hearing speech",
                 Some(VoiceState::Listening) => "listening",
-                Some(VoiceState::BudgetLimited) => "hourly speech-processing limit reached",
                 _ => "starting",
             }
         }
@@ -516,32 +514,27 @@ impl AlwaysListening {
         }));
         let cfg = &crate::config::config().jarvis.listening;
         anyhow::ensure!(
-            (1..=3600).contains(&cfg.max_audio_seconds_per_hour)
-                && (1..=600).contains(&cfg.max_classifications_per_hour)
-                && cfg.max_agent_turns_per_hour <= 120
+            cfg.max_agent_turns_per_hour <= 120
                 && cfg.action_probability.is_finite()
                 && (0.5..=1.0).contains(&cfg.action_probability),
-            "Invalid Jarvis listening limits: audio 1..3600 sec/hour, classifications 1..600/hour, agent turns 0 (unlimited) or 1..120/hour, probability 0.5..1"
+            "Invalid Jarvis listening limits: agent turns 0 (unlimited) or 1..120/hour, probability 0.5..1"
         );
         let key = jcode_voice::nari_api_key().ok_or(jcode_voice::VoiceError::NariNotConfigured)?;
         // Resolve before opening the microphone. A missing gate must not turn
         // continuous speech into unchecked agent requests.
         crate::jev::JevClient::for_voice()?;
-        let recording = ContinuousRecording::start_auto_with_budget(
+        let recording = ContinuousRecording::start_auto_with_restoration(
             Arc::new(AtomicBool::new(false)),
             &key,
             &crate::config::config().dictation.recorder,
             ContinuousConfig {
                 require_jev: false,
-                max_audio_seconds_per_hour: cfg.max_audio_seconds_per_hour as u32,
-                max_classifications_per_hour: cfg.max_classifications_per_hour,
                 action_probability: cfg.action_probability,
                 live_action_probability: Some(|| {
                     crate::config::config().jarvis.listening.action_probability
                 }),
                 warm_nari: cfg.warm_nari,
             },
-            self.capture_budget.clone(),
             || Box::pin(crate::network_retry::wait_for_connectivity_restoration()),
         )?;
         self.recording = Some(recording);
