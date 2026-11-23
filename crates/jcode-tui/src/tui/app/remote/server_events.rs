@@ -1000,14 +1000,6 @@ fn handle_server_event_inner(
             let completes_resumed_turn =
                 app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
             if app.current_message_id == Some(id) || completes_resumed_turn {
-                if !app.stream_buffer.is_empty() {
-                    crate::logging::info(&format!(
-                        "Deferring Done id={} until paced stream backlog drains",
-                        id
-                    ));
-                    app.deferred_stream_done_id = Some(id);
-                    return true;
-                }
                 app.deferred_stream_done_id = None;
                 // A delivery acknowledgement is not proof that an AI turn ran.
                 // This catches hidden continuation dedup/no-op completions at
