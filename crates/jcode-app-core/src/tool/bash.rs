@@ -1246,147 +1246,55 @@ impl BashTool {
         let command = params.command.clone();
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
-        let working_dir = ctx.working_dir.clone();
-        let cloud_environment = cloud_command_environment(working_dir.as_deref())?;
-        let session_id_env = ctx.session_id.clone();
-        // Capture before handing work to the manager. Its closure can start
-        // after a caller has already replaced or cleared these overrides.
+        let cloud_environment = cloud_command_environment(ctx.working_dir.as_deref())?;
         let session_environment = crate::session_env::session_env(&ctx.session_id);
-        let timeout_ms = background_timeout_ms(params.timeout);
-        let timeout_duration = timeout_ms.map(Duration::from_millis);
+        let started_at = Utc::now().to_rfc3339();
 
         let wake = params.wake;
         let notify = params.notify || wake;
-        let info = crate::background::global()
-            .spawn_with_notify(
+        let manager = crate::background::global();
+        let info = manager.reserve_task_info();
+
+        // Spawn as a fully detached OS process so the child survives server
+        // reloads (exec). build_detached_shell_wrapper writes the exit marker
+        // line that finalize_detached_status_if_needed reads on recovery.
+        let mut cmd = build_detached_shell_wrapper(&command);
+        cmd.envs(cloud_environment);
+        cmd.envs(session_environment);
+        cmd.env("JCODE_SESSION_ID", &ctx.session_id);
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&info.output_file)
+            .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
+        let stderr = stdout
+            .try_clone()
+            .map_err(|e| anyhow::anyhow!("Failed to clone output fd: {}", e))?;
+        cmd.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+        if let Some(ref dir) = ctx.working_dir {
+            cmd.current_dir(dir);
+        }
+
+        let child = crate::platform::spawn_detached(&mut cmd)
+            .map_err(|e| anyhow::anyhow!("Failed to spawn detached command: {}", e))?;
+        let pid = child.id();
+
+        manager
+            .register_detached_task(
+                &info,
                 "bash",
                 Some(display_name.clone()),
                 &ctx.session_id,
+                pid,
+                &started_at,
                 notify,
                 wake,
-				move |output_path| async move {
-                    #[cfg(all(test, not(windows)))]
-                    tests::wait_for_session_env_launch_gate(&session_id_env).await;
-					let mut cmd = build_shell_command(&command);
-					cmd.envs(cloud_environment);
-					cmd.envs(session_environment);
-					cmd.env("JCODE_SESSION_ID", &session_id_env);
-					// build_shell_command runs the child in its own session
-					// (setsid), so it is already its own process group leader.
-                    cmd.kill_on_drop(true);
-                    configure_background_command_stdio(&mut cmd);
-                    if let Some(ref dir) = working_dir {
-                        cmd.current_dir(dir);
-                    }
-                    let mut child = cmd
-                        .spawn()
-                        .map_err(|e| anyhow::anyhow!("Failed to spawn command: {}", e))?;
-                    #[cfg(unix)]
-                    let mut process_group_guard = ProcessGroupKillGuard::new(child.id());
-
-                    // Stream output to file
-                    let mut file = tokio::fs::File::create(&output_path)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to create output file: {}", e))?;
-
-                    // Read stdout and stderr truly concurrently using select!
-                    // Sequential reads can deadlock if the unread pipe fills up.
-                    let stdout = child.stdout.take();
-                    let stderr = child.stderr.take();
-
-                    let mut stdout_lines = stdout.map(|s| BufReader::new(s).lines());
-                    let mut stderr_lines = stderr.map(|s| BufReader::new(s).lines());
-                    let mut stdout_done = stdout_lines.is_none();
-                    let mut stderr_done = stderr_lines.is_none();
-                    let timeout_sleep = timeout_duration.map(tokio::time::sleep);
-                    tokio::pin!(timeout_sleep);
-                    let mut timed_out = false;
-
-	                    while !stdout_done || !stderr_done {
-	                        tokio::select! {
-	                            _ = async {
-	                                match timeout_sleep.as_mut().as_pin_mut() {
-	                                    Some(sleep) => sleep.await,
-	                                    None => std::future::pending().await,
-	                                }
-	                            }, if timeout_duration.is_some() => {
-	                                timed_out = true;
-	                                #[cfg(unix)]
-	                                {
-	                                    if let Some(pid) = child.id() {
-	                                        let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-	                                    } else {
-	                                        let _ = child.start_kill();
-	                                    }
-	                                }
-	                                #[cfg(not(unix))]
-	                                {
-	                                    let _ = child.start_kill();
-	                                }
-	                                break;
-	                            }
-                            line = async {
-                                match stdout_lines.as_mut() {
-                                    Some(r) => r.next_line().await,
-                                    None => std::future::pending().await,
-                                }
-                            }, if !stdout_done => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        handle_background_output_line(&output_path, &mut file, &line, false).await;
-                                    }
-                                    _ => { stdout_done = true; }
-                                }
-                            }
-                            line = async {
-                                match stderr_lines.as_mut() {
-                                    Some(r) => r.next_line().await,
-                                    None => std::future::pending().await,
-                                }
-                            }, if !stderr_done => {
-                                match line {
-                                    Ok(Some(line)) => {
-                                        handle_background_output_line(&output_path, &mut file, &line, true).await;
-                                    }
-                                    _ => { stderr_done = true; }
-                                }
-                            }
-                        }
-                    }
-
-                    if timed_out {
-                        let _ = child.wait().await;
-                        #[cfg(unix)]
-                        process_group_guard.disarm();
-                        let msg = timeout_message(timeout_ms.unwrap_or_default());
-                        let timeout_line = format!("\n--- {} ---\n", msg);
-                        file.write_all(timeout_line.as_bytes()).await.ok();
-                        return Ok(TaskResult::failed(Some(124), msg));
-                    }
-
-                    let status = child.wait().await?;
-                    #[cfg(unix)]
-                    process_group_guard.disarm();
-                    let exit_code = status.code();
-
-                    // Write final status line
-                    let status_line = format!(
-                        "\n--- Command finished with exit code: {} ---\n",
-                        exit_code.unwrap_or(-1)
-                    );
-                    file.write_all(status_line.as_bytes()).await.ok();
-
-                    if status.success() {
-                        Ok(TaskResult::completed(exit_code))
-                    } else {
-                        Ok(TaskResult::failed(
-                            exit_code,
-                            format!("Command exited with code {}", exit_code.unwrap_or(-1)),
-                        ))
-                    }
-                },
             )
             .await;
+
+        // Follow the output file for progress updates (same as the
+        // foreground-promoted path).
+        spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
 
         let notify_msg = if wake {
             "The agent will be woken when the task completes."
@@ -1436,6 +1344,8 @@ impl BashTool {
                 "display_name": display_name,
                 "output_file": info.output_file.to_string_lossy(),
                 "status_file": info.status_file.to_string_lossy(),
+                "pid": pid,
+                "detached": true,
             })))
     }
 }

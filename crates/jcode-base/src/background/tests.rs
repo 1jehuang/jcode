@@ -1008,6 +1008,197 @@ async fn disarm_stall_watchdog_clears_state() -> Result<()> {
     Ok(())
 }
 
+/// A detached task whose child process already exited is finalized by
+/// `status()` (which calls `finalize_detached_status_if_needed`), even
+/// when the manager is a fresh instance (simulating a server reload).
+#[tokio::test]
+async fn detached_task_recovered_after_manager_recreation() -> Result<()> {
+    let tmp = tempdir()?;
+    let dir = tmp.path().to_path_buf();
+
+    // Spawn a short-lived child to get a real PID that will be dead by the
+    // time we query the manager.
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("echo 'hello from detached'")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("spawn: {e}"))?;
+    let pid = child.id();
+    child.wait().map_err(|e| anyhow!("wait: {e}"))?;
+
+    // Write a detached Running status file as if the previous server had
+    // registered it, and an output file with the exit marker line.
+    let task_id = "detach1surv";
+    let manager1 = BackgroundTaskManager::with_output_dir(dir.clone());
+    let mut status = running_status_fixture(task_id, "session-detach-recover");
+    status.detached = true;
+    status.pid = Some(pid);
+    write_status_fixture(&manager1, &status).await;
+
+    let output_path = manager1.output_path_for(task_id);
+    tokio::fs::write(
+        &output_path,
+        "hello from detached\n--- Command finished with exit code: 0 ---\n",
+    )
+    .await?;
+
+    // Drop the first manager and create a new one on the same directory
+    // (simulating a server reload that calls new() on the same task dir).
+    drop(manager1);
+    let manager2 = BackgroundTaskManager::with_output_dir(dir);
+
+    // Querying status should finalize the dead detached task.
+    let recovered = manager2
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist after recovery"))?;
+    assert_eq!(
+        recovered.status,
+        BackgroundTaskStatus::Completed,
+        "detached task with exit 0 should be Completed, got {:?}",
+        recovered.status
+    );
+    assert_eq!(recovered.exit_code, Some(0));
+    assert!(recovered.completed_at.is_some());
+    assert!(recovered.detached);
+    Ok(())
+}
+
+/// Detached tasks with a non-zero exit code are recovered as Failed.
+#[tokio::test]
+async fn detached_task_recovered_as_failed_on_nonzero_exit() -> Result<()> {
+    let tmp = tempdir()?;
+    let dir = tmp.path().to_path_buf();
+
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("exit 42")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("spawn: {e}"))?;
+    let pid = child.id();
+    child.wait().map_err(|e| anyhow!("wait: {e}"))?;
+
+    let task_id = "detach2fail";
+    let manager = BackgroundTaskManager::with_output_dir(dir);
+    let mut status = running_status_fixture(task_id, "session-detach-fail");
+    status.detached = true;
+    status.pid = Some(pid);
+    write_status_fixture(&manager, &status).await;
+
+    let output_path = manager.output_path_for(task_id);
+    tokio::fs::write(
+        &output_path,
+        "some output\n--- Command finished with exit code: 42 ---\n",
+    )
+    .await?;
+
+    let recovered = manager
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(recovered.status, BackgroundTaskStatus::Failed);
+    assert_eq!(recovered.exit_code, Some(42));
+    Ok(())
+}
+
+/// A detached Running task that is still alive (simulated via a long sleep)
+/// is NOT finalized by the recovery sweep.
+#[tokio::test]
+async fn detached_task_still_running_not_finalized() -> Result<()> {
+    let tmp = tempdir()?;
+    let dir = tmp.path().to_path_buf();
+
+    // Spawn a child that sleeps long enough for the test to check status.
+    let child = std::process::Command::new("sleep")
+        .arg("60")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("spawn: {e}"))?;
+    let pid = child.id();
+
+    let task_id = "detach3live";
+    let manager = BackgroundTaskManager::with_output_dir(dir);
+    let mut status = running_status_fixture(task_id, "session-detach-live");
+    status.detached = true;
+    status.pid = Some(pid);
+    write_status_fixture(&manager, &status).await;
+
+    let live = manager
+        .status(task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(
+        live.status,
+        BackgroundTaskStatus::Running,
+        "still-running detached task must stay Running"
+    );
+
+    // Clean up the sleep process.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    Ok(())
+}
+
+/// The sweep picks up completed detached tasks and publishes bus events,
+/// so post-reload recovery is visible to waiting agents.
+#[tokio::test]
+async fn sweep_finalizes_completed_detached_task() -> Result<()> {
+    let tmp = tempdir()?;
+    let dir = tmp.path().to_path_buf();
+
+    let mut child = std::process::Command::new("true")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow!("spawn: {e}"))?;
+    let pid = child.id();
+    child.wait().map_err(|e| anyhow!("wait: {e}"))?;
+
+    let task_id = "detach4swep";
+    let manager = BackgroundTaskManager::with_output_dir(dir);
+    let mut status = running_status_fixture(task_id, "session-detach-sweep");
+    status.detached = true;
+    status.pid = Some(pid);
+    write_status_fixture(&manager, &status).await;
+
+    let output_path = manager.output_path_for(task_id);
+    tokio::fs::write(
+        &output_path,
+        "\n--- Command finished with exit code: 0 ---\n",
+    )
+    .await?;
+
+    let mut events = Bus::global().subscribe();
+    let count = manager.sweep().await;
+    assert!(count >= 1, "sweep should see the status file");
+
+    // The sweep should have published a completion event.
+    let found = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await
+                && event.task_id == task_id
+            {
+                return event;
+            }
+        }
+    })
+    .await;
+    assert!(
+        found.is_ok(),
+        "sweep should publish BackgroundTaskCompleted for the finalized detached task"
+    );
+    let event = found.unwrap();
+    assert_eq!(event.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
     let tmp = tempdir()?;
