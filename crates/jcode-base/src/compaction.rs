@@ -1430,9 +1430,13 @@ impl CompactionManager {
 
                 let mut result = Vec::with_capacity(active.len() + 1);
 
+                // Pin the root prompt byte-identically after the summary block (summary
+                // stays content[0] for harness detection) so it is never paraphrased away.
+                let mut content = vec![summary_block];
+                content.extend(pinned_root_prompt(all_messages, self.compacted_count));
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content,
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -2006,6 +2010,28 @@ fn looks_like_refusal(text: &str) -> bool {
     } else {
         PATTERNS.iter().any(|pattern| head.starts_with(pattern))
     }
+}
+
+/// Text blocks of the first user message, copied verbatim, when that message
+/// has been compacted away. Empty when it is still in the active window.
+fn pinned_root_prompt(all_messages: &[Message], compacted_count: usize) -> Vec<ContentBlock> {
+    all_messages
+        .iter()
+        .take(compacted_count)
+        .find(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. }))
+        })
+        .map(|m| {
+            m.content
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[path = "compaction_transfer.rs"]

@@ -1518,3 +1518,17 @@ fn emergency_compaction_cooldown_blocks_refire_near_baseline() {
     manager.update_observed_input_tokens(260_000);
     assert!(!manager.emergency_compaction_suppressed(&messages));
 }
+
+#[test]
+fn pinned_root_prompt_is_byte_identical_once_compacted() {
+    let root = "ROOT DIRECTIVE: never stop, verify everything";
+    let messages = vec![
+        make_text_message(Role::User, root),
+        make_text_message(Role::Assistant, "ok"),
+        make_text_message(Role::User, "later"),
+    ];
+    assert!(super::pinned_root_prompt(&messages, 0).is_empty());
+    let pinned = super::pinned_root_prompt(&messages, 2);
+    assert_eq!(pinned.len(), 1);
+    assert!(matches!(&pinned[0], ContentBlock::Text { text, .. } if text == root));
+}
