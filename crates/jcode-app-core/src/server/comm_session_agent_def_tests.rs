@@ -715,6 +715,12 @@ async fn headless_session_start_hook_sees_worker_identity() {
 #[tokio::test]
 async fn stopping_a_running_worker_fires_swarm_member_end() {
     let _env = crate::storage::lock_test_env();
+    // The stop request persists its final response under the runtime dir for
+    // 30s and replays it for an identical request. Without a private dir a
+    // rerun inside that window replays instead of stopping, and no hook fires.
+    let runtime_dir = tempfile::TempDir::new().unwrap();
+    let previous_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime_dir.path());
     let hooks_dir = tempfile::TempDir::new().unwrap();
     let coord_dir = tempfile::TempDir::new().unwrap();
     let state = crate::server::SwarmState::new(
@@ -804,6 +810,10 @@ async fn stopping_a_running_worker_fires_swarm_member_end() {
     .await;
     let recorded = read_record(&record);
     unset_recording_hook("JCODE_HOOK_SWARM_MEMBER_END", previous_hook);
+    match previous_runtime {
+        Some(value) => crate::env::set_var("JCODE_RUNTIME_DIR", value),
+        None => crate::env::remove_var("JCODE_RUNTIME_DIR"),
+    }
     crate::hooks::forget_swarm_identity("stop-hook-worker");
     let expected_dir = std::fs::canonicalize(coord_dir.path()).unwrap();
     assert_eq!(
