@@ -56,14 +56,10 @@ fn counts_for_presence(sessions: &[SessionPresence]) -> SessionCounts {
 ///
 /// Always shows both the streaming and total counts directly in the menu bar
 /// (e.g. "0/3" idle, "2/7" while streaming) so the live state is visible at a
-/// glance without opening the dropdown. Icon-only when no sessions are running.
+/// glance without opening the dropdown. Keep a visible title even when the symbol is unavailable.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn format_menubar_title(counts: SessionCounts) -> String {
-    if counts.total == 0 {
-        String::new()
-    } else {
-        format!("{}/{}", counts.streaming, counts.total)
-    }
+    format!("{}/{}", counts.streaming, counts.total)
 }
 
 /// Human-readable one-line summary used for `--once` and the menu header.
@@ -406,14 +402,11 @@ mod macos {
     use objc2::runtime::AnyObject;
     use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-        NSApplicationActivationPolicy, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
-        NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration,
-        NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSColor, NSFont,
+        NSFontWeightRegular, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuItem, NSStatusBar,
+        NSStatusItem, NSVariableStatusItemLength,
     };
-    use objc2_foundation::{
-        NSArray, NSAttributedString, NSDictionary, NSObject, NSString, NSUserDefaults, ns_string,
-    };
+    use objc2_foundation::{NSArray, NSObject, NSString, NSUserDefaults, ns_string};
 
     /// Poll interval for refreshing the counts (milliseconds).
     const REFRESH_INTERVAL_MS: u64 = 1000;
@@ -574,16 +567,6 @@ mod macos {
         // Accessory: no Dock icon, no main menu, just a menu bar item.
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-        // Follow the system's Light/Dark setting explicitly. `jcode` runs as a
-        // bare Mach-O with no Info.plist app bundle, so AppKit defaults the
-        // process to the light Aqua appearance and never auto-adopts macOS Dark
-        // Mode. That made the status item's template icon and `labelColor` text
-        // resolve to *black*, which is invisible on a dark menu bar (the exact
-        // symptom: a black icon on an already-black bar). Pin the app's
-        // appearance to match `AppleInterfaceStyle` so the template image and
-        // dynamic colors render light on a dark bar (and dark on a light bar).
-        sync_app_appearance(&app);
-
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item: Retained<NSStatusItem> =
             status_bar.statusItemWithLength(NSVariableStatusItemLength);
@@ -618,10 +601,9 @@ mod macos {
                 NSFontWeightRegular
             });
         if let Some(button) = status_item.button(mtm) {
+            button.setImagePosition(NSCellImagePosition::ImageTrailing);
             if let Some(icon) = status_icon(false) {
                 button.setImage(Some(&icon));
-                // Title on the left, icon on the right.
-                button.setImagePosition(NSCellImagePosition::ImageTrailing);
             }
             button.setFont(Some(&title_font));
         }
@@ -677,11 +659,6 @@ mod macos {
                 app_for_refresh.terminate(None);
                 return;
             }
-            // Re-sync the Light/Dark appearance each tick so toggling the
-            // system theme at runtime keeps the status item visible (the
-            // process won't auto-adopt the change on its own).
-            sync_app_appearance(&app_for_refresh);
-
             let mut sessions = session::user_session_presence();
             let active_ids: HashSet<String> = sessions
                 .iter()
@@ -708,8 +685,8 @@ mod macos {
             let counts = counts_for_presence(&sessions);
             if let Some(button) = status_item.button(mtm) {
                 let title = format_menubar_title(counts);
-                let attributed = attributed_title(&title, &title_font, counts.streaming > 0);
-                button.setAttributedTitle(&attributed);
+                // Let the status button choose contrast for its actual menu bar.
+                button.setTitle(&NSString::from_str(&title));
                 let streaming = counts.streaming > 0;
                 if streaming != icon_streaming.get() {
                     if let Some(icon) = status_icon(streaming) {
@@ -735,35 +712,6 @@ mod macos {
 
         // Run the Cocoa event loop. `terminate:` (the Quit item) exits the process.
         app.run();
-    }
-
-    /// Pin the application's appearance to the system Light/Dark setting.
-    ///
-    /// `jcode` runs as a bare executable without an `Info.plist` app bundle, so
-    /// AppKit defaults the process to the light `Aqua` appearance and does not
-    /// follow the user's macOS Dark Mode preference. With a light appearance the
-    /// status item's template SF Symbol and `labelColor` title both resolve to a
-    /// dark/black color, which is invisible against a dark menu bar. Reading
-    /// `AppleInterfaceStyle` (absent => Light, "Dark" => Dark) and applying the
-    /// matching named appearance makes those dynamic colors and template images
-    /// render with proper contrast on whatever menu bar the user has.
-    ///
-    /// Safe to call repeatedly; setting the same appearance is a no-op.
-    fn sync_app_appearance(app: &NSApplication) {
-        let is_dark = {
-            let defaults = NSUserDefaults::standardUserDefaults();
-            defaults
-                .stringForKey(ns_string!("AppleInterfaceStyle"))
-                .map(|style| style.to_string().eq_ignore_ascii_case("dark"))
-                .unwrap_or(false)
-        };
-        let name = if is_dark {
-            unsafe { NSAppearanceNameDarkAqua }
-        } else {
-            unsafe { NSAppearanceNameAqua }
-        };
-        let appearance = NSAppearance::appearanceNamed(name);
-        app.setAppearance(appearance.as_deref());
     }
 
     /// The status item icon. Idle uses a template SF Symbol so AppKit renders
@@ -801,35 +749,6 @@ mod macos {
     /// both light and dark menu bars.
     fn streaming_color() -> Retained<NSColor> {
         NSColor::systemGreenColor()
-    }
-
-    /// Build the colored menu bar title. While streaming, the count is drawn in
-    /// the streaming color; when idle it uses the primary dynamic label color so
-    /// it keeps full contrast against whatever the menu bar background is. (The
-    /// previous secondary/"quiet" gray was nearly invisible on a black/dark menu
-    /// bar.) `labelColor` is a dynamic system color, so AppKit resolves it at
-    /// draw time using the status item button's effective appearance - white-ish
-    /// on a dark menu bar, dark on a light one. The monospaced-digit font is
-    /// applied so the width stays stable.
-    fn attributed_title(
-        title: &str,
-        font: &NSFont,
-        streaming: bool,
-    ) -> Retained<NSAttributedString> {
-        let string = NSString::from_str(title);
-        let color = if streaming {
-            streaming_color()
-        } else {
-            NSColor::labelColor()
-        };
-        let keys: [&NSString; 2] = [unsafe { NSForegroundColorAttributeName }, unsafe {
-            NSFontAttributeName
-        }];
-        let color_obj: &AnyObject = &color;
-        let font_obj: &AnyObject = font;
-        let values: [&AnyObject; 2] = [color_obj, font_obj];
-        let attrs = NSDictionary::from_slices(&keys, &values);
-        unsafe { NSAttributedString::new_with_attributes(&string, &attrs) }
     }
 
     /// Replace the dynamic session rows between the summary header (index 0)

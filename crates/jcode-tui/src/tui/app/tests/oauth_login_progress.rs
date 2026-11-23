@@ -231,3 +231,160 @@ fn oauth_login_progress_real_frame_has_clickable_link_and_expand_button() {
     assert!(!success.contains("Login only:"));
     println!("Observed successful login frame:\n{success}");
 }
+
+#[test]
+fn oauth_login_progress_generalized_claude_and_device_code_cards() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.show_oauth_login_progress(
+        "Claude login",
+        "Claude",
+        Some("work"),
+        "https://claude.ai/oauth/authorize?state=secret-claude-state",
+        true,
+        true,
+        "Paste callback code here · /cancel",
+        "Manual Claude fallback details",
+    );
+    let index = app.display_messages.len() - 1;
+    let backend = ratatui::backend::TestBackend::new(90, 36);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let collapsed = render_and_snap(&app, &mut terminal);
+    assert!(collapsed.contains("Open Claude sign-in"), "{collapsed}");
+    assert!(!collapsed.contains("secret-claude-state"), "{collapsed}");
+
+    let buf = terminal.backend().buffer();
+    let (link_col, link_row) = (0..buf.area().height)
+        .find_map(|row| {
+            let line = (0..buf.area().width)
+                .map(|col| buf[(col, row)].symbol())
+                .collect::<String>();
+            line.find("Open Claude sign-in").map(|byte| {
+                (
+                    unicode_width::UnicodeWidthStr::width(&line[..byte]) as u16,
+                    row,
+                )
+            })
+        })
+        .expect("Claude sign-in link in frame");
+    assert_eq!(
+        crate::tui::ui::oauth_login_link_message_from_screen(link_col + 2, link_row),
+        Some(index)
+    );
+
+    // Device-code card for Copilot shows Code: <CODE> and collapses details.
+    let device_card = crate::tui::app::auth::auth_progress::encode_device_login_card(
+        "GitHub",
+        "https://github.com/login/device",
+        Some("ABCD-1234"),
+        false,
+        true,
+        "◌ Waiting for GitHub approval",
+        "Type /cancel to abort",
+        "Visit https://github.com/login/device and enter ABCD-1234\n\nQR block hidden",
+    );
+    app.upsert_login_progress_card("GitHub Copilot login", device_card);
+    let rendered = render_and_snap(&app, &mut terminal);
+    assert!(rendered.contains("Code: ABCD-1234"), "{rendered}");
+    assert!(rendered.contains("Open GitHub sign-in"), "{rendered}");
+    assert!(!rendered.contains("QR block hidden"), "{rendered}");
+}
+
+#[test]
+fn oauth_login_progress_openai_device_fallback_updates_card_and_cancels_cleanly() {
+    let mut app = create_test_app();
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.show_openai_login_progress(
+        "default",
+        "https://auth.openai.com/oauth/authorize?state=initial",
+        false,
+        false,
+        "Manual fallback",
+    );
+    app.pending_login = Some(PendingLogin::OpenAiAccount {
+        label: "default".to_string(),
+        verifier: "v".to_string(),
+        expected_state: "s".to_string(),
+        redirect_uri: "http://localhost:1455/auth/callback".to_string(),
+        device_fallback_cancelled: Some(std::sync::Arc::clone(&cancelled)),
+    });
+
+    let fallback_card = crate::tui::app::auth::auth_progress::encode_device_login_card(
+        "OpenAI",
+        "https://auth.openai.com/codex/device",
+        Some("WXYZ-9876"),
+        false,
+        false,
+        "◌ Waiting for OpenAI approval",
+        "Paste callback URL here · /cancel",
+        "Account: default\nEnter code WXYZ-9876",
+    );
+    app.handle_login_completed(crate::tui::app::LoginCompleted {
+        provider: "openai_device_code".to_string(),
+        success: false,
+        message: fallback_card,
+    });
+    assert!(
+        app.display_messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Code: WXYZ-9876")
+    );
+    assert!(!cancelled.load(std::sync::atomic::Ordering::Acquire));
+
+    let pending = app.pending_login.take().unwrap();
+    app.handle_login_input(pending, "/cancel".to_string());
+    assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert!(app.pending_login.is_none());
+    assert!(
+        app.display_messages
+            .last()
+            .unwrap()
+            .content
+            .contains("OpenAI login cancelled.")
+    );
+}
+
+#[test]
+fn tui_auto_api_key_masks_secret_input_and_disambiguates_ambiguous_prefix() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.start_auto_api_key_login();
+    assert!(matches!(app.pending_login, Some(PendingLogin::AutoApiKey)));
+    assert!(app.login_input_is_secret());
+
+    // Real rendered frame masks the typed API key so the secret body never leaks.
+    app.input = "sk-or-v1-supersecret999988887777".to_string();
+    app.cursor_pos = app.input.len();
+    let backend = ratatui::backend::TestBackend::new(90, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let frame = render_and_snap(&app, &mut terminal);
+    assert!(
+        !frame.contains("supersecret"),
+        "secret API key leaked into rendered frame:\n{frame}"
+    );
+    assert!(
+        frame.contains("••••"),
+        "expected masked bullets in rendered frame:\n{frame}"
+    );
+
+    // Commands like /cancel remain readable while secret input mode is active.
+    app.input = "/cancel".to_string();
+    app.cursor_pos = app.input.len();
+    let cmd_frame = render_and_snap(&app, &mut terminal);
+    assert!(
+        cmd_frame.contains("/cancel"),
+        "expected /cancel to remain readable in secret mode:\n{cmd_frame}"
+    );
+
+    // Submitting an ambiguous `sk-...` key opens provider disambiguation.
+    let pending = app.pending_login.take().unwrap();
+    app.handle_login_input(pending, "sk-abcdef12345678901234567890".to_string());
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ApiKeyChooseProvider { ref candidates, .. })
+            if candidates.iter().any(|c| *c == "openai-api")
+                && candidates.iter().any(|c| *c == "deepseek")
+    ));
+}

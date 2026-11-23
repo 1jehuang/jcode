@@ -422,16 +422,18 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if messages.is_empty() && reminder.is_none() {
             return true;
         }
+        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send_with_origin(
             app,
             remote,
             combined.clone(),
-            vec![],
+            images.clone(),
             true,
             queued_origin_is_auto,
             reminder.clone(),
             auto_retry,
             0,
+            false,
         )
         .await
         .is_err()
@@ -448,6 +450,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_images = images;
             }
         }
         needs_redraw = true;
@@ -564,15 +567,17 @@ pub(super) async fn dispatch_due_remote_retry(
         "RECOVERY_RETRY_DISPATCH",
         "deadline_elapsed",
     );
-    if let Err(error) = begin_remote_send(
+    if let Err(error) = begin_remote_send_with_origin(
         app,
         remote,
         pending.content,
         pending.images,
         pending.is_system,
+        pending.is_system,
         pending.system_reminder,
         pending.auto_retry,
         pending.retry_attempts,
+        pending.jarvis_voice,
     )
     .await
     {
@@ -844,48 +849,8 @@ async fn dispatch_compacted_history_load(app: &mut App, remote: &mut RemoteConne
 mod tests;
 
 #[cfg(test)]
-#[test]
-fn borrowed_remote_status_fields_match_legacy_and_retain_sources() {
-    for value in [None, Some(String::new()), Some("fixture 🦀".to_string())] {
-        let mut provider_name = value.clone();
-        let mut connection_type = value.clone();
-        let mut remote_transport = value.clone();
-        let mut server_version = value;
-        let legacy = serde_json::json!({
-            "provider_name": provider_name.clone(),
-            "connection_type": connection_type.clone(),
-            "remote_transport": remote_transport.clone(),
-            "server_version": server_version.clone(),
-        });
-        let evidence = serde_json::json!({
-            "provider_name": provider_name,
-            "connection_type": connection_type,
-            "remote_transport": remote_transport,
-            "server_version": server_version,
-        });
-        assert_eq!(evidence, legacy);
-        assert_eq!(evidence.to_string(), legacy.to_string());
-        assert_eq!(provider_name.as_deref(), legacy["provider_name"].as_str());
-        assert_eq!(
-            connection_type.as_deref(),
-            legacy["connection_type"].as_str()
-        );
-        assert_eq!(
-            remote_transport.as_deref(),
-            legacy["remote_transport"].as_str()
-        );
-        assert_eq!(server_version.as_deref(), legacy["server_version"].as_str());
-        for source in [
-            &mut provider_name,
-            &mut connection_type,
-            &mut remote_transport,
-            &mut server_version,
-        ] {
-            *source = Some("changed after serialization".to_string());
-        }
-        assert_eq!(evidence, legacy);
-    }
-}
+#[path = "remote_status_serialization_tests.rs"]
+mod status_serialization_tests;
 
 pub(super) async fn handle_bus_event(
     app: &mut App,
@@ -1269,6 +1234,7 @@ pub(super) fn debug_command_needs_current_frame(command: &str) -> bool {
         "frame"
             | "frame-normalized"
             | "screen"
+            | "cells"
             | "screen-json"
             | "screen-json-normalized"
             | "layout"
@@ -1723,10 +1689,13 @@ fn format_stall_duration(timeout: Duration) -> String {
     }
 }
 
-async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
+pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
     let stall_timeout = stall_timeout();
-    let is_running_tool = matches!(app.status, ProcessingStatus::RunningTool(_));
-    if app.is_processing && !is_running_tool {
+    let exempt_from_stall_guard = matches!(
+        app.status,
+        ProcessingStatus::RunningTool(_) | ProcessingStatus::WaitingForNetwork { .. }
+    );
+    if app.is_processing && !exempt_from_stall_guard {
         let stalled = app
             .last_stream_activity
             .map(|t| t.elapsed() > stall_timeout)
@@ -1943,7 +1912,7 @@ fn queue_message_for_reconnect(app: &mut App) {
     }
 
     let prepared = input::take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    input::stage_queued_input(app, prepared);
     if crate::tui::is_ssh_remote() {
         crate::tui::request_immediate_ssh_reconnect();
     }

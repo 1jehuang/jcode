@@ -171,6 +171,7 @@ pub(super) async fn process_message_with_server_failover(
         system_reminder,
         event_tx,
         (enabled, None),
+        None,
     )
     .await
 }
@@ -184,19 +185,21 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     (enabled, origin): (bool, Option<String>),
+    display_role: Option<crate::session::StoredDisplayRole>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
     // Declared under the agent lock right before this request's hook runs, so
     // a concurrent client on the same session cannot overwrite it.
     crate::hooks::set_pending_prompt_origin_named(guard.session_id(), origin.as_deref());
-    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_reserved_message_with_role(
         &mut guard,
         lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
+        display_role,
     )
     .await;
     if !enabled && result.is_err() {
@@ -504,6 +507,7 @@ mod tests {
                     None,
                     tx,
                     (true, Some("sdk".to_string())),
+                    None,
                 )
                 .await
                 .unwrap();

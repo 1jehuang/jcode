@@ -357,16 +357,18 @@ pub(in super::super) async fn process_remote_followups(
         let queued_origin_is_auto = messages
             .iter()
             .all(|msg| super::super::commands::is_poke_message(msg));
+        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send_with_origin(
             app,
             remote,
             combined.clone(),
-            vec![],
+            images.clone(),
             true,
             queued_origin_is_auto,
             reminder.clone(),
             auto_retry,
             0,
+            false,
         )
         .await
         .is_err()
@@ -381,6 +383,7 @@ pub(in super::super) async fn process_remote_followups(
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_images = images;
             }
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {

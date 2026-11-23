@@ -6,19 +6,6 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::time::Instant;
 
-#[cfg(target_os = "linux")]
-fn thread_cpu_ns() -> u128 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    assert_eq!(
-        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
-        0
-    );
-    time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
-}
-
 struct CountingAllocator;
 thread_local! {
     static COUNTS: Cell<Option<(usize, usize)>> = const { Cell::new(None) };
@@ -51,6 +38,22 @@ fn optimized(text: &str) -> Vec<String> {
     tokenize_prelowercased_session_search_text(&text.to_lowercase())
 }
 
+#[cfg(target_os = "linux")]
+fn thread_cpu_ns() -> u128 {
+    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: clock_gettime initializes the timespec on success, checked below.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, time.as_mut_ptr()) };
+    assert_eq!(
+        result,
+        0,
+        "clock_gettime: {}",
+        std::io::Error::last_os_error()
+    );
+    let time = unsafe { time.assume_init() };
+    time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "optimized CPU/allocation probe"]
 fn tokenization_probe() {
@@ -88,29 +91,32 @@ fn tokenization_probe() {
         assert!(allocations[1].1 <= allocations[0].1);
         let iterations = (500_000 / text.len().max(1)).clamp(8, 5000);
         let mut samples = [Vec::new(), Vec::new()];
+        let mut cpu_samples = [Vec::new(), Vec::new()];
         for round in 0..15 {
             for slot in 0..2 {
                 let index = (round + slot) % 2;
                 let f = [legacy as fn(&str) -> Vec<String>, optimized][index];
                 let start = Instant::now();
-                #[cfg(target_os = "linux")]
                 let cpu_start = thread_cpu_ns();
                 for _ in 0..iterations {
                     black_box(f(black_box(&text)));
                 }
-                #[cfg(target_os = "linux")]
-                let elapsed = thread_cpu_ns() - cpu_start;
-                #[cfg(not(target_os = "linux"))]
-                let elapsed = start.elapsed().as_nanos();
-                black_box(start.elapsed());
-                samples[index].push(elapsed / iterations as u128);
+                let cpu_elapsed = thread_cpu_ns() - cpu_start;
+                samples[index].push(start.elapsed().as_nanos() / iterations as u128);
+                cpu_samples[index].push(cpu_elapsed / iterations as u128);
             }
         }
         for times in &mut samples {
             times.sort_unstable();
         }
+        for times in &mut cpu_samples {
+            times.sort_unstable();
+        }
         println!(
-            "{name}: median ns (Linux thread CPU, otherwise elapsed) legacy={} optimized={} ratio={:.3}, allocations/bytes {:?} -> {:?}",
+            "{name}: median thread CPU ns legacy={} optimized={} ratio={:.3}; median wall ns legacy={} optimized={} ratio={:.3}, allocations/bytes {:?} -> {:?}",
+            cpu_samples[0][7],
+            cpu_samples[1][7],
+            cpu_samples[1][7] as f64 / cpu_samples[0][7] as f64,
             samples[0][7],
             samples[1][7],
             samples[1][7] as f64 / samples[0][7] as f64,

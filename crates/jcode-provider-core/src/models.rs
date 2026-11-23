@@ -187,6 +187,7 @@ fn copilot_context_limit_for_model(model: &str) -> usize {
         m if m.starts_with("gemini-2.0-flash") => 1_000_000,
         m if m.starts_with("gemini-2.5") => 1_000_000,
         m if m.starts_with("gemini-3") => 1_000_000,
+        m if m.starts_with("gemini-4") => 1_000_000,
         _ => 128_000,
     }
 }
@@ -336,6 +337,7 @@ pub fn context_limit_for_model_with_provider_and_cache(
     if model.starts_with("gemini-2.0-flash")
         || model.starts_with("gemini-2.5")
         || model.starts_with("gemini-3")
+        || model.starts_with("gemini-4")
     {
         return Some(1_000_000);
     }

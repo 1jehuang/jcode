@@ -183,7 +183,7 @@ impl App {
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
-            manager.set_budget(context_budget);
+            manager.set_budget_for_provider(context_budget, self.provider.name());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
@@ -246,7 +246,7 @@ impl App {
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(context_budget);
+            manager.set_budget_for_provider(context_budget, self.provider.name());
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
 
@@ -343,6 +343,7 @@ impl App {
         // pre-compaction request that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
+        self.kv_cache.kv_cache_tail.reset();
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
@@ -798,6 +799,7 @@ impl App {
         // re-registering them if we cleared the registry here.
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_images.clear();
         self.pasted_contents.clear();
         self.pending_images.clear();
         self.active_skill = None;

@@ -190,6 +190,7 @@ impl MultiProvider {
             ModelRouteApiMethod::Copilot => Some("copilot".to_string()),
             ModelRouteApiMethod::Cursor => Some("cursor".to_string()),
             ModelRouteApiMethod::Bedrock => Some("bedrock".to_string()),
+            ModelRouteApiMethod::AntigravityHttps => Some("antigravity".to_string()),
             ModelRouteApiMethod::Other(method)
                 if method == "cli" && provider_display == "Antigravity" =>
             {
@@ -951,6 +952,14 @@ mod tests {
             openrouter_openai.provider_key.as_deref(),
             Some("openrouter")
         );
+
+        let antigravity = MultiProvider::default_model_selection_from_route(
+            "gemini-4-neon-low",
+            "https",
+            "Antigravity",
+        );
+        assert_eq!(antigravity.model_spec, "antigravity:gemini-4-neon-low");
+        assert_eq!(antigravity.provider_key.as_deref(), Some("antigravity"));
     }
 
     #[test]

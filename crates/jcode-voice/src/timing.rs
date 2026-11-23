@@ -7,6 +7,22 @@ use std::time::Instant;
 static ORIGIN: Mutex<Option<Instant>> = Mutex::new(None);
 static RELEASE: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// Comparable across capture, dispatch and playback (and processes on Unix).
+pub fn monotonic_ms() -> u128 {
+    #[cfg(all(unix, feature = "desktop-config"))]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
+            return ts.tv_sec as u128 * 1000 + ts.tv_nsec as u128 / 1_000_000;
+        }
+    }
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis()
+}
+
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("JCODE_VOICE_TIMING").is_some_and(|v| v != "0"))

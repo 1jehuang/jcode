@@ -99,6 +99,7 @@ fn event_for_transport(
 }
 
 struct ProcessingMessage {
+    jarvis_voice: bool,
     id: u64,
     content: String,
     images: Vec<(String, String)>,
@@ -1083,6 +1084,7 @@ pub(super) async fn handle_client(
             Request::ScreenContext { .. } => unreachable!("Passive screen control dispatched before acknowledgment"),
             Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1120,6 +1122,7 @@ pub(super) async fn handle_client(
                 let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
+                        jarvis_voice,
                         id,
                         content,
                         images,
@@ -1156,8 +1159,13 @@ pub(super) async fn handle_client(
                         &swarm_members,
                         &client_session_id,
                         &client_connection_id,
-                        ServerEvent::PeerUserMessage {
-                            content: peer_content,
+                        if jarvis_voice {
+                            ServerEvent::SoftInterruptInjected {
+                                content: peer_content, display_role: Some("jarvis_user".into()),
+                                point: "turn_start".into(), tools_skipped: None, client_ids: Vec::new(),
+                            }
+                        } else {
+                            ServerEvent::PeerUserMessage { content: peer_content }
                         },
                     )
                     .await;
@@ -1196,6 +1204,7 @@ pub(super) async fn handle_client(
             }
 
             Request::SoftInterrupt {
+                jarvis_voice,
                 id,
                 content,
                 images,
@@ -1231,6 +1240,7 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            jarvis_voice,
                             id,
                             content,
                             images,
@@ -1266,7 +1276,7 @@ pub(super) async fn handle_client(
                     if processing_message_id == Some(id) {
                         let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
                             content: accepted_content,
-                            display_role: None,
+                            display_role: jarvis_voice.then(|| "jarvis_user".to_owned()),
                             point: "turn_start".to_string(),
                             tools_skipped: None,
                             client_ids: client_id.into_iter().collect(),
@@ -1284,6 +1294,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
+                        jarvis_voice,
                         client_id,
                         &session_control,
                         &client_event_tx,
@@ -2052,6 +2063,7 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                             id,
                             effort: None,
+                            model: None,
                             error: Some(format!("target session not found: {target_session_id}")),
                         });
                     }
@@ -2409,7 +2421,11 @@ pub(super) async fn handle_client(
                                 }
                             }
                             start_processing_message(
-                                ProcessingMessage { id, content, images: Vec::new(), system_reminder: None, active_skill: None, origin: None, server_failover: true },
+                                ProcessingMessage {
+                                    jarvis_voice: false,
+                                    id, content, images: Vec::new(), system_reminder: None,
+                                    active_skill: None, origin: None, server_failover: true,
+                                },
                                 &client_session_id,
                                 &mut ProcessingState { client_is_processing: &mut client_is_processing, message_id: &mut processing_message_id, session_id: &mut processing_session_id, task: &mut processing_task },
                                 &agent, &client_event_tx, &processing_done_tx,
@@ -3423,101 +3439,8 @@ impl ModelCatalogRetry {
 }
 
 #[cfg(test)]
-mod model_catalog_retry_tests {
-    use super::*;
-
-    struct TestProvider;
-
-    #[async_trait::async_trait]
-    impl Provider for TestProvider {
-        async fn complete(
-            &self,
-            _messages: &[crate::message::Message],
-            _tools: &[crate::message::ToolDefinition],
-            _system: &str,
-            _resume_session_id: Option<&str>,
-        ) -> Result<crate::provider::EventStream> {
-            anyhow::bail!("catalog test must not call complete")
-        }
-
-        fn name(&self) -> &str {
-            "catalog-retry-test"
-        }
-
-        fn fork(&self) -> Arc<dyn Provider> {
-            Arc::new(Self)
-        }
-    }
-
-    #[tokio::test]
-    #[expect(clippy::await_holding_lock, reason = "isolated test home")]
-    async fn queued_catalog_retry_recovers_after_agent_unlocks() {
-        let _env = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("JCODE_HOME");
-        struct RestoreHome(Option<std::ffi::OsString>);
-        impl Drop for RestoreHome {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => crate::env::set_var("JCODE_HOME", value),
-                    None => crate::env::remove_var("JCODE_HOME"),
-                }
-            }
-        }
-        let _restore = RestoreHome(previous_home);
-        crate::env::set_var("JCODE_HOME", home.path());
-        let agent = Arc::new(Mutex::new(Agent::new(
-            Arc::new(TestProvider),
-            Registry::empty(),
-        )));
-        let busy = agent.lock().await;
-        let mut retry = ModelCatalogRetry::default();
-        retry.queue();
-        assert!(
-            try_available_models_catalog_offloaded(&agent)
-                .await
-                .is_none()
-        );
-        retry.busy();
-        let deadline = retry.deadline.unwrap();
-        retry.queue();
-        assert_eq!(retry.deadline, Some(deadline));
-        drop(busy);
-        tokio::time::sleep_until(deadline).await;
-        let catalog = try_available_models_catalog_offloaded(&agent)
-            .await
-            .unwrap();
-        assert!(catalog.live_event().is_some());
-        retry.complete();
-        assert!(retry.deadline.is_none());
-    }
-
-    #[tokio::test]
-    async fn busy_model_catalog_updates_coalesce_and_retry_until_idle() {
-        let mut retry = ModelCatalogRetry::default();
-        assert!(retry.deadline.is_none());
-        retry.queue();
-        for _ in 0..32 {
-            retry.busy();
-            let deadline = retry.deadline.unwrap();
-            for _ in 0..100 {
-                retry.queue();
-            }
-            assert_eq!(retry.deadline, Some(deadline));
-            let delay = deadline.saturating_duration_since(tokio::time::Instant::now());
-            assert!(delay <= Duration::from_millis(1600));
-            assert!(delay > Duration::ZERO);
-        }
-        // No new bus event is needed when the busy turn ends.
-        assert!(retry.deadline.is_some());
-        retry.complete();
-        assert!(retry.deadline.is_none());
-        assert_eq!(retry.attempts, 0);
-        retry.queue();
-        retry.busy();
-        assert_eq!(retry.attempts, 1);
-    }
-}
+#[path = "client_lifecycle_catalog_retry_tests.rs"]
+mod model_catalog_retry_tests;
 
 #[path = "client_processing.rs"]
 mod client_processing;
@@ -3574,10 +3497,38 @@ pub(super) async fn process_reserved_message_streaming_mpsc(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    process_reserved_message_with_role(
+        agent,
+        lease,
+        content,
+        images,
+        system_reminder,
+        event_tx,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn process_reserved_message_with_role(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    images: Vec<(String, String)>,
+    system_reminder: Option<String>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+    display_role: Option<crate::session::StoredDisplayRole>,
+) -> Result<()> {
     agent.validate_server_turn(lease)?;
     let session_id = agent.session_id().to_string();
     let result = agent
-        .run_reserved_streaming_mpsc(lease, content, images, system_reminder, event_tx, None)
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            images,
+            system_reminder,
+            event_tx,
+            display_role,
+        )
         .await;
     if result.is_ok() {
         crate::runtime_memory_log::emit_event(

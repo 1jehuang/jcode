@@ -599,6 +599,13 @@ pub fn get_cached_png(hash: u64) -> Option<(PathBuf, u32, u32)> {
 /// Register a local markdown image, rasterizing SVGs for terminal protocols.
 /// SVG cache keys include the source bytes so edited graphs never reuse old pixels.
 pub fn register_markdown_image(path: &Path) -> Option<u64> {
+    register_markdown_image_with_dims(path).map(|(hash, _, _)| hash)
+}
+
+/// Register a local Markdown image (raster or SVG) in the render cache and
+/// return `(hash, width, height)` in pixels so inline chat renderers can size
+/// the terminal placeholder box accurately.
+pub fn register_markdown_image_with_dims(path: &Path) -> Option<(u64, u32, u32)> {
     if !path.extension()?.eq_ignore_ascii_case("svg") {
         let (width, height) = image::image_dimensions(path).map_or_else(
             |error| {
@@ -607,7 +614,8 @@ pub fn register_markdown_image(path: &Path) -> Option<u64> {
             },
             Some,
         )?;
-        return Some(register_external_image(path, width, height));
+        let hash = register_external_image(path, width, height);
+        return Some((hash, width, height));
     }
 
     let bytes = fs::read(path).map_or_else(
@@ -674,7 +682,8 @@ pub fn register_markdown_image(path: &Path) -> Option<u64> {
         },
         Some,
     )?;
-    Some(register_external_image(&output, width, height))
+    let hash = register_external_image(&output, width, height);
+    Some((hash, width, height))
 }
 
 /// Register an external image file (e.g. from file_read) in the render cache

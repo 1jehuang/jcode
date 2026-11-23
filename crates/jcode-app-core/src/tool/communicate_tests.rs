@@ -456,6 +456,7 @@ impl RawClient {
         self.next_id += 1;
         self.send_request(Request::Message {
             id,
+            jarvis_voice: false,
             content: content.to_string(),
             images: vec![],
             system_reminder: None,

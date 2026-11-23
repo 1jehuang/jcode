@@ -320,6 +320,11 @@ impl SessionPicker {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        let (match_hint_line, transcript_only_match) =
+            Self::search_match_hint_line(session, &highlight_tokens);
+        if transcript_only_match {
+            detail_spans.push(Span::styled("  · transcript", Style::default().fg(dimmer)));
+        }
         // A running turn is a state, not an age: show a spinner instead of
         // a stale "x ago" that would count up while the agent is busy.
         if self.session_is_streaming(session) {
@@ -333,11 +338,64 @@ impl SessionPicker {
             detail_spans.push(Span::styled(activity, Style::default().fg(dim)));
         }
         let mut rows = vec![line1, Line::from(detail_spans)];
+        if let Some(hint_line) = match_hint_line {
+            rows.push(hint_line);
+        }
         if let Some(reason_line) = Self::crash_reason_line(session) {
             rows.push(reason_line);
         }
 
         rows
+    }
+
+    fn search_match_hint_line(
+        session: &SessionInfo,
+        highlight_tokens: &[String],
+    ) -> (Option<Line<'static>>, bool) {
+        if highlight_tokens.is_empty() {
+            return (None, false);
+        }
+        let title_lower = session.title.to_lowercase();
+        let label_lower = session
+            .save_label
+            .as_deref()
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        let title_covers_all = highlight_tokens.iter().all(|token| {
+            title_lower.contains(token.as_str()) || label_lower.contains(token.as_str())
+        });
+        if title_covers_all {
+            return (None, false);
+        }
+        let label_style = Style::default().fg(rgb(130, 140, 155));
+        let text_style = Style::default().fg(rgb(155, 165, 180));
+        if let Some(intention) = session.user_intention.as_deref() {
+            let lower = intention.to_lowercase();
+            if highlight_tokens.iter().any(|t| lower.contains(t.as_str())) {
+                let compact = intention.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut spans = vec![Span::styled("  intent: ", label_style)];
+                spans.extend(Self::highlight_spans(
+                    &compact,
+                    highlight_tokens,
+                    text_style,
+                ));
+                return (Some(Line::from(spans)), false);
+            }
+        }
+        if let Some(prompt) = session.first_user_prompt.as_deref() {
+            let lower = prompt.to_lowercase();
+            if highlight_tokens.iter().any(|t| lower.contains(t.as_str())) {
+                let compact = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut spans = vec![Span::styled("  prompt: ", label_style)];
+                spans.extend(Self::highlight_spans(
+                    &compact,
+                    highlight_tokens,
+                    text_style,
+                ));
+                return (Some(Line::from(spans)), false);
+            }
+        }
+        (None, true)
     }
 
     fn render_session_item(

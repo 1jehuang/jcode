@@ -851,6 +851,10 @@ pub enum ServerEvent {
         id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Updated model ID when changing effort switches to a sibling model
+        /// variant (for example Antigravity `gemini-4-neon-low` -> `gemini-4-neon-medium`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

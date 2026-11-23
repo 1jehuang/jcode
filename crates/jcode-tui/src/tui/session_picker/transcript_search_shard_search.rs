@@ -22,12 +22,13 @@ fn search_shard(
     let phrase = PhraseQuery::new(query);
     // Sessions whose later user prompts may contain the query
     // as a retyped phrase, checked after cheaper evidence.
+    let short = phrase.as_ref().is_some_and(|q| q.words.len() < 4);
     let mut phrase_jobs = Vec::new();
     for (mut candidate, priority) in candidates {
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        if phrase.is_some() && !candidate.paths.is_empty() {
+        if !short && phrase.is_some() && !candidate.paths.is_empty() {
             phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), priority));
         }
         if priority.opening_prompt > 0 {
@@ -51,6 +52,9 @@ fn search_shard(
             rank.intent_terms = priority.intent_terms;
             if sender.send((candidate.id.clone(), rank)).is_err() {
                 return;
+            }
+            if short && priority.opening_prompt == 0 && !candidate.paths.is_empty() {
+                phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
             }
             if !candidate.paths.is_empty()
                 && candidate
@@ -104,6 +108,9 @@ fn search_shard(
             &mut scores,
         ) {
             Some(Some(evidence)) => {
+                if short && rank.opening_prompt == 0 {
+                    phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
+                }
                 if sender
                     .send((
                         candidate.id.clone(),
@@ -165,6 +172,9 @@ fn search_shard(
             ScanMode::Literal,
             &mut scores,
         ) {
+            if short && rank.opening_prompt == 0 {
+                phrase_jobs.push((candidate.id.clone(), candidate.paths.clone(), rank));
+            }
             if sender
                 .send((
                     candidate.id.clone(),

@@ -22,6 +22,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
         system_reminder,
         auto_retry,
         retry_attempts,
+        false,
     )
     .await
 }
@@ -42,6 +43,7 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
     system_reminder: Option<String>,
     auto_retry: bool,
     retry_attempts: u8,
+    jarvis_voice: bool,
 ) -> Result<u64> {
     if let Err(error) = app.prepare_local_tools(remote).await {
         crate::logging::info(&format!(
@@ -86,11 +88,12 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
         }
     });
     let msg_id = remote
-        .send_message_with_images_reminder_and_skill(
+        .send_message_with_origin(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
+            jarvis_voice,
         )
         .await;
     let msg_id = match msg_id {
@@ -148,6 +151,7 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice,
         content,
         images,
         is_system,
@@ -259,8 +263,11 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     }
 
     app.commit_pending_streaming_assistant_message();
-    // A manually submitted prompt supersedes any armed post-error fallback
-    // offer (and its staged resend): the user chose to continue differently.
+    // This typed turn supersedes any voice reply that is still being prepared.
+    if crate::tui::jarvis::always_on() {
+        app.cancel_jarvis_speech();
+    }
+    // The user chose to continue differently, superseding any post-error fallback.
     app.clear_pending_fallback_offer();
     // Remember the typed prompt so we can restore it to the input box if this turn
     // fails (e.g. "token refresh needed"), instead of dropping it.
