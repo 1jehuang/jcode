@@ -1223,5 +1223,32 @@ fn test_replacement_prompt_does_not_inherit_deferred_skill_arguments() {
     assert!(app.pending_skill_arguments_after_model_switch.is_none());
     assert!(app.pending_skill_arguments.is_none());
 }
+#[test]
+fn test_failed_remote_send_keeps_pending_skill_arguments() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+    // Closing the peer makes the socket write fail.
+    drop(remote.take_dummy_peer());
+    app.is_remote = true;
+
+    // An explicit empty value is a deliberate reset and must survive too.
+    for pending in [String::new(), "42".to_string()] {
+        app.pending_skill_arguments = Some(pending.clone());
+        let result = rt.block_on(crate::tui::app::remote::begin_remote_send(
+            &mut app,
+            &mut remote,
+            "hello".to_string(),
+            vec![],
+            false,
+            None,
+            false,
+            0,
+        ));
+        assert!(result.is_err(), "send should fail with a closed peer");
+        assert_eq!(app.pending_skill_arguments, Some(pending));
+    }
+}
+
 #[path = "part_01_additional_tests.rs"]
 mod additional_test_pending_split_launch_shows_processing_status_in_ui;

@@ -81,19 +81,23 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
             reminder
         }
     });
+    // Keep the pending arguments (including an explicit empty reset) until the
+    // write succeeds, so a retry of the same draft still carries them.
+    let skill_arguments = app.pending_skill_arguments.take();
     let msg_id = remote
         .send_message_with_origin(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
-            app.pending_skill_arguments.take(),
+            skill_arguments.clone(),
             jarvis_voice,
         )
         .await;
     let msg_id = match msg_id {
         Ok(id) => id,
         Err(error) => {
+            app.pending_skill_arguments = skill_arguments;
             // Errors can contain wire data, so keep diagnostics metadata-only.
             crate::logging::info(&format!(
                 "RECOVERY_SEND_FAILED session_id={:?} request_id=unassigned previous_request_id={:?} phase=write content_bytes={} images={} retry_attempts={}",
