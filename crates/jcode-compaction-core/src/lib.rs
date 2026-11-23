@@ -54,8 +54,12 @@ pub fn is_anthropic_oauth_route(api_method: &str) -> bool {
 
 /// Auto-compaction budget ceiling for a route, when that route has a limit
 /// stricter than its context window.
-pub fn auto_compaction_budget_ceiling(api_method: &str) -> Option<usize> {
-    is_anthropic_oauth_route(api_method).then_some(ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET)
+///
+/// No route currently qualifies: clamping subscription routes to a fixed
+/// 100k budget made a 1M-window model emergency-compact in a loop near 100k.
+/// The budget now always scales from the model's real context window.
+pub fn auto_compaction_budget_ceiling(_api_method: &str) -> Option<usize> {
+    None
 }
 
 /// Max chars for a single tool result during emergency truncation

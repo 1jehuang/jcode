@@ -44,6 +44,14 @@ pub(super) async fn admit_runtime_delivery(
     Some(activity)
 }
 
+/// A session with unfinished todos must resume when its background task ends,
+/// even if the task was started without `wake`, or the agent stalls forever.
+pub(super) fn has_open_todos(todos: &[crate::todo::TodoItem]) -> bool {
+    todos
+        .iter()
+        .any(|t| matches!(t.status.as_str(), "pending" | "in_progress"))
+}
+
 async fn emit_external_wake(
     session_id: &str,
     reason: &str,
@@ -119,7 +127,11 @@ pub(super) async fn dispatch_background_task_completion(
         ));
     }
 
-    if task.wake
+    let should_wake = task.wake
+        || has_open_todos(
+            &crate::todo::load_todos(&task.session_id).unwrap_or_default(),
+        );
+    if should_wake
         && !emit_external_wake(
             &task.session_id,
             "background_task_completed",
@@ -1008,5 +1020,23 @@ mod tests {
             .expect("progress captured");
         assert_eq!((captured.current, captured.total), (27, 43));
         assert!(!update_active_todo_batch_progress(&mut items, &progress));
+    }
+}
+
+#[cfg(test)]
+mod open_todo_wake_tests {
+    use super::has_open_todos;
+    fn item(status: &str) -> crate::todo::TodoItem {
+        serde_json::from_value(serde_json::json!({
+            "content": "x", "status": status, "priority": "high", "id": "1"
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn open_todos_force_wake_and_finished_ones_do_not() {
+        assert!(has_open_todos(&[item("completed"), item("in_progress")]));
+        assert!(has_open_todos(&[item("pending")]));
+        assert!(!has_open_todos(&[item("completed"), item("cancelled")]));
+        assert!(!has_open_todos(&[]));
     }
 }

@@ -207,6 +207,10 @@ pub struct CompactionManager {
     /// Used as a cooldown anti-signal.
     turns_since_last_compact: usize,
 
+    /// Token count right after the last emergency hard compact. Emergency
+    /// compaction re-fires only after growth past this baseline (hysteresis).
+    emergency_baseline_tokens: Option<usize>,
+
     // ── Semantic mode state ────────────────────────────────────────────────
     /// Per-turn embedding snapshots for topic-shift detection.
     /// Each entry is the L2-normalized embedding of the last assistant message
@@ -246,6 +250,7 @@ impl CompactionManager {
             compaction_config: cfg,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
+            emergency_baseline_tokens: None,
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
@@ -415,6 +420,7 @@ impl CompactionManager {
         self.last_compaction = None;
         self.token_history.clear();
         self.turns_since_last_compact = 0;
+        self.emergency_baseline_tokens = None;
         self.embedding_history.clear();
         self.semantic_embed_cache.clear();
         self.semantic_embed_cache_counter = 0;
@@ -1044,6 +1050,13 @@ impl CompactionManager {
         // against the pre-hard-compact offsets), so skip the wasted work and the
         // risk of a stale `pending_cutoff` being applied later.
         let usage = self.context_usage_with(all_messages);
+        if usage >= CRITICAL_THRESHOLD && self.emergency_compaction_suppressed(all_messages) {
+            crate::logging::warn(&format!(
+                "[compaction] Context at {:.1}% but emergency compaction is in cooldown; skipping",
+                usage * 100.0,
+            ));
+            return CompactionAction::None;
+        }
         if usage >= CRITICAL_THRESHOLD {
             if self.pending_task.is_some() {
                 crate::logging::warn(&format!(
@@ -1417,9 +1430,13 @@ impl CompactionManager {
 
                 let mut result = Vec::with_capacity(active.len() + 1);
 
+                // Pin the root prompt byte-identically after the summary block (summary
+                // stays content[0] for harness detection) so it is never paraphrased away.
+                let mut content = vec![summary_block];
+                content.extend(pinned_root_prompt(all_messages, self.compacted_count));
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content,
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -1676,7 +1693,23 @@ impl CompactionManager {
             all_messages,
         });
 
+        self.turns_since_last_compact = 0;
+        self.emergency_baseline_tokens = Some(post_tokens as usize);
         Ok(dropped_count)
+    }
+
+    /// Emergency compaction cooldown: after a hard compact, skip re-firing
+    /// until `min_turns_between_compactions` turns pass or usage grows past
+    /// the post-compact baseline by max(15% of budget, 50k tokens).
+    pub fn emergency_compaction_suppressed(&self, all_messages: &[Message]) -> bool {
+        let Some(baseline) = self.emergency_baseline_tokens else {
+            return false;
+        };
+        if self.turns_since_last_compact >= self.compaction_config.min_turns_between_compactions {
+            return false;
+        }
+        let margin = (self.token_budget * 15 / 100).max(50_000);
+        self.effective_token_count_with(all_messages) < baseline.saturating_add(margin)
     }
 
     /// Emergency truncation: shorten large tool results in active messages.
@@ -1977,6 +2010,28 @@ fn looks_like_refusal(text: &str) -> bool {
     } else {
         PATTERNS.iter().any(|pattern| head.starts_with(pattern))
     }
+}
+
+/// Text blocks of the first user message, copied verbatim, when that message
+/// has been compacted away. Empty when it is still in the active window.
+fn pinned_root_prompt(all_messages: &[Message], compacted_count: usize) -> Vec<ContentBlock> {
+    all_messages
+        .iter()
+        .take(compacted_count)
+        .find(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { .. }))
+        })
+        .map(|m| {
+            m.content
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[path = "compaction_transfer.rs"]
