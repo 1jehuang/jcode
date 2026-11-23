@@ -328,3 +328,58 @@ fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
         assert!(crate::tui::scheduled_notification_text(info.ambient_info.as_ref()).is_none());
     });
 }
+
+#[test]
+fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
+    with_ssh_remote_test_home(|| {
+        let mut app = App::new_for_remote(None);
+        app.remote_provider_name = Some("antigravity".to_string());
+        app.remote_provider_model = Some("gemini-4-neon-low".to_string());
+        let route = |model: &str| crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "Antigravity".to_string(),
+            api_method: "antigravity-https".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        };
+        app.remote_model_options = vec![
+            route("gemini-4-neon-low"),
+            route("gemini-4-neon-medium"),
+            route("gemini-4-neon-high"),
+            route("gemini-4-neon-xhigh"),
+            route("gemini-3-flash"),
+        ];
+
+        assert_eq!(
+            app.remote_available_efforts(),
+            vec!["low", "medium", "high", "xhigh", "swarm"]
+        );
+        assert_eq!(app.remote_reasoning_effort_hint().as_deref(), Some("low"));
+
+        let mut remote = crate::tui::backend::ReplayRemoteState::default();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 42,
+                effort: Some("high".to_string()),
+                model: Some("gemini-4-neon-high".to_string()),
+                error: None,
+            },
+            &mut remote,
+        );
+
+        assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            app.remote_provider_model.as_deref(),
+            Some("gemini-4-neon-high")
+        );
+        assert_eq!(app.session.model.as_deref(), Some("gemini-4-neon-high"));
+
+        // Non-effort Antigravity model exposes no reasoning efforts
+        app.remote_provider_model = Some("gemini-3-flash".to_string());
+        app.remote_reasoning_effort = None;
+        assert!(app.remote_available_efforts().is_empty());
+        assert_eq!(app.remote_reasoning_effort_hint(), None);
+    });
+}

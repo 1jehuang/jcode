@@ -389,16 +389,31 @@ pub(super) async fn run_reserved_followups(
             return Ok(());
         }
         let mut snapshot = snapshot(&session_id)?;
-        snapshot.running_background_tasks = crate::background::global()
-            .list()
-            .await
-            .into_iter()
-            .filter(|task| {
-                task.session_id == session_id
-                    && matches!(task.status, crate::bus::BackgroundTaskStatus::Running)
+        snapshot.running_workers = snapshot
+            .todos
+            .iter()
+            .filter_map(|todo| todo.assigned_to.as_ref())
+            .filter(|id| {
+                id.as_str() != session_id && crate::turn_cancel_registry::has_active_turn(id)
             })
-            .map(|task| task.task_id)
+            .cloned()
             .collect();
+        // The process-backed task list cannot see durable await_members waits.
+        // Keep those verified by the snapshot, replacing only process facts.
+        snapshot
+            .running_background_tasks
+            .retain(|id| id.starts_with(todo::await_dependency::ID_PREFIX));
+        snapshot.running_background_tasks.extend(
+            crate::background::global()
+                .list()
+                .await
+                .into_iter()
+                .filter(|task| {
+                    task.session_id == session_id
+                        && matches!(task.status, crate::bus::BackgroundTaskStatus::Running)
+                })
+                .map(|task| task.task_id),
+        );
         let decision = update_state(&session_id, |state| {
             state
                 .policy

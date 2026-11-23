@@ -8,12 +8,10 @@ pub(super) async fn apply_remote_effort_direction(
     direction: i8,
 ) -> Result<()> {
     // Use the best-known provider/model identity (server-reported when
-    // available, header hints during the pre-History bootstrap window) so
-    // effort cycling works immediately after spawn instead of claiming the
-    // provider does not support it until the History payload settles.
-    let (provider_name, provider_model) = app.remote_effort_identity();
-    let efforts =
-        app_mod::inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref());
+    // available, header hints during the pre-History bootstrap window) and
+    // live remote catalog routes so effort cycling works immediately after
+    // spawn and reflects discovered sibling models (e.g. Antigravity).
+    let efforts = app.remote_available_efforts();
     if efforts.is_empty() {
         app.set_status_notice("Reasoning effort not available for this provider");
         return Ok(());

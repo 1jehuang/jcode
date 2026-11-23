@@ -5,7 +5,7 @@ use jcode_session_types::{ResponseStats, StoredMessage};
 
 fn is_user_prompt(message: &StoredMessage) -> bool {
     matches!(message.role, Role::User)
-        && message.display_role.is_none()
+        && !message.has_context_display_role()
         && !super::is_internal_system_reminder(message)
         && !super::is_auto_poke_user_message(message)
         && !super::super::is_scheduled_task_message(message)
@@ -168,6 +168,28 @@ mod tests {
         let mut tail = vec![row(3)];
         attach(&messages, &mut tail);
         assert_eq!(tail[0].response_stats, rows[0].response_stats);
+    }
+
+    #[test]
+    fn jarvis_user_starts_a_separate_historical_turn() {
+        let mut messages = vec![
+            text(Role::User, "typed", None),
+            text(Role::Assistant, "first", usage(10)),
+            text(Role::User, "voice", None),
+            text(Role::Assistant, "second", usage(20)),
+        ];
+        messages[2].display_role = Some(jcode_session_types::StoredDisplayRole::JarvisUser);
+        assert!(super::super::stored_message_is_user_turn(&messages[2]));
+        let mut rows = vec![row(1), row(3)];
+        attach(&messages, &mut rows);
+        assert_eq!(
+            rows[0].response_stats.as_ref().unwrap().input_tokens,
+            Some(10)
+        );
+        assert_eq!(
+            rows[1].response_stats.as_ref().unwrap().input_tokens,
+            Some(20)
+        );
     }
 
     #[test]

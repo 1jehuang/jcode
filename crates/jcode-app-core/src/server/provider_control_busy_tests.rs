@@ -254,6 +254,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
         Some(ServerEvent::ReasoningEffortChanged {
             id: 7,
             effort: Some(effort),
+            model: None,
             error: None,
         }) if effort == "low"
     ));
@@ -518,4 +519,119 @@ async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecy
         "registry must not retain providers"
     );
     super::super::state::remove_background_tool_signal("tier_registry_other");
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_propagates_sibling_model_change() {
+    struct SiblingEffortProvider {
+        model: StdMutex<String>,
+    }
+
+    #[async_trait]
+    impl Provider for SiblingEffortProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            panic!("complete should not run in sibling effort test")
+        }
+
+        fn name(&self) -> &str {
+            "antigravity"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().expect("model lock").clone()
+        }
+
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = model.to_string();
+            Ok(())
+        }
+
+        fn available_models_for_switching(&self) -> Vec<String> {
+            vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-high".to_string(),
+            ]
+        }
+
+        fn available_efforts(&self) -> Vec<&'static str> {
+            vec!["low", "high", "swarm"]
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            let model = self.model();
+            model.rsplit('-').next().map(str::to_string)
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = format!("gemini-4-neon-{effort}");
+            Ok(())
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self {
+                model: StdMutex::new(self.model()),
+            })
+        }
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(SiblingEffortProvider {
+        model: StdMutex::new("gemini-4-neon-low".to_string()),
+    });
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_sibling_effort_change".to_string(),
+        None,
+        None,
+    );
+    session.model = Some(provider.model());
+    session.save_prepared().unwrap();
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        registry,
+        session,
+        None,
+    )));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    handle_set_reasoning_effort(11, "high".to_string(), &agent, &tx).await;
+
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("effort change should emit event");
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ReasoningEffortChanged {
+            id: 11,
+            effort: Some(effort),
+            model: Some(model),
+            error: None,
+        }) if effort == "high" && model == "gemini-4-neon-high"
+    ));
+    assert_eq!(provider.model(), "gemini-4-neon-high");
+    assert_eq!(agent.lock().await.provider_model(), "gemini-4-neon-high");
+    let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
+    assert_eq!(saved.model.as_deref(), Some("gemini-4-neon-high"));
 }

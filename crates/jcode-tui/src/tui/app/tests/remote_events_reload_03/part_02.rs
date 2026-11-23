@@ -440,6 +440,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

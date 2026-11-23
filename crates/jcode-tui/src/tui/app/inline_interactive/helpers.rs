@@ -252,6 +252,145 @@ pub(super) fn agent_model_default_summary(target: AgentModelTarget, app: &App) -
     normalize_agent_model_summary(target, summary)
 }
 
+impl App {
+    pub(in crate::tui::app) fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
+        jcode_fuzzy::fuzzy_score_tokens(pattern, text)
+    }
+
+    pub(in crate::tui::app) fn is_login_starter_entry(entry: &crate::tui::PickerEntry) -> bool {
+        match entry.action {
+            crate::tui::PickerAction::AutoApiKey
+            | crate::tui::PickerAction::ExpandLoginProviders => true,
+            crate::tui::PickerAction::Login(provider) => matches!(
+                provider.target,
+                crate::provider_catalog::LoginProviderTarget::OpenAi
+                    | crate::provider_catalog::LoginProviderTarget::Claude
+                    | crate::provider_catalog::LoginProviderTarget::Antigravity
+                    | crate::provider_catalog::LoginProviderTarget::Gemini
+                    | crate::provider_catalog::LoginProviderTarget::AutoImport
+            ),
+            crate::tui::PickerAction::Account(_) => false,
+            _ => true,
+        }
+    }
+
+    pub(in crate::tui::app) fn apply_inline_interactive_filter(
+        picker: &mut InlineInteractiveState,
+    ) {
+        if picker.filter.is_empty() {
+            let collapsed_login = picker.kind == crate::tui::PickerKind::Login
+                && picker.entries.iter().any(|entry| {
+                    matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders)
+                });
+            if collapsed_login {
+                picker.filtered = picker
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, entry)| Self::is_login_starter_entry(entry).then_some(i))
+                    .collect();
+            } else {
+                picker.filtered = (0..picker.entries.len()).collect();
+            }
+        } else {
+            let query = picker.filter.trim();
+            // Prepare the query once per keystroke instead of re-parsing and
+            // re-lowercasing it for every entry.
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
+            let query_words: Vec<String> =
+                query.split_whitespace().map(|w| w.to_lowercase()).collect();
+            let mut scored: Vec<(usize, bool, i32)> = picker
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| {
+                    if matches!(m.action, crate::tui::PickerAction::ExpandLoginProviders) {
+                        return None;
+                    }
+                    let filter_text = picker.filter_text(m);
+                    prepared.score(&filter_text).map(|s| {
+                        // Usage and recommendation only nudge ranking. They
+                        // must never outweigh match quality, otherwise a
+                        // frequently used model that loosely matches the
+                        // query buries the model the user is typing.
+                        let usage_bonus = (m.usage_score / 10).min(30) as i32;
+                        let name_lower = m.name.to_lowercase();
+                        let literal_name_bonus =
+                            if query_words.iter().all(|w| name_lower.contains(w.as_str())) {
+                                80
+                            } else {
+                                0
+                            };
+                        let bonus =
+                            usage_bonus + literal_name_bonus + if m.recommended { 5 } else { 0 };
+                        (
+                            i,
+                            m.name.eq_ignore_ascii_case(query),
+                            s.saturating_add(bonus),
+                        )
+                    })
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then(b.2.cmp(&a.2))
+                    .then(
+                        picker.entries[a.0]
+                            .recommendation_rank
+                            .cmp(&picker.entries[b.0].recommendation_rank),
+                    )
+                    .then(picker.entries[a.0].name.cmp(&picker.entries[b.0].name))
+            });
+            picker.filtered = scored.into_iter().map(|(i, _, _)| i).collect();
+        }
+        if picker.filtered.is_empty() {
+            picker.selected = 0;
+        } else {
+            picker.selected = picker.selected.min(picker.filtered.len() - 1);
+        }
+    }
+
+    pub(in crate::tui::app) fn tab_complete_inline_interactive_filter(
+        picker: &mut InlineInteractiveState,
+    ) {
+        if picker.filtered.is_empty() {
+            return;
+        }
+        if picker.filtered.len() == 1 {
+            let name = picker.entries[picker.filtered[0]].name.clone();
+            picker.filter = name;
+            Self::apply_inline_interactive_filter(picker);
+            return;
+        }
+        let names: Vec<&str> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.entries[i].name.as_str())
+            .collect();
+        let first = names[0].to_lowercase();
+        let first_chars: Vec<char> = first.chars().collect();
+        let mut prefix_len = first_chars.len();
+        for name in names.iter().skip(1) {
+            let lower = (*name).to_lowercase();
+            let chars: Vec<char> = lower.chars().collect();
+            let mut common = 0;
+            for (a, b) in first_chars.iter().zip(chars.iter()) {
+                if a == b {
+                    common += 1;
+                } else {
+                    break;
+                }
+            }
+            prefix_len = prefix_len.min(common);
+        }
+        if prefix_len > picker.filter.len() {
+            let first_original = &picker.entries[picker.filtered[0]].name;
+            picker.filter = first_original[..prefix_len].to_string();
+            Self::apply_inline_interactive_filter(picker);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

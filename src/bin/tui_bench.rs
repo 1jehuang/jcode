@@ -598,21 +598,18 @@ fn session_to_display_messages(session: &Session, max_messages: usize) -> Vec<Di
         if text.trim().is_empty() {
             continue;
         }
-        match message.display_role {
+        let display_msg = match message.display_role {
+            Some(StoredDisplayRole::JarvisUser) => DisplayMessage::jarvis_user(text),
             Some(StoredDisplayRole::System | StoredDisplayRole::FileActivity) => {
-                out.push(DisplayMessage::system(text));
-                continue;
+                DisplayMessage::system(text)
             }
-            Some(StoredDisplayRole::BackgroundTask) => {
-                out.push(DisplayMessage::background_task(text));
-                continue;
-            }
-            None => {}
-        }
-        match message.role {
-            Role::User => out.push(DisplayMessage::user(text)),
-            Role::Assistant => out.push(DisplayMessage::assistant(text)),
-        }
+            Some(StoredDisplayRole::BackgroundTask) => DisplayMessage::background_task(text),
+            None => match message.role {
+                Role::User => DisplayMessage::user(text),
+                Role::Assistant => DisplayMessage::assistant(text),
+            },
+        };
+        out.push(display_msg);
     }
 
     if out.is_empty() {

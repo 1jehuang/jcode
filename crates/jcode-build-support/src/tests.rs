@@ -906,3 +906,51 @@ fn repair_never_downgrades_when_stable_is_older() {
         );
     });
 }
+
+#[test]
+fn repair_repoints_stale_prerelease_shared_server_to_newer_release() {
+    use std::time::{Duration, SystemTime};
+    with_temp_jcode_home(|| {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let old_prerelease = "selfdev-linux-2248281ef64759b991254c377ba2211d53e04868";
+        let new_prerelease = "selfdev-linux-e8d3ca609344a00de3731cdb4b6a0bce3adb0510";
+        write_versioned_binary(old_prerelease, base);
+        write_versioned_binary(new_prerelease, base + Duration::from_secs(60));
+        update_shared_server_symlink(old_prerelease).expect("old prerelease");
+        update_stable_symlink(new_prerelease).expect("new prerelease");
+
+        let outcome = repair_stale_shared_server_channel().expect("repair");
+        assert_eq!(
+            outcome,
+            SharedServerRepair::Repaired {
+                previous: Some(old_prerelease.to_string()),
+                repaired_to: new_prerelease.to_string(),
+            }
+        );
+        assert_eq!(
+            read_shared_server_version().unwrap().as_deref(),
+            Some(new_prerelease),
+        );
+    });
+}
+
+#[test]
+fn detects_dynamic_loader_paths_and_ignores_real_jcode_binaries() {
+    assert!(is_dynamic_loader_path(Path::new(
+        "/data/data/com.termux/files/usr/glibc/lib/ld-linux-aarch64.so.1"
+    )));
+    assert!(is_dynamic_loader_path(Path::new(
+        "/lib64/ld-linux-x86-64.so.2"
+    )));
+    assert!(is_dynamic_loader_path(Path::new(
+        "/lib/ld-musl-aarch64.so.1"
+    )));
+    assert!(is_dynamic_loader_path(Path::new("/system/bin/linker64")));
+    assert!(is_dynamic_loader_path(Path::new("/system/bin/linker")));
+    assert!(!is_dynamic_loader_path(Path::new(
+        "/data/data/com.termux/files/home/.jcode/builds/versions/1.0.1/jcode"
+    )));
+    assert!(!is_dynamic_loader_path(Path::new(
+        "/home/user/.jcode/builds/versions/1.0.1/jcode-linux-x86_64.bin"
+    )));
+}

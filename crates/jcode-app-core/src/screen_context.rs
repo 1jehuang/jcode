@@ -174,10 +174,11 @@ fn render_prompt(snapshot: &ScreenSnapshot, owner: &str) -> String {
         "title": window.title.as_deref().map(|s| short(s, if Some(window.id) == snapshot.focused_window { 256 } else { 96 })),
         "workspace": window.workspace_id, "visible": window.visible,
     })).collect();
+    // Lease checks in Store::latest enforce freshness. Transport counters and
+    // wall times belong to the on-demand snapshot, not the provider prompt:
+    // an otherwise identical desktop heartbeat must not rewrite its prefix.
     let mut observation = serde_json::json!({
-        "source":"niri", "source_client":short(owner, 64), "sequence":snapshot.sequence,
-        "observed_at_ms":snapshot.observed_at_ms,
-        "expires_at_ms":snapshot.observed_at_ms.saturating_add(SCREEN_LEASE_MS),
+        "source":"niri", "source_client":short(owner, 64),
         "interaction":"unknown", "focused_window":snapshot.focused_window,
         "window_count":snapshot.windows.len(), "output_count":snapshot.outputs.len(), "windows":windows,
         "layout_coordinate_space":"niri_logical_not_global_rect", "detail_tool":"screen_context",
@@ -332,6 +333,15 @@ mod tests {
             .unwrap();
         assert!(store.latest("s", later, wall).is_none());
     }
+    #[test]
+    fn passive_screen_prompt_ignores_heartbeat_but_tracks_screen_changes() {
+        let before = render_prompt(&snapshot(1, 100_000), "desktop");
+        let mut refreshed = snapshot(2, 102_000);
+        assert_eq!(before, render_prompt(&refreshed, "desktop"));
+        refreshed.windows[0].title = Some("new title".into());
+        assert_ne!(before, render_prompt(&refreshed, "desktop"));
+    }
+
     #[test]
     fn passive_screen_prompt_is_under_two_kib_even_with_json_escaping() {
         let mut screen = snapshot(u64::MAX, u64::MAX);

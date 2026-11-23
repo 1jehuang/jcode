@@ -76,18 +76,60 @@ async fn requires_user_auth_validates_updates_clears_and_ends_with_the_todo() {
     .await
     .unwrap();
     assert!(load_todos(SESSION).unwrap()[0].requires_user_auth.is_none());
-    for status in ["completed", "cancelled"] {
-        tool.execute(
-            json!({"update":[{"id":"a", "status":"pending", "requires_user_auth":auth}]}),
-            context(),
-        )
-        .await
-        .unwrap();
-        tool.execute(json!({"update":[{"id":"a", "status":status}]}), context())
-            .await
-            .unwrap();
-        assert!(load_todos(SESSION).unwrap()[0].requires_user_auth.is_none());
+    tool.execute(
+        json!({"update":[{"id":"a", "status":"pending", "requires_user_auth":auth}]}),
+        context(),
+    )
+    .await
+    .unwrap();
+    tool.execute(
+        json!({"update":[{"id":"a", "status":"completed"}]}),
+        context(),
+    )
+    .await
+    .unwrap();
+    assert!(load_todos(SESSION).unwrap()[0].requires_user_auth.is_none());
+}
+
+#[tokio::test]
+async fn cancel_archives_original_only_after_all_edits_and_dependencies_validate() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = HomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let tool = TodoTool::new();
+    let initial = json!({"todos":[item(json!({})), {"id":"b","content":"Test","phase":2,"lane":"test","lane_after":["a"],"status":"pending","priority":"high"}]});
+    tool.execute(initial, context()).await.unwrap();
+    let original = load_todos(SESSION).unwrap();
+    let cancel = json!([{"name":"Deploy","reason":" Superseded "}]);
+    for invalid in [
+        json!({"cancel":cancel}),
+        json!({"cancel":[{"name":"Test","reason":" "}]}),
+        json!({"cancel":[{"name":"Test","reason":"obsolete"},{"name":"Missing","reason":"obsolete"}]}),
+        json!({"update":[{"name":"Test","status":"canceled"}]}),
+    ] {
+        assert!(tool.execute(invalid, context()).await.is_err());
+        assert_eq!(load_todos(SESSION).unwrap(), original);
+        assert!(
+            crate::todo::store::load_cancellations(dir.path(), SESSION)
+                .unwrap()
+                .is_empty()
+        );
     }
+    tool.execute(
+        json!({"update":[{"name":"Test","lane_dependencies":null}], "cancel":cancel}),
+        context(),
+    )
+    .await
+    .unwrap();
+    let remaining = load_todos(SESSION).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].content, "Test");
+    assert!(remaining[0].lane_after.is_none());
+    let history = crate::todo::store::load_cancellations(dir.path(), SESSION).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].todo, original[0]);
+    assert_eq!(history[0].reason, "Superseded");
 }
 
 #[test]

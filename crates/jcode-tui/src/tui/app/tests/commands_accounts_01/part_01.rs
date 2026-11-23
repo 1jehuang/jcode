@@ -413,6 +413,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
             session_id: "session_scroll".to_string(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     };
 

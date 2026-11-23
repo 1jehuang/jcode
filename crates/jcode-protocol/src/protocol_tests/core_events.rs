@@ -130,6 +130,7 @@ fn test_model_changed_oauth_identity_legacy_and_redaction() -> Result<()> {
 fn test_request_roundtrip() -> Result<()> {
     let req = Request::Message {
         id: 1,
+        jarvis_voice: false,
         content: "hello".to_string(),
         images: vec![],
         system_reminder: None,
@@ -146,6 +147,7 @@ fn test_request_roundtrip() -> Result<()> {
 fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
     let req = Request::SoftInterrupt {
         id: 2,
+        jarvis_voice: false,
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
@@ -182,6 +184,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
 fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
     let req = Request::SoftInterrupt {
         id: 4,
+        jarvis_voice: false,
         content: "steer".to_string(),
         images: Vec::new(),
         urgent: false,

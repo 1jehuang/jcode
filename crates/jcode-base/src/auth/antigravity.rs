@@ -18,7 +18,10 @@ const ANTIGRAVITY_CLIENT_SECRET: &str = "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"; /
 const CLIENT_ID_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_ID";
 const CLIENT_SECRET_ENV: &str = "JCODE_ANTIGRAVITY_CLIENT_SECRET";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-const ANTIGRAVITY_VERSION: &str = "1.18.3";
+const ANTIGRAVITY_VERSION: &str = "2.30.0";
+// Google gates the Gemini 4 catalog (Neon, Argon, Hydrogen tiers) on the Hub
+// client identity: `antigravity/<v>` gets the legacy free catalog and 404s on
+// `gemini-4-neon-*`, while `antigravity/hub/<v>` gets the full paid catalog.
 const ANTIGRAVITY_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -67,11 +70,11 @@ fn metadata_platform() -> &'static str {
 
 fn user_agent() -> String {
     if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
+        format!("antigravity/hub/{} windows/amd64", antigravity_version())
     } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
+        format!("antigravity/hub/{} darwin/arm64", antigravity_version())
     } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
+        format!("antigravity/hub/{} darwin/amd64", antigravity_version())
     }
 }
 

@@ -112,6 +112,7 @@ pub(super) fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -279,6 +280,7 @@ pub(super) fn load_pi_session_info(path: &Path) -> Result<Option<(SessionInfo, S
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     };
     Ok(Some((session, search)))
