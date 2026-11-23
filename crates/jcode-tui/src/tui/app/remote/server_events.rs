@@ -1720,14 +1720,13 @@ fn handle_server_event_inner(
                     }
                     app.clear_remote_startup_phase();
                     if client_detected_stale {
-                        // The client independently measured the server's release as
-                        // older than its own. This covers both a pre-self-heal daemon
-                        // (server_has_update: None) AND a daemon that self-reports
-                        // "no update" because its own shared-server channel still
-                        // points at its old binary (the "current client, stale
-                        // server" report). Repair the channel client-side so the
-                        // forced reload below has a strictly-newer binary to exec
-                        // into instead of re-execing the same old build.
+                        // The client independently measured the server's release as older
+                        // than its own. This covers both a pre-self-heal daemon
+                        // (server_has_update: None) AND a daemon that self-reports "no
+                        // update" because its own shared-server channel still points at its
+                        // old binary (the "current client, stale server" report). Repair the
+                        // channel client-side so the forced reload below has a strictly-newer
+                        // binary to exec into instead of re-execing the same old build.
                         match crate::build::repair_stale_shared_server_channel() {
                             Ok(crate::build::SharedServerRepair::Repaired {
                                 repaired_to, ..
@@ -2642,11 +2641,7 @@ fn handle_server_event_inner(
                     std::mem::take(&mut app.remote_session_facts_provisional);
                 let model_actually_changed = !had_provisional_facts
                     && app.remote_provider_model.as_deref() != Some(model.as_str());
-                // An older server may omit the window on a route switch.
-                if context_window.is_none() {
-                    app.remote_server_context = None;
-                }
-                app.update_context_limit_for_model(&model, context_window);
+                app.apply_server_context_window(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {

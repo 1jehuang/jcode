@@ -773,10 +773,9 @@ impl App {
     /// disk cache, names-only catalog updates). Without this, newly released
     /// models are invisible in the picker even though the server lists them.
     ///
-    /// A model also needs re-synthesis when its persisted routes predate an
-    /// auth method: an older session may have baked an OAuth-only fallback
-    /// route into the cache, which would otherwise permanently hide the
-    /// API-key route for that model.
+    /// A model also needs re-synthesis when its persisted routes predate an auth
+    /// method: an older session may have baked an OAuth-only fallback route into the
+    /// cache, which would otherwise permanently hide the API-key route for that model.
     fn append_jcode_subscription_routes_static(
         remote_available_entries: &[String],
         routes: &mut Vec<crate::provider::ModelRoute>,

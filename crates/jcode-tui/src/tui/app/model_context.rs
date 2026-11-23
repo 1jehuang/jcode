@@ -3,6 +3,8 @@ mod model_commands;
 pub(super) use model_commands::*;
 #[path = "model_context_fallback_recovery.rs"]
 mod fallback_recovery;
+#[path = "model_context_remote_window.rs"]
+mod remote_window;
 
 use super::*;
 
@@ -1082,30 +1084,8 @@ impl App {
         // entry with context_length 1000000, and the panel showed 200000 because
         // the number never crossed the wire.
         let limit = match server_context_window {
-            Some(window) => {
-                let limit = window as usize;
-                if self.is_remote {
-                    self.remote_server_context = Some((model.to_string(), limit));
-                }
-                limit
-            }
-            None if self.is_remote => {
-                if let Some((_, limit)) = self
-                    .remote_server_context
-                    .as_ref()
-                    .filter(|(name, _)| name == model)
-                {
-                    *limit
-                } else {
-                    // Clear the saved window when the model changes and use the existing fallback.
-                    self.remote_server_context = None;
-                    crate::provider::context_limit_for_model_with_provider(
-                        model,
-                        self.remote_provider_name.as_deref(),
-                    )
-                    .unwrap_or(self.context_limit as usize)
-                }
-            }
+            _ if self.is_remote => self.remote_context_limit(model, server_context_window),
+            Some(window) => window as usize,
             None => self.provider.context_window(),
         };
         self.context_limit = limit as u64;
