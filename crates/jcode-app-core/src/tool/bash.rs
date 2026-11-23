@@ -64,6 +64,17 @@ export -f cargo
     ))
 }
 
+/// Timeout applied to a background command.
+///
+/// An explicit timeout is honored as given. The 10 minute cap only bounds how
+/// long a foreground call may hold the turn; a background task has no such
+/// limit (and none at all when `timeout` is omitted), so clamping a requested
+/// 30 minutes down to 10 killed long test runs early with a misleading
+/// "timed out after 600000ms".
+#[cfg(test)]
+fn background_timeout_ms(requested: Option<u64>) -> Option<u64> {
+    requested
+}
 
 fn progress_ratio_regex() -> Result<&'static regex::Regex> {
     static REGEX: LazyLock<Result<regex::Regex, regex::Error>> = LazyLock::new(|| {
@@ -608,6 +619,31 @@ fn configure_tool_scratch(command: &mut TokioCommand) {
     }
 }
 
+#[cfg(unix)]
+struct ProcessGroupKillGuard {
+    pid: Option<u32>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupKillGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    #[allow(dead_code)]
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+        }
+    }
+}
 
 fn build_shell_command(cmd_str: &str) -> TokioCommand {
     #[cfg(windows)]
@@ -635,6 +671,14 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
         configure_non_interactive(&mut cmd);
         cmd
     }
+}
+
+#[cfg(test)]
+fn configure_background_command_stdio(command: &mut TokioCommand) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 }
 
 /// Keep cloud environment values out of tool arguments and transcript output.
