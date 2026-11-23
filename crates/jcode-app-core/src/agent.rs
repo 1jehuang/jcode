@@ -371,6 +371,10 @@ pub struct Agent {
     /// it never begins or ends one (that was a phantom zero-turn session plus
     /// sync file I/O on every reconnect's accept path).
     telemetry_session_deferred: bool,
+    /// Whether reasoning effort was explicitly chosen by the user or restored from a saved session.
+    reasoning_effort_user_override: bool,
+    /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
+    jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
@@ -501,6 +505,8 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
+            reasoning_effort_user_override: false,
+            jarvis_default_effort_applied: false,
             concurrency_session: None,
         };
         let t = Instant::now();

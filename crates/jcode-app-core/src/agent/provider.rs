@@ -335,6 +335,7 @@ impl Agent {
 
     pub fn restore_reasoning_effort_from_session(&mut self) {
         if let Some(effort) = self.session.reasoning_effort.clone() {
+            self.reasoning_effort_user_override = true;
             if let Err(e) = self.provider.set_reasoning_effort(&effort) {
                 crate::logging::error(&format!(
                     "Failed to restore session reasoning effort '{}': {}",
@@ -342,8 +343,10 @@ impl Agent {
                 ));
             }
         } else {
+            self.reasoning_effort_user_override = false;
             self.session.reasoning_effort = self.provider.reasoning_effort();
         }
+        self.jarvis_default_effort_applied = false;
         // Mirror the effort into the deadlock-free side-table so server handlers
         // (e.g. the swarm seed handler) can learn this session's effort without
         // taking the agent lock.
@@ -353,9 +356,46 @@ impl Agent {
         );
     }
 
+    /// Default Jarvis root sessions to `none` reasoning effort for low-latency
+    /// voice interaction, while preserving any explicit user or session override.
+    pub(crate) fn apply_jarvis_default_reasoning_effort(&mut self) -> Option<Option<String>> {
+        if self.reasoning_effort_user_override || self.jarvis_default_effort_applied {
+            return None;
+        }
+        let config = crate::tool::sdk::config(self.session_id())?;
+        if !self.is_jarvis_root(&config) {
+            return None;
+        }
+        self.jarvis_default_effort_applied = true;
+        if self.provider.reasoning_effort().as_deref() == Some("none") {
+            return None;
+        }
+        match self.provider.set_reasoning_effort("none") {
+            Ok(()) => {
+                let current = self.provider.reasoning_effort();
+                self.session.reasoning_effort = current.clone();
+                crate::session_effort::record_session_effort(
+                    &self.session.id,
+                    current.as_deref(),
+                );
+                self.log_env_snapshot("jarvis_default_reasoning_effort");
+                Some(current)
+            }
+            Err(e) => {
+                crate::logging::debug(&format!(
+                    "Skipping Jarvis default reasoning effort 'none' for {}: {}",
+                    self.provider.model(),
+                    e
+                ));
+                None
+            }
+        }
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         let prev_model = self.provider.model();
         self.provider.set_reasoning_effort(effort)?;
+        self.reasoning_effort_user_override = true;
         let current = self.provider.reasoning_effort();
         self.session.reasoning_effort = current.clone();
         let new_model = self.provider.model();
