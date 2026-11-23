@@ -21,8 +21,10 @@ impl BackgroundTaskManager {
             removed_files: 0,
             skipped_running_files: 0,
         };
-        let cutoff =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(max_age_hours * 3600);
+        let now = std::time::SystemTime::now();
+        let cutoff = now - std::time::Duration::from_secs(max_age_hours * 3600);
+        // A `replace_file` temp this young may be mid-write; older is an orphan.
+        let temp_cutoff = now - std::time::Duration::from_secs(3600);
 
         if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -33,7 +35,10 @@ impl BackgroundTaskManager {
                 let Ok(modified) = metadata.modified() else {
                     continue;
                 };
-                if modified >= cutoff {
+                if modified >= cutoff
+                    || path.extension().and_then(|ext| ext.to_str()) == Some("tmp")
+                        && modified >= temp_cutoff
+                {
                     continue;
                 }
 
@@ -92,6 +97,20 @@ mod tests {
         std::fs::create_dir(&unremovable)?;
         assert!(manager.cleanup(0).await.is_err());
         assert!(unremovable.is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_a_status_replacement_that_may_be_mid_write() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(dir.path().to_path_buf());
+        let in_flight = dir.path().join("task.status.json.1.0.tmp");
+        std::fs::write(&in_flight, "{")?;
+        let finished = dir.path().join("old.output");
+        std::fs::write(&finished, "done")?;
+        assert_eq!(manager.cleanup(0).await?, 1);
+        assert!(in_flight.exists());
+        assert!(!finished.exists());
         Ok(())
     }
 }

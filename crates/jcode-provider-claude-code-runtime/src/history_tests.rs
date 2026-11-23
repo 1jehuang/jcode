@@ -178,6 +178,11 @@ fn native_tool_results_are_recognized_and_changed_results_diverge() {
         ),
     ];
     assert_eq!(seen.missing_start(&messages), Ok(3));
+    // jcode's message_timestamps header is presentation, not a changed result.
+    if let ContentBlock::ToolResult { content, .. } = &mut messages[2].content[0] {
+        *content = "[tool timing: start=a finish=b duration=1s] output".into();
+    }
+    assert_eq!(seen.missing_start(&messages), Ok(3));
     if let ContentBlock::ToolResult { content, .. } = &mut messages[2].content[0] {
         *content = "different provider output".into();
     }

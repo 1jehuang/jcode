@@ -26,6 +26,36 @@ impl Agent {
         id
     }
 
+    /// Store results of tools the provider already ran (Claude Code). Without
+    /// them the next turn's repair inserts "missing" placeholders, which edits
+    /// history the provider saw and forces it to start a fresh session.
+    pub(super) fn add_provider_tool_results(
+        &mut self,
+        tool_calls: &[crate::message::ToolCall],
+        results: &mut std::collections::HashMap<String, (String, bool)>,
+    ) {
+        let mut added = false;
+        for tc in tool_calls {
+            if JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()) {
+                continue;
+            }
+            if let Some((content, is_error)) = results.remove(&tc.id) {
+                added = true;
+                self.add_message(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: super::tools::cap_sdk_tool_content_for_history(&tc.name, content),
+                        is_error: is_error.then_some(true),
+                    }],
+                );
+            }
+        }
+        if added {
+            self.persist_session_best_effort("provider tool results");
+        }
+    }
+
     pub(crate) fn add_message_with_display_role(
         &mut self,
         role: Role,

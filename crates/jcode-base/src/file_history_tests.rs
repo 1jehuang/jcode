@@ -715,6 +715,49 @@ fn interrupted_restore_rolls_back_and_missing_backup_refuses_mutation() {
 }
 
 #[test]
+fn interrupted_mutation_changed_externally_does_not_block_the_session() {
+    let _env = crate::storage::lock_test_env();
+    let (_home, work) = fixture();
+    let path = fs::canonicalize(work.path()).unwrap().join("f");
+    fs::write(&path, b"before").unwrap();
+    let cp = checkpoint("s", 0, "go").unwrap();
+    mutate("s", &path, Some(b"after")).unwrap();
+    let dir = directory("s").unwrap();
+    let mut history = load(&dir).unwrap();
+    history.pending = Some(Change {
+        path: path.clone(),
+        before: history.expected[&path].clone(),
+        after: history.checkpoints[0].before[&path].clone(),
+    });
+    save(&dir, &history).unwrap();
+    fs::write(&path, b"user edit").unwrap();
+
+    mutate("s", &path, Some(b"next edit")).unwrap();
+    checkpoint("s", 1, "next prompt").unwrap();
+    let first = checkpoints("s")
+        .unwrap()
+        .into_iter()
+        .find(|checkpoint| checkpoint.id == cp.id)
+        .unwrap();
+    assert!(!first.can_restore_files, "{first:?}");
+    assert_eq!(fs::read(&path).unwrap(), b"next edit");
+
+    // A target that can no longer be tracked (here a directory) is dropped too.
+    let mut history = load(&dir).unwrap();
+    history.pending = Some(Change {
+        path: path.clone(),
+        before: history.expected[&path].clone(),
+        after: history.expected[&path].clone(),
+    });
+    save(&dir, &history).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let other = path.with_file_name("other");
+    mutate("s", &other, Some(b"unrelated")).unwrap();
+    assert_eq!(fs::read(other).unwrap(), b"unrelated");
+}
+
+#[test]
 fn intermediate_blobs_are_collected_and_external_unsafe_paths_do_not_block_prompts() {
     let _env = crate::storage::lock_test_env();
     let (_home, work) = fixture();

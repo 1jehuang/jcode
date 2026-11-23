@@ -1804,6 +1804,10 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
         app.open_skills_dialog();
         return true;
     }
+    if trimmed == "/tasks" {
+        app.open_tasks_dialog();
+        return true;
+    }
 
     if handle_skills_or_mcp_info_command(app, trimmed) {
         return true;

@@ -540,7 +540,21 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
     let notification = format_background_task_notification_markdown(&task);
     app.set_status_notice(background_task_status_notice(&task));
 
-    if !app.is_processing {
+    if app.is_processing {
+        // Mid-turn, the transcript cannot take a user message between a tool
+        // call and its result. Deliver it once the turn ends, like a queued
+        // soft interrupt; process_queued_messages starts that follow-up turn.
+        if task.wake && first_model_delivery(&task) {
+            app.push_display_message(DisplayMessage::background_task(notification.clone()));
+            app.hidden_queued_system_messages.push(notification);
+        }
+    } else if !task.wake {
+        // As in server mode, a completion that must not wake the model (such
+        // as a requested stop) is only shown, never written to its history.
+        if first_model_delivery(&task) {
+            app.push_display_message(DisplayMessage::background_task(notification));
+        }
+    } else if first_model_delivery(&task) {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));
         app.add_provider_message(Message {
             role: Role::User,
@@ -562,7 +576,7 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
         );
         let _ = app.session.save();
 
-        if task.wake && !app.cloud_handoff_blocks_work() {
+        if !app.cloud_handoff_blocks_work() {
             app.pending_turn = true;
             app.is_processing = true;
             app.status = ProcessingStatus::Sending;
@@ -572,6 +586,23 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             app.visible_turn_started = Some(std::time::Instant::now());
         }
     }
+}
+
+/// A turn's tool-execution loop subscribes to the bus beside the main loop, so
+/// one completion can arrive twice; only the first reaches the model. Keyed by
+/// `wake` too: a passive copy is only shown, so it must not stop a later
+/// waking republish (an interrupted `bg wait` releasing its hold) from
+/// reaching the model.
+/// shortcut: process-wide and never pruned (one small key per finished task);
+/// move onto `App` if sessions ever run thousands of background tasks.
+fn first_model_delivery(task: &BackgroundTaskCompleted) -> bool {
+    static DELIVERED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashSet<(String, String, bool)>>,
+    > = std::sync::LazyLock::new(Default::default);
+    DELIVERED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert((task.session_id.clone(), task.task_id.clone(), task.wake))
 }
 
 fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTaskStalled) {
@@ -713,4 +744,109 @@ pub(super) fn finish_turn(app: &mut App) {
         }
     }
     let _ = super::commands::maybe_begin_pending_local_transfer(app);
+}
+
+#[cfg(test)]
+mod background_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn completion_during_turn_is_queued_for_next_turn_and_delivered_once() {
+        let mut app = super::super::tests::create_test_app();
+        app.is_processing = true;
+        let before = app.session.messages.len();
+        let task = BackgroundTaskCompleted {
+            task_id: "bg-midturn".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: None,
+            session_id: app.session.id.clone(),
+            status: crate::bus::BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "done\n".to_string(),
+            output_file: std::env::temp_dir().join("bg-midturn.output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: true,
+        };
+
+        handle_bus_event(
+            &mut app,
+            Ok(BusEvent::BackgroundTaskCompleted(task.clone())),
+        );
+
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(app.hidden_queued_system_messages[0].contains("bg-midturn"));
+        assert_eq!(app.session.messages.len(), before, "no mid-turn injection");
+
+        // The main loop's receiver sees the same event after the turn ends.
+        app.is_processing = false;
+        handle_bus_event(&mut app, Ok(BusEvent::BackgroundTaskCompleted(task)));
+        assert_eq!(app.session.messages.len(), before);
+        assert_eq!(app.hidden_queued_system_messages.len(), 1);
+        assert!(!app.pending_turn);
+    }
+
+    #[test]
+    fn passive_completion_does_not_block_a_later_waking_republish() {
+        let mut app = super::super::tests::create_test_app();
+        let before = app.session.messages.len();
+        let mut task = BackgroundTaskCompleted {
+            task_id: "bg-held".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: None,
+            session_id: app.session.id.clone(),
+            status: crate::bus::BackgroundTaskStatus::Completed,
+            exit_code: Some(0),
+            output_preview: "done\n".to_string(),
+            output_file: std::env::temp_dir().join("bg-held.output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: false,
+        };
+        handle_bus_event(
+            &mut app,
+            Ok(BusEvent::BackgroundTaskCompleted(task.clone())),
+        );
+        assert_eq!(app.session.messages.len(), before);
+
+        task.wake = true;
+        handle_bus_event(
+            &mut app,
+            Ok(BusEvent::BackgroundTaskCompleted(task.clone())),
+        );
+        assert_eq!(app.session.messages.len(), before + 1, "delivered once");
+        assert!(app.pending_turn);
+        handle_bus_event(&mut app, Ok(BusEvent::BackgroundTaskCompleted(task)));
+        assert_eq!(app.session.messages.len(), before + 1, "not twice");
+    }
+
+    #[test]
+    fn idle_completion_that_must_not_wake_is_shown_but_kept_out_of_history() {
+        let mut app = super::super::tests::create_test_app();
+        let before = app.session.messages.len();
+        let task = BackgroundTaskCompleted {
+            task_id: "bg-stopped".to_string(),
+            tool_name: "bash".to_string(),
+            display_name: None,
+            session_id: app.session.id.clone(),
+            status: crate::bus::BackgroundTaskStatus::Failed,
+            exit_code: None,
+            output_preview: "Cancelled by user".to_string(),
+            output_file: std::env::temp_dir().join("bg-stopped.output"),
+            duration_secs: 1.0,
+            notify: true,
+            wake: false,
+        };
+
+        handle_bus_event(&mut app, Ok(BusEvent::BackgroundTaskCompleted(task)));
+
+        assert_eq!(app.session.messages.len(), before, "no model history write");
+        assert!(!app.pending_turn);
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|message| message.content.contains("bg-stopped")),
+            "the user still sees the completion"
+        );
+    }
 }

@@ -1441,7 +1441,7 @@ fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch
 }
 
 #[test]
-fn acme_named_profile_applies_model_specific_efforts_across_model_switches() {
+fn named_profile_named_profile_applies_model_specific_efforts_across_model_switches() {
     let profile = jcode_base::config::NamedProviderConfig {
         provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
         base_url: "https://example.invalid/v1".into(),
@@ -1461,14 +1461,14 @@ fn acme_named_profile_applies_model_specific_efforts_across_model_switches() {
             },
             jcode_base::config::NamedProviderModelConfig {
                 id: "claude-haiku-4-5".into(),
-                reasoning: Some(true),
+                reasoning: Some(false),
                 ..Default::default()
             },
         ],
         ..Default::default()
     };
     let provider = OpenRouterProvider::new_named_openai_compatible("acme", &profile)
-        .expect("construct ACME-style named profile");
+        .expect("construct named profile");
 
     assert_eq!(
         provider.available_efforts(),
@@ -1482,7 +1482,7 @@ fn acme_named_profile_applies_model_specific_efforts_across_model_switches() {
 
     provider
         .set_model("claude-haiku-4-5")
-        .expect("switch to configured reasoning-only model");
+        .expect("switch to configured no-effort model");
     assert!(provider.available_efforts().is_empty());
     assert!(provider.set_reasoning_effort("high").is_err());
 
@@ -1497,7 +1497,7 @@ fn acme_named_profile_applies_model_specific_efforts_across_model_switches() {
 }
 
 #[test]
-fn acme_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
+fn named_profile_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
     let profile = jcode_base::config::NamedProviderConfig {
         provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
         base_url: "https://example.invalid/v1".into(),
@@ -1512,7 +1512,7 @@ fn acme_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
         ..Default::default()
     };
     let provider = OpenRouterProvider::new_named_openai_compatible("acme", &profile)
-        .expect("construct ACME GLM profile");
+        .expect("construct named GLM profile");
 
     assert_eq!(
         provider.available_efforts(),
@@ -1526,7 +1526,7 @@ fn acme_glm_profile_exposes_zai_efforts_and_rejects_openai_only_rungs() {
 }
 
 #[test]
-fn acme_gpt_terra_profile_exposes_openai_efforts() {
+fn named_profile_gpt_terra_profile_exposes_openai_efforts() {
     let profile = jcode_base::config::NamedProviderConfig {
         provider_type: jcode_base::config::NamedProviderType::OpenAiCompatible,
         base_url: "https://example.invalid/v1".into(),
@@ -1548,7 +1548,7 @@ fn acme_gpt_terra_profile_exposes_openai_efforts() {
         ..Default::default()
     };
     let provider = OpenRouterProvider::new_named_openai_compatible("acme", &profile)
-        .expect("construct ACME GPT Terra profile");
+        .expect("construct named GPT Terra profile");
     assert_eq!(
         provider.available_efforts(),
         vec!["none", "low", "medium", "high", "xhigh", "max", "swarm",]

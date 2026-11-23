@@ -75,6 +75,10 @@ impl App {
             return Ok(());
         }
 
+        if self.handle_task_pill_key(code, modifiers) {
+            return Ok(());
+        }
+
         if self.handle_onboarding_continue_prompt_key(code) {
             return Ok(());
         }

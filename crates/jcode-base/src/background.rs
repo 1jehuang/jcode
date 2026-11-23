@@ -13,8 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::fs;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
@@ -34,6 +33,109 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+/// Shared by a tool runner and the call it may later move into a background
+/// task (Alt+B or the foreground budget). The handoff happens after the call
+/// started, so the call reads it through a task-local set by [`Self::scope`].
+#[derive(Default)]
+pub struct ToolHandoff {
+    handed_off: std::sync::atomic::AtomicBool,
+    /// Process groups the call runs (a batch runs several shells).
+    pids: std::sync::Mutex<std::collections::HashSet<u32>>,
+    /// A file the call's shell writes its output to as it runs.
+    output_file: std::sync::Mutex<Option<PathBuf>>,
+}
+
+/// Keeps a process group on its call's [`ToolHandoff`] until dropped.
+pub struct HandoffProcess(Option<(Arc<ToolHandoff>, u32)>);
+
+impl Drop for HandoffProcess {
+    fn drop(&mut self) {
+        if let Some((handoff, pid)) = self.0.take() {
+            lock_ignoring_poison(&handoff.pids).remove(&pid);
+        }
+    }
+}
+
+fn lock_ignoring_poison<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Replace `path` by renaming a fully written temporary file over it, so a
+/// concurrent reader never sees it half-written and a hard link to the old
+/// file (a shell's live log) keeps its contents.
+async fn replace_file(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(tmp);
+    let replaced = match fs::write(&tmp, contents.as_ref()).await {
+        Ok(()) => fs::rename(&tmp, path).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = replaced {
+        // Keep the old file: a stale record beats a task that vanished.
+        let _ = fs::remove_file(&tmp).await;
+        crate::logging::warn(&format!(
+            "Could not replace background task file {}: {error}",
+            path.display()
+        ));
+    }
+}
+
+tokio::task_local! {
+    static TOOL_HANDOFF: Arc<ToolHandoff>;
+}
+
+impl ToolHandoff {
+    /// Run a tool call so it can see a later handoff.
+    pub fn scope<F: std::future::Future>(
+        self: &Arc<Self>,
+        call: F,
+    ) -> impl std::future::Future<Output = F::Output> + use<F> {
+        TOOL_HANDOFF.scope(Arc::clone(self), call)
+    }
+
+    /// True when the running call already belongs to a background task,
+    /// which reports its completion.
+    pub fn current_handed_off() -> bool {
+        TOOL_HANDOFF
+            .try_with(|handoff| handoff.handed_off.load(std::sync::atomic::Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// Record a process group the running call owns until the returned guard
+    /// drops, so cancelling the task that adopted the call stops it too.
+    pub fn track_current_process(pid: u32) -> HandoffProcess {
+        TOOL_HANDOFF
+            .try_with(|handoff| handoff.track_process(pid))
+            .unwrap_or(HandoffProcess(None))
+    }
+
+    /// Record a process group on this handoff until the returned guard drops.
+    pub fn track_process(self: &Arc<Self>, pid: u32) -> HandoffProcess {
+        lock_ignoring_poison(&self.pids).insert(pid);
+        HandoffProcess(Some((Arc::clone(self), pid)))
+    }
+
+    /// Record the file the running call's shell writes as it runs, so the
+    /// task that adopts the call shows that output live.
+    pub fn set_current_output_file(path: &std::path::Path) {
+        let _ = TOOL_HANDOFF.try_with(|handoff| {
+            lock_ignoring_poison(&handoff.output_file).get_or_insert_with(|| path.to_path_buf());
+        });
+    }
+
+    fn pids(&self) -> Vec<u32> {
+        lock_ignoring_poison(&self.pids).iter().copied().collect()
+    }
+}
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -47,7 +149,27 @@ pub struct BackgroundTaskManager {
     /// Status files already seen in a terminal state by [`Self::sweep`]. A
     /// finished task never runs again, so the periodic sweep skips them.
     settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    held_deliveries: HeldDeliveries,
     output_dir: PathBuf,
+}
+
+/// Tasks whose model delivery a `bg wait` holds, each with whether a
+/// completion that would have woken the model was published during the hold.
+/// Process-local, so a reload or crash drops every hold.
+type HeldDeliveries = Arc<std::sync::Mutex<HashMap<String, bool>>>;
+
+/// The wake a completion publishes with: none while a `bg wait` holds it.
+fn held_wake(held: &HeldDeliveries, task_id: &str, wake: bool) -> bool {
+    let mut held = held
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match held.get_mut(task_id) {
+        Some(suppressed) => {
+            *suppressed |= wake;
+            false
+        }
+        None => wake,
+    }
 }
 
 impl BackgroundTaskManager {
@@ -66,6 +188,7 @@ impl BackgroundTaskManager {
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            held_deliveries: Arc::default(),
             output_dir,
         }
     }
@@ -150,19 +273,28 @@ impl BackgroundTaskManager {
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+            replace_file(path, json).await;
         }
     }
 
     async fn finalize_detached_status_if_needed(
         &self,
-        mut status: TaskStatusFile,
+        status: TaskStatusFile,
         status_path: &std::path::Path,
     ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running
+            || !status.detached
+            || status.pid.is_none()
+        {
+            return status;
+        }
+        // Settle from a fresh read under the status lock, so a concurrent
+        // cancel or finalizer cannot publish this completion a second time.
+        let _status_guard = self.progress_updates.lock().await;
+        let mut status = self.read_status_file(status_path).await.unwrap_or(status);
         if status.status != BackgroundTaskStatus::Running || !status.detached {
             return status;
         }
-
         let Some(pid) = status.pid else {
             return status;
         };
@@ -173,8 +305,9 @@ impl BackgroundTaskManager {
             return status;
         }
 
-        let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let output = fs::read_to_string(self.output_path_for(&status.task_id))
+            .await
+            .unwrap_or_default();
         let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
@@ -204,25 +337,7 @@ impl BackgroundTaskManager {
         );
 
         self.write_status_file(status_path, &status).await;
-
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: final_status,
-            exit_code,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        self.publish_completion(&status, status.wake).await;
 
         status
     }
@@ -297,27 +412,7 @@ impl BackgroundTaskManager {
             terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
         );
         self.write_status_file(status_path, &status).await;
-
-        let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: BackgroundTaskStatus::Failed,
-            exit_code: None,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        self.publish_completion(&status, status.wake).await;
 
         status
     }
@@ -431,7 +526,7 @@ impl BackgroundTaskManager {
         F: FnOnce(PathBuf) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<TaskResult>> + Send,
     {
-        self.spawn_with_notify(tool_name, None, session_id, true, false, execute_fn)
+        self.spawn_with_notify(tool_name, None, session_id, true, true, execute_fn)
             .await
     }
 
@@ -501,6 +596,7 @@ impl BackgroundTaskManager {
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -525,6 +621,7 @@ impl BackgroundTaskManager {
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+            let published_wake = held_wake(&held_deliveries, &task_id_clone, wake_flag);
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
                 .ok()
@@ -563,7 +660,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                replace_file(&status_path_clone, json).await;
             }
 
             // Drop this task from the live map now that its terminal status is
@@ -606,7 +703,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             result
@@ -623,6 +720,7 @@ impl BackgroundTaskManager {
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
             handle,
+            handoff: None,
         };
 
         self.tasks
@@ -648,7 +746,7 @@ impl BackgroundTaskManager {
         session_id: &str,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
-        self.adopt_with_options(tool_name, None, session_id, true, false, handle)
+        self.adopt_with_options(tool_name, None, session_id, true, true, handle)
             .await
     }
 
@@ -665,6 +763,40 @@ impl BackgroundTaskManager {
         wake: bool,
         handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
     ) -> BackgroundTaskInfo {
+        self.adopt_handoff(
+            None,
+            tool_name,
+            display_name,
+            session_id,
+            notify,
+            wake,
+            handle,
+        )
+        .await
+    }
+
+    /// [`Self::adopt_with_options`] for a call run inside `handoff`'s scope:
+    /// the call learns it was adopted, and cancelling the task also stops the
+    /// detached child it waits on.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "adopt_with_options plus the call's handoff state"
+    )]
+    pub async fn adopt_handoff(
+        &self,
+        handoff: Option<Arc<ToolHandoff>>,
+        tool_name: &str,
+        display_name: Option<String>,
+        session_id: &str,
+        notify: bool,
+        wake: bool,
+        handle: JoinHandle<Result<jcode_tool_types::ToolOutput>>,
+    ) -> BackgroundTaskInfo {
+        if let Some(handoff) = &handoff {
+            handoff
+                .handed_off
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut handle = model::AbortAdoptedTask(handle);
         // Reserve before the foreground caller can release its turn/tool guard.
         let runtime_activity = crate::runtime_activity::global()
@@ -676,10 +808,16 @@ impl BackgroundTaskManager {
         let status_path = self.output_dir.join(format!("{}.status.json", task_id));
 
         // Retain an output artifact before publishing the running task or
-        // returning its ID. Adopted work buffers its output until completion,
-        // when the wrapper below replaces this initially empty file. Create it
+        // returning its ID. It links to the file a shell writes as it runs,
+        // so the task shows live output; other work buffers its output until
+        // completion, when the wrapper below replaces this file. Create it
         // before spawning that wrapper so a fast completion cannot be truncated.
-        let _ = std::fs::write(&output_path, "");
+        let live_output = handoff
+            .as_ref()
+            .and_then(|handoff| lock_ignoring_poison(&handoff.output_file).clone());
+        if live_output.is_none_or(|live| std::fs::hard_link(live, &output_path).is_err()) {
+            let _ = std::fs::write(&output_path, "");
+        }
 
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
@@ -723,19 +861,39 @@ impl BackgroundTaskManager {
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
 
+            // A shell reports a nonzero exit in `exit_code` metadata; other
+            // tools (e.g. `bg` reporting someone else's failed task) must not.
+            let failed_exit = |output: &jcode_tool_types::ToolOutput| {
+                (tool_name_owned == "bash").then_some(())?;
+                output
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("exit_code")?.as_i64())
+                    .and_then(|code| i32::try_from(code).ok())
+                    .filter(|code| *code != 0)
+            };
             let (status, exit_code, error, output_text) = match tool_result {
-                Ok(Ok(output)) => (
-                    BackgroundTaskStatus::Completed,
-                    Some(0),
-                    None,
-                    output.output,
-                ),
+                Ok(Ok(output)) => match failed_exit(&output) {
+                    Some(code) => (
+                        BackgroundTaskStatus::Failed,
+                        Some(code),
+                        Some(format!("Command exited with code {code}")),
+                        output.output,
+                    ),
+                    None => (
+                        BackgroundTaskStatus::Completed,
+                        Some(0),
+                        None,
+                        output.output,
+                    ),
+                },
                 Ok(Err(e)) => (
                     BackgroundTaskStatus::Failed,
                     None,
@@ -750,12 +908,13 @@ impl BackgroundTaskManager {
                 ),
             };
 
-            if let Ok(mut file) = File::create(&output_path_clone).await {
-                let _ = file.write_all(output_text.as_bytes()).await;
-            }
+            // Replace, not truncate: the file may be a hard link to the live
+            // log of a shell that keeps running under another task.
+            replace_file(&output_path_clone, &output_text).await;
 
             let status_guard = status_updates.lock().await;
             let (notify_flag, wake_flag) = *delivery_flags_rx.borrow();
+            let published_wake = held_wake(&held_deliveries, &task_id_clone, wake_flag);
             let prior_status = tokio::fs::read_to_string(&status_path_clone)
                 .await
                 .ok()
@@ -793,7 +952,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                replace_file(&status_path_clone, json).await;
             }
 
             // Prune the live-map entry only after the terminal status file is
@@ -824,7 +983,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             Ok(TaskResult {
@@ -844,6 +1003,7 @@ impl BackgroundTaskManager {
             started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
             handle: wrapper_handle,
+            handoff,
         };
 
         self.tasks
@@ -1151,6 +1311,11 @@ impl BackgroundTaskManager {
         let Some(mut status) = self.read_status_file(&status_path).await else {
             return Ok(None);
         };
+        // A late progress line (read after the task settled) must not flip a
+        // finished row back to Running.
+        if status.status != BackgroundTaskStatus::Running {
+            return Ok(Some(status));
+        }
 
         let mut progress = progress.normalize();
         if let Some(existing) = status.progress.as_ref() {
@@ -1252,6 +1417,57 @@ impl BackgroundTaskManager {
         Ok(Some(status))
     }
 
+    /// Hold model delivery of a running task's completion while a foreground
+    /// `bg wait` in the task's own session owns its result. False when there
+    /// is nothing to hold. The hold lives only in this process's memory.
+    pub async fn hold_delivery(&self, task_id: &str, session_id: &str) -> bool {
+        let _status_guard = self.progress_updates.lock().await;
+        let status_path = self.status_path_for(task_id);
+        let Some(status) = self.read_status_file(&status_path).await else {
+            return false;
+        };
+        if status.status != BackgroundTaskStatus::Running
+            || !status.wake
+            || status.session_id != session_id
+        {
+            return false;
+        }
+        let mut held = self
+            .held_deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.contains_key(task_id) {
+            return false;
+        }
+        held.insert(task_id.to_string(), false);
+        true
+    }
+
+    /// End a [`Self::hold_delivery`]. A completion that would have woken the
+    /// model went out without waking it during the hold; `deliver` publishes
+    /// it to the model now, for a waiter that ends without returning it. A
+    /// requested stop never woke the model, so it stays passive.
+    pub async fn release_delivery(&self, task_id: &str, deliver: bool) -> Option<TaskStatusFile> {
+        let (status, suppressed) = {
+            let _status_guard = self.progress_updates.lock().await;
+            let suppressed = self
+                .held_deliveries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(task_id)
+                .unwrap_or(false);
+            (
+                self.read_status_file(&self.status_path_for(task_id))
+                    .await?,
+                suppressed,
+            )
+        };
+        if deliver && suppressed {
+            self.publish_completion(&status, true).await;
+        }
+        Some(status)
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))
@@ -1269,9 +1485,32 @@ impl BackgroundTaskManager {
         // needs both locks before it can exit.
         let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
+            // Read before the abort: dropping the call untracks its shells.
+            let pids = task
+                .handoff
+                .as_ref()
+                .map(|handoff| handoff.pids())
+                .unwrap_or_default();
             task.handle.abort();
-            let _ = (&mut task.handle).await;
+            if (&mut task.handle).await.is_ok() {
+                // It finished first and already published its own completion.
+                return Ok(false);
+            }
+            Self::terminate_detached_groups(&pids, _graceful_timeout).await;
+            for pid in pids {
+                // Its waiter dropped the child unreaped; do not leave a zombie.
+                let _ = crate::platform::try_reap_child_process(pid);
+            }
             let _status_guard = self.progress_updates.lock().await;
+            // The abort can land after the task persisted its own terminal
+            // status but before it published it. Keep that real result and
+            // publish it once, with the task's own delivery.
+            if let Some(status) = self.read_status_file(&task.status_path).await
+                && status.status != BackgroundTaskStatus::Running
+            {
+                self.publish_completion(&status, status.wake).await;
+                return Ok(false);
+            }
 
             // Update status file
             let (notify_flag, wake_flag) = *task.delivery_flags.borrow();
@@ -1304,40 +1543,36 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
+                replace_file(&task.status_path, json).await;
             }
+            self.publish_completion(&final_status, false).await;
 
             Ok(true)
         } else {
-            let _status_guard = self.progress_updates.lock().await;
-
             let status_path = self.status_path_for(task_id);
-            let Some(mut status) = self.read_status_file(&status_path).await else {
+            let Some(status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
             };
-            status = self
+            // Settles (and publishes) a detached task that already exited.
+            let status = self
                 .finalize_detached_status_if_needed(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
             }
 
+            let _status_guard = self.progress_updates.lock().await;
+            let Some(mut status) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            if status.status != BackgroundTaskStatus::Running {
+                return Ok(false);
+            }
             let Some(pid) = status.pid else {
                 return Ok(false);
             };
 
-            #[cfg(unix)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
-                tokio::time::sleep(_graceful_timeout).await;
-                if crate::platform::is_process_running(pid) {
-                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
-                }
-            }
-            #[cfg(windows)]
-            {
-                let _ = crate::platform::signal_detached_process_group(pid, 0);
-            }
+            Self::terminate_detached_groups(&[pid], _graceful_timeout).await;
 
             let completed_at = Utc::now();
             status.status = BackgroundTaskStatus::Failed;
@@ -1353,8 +1588,56 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            self.publish_completion(&status, false).await;
             Ok(true)
         }
+    }
+
+    /// Stop detached process groups: TERM, then KILL after `_grace` on Unix.
+    async fn terminate_detached_groups(pids: &[u32], _grace: std::time::Duration) {
+        #[cfg(unix)]
+        if !pids.is_empty() {
+            for &pid in pids {
+                let _ = crate::platform::signal_detached_process_group(pid, libc::SIGTERM);
+            }
+            tokio::time::sleep(_grace).await;
+            for &pid in pids {
+                // Probe the group, not the leader: an aborted call's leader
+                // can already be gone while its children ignore TERM.
+                if crate::platform::signal_detached_process_group(pid, 0).is_ok() {
+                    let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+                }
+            }
+        }
+        #[cfg(windows)]
+        for &pid in pids {
+            let _ = crate::platform::signal_detached_process_group(pid, 0);
+        }
+    }
+
+    /// Publish a settled task's completion. Like Claude Code's TaskStop, a
+    /// stop someone asked for passes `wake: false` so it never wakes the model.
+    async fn publish_completion(&self, status: &TaskStatusFile, wake: bool) {
+        let output_file = self.output_path_for(&status.task_id);
+        let output = fs::read_to_string(&output_file).await.unwrap_or_default();
+        let output_preview = if output.len() > 500 {
+            format!("{}...", crate::util::truncate_str(&output, 500))
+        } else {
+            output
+        };
+        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+            task_id: status.task_id.clone(),
+            tool_name: status.tool_name.clone(),
+            display_name: status.display_name.clone(),
+            session_id: status.session_id.clone(),
+            status: status.status.clone(),
+            exit_code: status.exit_code,
+            output_preview,
+            output_file,
+            duration_secs: status.duration_secs.unwrap_or_default(),
+            notify: status.notify,
+            wake: held_wake(&self.held_deliveries, &status.task_id, wake),
+        }));
     }
 
     /// Abort every live in-process task before an exec-based server reload.

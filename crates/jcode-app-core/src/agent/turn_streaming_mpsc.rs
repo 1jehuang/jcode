@@ -1450,6 +1450,7 @@ impl Agent {
             ));
 
             if self.provider.handles_tools_internally() {
+                self.add_provider_tool_results(&tool_calls, &mut sdk_tool_results);
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     // === INJECTION POINT D: After provider-handled tools, before next API call ===
@@ -1596,15 +1597,18 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
+                let handoff = Arc::new(crate::background::ToolHandoff::default());
+                let tool_handle = crate::runtime_activity::spawn_session(
+                    &self.session.id,
+                    handoff.scope(async move {
                         registry_clone
                             .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
                             .await
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                    })?;
+                    }),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                })?;
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
@@ -1780,13 +1784,15 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
+                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.name, &tc.input);
                     let bg_info = crate::background::global()
-                        .adopt_with_options(
-                            &tc.name,
+                        .adopt_handoff(
+                            Some(handoff),
+                            Registry::resolve_tool_name_for_session(&self.session.id, &tc.name),
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,
-                            true,
-                            false,
+                            notify,
+                            wake,
                             tool_handle,
                         )
                         .await;
@@ -1797,10 +1803,11 @@ impl Agent {
                         "by the user".to_string()
                     };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
                         tc.name,
                         reason,
                         bg_info.task_id,
+                        crate::tool::background_delivery_notice(wake),
                         crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 

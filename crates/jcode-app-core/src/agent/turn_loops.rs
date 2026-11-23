@@ -37,6 +37,9 @@ impl Agent {
             self.graceful_shutdown.clone(),
         );
         let mut final_text = String::new();
+        // Answers that were already final before a late soft interrupt continued
+        // the turn; callers that capture the result must still get them.
+        let mut answered_before_interrupt: Vec<String> = Vec::new();
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
@@ -1041,11 +1044,29 @@ impl Agent {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
                 }
+                // A completion that arrived during the final response would be
+                // lost when a one-shot run exits; answer it in this turn.
+                let injected = self.inject_soft_interrupts();
+                if !injected.is_empty() {
+                    logging::info(&format!(
+                        "Soft interrupt arrived with the final response; continuing headless turn ({} message(s))",
+                        injected.len()
+                    ));
+                    if !text_content.trim().is_empty() {
+                        answered_before_interrupt.push(std::mem::take(&mut text_content));
+                    }
+                    if print_output {
+                        println!();
+                    }
+                    continue;
+                }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {
                     println!();
                 }
-                final_text = text_content;
+                answered_before_interrupt.push(text_content);
+                answered_before_interrupt.retain(|text| !text.trim().is_empty());
+                final_text = answered_before_interrupt.join("\n\n");
                 break;
             }
 
@@ -1056,6 +1077,7 @@ impl Agent {
 
             // If provider handles tools internally (like Claude Code CLI), only run native tools locally
             if self.provider.handles_tools_internally() {
+                self.add_provider_tool_results(&tool_calls, &mut sdk_tool_results);
                 tool_calls.retain(|tc| JCODE_NATIVE_TOOLS.contains(&tc.name.as_str()));
                 if tool_calls.is_empty() {
                     if !generated_image_contexts.is_empty() {
@@ -1352,6 +1374,12 @@ impl Agent {
             }
         }
 
+        // An early exit (cancel, migration) after a late continuation must not
+        // drop the answer that was already final.
+        if final_text.is_empty() {
+            answered_before_interrupt.retain(|text| !text.trim().is_empty());
+            final_text = answered_before_interrupt.join("\n\n");
+        }
         Ok(final_text)
     }
 }

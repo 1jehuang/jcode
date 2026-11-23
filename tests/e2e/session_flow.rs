@@ -310,3 +310,94 @@ async fn test_clear_preserves_debug_for_resumed_debug_session() -> Result<()> {
 
     Ok(())
 }
+
+fn bash_call(id: &str, input: serde_json::Value) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseStart {
+            id: id.into(),
+            name: "bash".into(),
+        },
+        StreamEvent::ToolInputDelta(input.to_string()),
+        StreamEvent::ToolUseEnd,
+        StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        },
+    ]
+}
+
+/// A background task that finishes while an attached client's turn runs a
+/// foreground tool must reach the model at that turn's next safe point.
+#[tokio::test]
+async fn attached_turn_receives_background_completion_mid_turn() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime = tempfile::Builder::new().prefix("jc-bgmid-").tempdir()?;
+    let socket_path = runtime.path().join("jcode.sock");
+    let debug_socket_path = runtime.path().join("jcode-debug.sock");
+    let provider = MockProvider::new();
+    provider.queue_response(bash_call(
+        "bg",
+        serde_json::json!({"command": "sleep 0.2; echo BG_MARK", "run_in_background": true}),
+    ));
+    provider.queue_response(bash_call(
+        "fg",
+        serde_json::json!({"command": "sleep 1.5; echo FG_MARK"}),
+    ));
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("done".into()),
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".into()),
+        },
+    ]);
+    let captured = provider.captured_messages.clone();
+    let server_instance = server::Server::new_with_paths(
+        Arc::new(provider),
+        socket_path.clone(),
+        debug_socket_path.clone(),
+    );
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let result = async {
+        wait_for_server_ready(&socket_path, &debug_socket_path).await?;
+        let mut client = server::Client::connect_with_path(socket_path.clone()).await?;
+        let subscribe_id = client.subscribe().await?;
+        let _ = collect_until_done_unix(&mut client, subscribe_id).await?;
+        let message_id = client.send_message("run both").await?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            anyhow::ensure!(Instant::now() < deadline, "turn did not finish");
+            match timeout(Duration::from_secs(5), client.read_event()).await?? {
+                ServerEvent::Done { id } if id == message_id => break,
+                ServerEvent::Error { id, message, .. } if id == message_id => {
+                    anyhow::bail!("turn failed: {message}")
+                }
+                _ => {}
+            }
+        }
+
+        let calls = captured.lock().unwrap();
+        let after_fg = calls
+            .iter()
+            .find(|messages| {
+                messages.iter().any(|message| {
+                    message.content.iter().any(|block| {
+                        matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("FG_MARK"))
+                    })
+                })
+            })
+            .context("no provider request carried the foreground result")?;
+        let text = after_fg
+            .iter()
+            .map(flatten_text_blocks)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("**Background task**") && text.contains("BG_MARK"),
+            "completion was not injected before the next request: {text}"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+    result
+}

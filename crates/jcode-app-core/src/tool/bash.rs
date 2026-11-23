@@ -776,6 +776,16 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
     }
 }
 
+/// A finished shell's tool output. A nonzero exit also rides in `exit_code`
+/// metadata, so a background task that adopted the call records the failure.
+fn command_tool_output(output: String, exit_code: Option<i32>) -> ToolOutput {
+    let tool_output = ToolOutput::new(format_command_output(output, exit_code));
+    match exit_code.filter(|code| *code != 0) {
+        Some(code) => tool_output.with_metadata(json!({ "exit_code": code })),
+        None => tool_output,
+    }
+}
+
 #[cfg(test)]
 #[path = "bash_utf8_truncation_tests.rs"]
 mod utf8_truncation_tests;
@@ -802,8 +812,10 @@ struct BashInput {
         deserialize_with = "deserialize_bool_or_default::<_, true>"
     )]
     notify: bool,
-    #[serde(default, deserialize_with = "deserialize_bool_or_default::<_, false>")]
-    wake: bool,
+    /// Omitted or null: follows `notify`, so a backgrounded task reports its
+    /// completion to the model unless the caller opted out.
+    #[serde(default)]
+    wake: Option<bool>,
     /// For background runs: wake the agent after this many seconds with no
     /// new output and no progress events. Resets on activity.
     #[serde(default)]
@@ -815,6 +827,12 @@ struct BashInput {
 
 fn default_true() -> bool {
     true
+}
+
+impl BashInput {
+    fn wake(&self) -> bool {
+        self.wake.unwrap_or(self.notify)
+    }
 }
 
 // OpenAI strict schemas represent omitted optional arguments as explicit null.
@@ -968,6 +986,14 @@ impl BashTool {
             command.current_dir(dir);
         }
         let mut child = command.spawn()?;
+        // Cancelling the task that adopts this call stops the shell's group.
+        let process = child
+            .id()
+            .map(crate::background::ToolHandoff::track_current_process);
+        // A timeout promotion adopts this call under its own handoff, so
+        // cancelling that task stops the shell's group too.
+        let promotion = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let promoted_process = child.id().map(|pid| promotion.track_process(pid));
 
         let stdin_handle = child.stdin.take();
         let stdout_handle = child.stdout.take();
@@ -989,8 +1015,9 @@ impl BashTool {
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
         // the still-running task off to the background manager instead of killing it.
-        let mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
+        let unguarded_work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
+                let _process = (process, promoted_process);
                 let stdout_task = tokio::spawn(collect_output_reporting_progress(
                     stdout_handle,
                     stdout_progress,
@@ -1020,16 +1047,19 @@ impl BashTool {
                     }
                     output.push_str(&stderr);
                 }
-                let output = format_command_output(output, status.code());
-                Ok(ToolOutput::new(output).with_title(title_for_work))
+                Ok(command_tool_output(output, status.code()).with_title(title_for_work))
             });
+        // Aborted when this call is dropped (a cancelled handoff), so the
+        // `kill_on_drop` child dies with it; a timeout promotion detaches it.
+        let mut work_handle = tokio_util::task::AbortOnDropHandle::new(unguarded_work_handle);
 
-        match tokio::time::timeout(timeout_duration, &mut work_handle).await {
-            Ok(join_result) => match join_result {
-                Ok(Ok(output)) => Ok(output),
-                Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
-                Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
-            },
+        let join_result = match tokio::time::timeout(timeout_duration, &mut work_handle).await {
+            Ok(join_result) => join_result,
+            // The background task that adopted this call reports the real
+            // exit; promoting again would make one shell two tasks.
+            Err(_) if crate::background::ToolHandoff::current_handed_off() => {
+                (&mut work_handle).await
+            }
             Err(_) => {
                 // Timed out, but the command is still running. Instead of killing
                 // it, promote it to a background task so it keeps running, renders
@@ -1037,13 +1067,14 @@ impl BashTool {
                 let display_name =
                     summarize_background_command(params.intent.as_deref(), &params.command);
                 let info = crate::background::global()
-                    .adopt_with_options(
+                    .adopt_handoff(
+                        Some(promotion),
                         "bash",
                         Some(display_name.clone()),
                         &ctx.session_id,
                         params.notify,
-                        params.wake,
-                        work_handle,
+                        params.wake(),
+                        work_handle.detach(),
                     )
                     .await;
                 // Route progress parsed from the still-running command's output
@@ -1057,6 +1088,7 @@ impl BashTool {
                      Name: {}\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
+                     {}\n\
                      {BACKGROUND_WAIT_GUIDANCE}\n\n\
                      The command is still running; do not rerun it unless you intentionally want a second copy.\n\
                      If you expected it to finish quickly and it did not, the `timeout` parameter is in MILLISECONDS; pass a larger value or omit it.",
@@ -1065,9 +1097,10 @@ impl BashTool {
                     display_name,
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
 
-                Ok(ToolOutput::new(output)
+                return Ok(ToolOutput::new(output)
                     .with_title(title)
                     .with_metadata(json!({
                         "background": true,
@@ -1077,8 +1110,13 @@ impl BashTool {
                         "status_file": info.status_file.to_string_lossy(),
                         "timeout_promoted": true,
                         "foreground_timeout_ms": timeout_ms,
-                    })))
+                    })));
             }
+        };
+        match join_result {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
+            Err(join_err) => Err(anyhow::anyhow!("Command task panicked: {}", join_err)),
         }
     }
 
@@ -1122,25 +1160,30 @@ impl BashTool {
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
+        let process = crate::background::ToolHandoff::track_current_process(pid);
+        crate::background::ToolHandoff::set_current_output_file(&info.output_file);
 
         loop {
             if let Some(status) = child.try_wait()? {
+                drop(process);
                 let output = tokio::fs::read_to_string(&info.output_file)
                     .await
                     .unwrap_or_default();
                 let _ = tokio::fs::remove_file(&info.output_file).await;
                 let _ = tokio::fs::remove_file(&info.status_file).await;
-                return Ok(
-                    ToolOutput::new(format_command_output(output, status.code())).with_title(
-                        params
-                            .intent
-                            .clone()
-                            .unwrap_or_else(|| params.command.clone()),
-                    ),
-                );
+                return Ok(command_tool_output(output, status.code()).with_title(
+                    params
+                        .intent
+                        .clone()
+                        .unwrap_or_else(|| params.command.clone()),
+                ));
             }
 
-            if started.elapsed() >= timeout_duration {
+            // Once adopted, the background task owns this shell and reports
+            // its exit; promoting it again would make one shell two tasks.
+            if started.elapsed() >= timeout_duration
+                && !crate::background::ToolHandoff::current_handed_off()
+            {
                 let elapsed = started.elapsed();
                 manager
                     .register_detached_task(
@@ -1151,7 +1194,7 @@ impl BashTool {
                         pid,
                         &started_at,
                         params.notify,
-                        params.wake,
+                        params.wake(),
                     )
                     .await;
                 // Detached commands write straight to the output file, so no
@@ -1167,6 +1210,7 @@ impl BashTool {
                      Foreground time used: {:.1}s\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
+                     {}\n\
                      {BACKGROUND_WAIT_GUIDANCE}\n\n\
                      The command is still running; do not rerun it unless you intentionally want a second copy.",
                     timeout_ms as f64 / 1000.0,
@@ -1175,6 +1219,7 @@ impl BashTool {
                     elapsed.as_secs_f64(),
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1200,6 +1245,8 @@ impl BashTool {
                 .map(|signal| signal.is_set())
                 .unwrap_or(false)
             {
+                // The registered task owns the child across the reload.
+                drop(process);
                 manager
                     .register_detached_task(
                         &info,
@@ -1209,15 +1256,16 @@ impl BashTool {
                         pid,
                         &started_at,
                         params.notify,
-                        params.wake,
+                        params.wake(),
                     )
                     .await;
                 spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
                 let output = format!(
-                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{BACKGROUND_WAIT_GUIDANCE}",
+                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{}\n{BACKGROUND_WAIT_GUIDANCE}",
                     info.task_id,
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1254,7 +1302,7 @@ impl BashTool {
         let timeout_ms = background_timeout_ms(params.timeout);
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
-        let wake = params.wake;
+        let wake = params.wake();
         let notify = params.notify || wake;
         let info = crate::background::global()
             .spawn_with_notify(
@@ -1387,13 +1435,7 @@ impl BashTool {
             )
             .await;
 
-        let notify_msg = if wake {
-            "The agent will be woken when the task completes."
-        } else if notify {
-            "You will be notified when the task completes."
-        } else {
-            "Notifications disabled."
-        };
+        let notify_msg = super::background_delivery_notice(wake);
 
         let stall_msg = match params.stall_wake_seconds {
             Some(requested) => {

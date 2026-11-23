@@ -85,7 +85,9 @@ impl TestEnvGuard {
         let runtime_dir = temp_home.path().join("runtime");
         std::fs::create_dir_all(&runtime_dir)?;
 
-        jcode::env::set_var("JCODE_HOME", temp_home.path());
+        // Canonical: macOS temp dirs sit under the /var symlink, which the
+        // cloud-environment path check refuses, failing every shell tool.
+        jcode::env::set_var("JCODE_HOME", temp_home.path().canonicalize()?);
         jcode::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
         jcode::env::set_var("JCODE_TEST_SESSION", "1");
         jcode::env::set_var("JCODE_DEBUG_CONTROL", "1");

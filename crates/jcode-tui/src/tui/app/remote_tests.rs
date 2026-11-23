@@ -685,6 +685,133 @@ fn startup_send_state_is_not_preserved_for_real_session_switch() {
 }
 
 #[test]
+fn attaching_seeds_rows_for_the_sessions_running_background_shells() {
+    let session_id = crate::id::new_id("ses_attach_bg");
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        Some("sleep 600".to_string()),
+        &session_id,
+        std::process::id(),
+        &chrono::Utc::now().to_rfc3339(),
+        true,
+        false,
+    ));
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+    let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].task_id, info.task_id);
+    assert_eq!(rows[0].status, crate::tui::BackgroundTaskRowStatus::Running);
+}
+
+/// A fresh client can learn its session id before the first History; that
+/// first History must still seed the session's running shells.
+#[test]
+fn fresh_client_that_knows_its_session_still_seeds_running_shells() {
+    let session_id = crate::id::new_id("ses_fresh_bg");
+    let manager = crate::background::global();
+    let info = manager.reserve_task_info();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(manager.register_detached_task(
+        &info,
+        "bash",
+        Some("sleep 600".to_string()),
+        &session_id,
+        std::process::id(),
+        &chrono::Utc::now().to_rfc3339(),
+        true,
+        false,
+    ));
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    app.remote_session_id = Some(session_id.clone());
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+    let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].task_id, info.task_id);
+}
+
+/// Reattaching to the same session reconciles the rows it shows: one that
+/// finished is no longer shown as running, and one whose status file was
+/// cleaned up while the client was away is dropped. It does not rescan the
+/// task directory, so a task started while away gets no row yet.
+#[test]
+fn reattaching_to_the_same_session_reconciles_background_rows() {
+    let session_id = crate::id::new_id("ses_reattach_bg");
+    let manager = crate::background::global();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let register = |label: &str| {
+        let info = manager.reserve_task_info();
+        rt.block_on(manager.register_detached_task(
+            &info,
+            "bash",
+            Some(label.to_string()),
+            &session_id,
+            std::process::id(),
+            &chrono::Utc::now().to_rfc3339(),
+            true,
+            false,
+        ));
+        info
+    };
+    let finished = register("finishes while away");
+    let cleaned = register("finishes and is cleaned up while away");
+    let _guard = rt.enter();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.auto_server_reload = false;
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    assert_eq!(app.background_task_rows_ref().len(), 2);
+
+    let started = register("starts while away");
+    let status_path = manager.status_path_for(&finished.task_id);
+    let mut status: crate::background::TaskStatusFile =
+        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+    status.status = crate::bus::BackgroundTaskStatus::Completed;
+    std::fs::write(&status_path, serde_json::to_string(&status).unwrap()).unwrap();
+    std::fs::remove_file(manager.status_path_for(&cleaned.task_id)).unwrap();
+    handle_server_event(&mut app, startup_history(&session_id), &mut remote);
+    let rows = app.background_task_rows_ref().to_vec();
+    for info in [&finished, &cleaned, &started] {
+        let _ = std::fs::remove_file(manager.status_path_for(&info.task_id));
+        let _ = std::fs::remove_file(manager.output_path_for(&info.task_id));
+    }
+
+    let row = |task_id: &str| {
+        rows.iter()
+            .find(|row| row.task_id == task_id)
+            .map(|row| row.status)
+    };
+    assert_eq!(
+        row(&finished.task_id),
+        Some(crate::tui::BackgroundTaskRowStatus::Completed),
+        "{rows:?}"
+    );
+    assert_eq!(row(&cleaned.task_id), None, "{rows:?}");
+    assert_eq!(row(&started.task_id), None, "{rows:?}");
+}
+
+#[test]
 fn has_pending_startup_submission_requires_input_and_flag() {
     // Guards the predicate that gates post-connect startup dispatch.
     let mut app = create_test_app();

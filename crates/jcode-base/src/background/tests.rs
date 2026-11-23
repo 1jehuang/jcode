@@ -1041,3 +1041,401 @@ async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
     assert!(manager.settled.lock().await.is_empty());
     Ok(())
 }
+
+fn drain_completions(
+    events: &mut tokio::sync::broadcast::Receiver<BusEvent>,
+    task_id: &str,
+) -> Vec<BackgroundTaskCompleted> {
+    let mut completions = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok(BusEvent::BackgroundTaskCompleted(event)) if event.task_id == task_id => {
+                completions.push(event)
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(_) => return completions,
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancel_publishes_completion_once_without_waking() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-publish",
+            true,
+            true,
+            |_output_path| async move {
+                sleep(Duration::from_secs(3600)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    assert!(manager.cancel(&info.task_id).await?);
+    assert!(!manager.cancel(&info.task_id).await?);
+    assert_eq!(manager.sweep().await, 1);
+
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    let completion = &completions[0];
+    assert_eq!(completion.status, BackgroundTaskStatus::Failed);
+    assert!(completion.notify, "UIs still settle the task row");
+    assert!(!completion.wake, "a requested stop must not wake the model");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn detached_cancel_publishes_once_even_after_sweep() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let mut child = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .map_err(|err| anyhow!("spawn child: {err}"))?;
+    let info = manager.reserve_task_info();
+    manager
+        .register_detached_task(
+            &info,
+            "bash",
+            None,
+            "session-detached-cancel",
+            child.id(),
+            &Utc::now().to_rfc3339(),
+            true,
+            true,
+        )
+        .await;
+
+    assert!(
+        manager
+            .cancel_with_grace(&info.task_id, Duration::from_millis(50))
+            .await?
+    );
+    let _ = child.wait();
+    manager.sweep().await;
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(status.error.as_deref(), Some("Cancelled by user"));
+
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one completion: {completions:?}"
+    );
+    assert!(
+        !completions[0].wake,
+        "a requested stop must not wake the model"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancel_keeps_terminal_status_written_before_abort() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-cancel-terminal",
+            true,
+            true,
+            |_output_path| async move {
+                sleep(Duration::from_secs(3600)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+    // The task persisted its real result, but the abort lands before it publishes.
+    let mut finished = manager
+        .read_status_file(&info.status_file)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    finished.status = BackgroundTaskStatus::Completed;
+    finished.exit_code = Some(0);
+    manager
+        .write_status_file(&info.status_file, &finished)
+        .await;
+
+    assert!(!manager.cancel(&info.task_id).await?);
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+    assert_eq!(status.error, None);
+
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(completions.len(), 1, "exactly one: {completions:?}");
+    assert_eq!(completions[0].status, BackgroundTaskStatus::Completed);
+    assert!(
+        completions[0].wake,
+        "the real completion keeps its delivery"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_an_adopted_call_stops_its_detached_child() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let child = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .map_err(|err| anyhow!("spawn child: {err}"))?;
+    let pid = child.id();
+    let handoff = Arc::new(ToolHandoff::default());
+    let call = tokio::spawn(handoff.scope(async move {
+        // Like bash's detached waiter: hold the child and wait on it.
+        let _child = child;
+        let _process = ToolHandoff::track_current_process(pid);
+        sleep(Duration::from_secs(3600)).await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    }));
+    let info = manager
+        .adopt_handoff(
+            Some(Arc::clone(&handoff)),
+            "bash",
+            None,
+            "session-handoff-cancel",
+            true,
+            true,
+            call,
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while handoff.pids().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    assert!(
+        manager
+            .cancel_with_grace(&info.task_id, Duration::from_millis(50))
+            .await?
+    );
+    let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let _ = crate::platform::try_reap_child_process(pid);
+            if !crate::platform::is_process_running(pid) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    if stopped.is_err() {
+        let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+    }
+    assert!(stopped.is_ok(), "cancel must stop the detached child");
+    Ok(())
+}
+
+#[tokio::test]
+async fn held_delivery_publishes_once_without_waking_until_released() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let mut abandoned_events = Bus::global().subscribe();
+    let mut infos = Vec::new();
+    for _ in 0..2 {
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let info = manager
+            .spawn("bash", "session-held-delivery", |_| async move {
+                let _ = finish_rx.await;
+                Ok(TaskResult::completed(Some(0)))
+            })
+            .await;
+        assert!(
+            manager
+                .hold_delivery(&info.task_id, "session-held-delivery")
+                .await
+        );
+        let _ = finish_tx.send(());
+        infos.push(info);
+    }
+    for info in &infos {
+        manager
+            .wait(&info.task_id, Duration::from_secs(5), false)
+            .await;
+    }
+    sleep(Duration::from_millis(50)).await;
+
+    // A waiter that returns the result releases without delivering again.
+    let returned = manager.release_delivery(&infos[0].task_id, false).await;
+    assert_eq!(
+        returned.map(|task| task.status),
+        Some(BackgroundTaskStatus::Completed)
+    );
+    let completions = drain_completions(&mut events, &infos[0].task_id);
+    assert_eq!(completions.len(), 1, "exactly one: {completions:?}");
+    assert!(!completions[0].wake, "the waiter's reply is the delivery");
+
+    // An abandoned waiter hands the completion back to the model.
+    manager.release_delivery(&infos[1].task_id, true).await;
+    let completions = drain_completions(&mut abandoned_events, &infos[1].task_id);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|event| event.wake)
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn progress_after_a_task_settled_is_ignored() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let info = manager
+        .spawn("bash", "session-late-progress", |_| async move {
+            Ok(TaskResult::completed(Some(0)))
+        })
+        .await;
+    manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await;
+    let mut events = Bus::global().subscribe();
+    let late = BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(99.0),
+        message: None,
+        current: None,
+        total: None,
+        unit: None,
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::ParsedOutput,
+    };
+    let status = manager
+        .update_progress(&info.task_id, late)
+        .await?
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert!(status.progress.is_none());
+    while let Ok(event) = events.try_recv() {
+        if let BusEvent::BackgroundTaskProgress(event) = event {
+            assert_ne!(event.task_id, info.task_id, "late progress was published");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn delivery_hold_is_process_local_owner_only_and_keeps_a_stop_passive() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut events = Bus::global().subscribe();
+    let info = manager
+        .spawn("bash", "session-hold-owner", |_| async move {
+            sleep(Duration::from_secs(3600)).await;
+            Ok(TaskResult::completed(Some(0)))
+        })
+        .await;
+
+    // Another session's wait must not silence the owner.
+    assert!(!manager.hold_delivery(&info.task_id, "session-other").await);
+    assert!(
+        manager
+            .hold_delivery(&info.task_id, "session-hold-owner")
+            .await
+    );
+    // Nothing on disk: a reload drops the hold and the task keeps its wake.
+    let persisted = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert!(persisted.wake, "the hold must not be persisted");
+
+    // A requested stop during the hold stays passive after an abandoned wait.
+    assert!(manager.cancel(&info.task_id).await?);
+    manager.release_delivery(&info.task_id, true).await;
+    let completions = drain_completions(&mut events, &info.task_id);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|event| event.wake)
+            .collect::<Vec<_>>(),
+        vec![false],
+        "a stop never wakes the model"
+    );
+    Ok(())
+}
+
+/// An adopted task's output file links to its shell's live log; recording
+/// the final output replaces the link and never truncates that log, which
+/// the shell may still be writing under another task (e.g. across a reload).
+#[cfg(unix)]
+#[tokio::test]
+async fn adopted_task_final_output_leaves_the_shells_live_log_intact() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let log = tmp.path().join("shell.log");
+    std::fs::write(&log, "live shell log")?;
+    let handoff = Arc::new(ToolHandoff::default());
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let call_log = log.clone();
+    let call = tokio::spawn(handoff.scope(async move {
+        ToolHandoff::set_current_output_file(&call_log);
+        let _ = finish_rx.await;
+        Ok(jcode_tool_types::ToolOutput::new("final output"))
+    }));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while lock_ignoring_poison(&handoff.output_file).is_none() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let info = manager
+        .adopt_handoff(
+            Some(handoff),
+            "bash",
+            None,
+            "session-live-log",
+            false,
+            false,
+            call,
+        )
+        .await;
+    assert_eq!(
+        manager.output(&info.task_id).await.as_deref(),
+        Some("live shell log")
+    );
+    let _ = finish_tx.send(());
+    manager
+        .wait(&info.task_id, Duration::from_secs(10), false)
+        .await
+        .expect("adopted task should exist");
+    assert_eq!(std::fs::read_to_string(&log)?, "live shell log");
+    assert_eq!(
+        manager.output(&info.task_id).await.as_deref(),
+        Some("final output")
+    );
+    Ok(())
+}

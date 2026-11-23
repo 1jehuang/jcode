@@ -334,7 +334,7 @@ async fn await_or_background_search(
                     Some(display_name.clone()),
                     &session_id,
                     true,
-                    false,
+                    true,
                     // Transfer, do not cancel: the background manager becomes
                     // the sole owner, including while adoption is awaiting.
                     owner
@@ -347,9 +347,10 @@ async fn await_or_background_search(
                 "Search is still running after 5s and is continuing in background.\n\n\
                      Task ID: {}\n\
                      Name: {}\n\n\
-                     {}",
+                     {}\n{}",
                 info.task_id,
                 display_name,
+                super::background_delivery_notice(true),
                 super::BACKGROUND_WAIT_GUIDANCE,
             ))
             .with_title(display_name.clone())

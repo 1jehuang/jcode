@@ -1493,6 +1493,20 @@ pub(super) async fn handle_resume_session(
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
+        // A completion that found the agent locked by the history send above
+        // is queued with no turn left to drain it.
+        super::live_turn::run_stranded_background_completions(
+            session_id.clone(),
+            Arc::clone(live_target_agent),
+            super::live_turn::LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+            ),
+        )
+        .await;
         // Resolve project-local MCP config against the resumed session's
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
@@ -1966,9 +1980,26 @@ pub(super) async fn handle_resume_session(
             // Persist even if history delivery failed, but do not make inbound
             // controls wait for a recovery turn that already owns the agent.
             let persist_agent = Arc::clone(agent);
+            let drain_session_id = session_id.clone();
+            let swarm = super::live_turn::LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+            );
             crate::runtime_activity::spawn(async move {
                 let mut guard = persist_agent.lock().await;
                 super::run_blocking_io(|| guard.persist_restored_session());
+                drop(guard);
+                // A completion that found the agent locked by the history
+                // send or this persist is queued with no turn to drain it.
+                super::live_turn::run_stranded_background_completions(
+                    drain_session_id,
+                    persist_agent,
+                    swarm,
+                )
+                .await;
             });
             history_result?;
             let history_sent_ms = resume_start.elapsed().as_millis();

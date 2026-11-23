@@ -97,6 +97,9 @@ pub(super) async fn handle_remote_key_internal(
                     )));
                 }
             }
+            Some(crate::tui::dialog::DialogKey::StopTask(target)) => {
+                app_mod::tasks_dialog::stop_task_remote(app, remote, target).await;
+            }
             _ => {}
         }
         return Ok(());
@@ -245,6 +248,10 @@ pub(super) async fn handle_remote_key_internal(
     // can claim them. This mirrors the local path in `input.rs`
     // `handle_key_core`.
     if app.model_picker_preview_hotkey(code, modifiers)? {
+        return Ok(());
+    }
+
+    if app.handle_task_pill_key(code, modifiers) {
         return Ok(());
     }
 

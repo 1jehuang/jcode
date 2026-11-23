@@ -338,21 +338,102 @@ impl App {
                 return None;
             }
         };
-        // UI rows are history, not proof that an owner survived a crash.
-        let owner = if status.detached {
-            status.pid
-        } else {
-            status.owner_pid.or(status.pid)
-        };
-        if owner.is_none_or(|pid| {
-            pid == 0 || pid > i32::MAX as u32 || !crate::platform::is_process_running(pid)
-        }) {
-            return None;
-        }
-        (status.task_id == task_id
-            && status.session_id == session_id
-            && status.status == crate::bus::BackgroundTaskStatus::Running)
+        (status.task_id == task_id && running_background_status_for(&status, session_id))
             .then_some(status)
+    }
+
+    /// A client that reattaches missed the completions of tasks it showed.
+    /// Reconcile its running rows with the status files the daemon writes on
+    /// this machine; one whose file is gone (cleaned up) no longer runs.
+    pub(super) fn reconcile_running_background_tasks(&mut self, session_id: &str) {
+        // A remote daemon's status files are not on this machine; a missing
+        // file proves nothing there, so keep rows as the events left them.
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
+        let mut gone = Vec::new();
+        let mut finished = Vec::new();
+        for row in &self.background_task_rows {
+            // Only a bare id names a status file.
+            if row.status != crate::tui::BackgroundTaskRowStatus::Running
+                || std::path::Path::new(&row.task_id).file_name()
+                    != Some(std::ffi::OsStr::new(&row.task_id))
+            {
+                continue;
+            }
+            let path = crate::background::global().status_path_for(&row.task_id);
+            match std::fs::read(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    gone.push(row.task_id.clone());
+                }
+                Ok(bytes) => {
+                    if let Ok(status) =
+                        serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes)
+                        && status.session_id == session_id
+                        && !running_background_status_for(&status, session_id)
+                    {
+                        finished.push(status);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        // Its result is unknown, so drop the row rather than guess one.
+        self.background_task_rows
+            .retain(|row| !gone.contains(&row.task_id));
+        for status in finished {
+            let label = crate::message::background_task_display_label(
+                &status.tool_name,
+                status.display_name.as_deref(),
+            );
+            let row_status = if status.status == crate::bus::BackgroundTaskStatus::Completed {
+                crate::tui::BackgroundTaskRowStatus::Completed
+            } else {
+                crate::tui::BackgroundTaskRowStatus::Failed
+            };
+            self.finish_background_task(status.task_id, label, row_status);
+        }
+    }
+
+    /// A client that attaches after a task started never saw its start event.
+    /// Seed rows for the session's running tasks from the status files the
+    /// daemon writes on this machine, as the tasks dialog already reads.
+    pub(super) fn seed_running_background_tasks(&mut self, session_id: &str) {
+        // `status_path_for("")` is `<task dir>/.status.json`.
+        let status_path = crate::background::global().status_path_for("");
+        let Some(Ok(entries)) = status_path.parent().map(std::fs::read_dir) else {
+            return;
+        };
+        let mut running: Vec<crate::background::TaskStatusFile> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".status.json"))
+            })
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            // The directory holds every session's tasks; parse only this one's.
+            .filter(|content| content.contains(session_id))
+            .filter_map(|content| serde_json::from_str(&content).ok())
+            .filter(|status| running_background_status_for(status, session_id))
+            .collect();
+        running.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        for status in running {
+            if self
+                .background_task_rows
+                .iter()
+                .any(|row| row.task_id == status.task_id)
+            {
+                continue;
+            }
+            let label = crate::message::background_task_display_label(
+                &status.tool_name,
+                status.display_name.as_deref(),
+            );
+            let percent = status.progress.and_then(|progress| progress.percent);
+            self.upsert_running_background_task(status.task_id, label, percent);
+        }
     }
 
     pub(super) fn all_open_todos_are_paused(&self) -> bool {
@@ -363,12 +444,19 @@ impl App {
                 .all(|todo| self.todo_is_paused_for_auto_followup(todo))
     }
 
+    /// Drop the oldest finished rows past the cap; running rows always stay,
+    /// since the pill counts them and `/tasks` stops them.
     fn retain_latest_background_tasks(&mut self) {
         const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
-        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
-            self.background_task_rows.drain(..stale);
-        }
+        let mut excess = self
+            .background_task_rows
+            .len()
+            .saturating_sub(MAX_TRACKED_BACKGROUND_TASKS);
+        self.background_task_rows.retain(|row| {
+            let evict = excess > 0 && row.status != crate::tui::BackgroundTaskRowStatus::Running;
+            excess -= usize::from(evict);
+            !evict
+        });
     }
 
     pub(super) fn upsert_running_background_task(
@@ -452,6 +540,7 @@ impl App {
                 task.percent = Some(100.0);
             }
             self.background_task_rows.push(task);
+            self.retain_latest_background_tasks();
             return;
         }
         self.background_task_rows
@@ -1190,4 +1279,22 @@ fn carry_over_tool_durations(previous: &[DisplayMessage], incoming: &mut [Displa
             message.duration_secs = Some(*seconds);
         }
     }
+}
+
+/// Running for `session_id` with a live owner: a status file left behind by a
+/// crashed owner is history, not proof that the task still runs.
+fn running_background_status_for(
+    status: &crate::background::TaskStatusFile,
+    session_id: &str,
+) -> bool {
+    let owner = if status.detached {
+        status.pid
+    } else {
+        status.owner_pid.or(status.pid)
+    };
+    status.session_id == session_id
+        && status.status == crate::bus::BackgroundTaskStatus::Running
+        && owner.is_some_and(|pid| {
+            pid != 0 && pid <= i32::MAX as u32 && crate::platform::is_process_running(pid)
+        })
 }

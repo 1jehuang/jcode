@@ -840,5 +840,9 @@ async fn resumed_claude_account_pin_selects_its_cli_instance() {
     };
     assert_eq!(resume(&saved.id).as_deref(), Some("claude-fox"));
     crate::config::Config::set_claude_account_native("claude-fox", true, None).unwrap();
-    assert_eq!(resume(&saved.id), None, "a native-mode account keeps no CLI pin");
+    assert_eq!(
+        resume(&saved.id),
+        None,
+        "a native-mode account keeps no CLI pin"
+    );
 }

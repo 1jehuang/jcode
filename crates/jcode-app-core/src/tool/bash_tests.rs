@@ -56,7 +56,10 @@ fn bash_optional_nulls_use_omitted_defaults() {
     }))
     .unwrap();
     assert!(nulls.notify);
-    assert!(!nulls.wake);
+    assert!(nulls.wake(), "an omitted wake follows notify");
+    let silent: BashInput =
+        serde_json::from_value(json!({"command": "printf ok", "notify": false})).unwrap();
+    assert!(!silent.wake(), "notify=false opts out of model delivery");
     assert_eq!(nulls.notify, omitted.notify);
     assert_eq!(nulls.wake, omitted.wake);
     assert_eq!(nulls.run_in_background, omitted.run_in_background);
@@ -75,7 +78,7 @@ fn bash_optional_booleans_preserve_explicit_values() {
         }))
         .unwrap();
         assert_eq!(input.notify, value);
-        assert_eq!(input.wake, value);
+        assert_eq!(input.wake, Some(value));
         assert_eq!(input.run_in_background, Some(value));
     }
 }
@@ -253,7 +256,7 @@ fn cloud_environment_hydrates_commands_without_transcript_values() {
 async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tutorial() {
     let result = BashTool::new()
         .execute(
-            json!({"command": "printf done", "run_in_background": true, "wake": true}),
+            json!({"command": "printf done", "run_in_background": true}),
             make_ctx(None),
         )
         .await
@@ -265,15 +268,23 @@ async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tut
     );
     assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
     assert!(
-        result
-            .output
-            .contains("The agent will be woken when the task completes.")
+        result.output.contains(
+            "You will be notified when it completes — do not poll or sleep while waiting."
+        )
     );
     assert!(!result.output.contains("action=\"wait\""));
     assert!(!result.output.contains("To check progress"));
     let metadata = result.metadata.expect("background metadata");
     let id = metadata["task_id"].as_str().expect("task id");
     assert!(result.output.contains(&format!("Task ID: {id}")));
+    let status = crate::background::global()
+        .status(id)
+        .await
+        .expect("background status");
+    assert!(
+        status.notify && status.wake,
+        "default background delivery reaches the model"
+    );
     crate::background::global()
         .wait(id, Duration::from_secs(5), false)
         .await;
@@ -1188,4 +1199,244 @@ fn background_timeout_honors_values_above_the_foreground_cap() {
     assert_eq!(background_timeout_ms(Some(1_800_000)), Some(1_800_000));
     assert_eq!(background_timeout_ms(Some(100)), Some(100));
     assert_eq!(background_timeout_ms(None), None);
+}
+
+/// A call already adopted by a background task must not promote itself into a
+/// second task at its own timeout: one shell, one task, one completion.
+#[tokio::test]
+async fn handed_off_bash_reports_its_real_exit_instead_of_promoting_again() {
+    for ctx in [
+        make_ctx(None),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            BashTool::new()
+                .execute(
+                    json!({"command": "sleep 0.4; echo nested_handoff_ok", "timeout": 100}),
+                    ctx,
+                )
+                .await
+        }));
+        let info = crate::background::global()
+            .adopt_handoff(
+                Some(handoff),
+                "bash",
+                None,
+                "nested-handoff",
+                true,
+                true,
+                call,
+            )
+            .await;
+        let finished = crate::background::global()
+            .wait(&info.task_id, Duration::from_secs(10), false)
+            .await
+            .expect("adopted task should exist");
+        assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+        let output = crate::background::global()
+            .output(&info.task_id)
+            .await
+            .expect("output should exist");
+        assert!(output.contains("nested_handoff_ok"), "output was: {output}");
+        assert!(
+            !output.contains("continuing in background"),
+            "output was: {output}"
+        );
+    }
+}
+
+/// Cancelling a handed-off call stops every shell it runs, on both the piped
+/// path (a client is attached) and the detached path, including shells a
+/// batch runs side by side and the children those shells started.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_handed_off_call_stops_all_of_its_shells() {
+    let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel();
+    for ctx in [
+        make_ctx(Some(stdin_tx)),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_files: Vec<_> = (0..2)
+            .map(|i| dir.path().join(format!("{i}.pid")))
+            .collect();
+        let long = |pid_file: &std::path::Path| json!({"command": format!("sleep 60 & echo $! > {}; wait", pid_file.display())});
+        let inputs = [
+            json!({"command": "true"}),
+            long(&pid_files[0]),
+            long(&pid_files[1]),
+        ];
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            // Like batch: several shells inside one call, the first exits early.
+            let tool = BashTool::new();
+            let runs = inputs.map(|input| tool.execute(input, ctx.clone()));
+            futures::future::join_all(runs).await;
+            Ok(crate::tool::ToolOutput::new("unreachable"))
+        }));
+        let info = crate::background::global()
+            .adopt_handoff(
+                Some(handoff),
+                "batch",
+                None,
+                "handoff-stop-all",
+                true,
+                true,
+                call,
+            )
+            .await;
+        let pids: Vec<i32> = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pids: Vec<i32> = pid_files
+                    .iter()
+                    .filter_map(|file| std::fs::read_to_string(file).ok())
+                    .filter_map(|text| text.trim().parse().ok())
+                    .collect();
+                if pids.len() == pid_files.len() {
+                    break pids;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("both shells should start");
+        // Let the quick shell exit, which used to clear the only pid slot.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert!(
+            crate::background::global()
+                .cancel_with_grace(&info.task_id, Duration::from_millis(100))
+                .await
+                .unwrap()
+        );
+        let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+            while pids.iter().any(|pid| alive(*pid)) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        for pid in &pids {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        assert!(stopped.is_ok(), "cancel must stop every shell's children");
+    }
+}
+
+/// A handed-off detached shell shows its output while it runs, not only once
+/// it exits, and still reports its full output at the end.
+#[cfg(unix)]
+#[tokio::test]
+async fn handed_off_detached_shell_shows_live_output() {
+    let ctx = make_agent_ctx(jcode_agent_runtime::InterruptSignal::new());
+    let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+    let call = tokio::spawn(handoff.scope(async move {
+        BashTool::new()
+            .execute(
+                json!({"command": "echo live_line; sleep 1.5; echo final_line"}),
+                ctx,
+            )
+            .await
+    }));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let manager = crate::background::global();
+    let info = manager
+        .adopt_handoff(Some(handoff), "bash", None, "live-output", true, true, call)
+        .await;
+    let live = manager.output(&info.task_id).await.unwrap_or_default();
+    assert!(live.contains("live_line"), "live output was: {live:?}");
+    assert_eq!(
+        manager.status(&info.task_id).await.unwrap().status,
+        BackgroundTaskStatus::Running
+    );
+    manager
+        .wait(&info.task_id, Duration::from_secs(10), false)
+        .await
+        .expect("adopted task should exist");
+    let output = manager.output(&info.task_id).await.unwrap_or_default();
+    assert!(
+        output.contains("live_line") && output.contains("final_line"),
+        "output was: {output:?}"
+    );
+}
+
+/// A handed-off shell that exits nonzero is a failed task with its real exit
+/// code, as a background bash records it, not a success.
+#[tokio::test]
+async fn handed_off_bash_records_a_nonzero_exit_as_failed() {
+    for ctx in [
+        make_ctx(None),
+        make_agent_ctx(jcode_agent_runtime::InterruptSignal::new()),
+    ] {
+        let handoff = std::sync::Arc::new(crate::background::ToolHandoff::default());
+        let call = tokio::spawn(handoff.scope(async move {
+            BashTool::new()
+                .execute(json!({"command": "sleep 0.3; exit 7"}), ctx)
+                .await
+        }));
+        let manager = crate::background::global();
+        let info = manager
+            .adopt_handoff(
+                Some(handoff),
+                "bash",
+                None,
+                "handoff-exit",
+                true,
+                true,
+                call,
+            )
+            .await;
+        let finished = manager
+            .wait(&info.task_id, Duration::from_secs(10), false)
+            .await
+            .expect("adopted task should exist");
+        assert_eq!(finished.task.status, BackgroundTaskStatus::Failed);
+        assert_eq!(finished.task.exit_code, Some(7));
+    }
+}
+
+/// Cancelling a timeout-promoted piped shell stops the children in its
+/// process group, not only the shell that `kill_on_drop` kills.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_timeout_promoted_shell_stops_its_children() {
+    let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let command = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+    let result = BashTool::new()
+        .execute(
+            json!({"command": command, "timeout": 300}),
+            make_ctx(Some(stdin_tx)),
+        )
+        .await
+        .unwrap();
+    let metadata = result.metadata.expect("expected background metadata");
+    assert_eq!(metadata["timeout_promoted"], true);
+    let task_id = metadata["task_id"].as_str().unwrap();
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    assert!(
+        crate::background::global()
+            .cancel_with_grace(task_id, Duration::from_millis(100))
+            .await
+            .unwrap()
+    );
+    let alive = || unsafe { libc::kill(pid, 0) } == 0;
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while alive() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert!(
+        stopped.is_ok(),
+        "cancel must stop the promoted shell's children"
+    );
 }

@@ -51,7 +51,7 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        let rewind_checkpoint = self.checkpoint_user_input(user_message, false, false)?;
+        let rewind_checkpoint = self.checkpoint_user_input(user_message, false, false);
         self.refresh_plugin_mcp_before_prompt().await;
         let _turn = self.claim_server_turn()?;
         let _runtime_activity =
@@ -98,7 +98,7 @@ impl Agent {
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
         let rewind_checkpoint =
-            self.checkpoint_user_input(user_message, false, display_role.is_some())?;
+            self.checkpoint_user_input(user_message, false, display_role.is_some());
         self.refresh_plugin_mcp_before_prompt().await;
         let _turn = self.claim_server_turn()?;
         let _runtime_activity =
@@ -180,7 +180,7 @@ impl Agent {
         let _runtime_activity =
             crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         let rewind_checkpoint =
-            self.checkpoint_user_input(user_message, !images.is_empty(), display_role.is_some())?;
+            self.checkpoint_user_input(user_message, !images.is_empty(), display_role.is_some());
         // Inject any pending notifications before the user message
         let alert_start = self.session.messages.len();
         let alerts = self.take_alerts();
@@ -362,7 +362,7 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        let checkpoint = self.checkpoint_user_input(user_message, !images.is_empty(), false)?;
+        let checkpoint = self.checkpoint_user_input(user_message, !images.is_empty(), false);
         self.append_user_context_message_with_display_role(user_message, images, None, false)?;
         self.bind_user_checkpoint(checkpoint)
     }

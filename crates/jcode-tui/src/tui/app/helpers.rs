@@ -820,12 +820,6 @@ pub(super) fn named_profile_reasoning_efforts(
         return Some(efforts);
     }
     let model_reasoning = model_config.and_then(|entry| entry.reasoning);
-    // A model can support reasoning without exposing a selectable effort
-    // parameter. Treat an explicit per-model declaration as authoritative
-    // instead of borrowing a generic ladder from the profile's provider.
-    if profile_id.eq_ignore_ascii_case("acme") && model_reasoning == Some(true) {
-        return Some(Vec::new());
-    }
     // Keep Conifer's current local override policy outside this port.
     if profile_id.eq_ignore_ascii_case("conifer") {
         return if model_reasoning == Some(false)

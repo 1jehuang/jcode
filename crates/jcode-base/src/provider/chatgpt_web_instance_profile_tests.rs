@@ -131,3 +131,27 @@ async fn waiting_process_requests_handoff_and_clears_the_request() {
     );
     drop(lock);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_cancelled_waiters_request_stops_counting() {
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("chatgpt-web").join("profile");
+    let _held = ProfileLock::acquire(&profile).await.unwrap();
+    let waiter = tokio::spawn({
+        let profile = profile.clone();
+        async move { ProfileLock::acquire(&profile).await }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while !handoff_requested(&profile) {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    waiter.abort();
+    let _ = waiter.await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(
+        !handoff_requested(&profile),
+        "a stale marker must not keep asking the holder to hand over"
+    );
+}

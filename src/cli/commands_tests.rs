@@ -1759,3 +1759,210 @@ impl Provider for OpenRouterSlotProvider {
 
 #[path = "commands/tests/memory_tests.rs"]
 mod memory;
+
+/// Replies with a background bash call, then a foreground one, then text.
+struct BackgroundThenForegroundProvider(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl Provider for BackgroundThenForegroundProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tool = |id: &str, input: serde_json::Value| {
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: id.into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolInputDelta(input.to_string()),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("tool_use".into()),
+                },
+            ]
+        };
+        let events = match call {
+            0 => tool(
+                "bg",
+                serde_json::json!({"command": "sleep 0.2; echo RUN_BG_MARK", "run_in_background": true}),
+            ),
+            1 => tool(
+                "fg",
+                serde_json::json!({"command": "sleep 1.5; echo RUN_FG_MARK"}),
+            ),
+            _ => vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                },
+            ],
+        };
+        Ok(Box::pin(tokio_stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn name(&self) -> &str {
+        "bg-then-fg"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(Arc::clone(&self.0)))
+    }
+}
+
+#[tokio::test]
+async fn run_injects_a_background_completion_that_finishes_mid_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    // Canonical: the cloud-environment check refuses macOS's /var symlink.
+    crate::env::set_var("JCODE_HOME", temp.path().canonicalize().unwrap());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    let provider: Arc<dyn Provider> = Arc::new(BackgroundThenForegroundProvider(Arc::default()));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    run_single_message_with_agent(&mut agent, provider, "go", false, false)
+        .await
+        .unwrap();
+
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    let position = |needle: &str| {
+        session.messages.iter().position(|message| {
+            message.content.iter().any(|block| match block {
+                crate::message::ContentBlock::Text { text, .. } => text.contains(needle),
+                crate::message::ContentBlock::ToolResult { content, .. } => {
+                    content.contains(needle)
+                }
+                _ => false,
+            })
+        })
+    };
+    let foreground = position("RUN_FG_MARK").expect("foreground result");
+    let completion = position("**Background task**").expect("completion reached the model");
+    assert!(
+        completion > foreground,
+        "completion must follow the foreground result"
+    );
+    assert!(
+        session.messages[completion]
+            .content_preview()
+            .contains("RUN_BG_MARK"),
+        "the injected completion must carry the task output"
+    );
+}
+
+/// Starts a background shell, then answers slowly so the shell finishes while
+/// the final response is still being produced.
+struct BackgroundThenSlowFinalProvider(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl Provider for BackgroundThenSlowFinalProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events = if call == 0 {
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "bg".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolInputDelta(
+                    serde_json::json!({"command": "sleep 0.2; echo FINAL_BG_MARK", "run_in_background": true})
+                        .to_string(),
+                ),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("tool_use".into()),
+                },
+            ]
+        } else {
+            if call == 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            }
+            let text = if call == 1 { "REPORT_TEXT" } else { "ACK_TEXT" };
+            vec![
+                StreamEvent::TextDelta(text.into()),
+                StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".into()),
+                },
+            ]
+        };
+        Ok(Box::pin(tokio_stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn name(&self) -> &str {
+        "bg-then-slow-final"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(Arc::clone(&self.0)))
+    }
+}
+
+#[tokio::test]
+async fn run_answers_a_background_completion_that_lands_during_the_final_response() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path().canonicalize().unwrap());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(BackgroundThenSlowFinalProvider(Arc::clone(&calls)));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    run_single_message_with_agent(&mut agent, provider, "go", false, false)
+        .await
+        .unwrap();
+
+    let session = crate::session::Session::load(agent.session_id()).unwrap();
+    assert!(
+        session
+            .messages
+            .iter()
+            .any(|message| message.content_preview().contains("FINAL_BG_MARK")),
+        "a completion that lands during the final response must reach the model"
+    );
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "the turn continues once to answer the completion"
+    );
+}
+
+#[tokio::test]
+async fn captured_run_keeps_the_final_answer_when_a_late_completion_continues_it() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path().canonicalize().unwrap());
+
+    let provider: Arc<dyn Provider> = Arc::new(BackgroundThenSlowFinalProvider(Arc::default()));
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = crate::agent::Agent::new(provider, registry);
+    let completions = forward_background_completions(
+        agent.session_id().to_string(),
+        agent.soft_interrupt_queue(),
+    );
+    let text = agent.run_once_capture("go").await.unwrap();
+    completions.abort();
+
+    assert!(
+        text.contains("REPORT_TEXT"),
+        "the original answer is kept: {text:?}"
+    );
+    assert!(
+        text.contains("ACK_TEXT"),
+        "the answer to the completion follows: {text:?}"
+    );
+}

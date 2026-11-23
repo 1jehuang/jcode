@@ -15,6 +15,7 @@ fn dialog(state: Snapshot, tab: &str) -> Dialog {
         ask: None,
         pending_rewind: false,
         status: None,
+        tasks: None,
         pending_mcp: None,
     };
     dialog

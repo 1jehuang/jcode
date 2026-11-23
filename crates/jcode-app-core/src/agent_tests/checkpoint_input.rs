@@ -226,3 +226,31 @@ async fn automatic_inputs_do_not_evict_human_snapshots_or_lose_image_boundaries(
     assert_eq!(restored.images, images);
     assert_eq!(agent.session.messages.len(), boundary);
 }
+
+#[tokio::test]
+async fn unreadable_file_history_does_not_block_a_prompt() {
+    use sha2::Digest;
+    let _env = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut agent = Agent::new(
+        Arc::new(ContinuationProvider(calls.clone())),
+        Registry::empty(),
+    );
+    // Stands in for any sidecar `load` rejects, such as an interrupted
+    // mutation that conflicts with an external edit.
+    let key: String = sha2::Sha256::digest(agent.session_id().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let dir = crate::storage::jcode_dir()
+        .unwrap()
+        .join("sessions/file-history")
+        .join(key);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("history.json"), b"not json").unwrap();
+
+    agent.run_once("real human prompt").await.unwrap();
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

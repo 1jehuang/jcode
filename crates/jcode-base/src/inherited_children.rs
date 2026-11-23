@@ -17,13 +17,25 @@
 /// from detached work that is meant to outlive a reload.
 pub const MCP_CHILD_MARKER_ENV: &str = "JCODE_MCP_CHILD";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use std::collections::HashSet;
     use std::time::Duration;
 
     const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+    #[cfg(target_os = "macos")]
+    fn children_of(pid: u32) -> HashSet<i32> {
+        let mut pids = vec![0 as libc::pid_t; 8192];
+        let size = std::mem::size_of_val(pids.as_slice()) as libc::c_int;
+        // SAFETY: the buffer is valid for `size` bytes; the call returns a PID count.
+        let count =
+            unsafe { libc::proc_listchildpids(pid as libc::pid_t, pids.as_mut_ptr().cast(), size) };
+        pids.truncate(count.max(0) as usize);
+        pids.into_iter().filter(|&pid| pid > 0).collect()
+    }
+
+    #[cfg(target_os = "linux")]
     fn children_of(pid: u32) -> HashSet<i32> {
         let mut out = HashSet::new();
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
@@ -49,6 +61,14 @@ mod imp {
         out
     }
 
+    // shortcut: macOS only reaps; reading another process's environment needs
+    // KERN_PROCARGS2. Stale MCP servers still exit once their pipes close.
+    #[cfg(target_os = "macos")]
+    fn has_mcp_marker(_pid: i32) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
     fn has_mcp_marker(pid: i32) -> bool {
         let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
             return false;
@@ -118,11 +138,13 @@ mod imp {
             std::mem::forget(child);
             std::thread::sleep(std::time::Duration::from_millis(200));
             let mut set = std::collections::HashSet::from([pid]);
+            assert!(super::children_of(std::process::id()).contains(&pid));
             super::reap(&mut set);
             assert!(set.is_empty());
-            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            assert!(!super::children_of(std::process::id()).contains(&pid));
         }
 
+        #[cfg(target_os = "linux")]
         #[test]
         fn detects_mcp_marker() {
             let mut child = std::process::Command::new("sleep")
@@ -167,8 +189,8 @@ pub fn start() {
     // reload too), and the server calls it again. A second snapshot taken
     // after this image spawned children would steal their exit statuses.
     static ONCE: std::sync::Once = std::sync::Once::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     ONCE.call_once(imp::start);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     ONCE.call_once(|| {});
 }

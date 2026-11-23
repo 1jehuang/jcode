@@ -179,6 +179,13 @@ fn handle_server_event_inner(
         app.push_display_message(DisplayMessage::error(message.clone()));
         return true;
     }
+    // A swarm stop from the tasks dialog (`stop_swarm_member`).
+    if let ServerEvent::Done { id } = &event
+        && remote.finish_runtime_command(*id)
+    {
+        app.set_status_notice("Stopped agent");
+        return true;
+    }
 
     // Control responses are transcript notices, never conversation-turn activity.
     if let ServerEvent::RuntimeCommandResult {
@@ -189,6 +196,10 @@ fn handle_server_event_inner(
     } = event
     {
         remote.finish_runtime_command(id);
+        if command == "background_cancel" {
+            app.set_status_notice(message);
+            return true;
+        }
         if command == "poke"
             && let Some(enabled) = data["poke_enabled"].as_bool()
         {
@@ -1917,6 +1928,7 @@ fn handle_server_event_inner(
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
+                    app.background_task_rows.clear();
                 }
                 app.remote_total_tokens = None;
                 app.remote_token_usage_totals = None;
@@ -1930,6 +1942,18 @@ fn handle_server_event_inner(
             }
             if session_changed {
                 app.refresh_pinned_todos_now();
+            }
+            // A fresh client can learn its session id before the first History,
+            // so an empty row list must still be seeded.
+            // shortcut: this rescans the task dir on reattaches with no rows;
+            // track "seeded for this attachment" if that scan gets slow.
+            if session_changed || app.background_task_rows.is_empty() {
+                app.seed_running_background_tasks(&session_id);
+            } else {
+                // A reattach may have missed completions of the rows it shows.
+                // shortcut: tasks started while away get no row until their
+                // completion; seed them from the daemon if that matters.
+                app.reconcile_running_background_tasks(&session_id);
             }
             // Facts seeded from the last launch are only a first-frame guess.
             // When History reports a different model, drop them so the snapshot

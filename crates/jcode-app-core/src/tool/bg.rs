@@ -17,10 +17,6 @@ fn default_watch_notify() -> bool {
     true
 }
 
-fn default_watch_wake() -> bool {
-    true
-}
-
 fn default_wait_return_on_progress() -> bool {
     true
 }
@@ -71,7 +67,7 @@ struct BgInput {
     /// Whether to notify on completion when using watch/delivery (default: true)
     #[serde(default)]
     notify: Option<bool>,
-    /// Whether to wake on completion when using watch/delivery (default: true)
+    /// Whether to wake on completion when using watch/delivery (default: notify)
     #[serde(default)]
     wake: Option<bool>,
     /// For watch/delivery: also arm a stall watchdog that wakes the agent after
@@ -163,6 +159,28 @@ fn status_label(status: &BackgroundTaskStatus) -> &'static str {
         BackgroundTaskStatus::Completed => "completed",
         BackgroundTaskStatus::Superseded => "superseded",
         BackgroundTaskStatus::Failed => "failed",
+    }
+}
+
+/// A `bg wait` delivery hold. Dropped without [`Self::release`] (the wait was
+/// abandoned), it hands a completion that arrived meanwhile back to the model.
+struct DeliveryHold(Option<String>);
+
+impl DeliveryHold {
+    fn release(mut self) -> Option<String> {
+        self.0.take()
+    }
+}
+
+impl Drop for DeliveryHold {
+    fn drop(&mut self) {
+        if let Some(task_id) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                background::global().release_delivery(&task_id, true).await;
+            });
+        }
     }
 }
 
@@ -544,7 +562,7 @@ impl Tool for BgTool {
                 },
                 "max_age_hours": { "type": "integer", "description": "cleanup: default 24." },
                 "notify": { "type": "boolean", "description": "delivery: default true." },
-                "wake": { "type": "boolean", "description": "delivery: default true." },
+                "wake": { "type": "boolean", "description": "delivery: default notify." },
                 "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30)." },
                 "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 3600, 0 checks without blocking." },
                 "return_on_progress": { "type": "boolean", "description": "wait: also return on first progress event. Default true." },
@@ -715,7 +733,7 @@ impl Tool for BgTool {
                     .await?
                     .remove(0);
                 let notify = params.notify.unwrap_or_else(default_watch_notify);
-                let wake = params.wake.unwrap_or_else(default_watch_wake);
+                let wake = params.wake.unwrap_or(notify);
                 let stall_armed = match params.stall_wake_seconds {
                     Some(requested) => manager.arm_stall_watchdog(&task_id, requested).await,
                     None => None,
@@ -815,7 +833,13 @@ impl Tool for BgTool {
                     .unwrap_or_else(|| "Waiting for background task".to_string());
                 let wait_guard =
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
-                let wait_result = manager
+                // This reply carries the result, so hold the separate model
+                // delivery while it waits; one completion reaches the model once.
+                let hold = DeliveryHold(
+                    (blocking && manager.hold_delivery(&task_id, &ctx.session_id).await)
+                        .then(|| task_id.clone()),
+                );
+                let mut wait_result = manager
                     .wait(
                         &task_id,
                         wait_duration,
@@ -825,6 +849,25 @@ impl Tool for BgTool {
                     )
                     .await;
                 drop(wait_guard);
+                if let Some(held) = hold.release()
+                    && let Some(released) = manager.release_delivery(&held, false).await
+                    && is_terminal(&released.status)
+                    && wait_result
+                        .as_ref()
+                        .is_none_or(|result| !is_terminal(&result.task.status))
+                {
+                    // It finished after the wait returned (or the wait lost
+                    // it): its completion went out without waking the model,
+                    // so this reply delivers it.
+                    let result = wait_result.get_or_insert(background::BackgroundTaskWaitResult {
+                        reason: background::BackgroundTaskWaitReason::Finished,
+                        task: released.clone(),
+                        progress_event: None,
+                        event_record: None,
+                    });
+                    result.reason = background::BackgroundTaskWaitReason::Finished;
+                    result.task = released;
+                }
                 match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;

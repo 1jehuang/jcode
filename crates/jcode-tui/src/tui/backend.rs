@@ -793,6 +793,26 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Stop a spawned agent with the swarm tool's request. The reply is
+    /// settled like a runtime command so it never ends a turn.
+    pub async fn stop_swarm_member(&mut self, target_session: String) -> Result<()> {
+        let session_id = self
+            .session_id()
+            .ok_or_else(|| anyhow::anyhow!("no session yet"))?
+            .to_string();
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::CommStop {
+            id,
+            session_id,
+            target_session,
+            force: None,
+        })
+        .await?;
+        self.pending_runtime_commands.insert(id);
+        Ok(())
+    }
+
     /// Runtime failures share the Error wire variant with chat failures. Keep
     /// request ownership so the client can render them without ending a turn.
     pub fn finish_runtime_command(&mut self, id: u64) -> bool {

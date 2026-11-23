@@ -869,6 +869,7 @@ impl App {
                     }
                     _ = redraw_interval.tick() => {
                         needs_redraw |= local::handle_tick(&mut self);
+                        needs_redraw |= self.refresh_tasks_dialog();
                     }
                     command = async {
                         match handterm_native_scroll.as_mut() {

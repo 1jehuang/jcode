@@ -316,6 +316,21 @@ fn expand_plugin_paths(text: &str, root: &Path, data: Option<&Path>) -> String {
         .into_owned()
 }
 
+/// Kills a hook's process group on drop unless disarmed after the hook
+/// finished, so a timeout or a cancelled tool call leaves no descendants.
+struct HookGroup(Option<u32>);
+
+impl Drop for HookGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0 {
+            let _ = crate::platform::signal_detached_process_group(pid, libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        let _ = self.0;
+    }
+}
+
 async fn execute(
     hook: &CommandHook,
     event: &HookEvent,
@@ -386,6 +401,12 @@ async fn execute(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
     }
+    // Own process group, so HookGroup can stop the hook's descendants.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut cmd = tokio::process::Command::from(cmd);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -393,13 +414,23 @@ async fn execute(
         .kill_on_drop(true);
     let result = tokio::time::timeout(hook.timeout, async {
         let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin
-                .write_all(payload(event, input).to_string().as_bytes())
-                .await;
+        let mut group = HookGroup(child.id());
+        let stdin = child.stdin.take();
+        // Write stdin while draining output: a hook that logs before reading
+        // a large request would otherwise deadlock on full pipes.
+        let write = async {
+            if let Some(mut stdin) = stdin {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin
+                    .write_all(payload(event, input).to_string().as_bytes())
+                    .await;
+            }
+        };
+        let ((), output) = tokio::join!(write, child.wait_with_output());
+        if output.is_ok() {
+            group.0 = None;
         }
-        child.wait_with_output().await
+        output
     })
     .await;
     match result {
@@ -678,6 +709,44 @@ mod tests {
         );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(!temp.path().join("ran").exists());
+    }
+
+    #[tokio::test]
+    async fn gate_reads_a_hook_that_logs_before_reading_a_large_request() {
+        let temp = fixture(json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command",
+            "command":"head -c 200000 /dev/zero >&2; cat >/dev/null; exit 2","timeout":10}]}]}}));
+        let (hooks, _) = load_root(temp.path());
+        let event = HookEvent::new("pre_tool").cwd(temp.path().to_string_lossy());
+        let input = json!({"data":"x".repeat(1024 * 1024)}).to_string();
+        assert!(matches!(
+            gate_commands(hooks, &event, &input).await,
+            GateDecision::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn hook_timeout_stops_the_hooks_descendants() {
+        let temp = fixture(json!({"hooks":{"PreToolUse":[{"hooks":[{"type":"command",
+            "command":"sleep 30 & echo $! > \"$CLAUDE_PLUGIN_ROOT/child.pid\"; wait","timeout":0.5}]}]}}));
+        let (hooks, _) = load_root(temp.path());
+        let event = HookEvent::new("pre_tool").cwd(temp.path().to_string_lossy());
+        assert_eq!(
+            gate_commands(hooks, &event, "{}").await,
+            GateDecision::Allow
+        );
+        let pid: u32 = std::fs::read_to_string(temp.path().join("child.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while crate::platform::is_process_running(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "hook child {pid} survived"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]

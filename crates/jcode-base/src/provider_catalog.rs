@@ -355,12 +355,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("glm-4.7-flash");
             push("glm-4.7-flashx");
         }
-        // Acme marketplace exchange: static seed so the model picker and auth
-        // activation work before the live /v1/models catalog is fetched. The
-        // live catalog takes over once cached.
-        "acme" => {
-            push("gpt-6-astra");
-        }
         "302ai" => {
             push("qwen3-235b-a22b-instruct-2507");
             push("glm-4.7");
@@ -690,10 +684,6 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
         // direct profile runs through the OpenRouter/OpenAI-compatible provider
         // implementation, whose live catalog can be unavailable during startup.
         "deepseek" if model.starts_with("deepseek-v4-") => Some(1_000_000),
-        // gpt-6-astra through the Acme exchange carries the same 400K context
-        // window as the direct OpenAI line; the marketplace /v1/models catalog
-        // does not advertise context_length.
-        "acme" if model.contains("astra") => Some(400_000),
         // Fall back to the shared open-weight family classifier. Many bundled
         // OpenAI-compatible gateways (Z.AI/GLM, Moonshot/Kimi, MiniMax, Qwen,
         // etc.) serve `/v1/models` entries without a `context_length`, so this

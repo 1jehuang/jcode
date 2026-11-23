@@ -1713,11 +1713,57 @@ server_resumes: false,
                         )
                         .await;
                         if client_session_id == target_session_id {
+                            crate::hooks::with_client_terminal_env(
+                                active_terminal_env.clone(),
+                                handle_subscribe(
+                                    id,
+                                    subscribe_working_dir,
+                                    selfdev,
+                                    false,
+                                    &mut client_selfdev,
+                                    &client_session_id,
+                                    &client_connection_id,
+                                    &friendly_name,
+                                    &agent,
+                                    &registry,
+                                    swarm_enabled,
+                                    &swarm_members,
+                                    &swarms_by_id,
+                                    &channel_subscriptions,
+                                    &channel_subscriptions_by_session,
+                                    &swarm_plans,
+                                    &swarm_coordinators,
+                                    &client_event_tx,
+                                    &mcp_pool,
+                                    &event_history,
+                                    &event_counter,
+                                    &swarm_event_tx,
+                                    &sessions,
+                                    &soft_interrupt_queues,
+                                ),
+                            )
+                            .await;
+                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
+                                last_available_models_snapshot = Some(snapshot);
+                            }
+                        } else {
+                            crate::logging::warn(&format!(
+                                "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
+                                target_session_id, pre_resume_session_id, client_connection_id
+                            ));
+                            break;
+                        }
+                    } else {
+                        if provisional_session {
+                            agent.lock().await.activate_concurrency_tracking();
+                        }
+                        crate::hooks::with_client_terminal_env(
+                            active_terminal_env.clone(),
                             handle_subscribe(
                                 id,
                                 subscribe_working_dir,
                                 selfdev,
-                                false,
+                                true,
                                 &mut client_selfdev,
                                 &client_session_id,
                                 &client_connection_id,
@@ -1738,22 +1784,16 @@ server_resumes: false,
                                 &swarm_event_tx,
                                 &sessions,
                                 &soft_interrupt_queues,
-                            )
-                            .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent).await {
-                                last_available_models_snapshot = Some(snapshot);
-                            }
-                        } else {
-                            crate::logging::warn(&format!(
-                                "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
-                                target_session_id, pre_resume_session_id, client_connection_id
-                            ));
-                            break;
-                        }
-                    } else {
-                        if provisional_session {
-                            agent.lock().await.activate_concurrency_tracking();
-                        }
+                            ),
+                        )
+                        .await;
+                    }
+                } else {
+                    if provisional_session {
+                        agent.lock().await.activate_concurrency_tracking();
+                    }
+                    crate::hooks::with_client_terminal_env(
+                        active_terminal_env.clone(),
                         handle_subscribe(
                             id,
                             subscribe_working_dir,
@@ -1779,38 +1819,7 @@ server_resumes: false,
                             &swarm_event_tx,
                             &sessions,
                             &soft_interrupt_queues,
-                        )
-                        .await;
-                    }
-                } else {
-                    if provisional_session {
-                        agent.lock().await.activate_concurrency_tracking();
-                    }
-                    handle_subscribe(
-                        id,
-                        subscribe_working_dir,
-                        selfdev,
-                        true,
-                        &mut client_selfdev,
-                        &client_session_id,
-                        &client_connection_id,
-                        &friendly_name,
-                        &agent,
-                        &registry,
-                        swarm_enabled,
-                        &swarm_members,
-                        &swarms_by_id,
-                        &channel_subscriptions,
-                        &channel_subscriptions_by_session,
-                        &swarm_plans,
-                        &swarm_coordinators,
-                        &client_event_tx,
-                        &mcp_pool,
-                        &event_history,
-                        &event_counter,
-                        &swarm_event_tx,
-                        &sessions,
-                        &soft_interrupt_queues,
+                        ),
                     )
                     .await;
                     // No catalog dedup baseline here. A fresh subscribe sends
@@ -1871,6 +1880,20 @@ server_resumes: false,
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                // A completion that found the agent locked by the history
+                // send is queued with no turn left to drain it.
+                super::live_turn::run_stranded_background_completions(
+                    client_session_id.clone(),
+                    Arc::clone(&agent),
+                    super::live_turn::LiveTurnSwarmContext::new(
+                        &swarm_members,
+                        &swarms_by_id,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                    ),
+                )
+                .await;
             }
 
             Request::GetModelCatalog { id, subscribe_usage_updates } => {
@@ -2503,6 +2526,10 @@ server_resumes: false,
                     // tool turn owns the Agent mutex.
                     if let Some(result) = super::runtime_ssh_loops::control(&client_session_id, &command, &args)? {
                         return Ok(result);
+                    }
+                    // The tasks dialog stops a shell mid-turn, so this cannot wait for the Agent lock.
+                    if command == "background_cancel" {
+                        return super::runtime_commands::background_cancel(&client_session_id, &args).await;
                     }
                     // Supplemental SSH/cloud commands intentionally precede the shared
                     // enum parser so new host workflows do not require a wire-enum release.

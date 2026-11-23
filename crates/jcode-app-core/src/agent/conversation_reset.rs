@@ -27,11 +27,19 @@ impl Agent {
         prompt: &str,
         has_images: bool,
         synthetic: bool,
-    ) -> Result<Option<String>> {
-        if !synthetic && crate::session::is_authentic_user_input(prompt, has_images) {
-            Ok(Some(self.session.create_rewind_checkpoint(prompt)?.id))
-        } else {
-            Ok(None)
+    ) -> Option<String> {
+        if synthetic || !crate::session::is_authentic_user_input(prompt, has_images) {
+            return None;
+        }
+        // The file snapshot is optional: a failed one (for example an
+        // interrupted mutation that conflicts with an external edit) must not
+        // block the prompt, which is still saved to the transcript.
+        match self.session.create_rewind_checkpoint(prompt) {
+            Ok(checkpoint) => Some(checkpoint.id),
+            Err(error) => {
+                logging::warn(&format!("Rewind checkpoint capture failed: {error:#}"));
+                None
+            }
         }
     }
 

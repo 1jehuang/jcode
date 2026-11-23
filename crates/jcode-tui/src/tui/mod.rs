@@ -1052,6 +1052,10 @@ pub trait TuiState {
     /// Get info widget data (runtime, client count, etc.)
     fn info_widget_data(&self) -> info_widget::InfoWidgetData;
 
+    /// Whether ↓ selected the footer's background tasks pill.
+    fn task_pill_selected(&self) -> bool {
+        false
+    }
     /// Whether the inline swarm gallery band should be shown above the chat.
     /// Active when `agents.swarm_spawn_mode = inline` and the swarm has members.
     fn inline_swarm_gallery_active(&self) -> bool {

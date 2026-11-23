@@ -209,19 +209,55 @@ pub(super) async fn spawn_tracked_live_turn_with_images(
     input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
 ) -> bool {
+    // Claim before superseding the session's publication: while another turn
+    // still owns the lease the claim fails, and that turn must keep its
+    // terminal Done/Error.
+    let Some(reserved) = reserve_live_turn(session_id, &agent) else {
+        return false;
+    };
     // Direct callers can explicitly replace a waiting turn. Automatic wake
     // callers have already refused sessions whose provider wait still owns it.
     super::usage_limit_resume::cancel_pending_resume(session_id);
     let publication = super::swarm::begin_turn_publication(session_id).await;
-    spawn_tracked_live_turn_with_publication(session_id, agent, input, swarm, publication).await
+    spawn_reserved_live_turn(session_id, agent, input, swarm, publication, reserved).await
 }
 
 pub(super) async fn spawn_tracked_live_turn_with_publication(
+    session_id: &str,
+    agent: OwnedMutexGuard<Agent>,
+    input: LiveTurnInput,
+    swarm: LiveTurnSwarmContext,
+    publication: Arc<super::swarm::TurnPublication>,
+) -> bool {
+    let Some(reserved) = reserve_live_turn(session_id, &agent) else {
+        return false;
+    };
+    spawn_reserved_live_turn(session_id, agent, input, swarm, publication, reserved).await
+}
+
+fn reserve_live_turn(
+    session_id: &str,
+    agent: &Agent,
+) -> Option<(
+    crate::runtime_activity::ActivityReservation,
+    crate::agent::TurnLease,
+)> {
+    let admission = crate::runtime_activity::global()
+        .try_enter_session(session_id)
+        .ok()?;
+    Some((admission, agent.claim_server_turn().ok()?))
+}
+
+async fn spawn_reserved_live_turn(
     session_id: &str,
     mut agent: OwnedMutexGuard<Agent>,
     input: LiveTurnInput,
     swarm: LiveTurnSwarmContext,
     publication: Arc<super::swarm::TurnPublication>,
+    (_admission, turn_lease): (
+        crate::runtime_activity::ActivityReservation,
+        crate::agent::TurnLease,
+    ),
 ) -> bool {
     let LiveTurnInput {
         message,
@@ -230,12 +266,6 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         display_role,
         status_detail,
     } = input;
-    let Ok(_admission) = crate::runtime_activity::global().try_enter_session(session_id) else {
-        return false;
-    };
-    let Ok(turn_lease) = agent.claim_server_turn() else {
-        return false;
-    };
     if swarm
         .members
         .read()
@@ -290,6 +320,7 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
     let event_tx = events.sender();
     let session_id = session_id.to_string();
     let agent_arc = OwnedMutexGuard::mutex(&agent).clone();
+    let follow_up_agent = Arc::clone(&agent_arc);
     crate::runtime_activity::spawn_session(&session_id.clone(), async move {
         let start_message_index = agent.message_count();
         let resume_reminder = system_reminder.clone();
@@ -401,6 +432,14 @@ pub(super) async fn spawn_tracked_live_turn_with_publication(
         drop(reservation);
         events.finish().await;
         drop(turn_lease);
+        let follow_up = LiveTurnSwarmContext::new(
+            &swarm.members,
+            &swarm.swarms_by_id,
+            &swarm.event_history,
+            &swarm.event_counter,
+            &swarm.event_tx,
+        );
+        run_stranded_background_completions(session_id, follow_up_agent, follow_up).await;
     });
     true
 }
@@ -523,6 +562,93 @@ pub(super) async fn run_live_turn_if_idle(
         swarm,
     )
     .await
+}
+
+/// A background completion that lands after a turn's last soft-interrupt
+/// drain, while the turn still holds the agent, is queued, and nothing drains
+/// it until the user prompts. Once the turn has released the agent, start the
+/// follow-up turn that completion asked for.
+///
+/// Boxed with an explicit `Send` bound: it runs from the spawned turn it can
+/// start, so the compiler cannot infer `Send` through that cycle.
+pub(super) fn run_stranded_background_completions(
+    session_id: String,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+    swarm: LiveTurnSwarmContext,
+) -> futures::future::BoxFuture<'static, ()> {
+    use jcode_agent_runtime::SoftInterruptSource;
+    Box::pin(async move {
+        let Ok(agent) = agent.try_lock_owned() else {
+            return; // Its holder's turn drains the queue.
+        };
+        // A session refusing automatic turns (e.g. a pending usage-limit
+        // resume), or one that moved elsewhere or is a stale copy, keeps them
+        // queued for whichever copy can run them.
+        if agent.session_lease_blocked()
+            || !swarm
+                .members
+                .read()
+                .await
+                .get(&session_id)
+                .is_some_and(member_accepts_automatic_turn)
+        {
+            return;
+        }
+        let queue = agent.soft_interrupt_queue();
+        let stranded: Vec<_> = {
+            let Ok(mut pending) = queue.lock() else {
+                return;
+            };
+            let (stranded, rest) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|message| message.source == SoftInterruptSource::BackgroundTask);
+            *pending = rest;
+            stranded
+        };
+        if stranded.is_empty() {
+            return;
+        }
+        let message = stranded
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let detail = Some(truncate_detail(&message, 120)).filter(|detail| !detail.is_empty());
+        let started = spawn_tracked_live_turn(
+            &session_id,
+            agent,
+            message,
+            Some(
+                "A background task for this session just finished. Review the completion message and continue if useful."
+                    .to_string(),
+            ),
+            None,
+            detail,
+            swarm,
+        )
+        .await;
+        if !started && let Ok(mut pending) = queue.lock() {
+            // Not runnable now: keep them queued, ahead of anything newer.
+            pending.splice(0..0, stranded);
+        }
+    })
+}
+
+/// [`run_stranded_background_completions`] for a client turn. Its completion
+/// reconciler keeps the turn's publication pin, and so the turn gate, until
+/// it has joined the turn task, so a follow-up started from inside that task
+/// cannot claim the agent and would stay queued. Start it from its own task
+/// once the turn is `released`.
+pub(super) fn spawn_stranded_background_completions_after_release(
+    released: impl std::future::Future<Output = ()> + Send + 'static,
+    session_id: String,
+    agent: Arc<tokio::sync::Mutex<Agent>>,
+    swarm: LiveTurnSwarmContext,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        released.await;
+        run_stranded_background_completions(session_id, agent, swarm).await;
+    })
 }
 
 pub(super) async fn run_live_system_turn_if_idle(

@@ -148,7 +148,7 @@ fn named_compatible_profile_uses_per_model_effort_vocabulary() {
 }
 
 #[test]
-fn acme_model_catalog_exposes_model_specific_effort_ladders() {
+fn named_profile_model_catalog_exposes_model_specific_effort_ladders() {
     let mut config = crate::config::Config::default();
     config.providers.insert(
         "acme".into(),
@@ -199,31 +199,7 @@ fn acme_model_catalog_exposes_model_specific_effort_ladders() {
 }
 
 #[test]
-fn acme_models_without_effort_metadata_do_not_infer_a_ladder_from_thinking_support() {
-    let mut config = crate::config::Config::default();
-    config.providers.insert(
-        "acme".into(),
-        crate::config::NamedProviderConfig {
-            models: vec![crate::config::NamedProviderModelConfig {
-                id: "claude-haiku-4-5".into(),
-                reasoning: Some(true),
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-    );
-    assert_eq!(
-        named_profile_reasoning_efforts(
-            &config,
-            Some("openai-compatible:acme"),
-            Some("claude-haiku-4-5"),
-        ),
-        Some(Vec::new()),
-    );
-}
-
-#[test]
-fn acme_glm_models_use_zai_effort_vocabulary() {
+fn named_profile_glm_models_use_zai_effort_vocabulary() {
     let mut config = crate::config::Config::default();
     config.providers.insert(
         "acme".into(),
@@ -244,7 +220,7 @@ fn acme_glm_models_use_zai_effort_vocabulary() {
 }
 
 #[test]
-fn acme_gpt_terra_uses_openai_effort_vocabulary() {
+fn named_profile_gpt_terra_uses_openai_effort_vocabulary() {
     let mut config = crate::config::Config::default();
     config.providers.insert(
         "acme".into(),

@@ -254,6 +254,14 @@ where
     }
 }
 
+/// The value the current client's terminal identity gives `key`, if any.
+pub fn current_client_terminal_var(key: &str) -> Option<String> {
+    CLIENT_TERMINAL_ENV
+        .try_with(|env| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+        .ok()
+        .flatten()
+}
+
 /// Give `cmd` the terminal identity of the client whose request runs it, so a
 /// shared server's children never speak as the pane that started the server.
 pub fn apply_current_client_terminal_env(cmd: &mut std::process::Command) {

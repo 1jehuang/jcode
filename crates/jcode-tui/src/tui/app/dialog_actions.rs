@@ -49,7 +49,14 @@ impl App {
                 self.close_dialog();
                 None
             }
-            action @ (DialogKey::Mcp(_) | DialogKey::Rewind { .. }) => Some(action),
+            action @ (DialogKey::Mcp(_) | DialogKey::Rewind { .. } | DialogKey::StopTask(_)) => {
+                Some(action)
+            }
+            DialogKey::EnterAgent(session_id) => {
+                self.dialog = None;
+                self.enter_swarm_agent(&session_id);
+                None
+            }
             action @ DialogKey::AskUser { .. } => {
                 if !self.dialog.as_ref().is_some_and(Dialog::is_ask_user) {
                     self.dialog = None;
@@ -115,6 +122,7 @@ impl App {
                     "Not connected to the jcode server, so your answers were not sent.".to_string(),
                 ));
             }
+            Some(DialogKey::StopTask(target)) => self.stop_task_offline(target),
             Some(DialogKey::Mcp(_)) => {
                 if let Some(dialog) = self.dialog.as_mut() {
                     dialog.pending_mcp = None;

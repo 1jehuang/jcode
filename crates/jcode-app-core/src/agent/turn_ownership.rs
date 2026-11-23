@@ -68,6 +68,8 @@ struct Reservation {
     _guard: OwnedMutexGuard<()>,
     observer: TurnObserver,
     identity: TurnIdentity,
+    /// Dropped after the gate guard; its receivers resolve on release.
+    released: tokio::sync::watch::Sender<()>,
 }
 
 impl Drop for Reservation {
@@ -126,6 +128,16 @@ impl TurnLease {
         &self.reservation.identity
     }
 
+    /// Resolves once this lease and every publication pin of its turn are
+    /// dropped. Unlike [`TurnReleaseSignal`], it never takes the gate itself.
+    pub(crate) fn released(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut released = self.reservation.released.subscribe();
+        async move {
+            // Errs once the sender is dropped with the reservation.
+            let _ = released.changed().await;
+        }
+    }
+
     pub(crate) fn publication_pin(&self) -> TurnPublicationPin {
         TurnPublicationPin {
             _reservation: Arc::clone(&self.reservation),
@@ -175,6 +187,7 @@ impl TurnOwnership {
                 _guard: guard,
                 observer: self.observer.clone(),
                 identity,
+                released: tokio::sync::watch::Sender::new(()),
             }),
         })
     }

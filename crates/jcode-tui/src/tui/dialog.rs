@@ -31,11 +31,17 @@ mod ask_tests;
 mod mcp;
 #[path = "dialog_plugin.rs"]
 mod plugin;
+#[path = "dialog_tasks.rs"]
+mod tasks;
+#[cfg(test)]
+#[path = "dialog_tasks_tests.rs"]
+mod tasks_tests;
 pub use mcp::first_pending_approval;
 use mcp::{
     MCP_DOCS_URL, mcp_server_view, mcp_tool_view, mcp_tools_view, scope_of, server_status, str_of,
     tone_prefix,
 };
+pub use tasks::{ShellTask, TAIL_LINES, TaskTarget, TasksSnapshot, read_output_tail, task_pill};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Route {
@@ -51,6 +57,9 @@ pub enum Route {
     RewindList,
     RewindModes(String),
     AskUser,
+    Tasks,
+    TaskShell(String),
+    TaskAgent(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +80,7 @@ enum Tone {
     Error,
     Warning,
     Off,
+    Running,
 }
 
 impl Tone {
@@ -80,6 +90,7 @@ impl Tone {
             Tone::Error => "✘",
             Tone::Warning => "⚠",
             Tone::Off => "◯",
+            Tone::Running => "●",
         }
     }
 
@@ -89,6 +100,7 @@ impl Tone {
             Tone::Error => error_color(),
             Tone::Warning => warning_color(),
             Tone::Off => dim_color(),
+            Tone::Running => accent_color(),
         }
     }
 }
@@ -129,6 +141,9 @@ struct View {
     filter: String,
     /// Index into the filtered items.
     selected: usize,
+    /// A titled box of preformatted lines (a task's output tail) and the
+    /// text shown when it is empty. Lines are truncated, never wrapped.
+    boxed: Option<(String, Vec<String>, String)>,
 }
 
 impl View {
@@ -150,6 +165,7 @@ impl View {
             tail_item: None,
             filter: String::new(),
             selected: 0,
+            boxed: None,
         }
     }
 
@@ -210,6 +226,10 @@ pub enum DialogKey {
         request_id: String,
         answers: Option<Vec<crate::protocol::AskUserAnswer>>,
     },
+    /// Stop a background shell or a spawned agent.
+    StopTask(TaskTarget),
+    /// Switch this terminal to a spawned agent's session.
+    EnterAgent(String),
 }
 
 pub struct Dialog {
@@ -219,6 +239,7 @@ pub struct Dialog {
     plugin: Option<plugin::PluginState>,
     rewind: Option<Vec<RewindCheckpoint>>,
     ask: Option<ask::AskState>,
+    tasks: Option<TasksSnapshot>,
     pub pending_rewind: bool,
     /// Shown under the subtitle: progress or the last error.
     status: Option<String>,
@@ -236,6 +257,7 @@ impl Dialog {
             plugin: None,
             rewind: None,
             ask: None,
+            tasks: None,
             pending_rewind: false,
             status: Some("Loading MCP servers…".to_string()),
             pending_mcp: None,
@@ -255,6 +277,7 @@ impl Dialog {
             plugin: None,
             rewind: None,
             ask: None,
+            tasks: None,
             pending_rewind: false,
             status: None,
             pending_mcp: None,
@@ -285,6 +308,7 @@ impl Dialog {
             && self.skills.is_none()
             && self.rewind.is_none()
             && self.ask.is_none()
+            && self.tasks.is_none()
     }
 
     pub fn set_status(&mut self, status: Option<String>) {
@@ -362,6 +386,12 @@ impl Dialog {
         }
         if self.pending_rewind {
             return DialogKey::Handled;
+        }
+        if self.tasks.is_some()
+            && modifiers.is_empty()
+            && let Some(key) = self.tasks_key(code)
+        {
+            return key;
         }
         let Some(view) = self.stack.last_mut() else {
             return DialogKey::Close;
@@ -531,8 +561,20 @@ impl Dialog {
             if fresh.title.is_empty() {
                 break;
             }
+            // Task rows reorder as shells start and finish: follow the task.
+            let followed = (fresh.route == Route::Tasks)
+                .then(|| view.visible().get(view.selected).copied())
+                .flatten()
+                .and_then(|index| view.items[index].action.clone());
             fresh.filter = view.filter;
-            fresh.selected = view.selected.min(fresh.visible().len().saturating_sub(1));
+            let visible = fresh.visible();
+            fresh.selected = followed
+                .and_then(|action| {
+                    visible
+                        .iter()
+                        .position(|&index| fresh.items[index].action.as_ref() == Some(&action))
+                })
+                .unwrap_or_else(|| view.selected.min(visible.len().saturating_sub(1)));
             self.stack.push(fresh);
         }
     }
@@ -549,6 +591,9 @@ impl Dialog {
             Route::RewindList => self.rewind_list_view(),
             Route::RewindModes(id) => self.rewind_modes_view(id),
             Route::AskUser => self.ask_view(),
+            Route::Tasks => self.tasks_list_view(),
+            Route::TaskShell(id) => self.task_shell_view(id),
+            Route::TaskAgent(id) => self.task_agent_view(id),
             Route::McpList => self.mcp_list_view(),
             Route::McpServer(name) => self
                 .mcp_server(name)
@@ -789,6 +834,11 @@ impl Dialog {
             match view.route {
                 Route::McpList => "↑/↓ to navigate · Enter to confirm · Esc to cancel",
                 Route::McpTool(..) => "Esc to go back",
+                Route::Tasks if !view.items.is_empty() => {
+                    "↑/↓ to navigate · Enter to view · x to stop · Esc to close"
+                }
+                Route::TaskShell(_) => "x to stop · Esc to go back",
+                Route::TaskAgent(_) => "Enter to open agent · x to stop · Esc to go back",
                 _ if view.items.is_empty() => "Esc to go back",
                 _ => "↑/↓ to navigate · Enter to select · Esc to back",
             }
@@ -886,11 +936,18 @@ impl Dialog {
             .max()
             .unwrap_or(0)
             + 2;
+        // A task's status and command stay one row each, truncated.
+        let single_row = matches!(view.route, Route::TaskShell(_) | Route::TaskAgent(_));
         for (label, value) in &view.info {
             let prefix = format!("{label}:");
             let prefix = format!("{prefix:<info_width$}");
             let value_width = width.saturating_sub(prefix.width()).max(10);
-            for (index, chunk) in wrap(value, value_width).into_iter().enumerate() {
+            let chunks = if single_row {
+                vec![value.clone()]
+            } else {
+                wrap(value, value_width)
+            };
+            for (index, chunk) in chunks.into_iter().enumerate() {
                 let head_span = if index == 0 {
                     Span::styled(prefix.clone(), bold)
                 } else {
@@ -909,7 +966,12 @@ impl Dialog {
                     None if label == "Status" => spans.push(Span::raw(chunk)),
                     None => spans.push(Span::styled(chunk, dim)),
                 }
-                detail.push(Line::from(spans));
+                let line = Line::from(spans);
+                detail.push(if single_row {
+                    jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, width)
+                } else {
+                    line
+                });
             }
         }
         for (label, value) in &view.inline_info {
@@ -939,6 +1001,40 @@ impl Dialog {
             }
             for chunk in wrap(paragraph, width) {
                 detail.push(Line::from(Span::raw(chunk)));
+            }
+        }
+        if let Some((title, lines, empty)) = &view.boxed {
+            if !detail.is_empty() {
+                detail.push(Line::from(""));
+            }
+            detail.push(Line::from(Span::styled(title.clone(), bold)));
+            if lines.is_empty() {
+                detail.push(jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                    &Line::from(Span::styled(empty.clone(), dim)),
+                    width,
+                ));
+            } else {
+                let inner = width.saturating_sub(4).max(4);
+                detail.push(Line::from(Span::styled(
+                    format!("╭{}╮", "─".repeat(inner + 2)),
+                    dim,
+                )));
+                for text in lines {
+                    let text = jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                        &Line::from(text.clone()),
+                        inner,
+                    );
+                    let pad = inner.saturating_sub(text.width());
+                    let mut spans = vec![Span::styled("│ ", dim)];
+                    spans.extend(text.spans);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(Span::styled(" │", dim));
+                    detail.push(Line::from(spans));
+                }
+                detail.push(Line::from(Span::styled(
+                    format!("╰{}╯", "─".repeat(inner + 2)),
+                    dim,
+                )));
             }
         }
 
@@ -1012,9 +1108,26 @@ impl Dialog {
                 label_used += number.width();
                 spans.push(Span::styled(number, dim));
             }
+            let meta: Vec<&str> = item
+                .meta
+                .iter()
+                .map(String::as_str)
+                .filter(|m| !m.is_empty())
+                .collect();
+            let meta_text = meta.join(" · ");
+            // Task rows keep their meta (elapsed time) right-aligned, so the
+            // label gives way when the row is too narrow.
+            let right_aligned = view.route == Route::Tasks;
             let label = if view.tail_item == Some(index) {
                 let used = 2 + label_used + item.icon.map_or(0, |_| 2);
                 keep_tail(&item.label, width.saturating_sub(used))
+            } else if right_aligned {
+                let used = 2 + label_used + item.icon.map_or(0, |_| 2) + meta_text.width() + 1;
+                jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                    &Line::from(item.label.clone()),
+                    width.saturating_sub(used),
+                )
+                .to_string()
             } else {
                 item.label.clone()
             };
@@ -1027,16 +1140,15 @@ impl Dialog {
                     Style::default()
                 },
             ));
-            let meta: Vec<&str> = item
-                .meta
-                .iter()
-                .map(String::as_str)
-                .filter(|m| !m.is_empty())
-                .collect();
             if !meta.is_empty() {
-                let pad = label_width.saturating_sub(label_used) + 3;
+                let pad = if right_aligned {
+                    let used = 2 + label_used + item.icon.map_or(0, |_| 2);
+                    width.saturating_sub(used + meta_text.width()).max(1)
+                } else {
+                    label_width.saturating_sub(label_used) + 3
+                };
                 spans.push(Span::raw(" ".repeat(pad)));
-                spans.push(Span::styled(meta.join(" · "), dim));
+                spans.push(Span::styled(meta_text, dim));
             }
             rows.push(Line::from(spans));
         }
