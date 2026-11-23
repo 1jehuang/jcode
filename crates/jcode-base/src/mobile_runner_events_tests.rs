@@ -311,7 +311,7 @@ async fn unavailable_endpoint_does_not_hot_loop_and_fallback_remains_live() {
             let (mut stream, _) = listener.accept().await.unwrap();
             count.fetch_add(1, Ordering::SeqCst);
             let mut request = [0; 4096];
-            stream.read(&mut request).await.unwrap();
+            let _ = stream.read(&mut request).await.unwrap();
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         }
     });

@@ -44,6 +44,11 @@ pub(super) async fn admit_runtime_delivery(
     Some(activity)
 }
 
+/// An active goal also means the agent has work left, so it must wake too.
+pub(super) fn goal_forces_wake(status: crate::goal::GoalStatus) -> bool {
+    status == crate::goal::GoalStatus::Active
+}
+
 /// A session with unfinished todos must resume when its background task ends,
 /// even if the task was started without `wake`, or the agent stalls forever.
 pub(super) fn has_open_todos(todos: &[crate::todo::TodoItem]) -> bool {
@@ -130,7 +135,12 @@ pub(super) async fn dispatch_background_task_completion(
     let should_wake = task.wake
         || has_open_todos(
             &crate::todo::load_todos(&task.session_id).unwrap_or_default(),
-        );
+        )
+        // shortcut: project-scoped goals need working_dir, unavailable here; session goals only.
+        || crate::goal::load_attached_goal(&task.session_id, None)
+            .ok()
+            .flatten()
+            .is_some_and(|g| goal_forces_wake(g.status));
     if should_wake
         && !emit_external_wake(
             &task.session_id,
@@ -1038,5 +1048,12 @@ mod open_todo_wake_tests {
         assert!(has_open_todos(&[item("pending")]));
         assert!(!has_open_todos(&[item("completed"), item("cancelled")]));
         assert!(!has_open_todos(&[]));
+    }
+    #[test]
+    fn only_active_goal_forces_wake() {
+        use crate::goal::GoalStatus::*;
+        assert!(super::goal_forces_wake(Active));
+        assert!(!super::goal_forces_wake(Completed));
+        assert!(!super::goal_forces_wake(Blocked));
     }
 }
