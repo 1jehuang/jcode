@@ -118,8 +118,18 @@ pub(super) fn inventory_lines(
         ("openrouter", "openrouter", auth.openrouter, true),
         ("cursor", "cursor", auth.cursor, false),
         ("copilot", "copilot", auth.copilot, false),
-        ("gemini", "gemini", auth.gemini, false),
-        ("antigravity", "antigravity", auth.antigravity, false),
+        // Code Assist OAuth only serves paid Cloud projects now; personal
+        // Google accounts route through the Antigravity row instead.
+        (
+            "gemini",
+            "gemini",
+            if std::env::var_os("GOOGLE_CLOUD_PROJECT").is_some() {
+                auth.gemini
+            } else {
+                AuthState::NotConfigured
+            },
+            false,
+        ),
     ] {
         if state != AuthState::NotConfigured {
             let is_current = current_provider.is_some()
@@ -135,6 +145,58 @@ pub(super) fn inventory_lines(
                 detail(state, label, is_current),
             ));
         }
+    }
+    if auth.antigravity != AuthState::NotConfigured {
+        let key = "antigravity";
+        let is_current = current_provider.is_some()
+            && current_provider == jcode_provider_core::parse_provider_hint(key);
+        let quota = match inventory.antigravity.as_ref() {
+            Some(quota) => quota.clone(),
+            None => AntigravityQuota::default(),
+        };
+        let mut row = detail(
+            auth.antigravity,
+            format!(
+                "{:<9} {}",
+                "google",
+                masked_identity(quota.email.as_deref())
+            ),
+            is_current,
+        );
+        if quota.pools.is_empty() {
+            row.spans
+                .push(Span::styled(" · ", Style::default().fg(dim_color())));
+            row.spans.push(Span::styled(
+                "quota unknown",
+                Style::default().fg(dim_color()),
+            ));
+        }
+        let display_used = crate::config::config().display.usage_display_used();
+        let quotas = quota
+            .pools
+            .iter()
+            .map(|(label, used_milli, _)| {
+                let used_pct = ((*used_milli as u32 + 5) / 10).min(100) as u8;
+                let mut bar = crate::tui::info_widget::render_usage_limit_bar(
+                    label,
+                    used_pct,
+                    100u8.saturating_sub(used_pct),
+                    None,
+                    22,
+                    display_used,
+                );
+                if let Some(label_span) = bar.spans.first_mut() {
+                    label_span.content = format!("{label} ").into();
+                }
+                bar
+            })
+            .collect::<Vec<_>>();
+        quota_rows.insert(key.to_string(), quotas);
+        entries.push((
+            key.into(),
+            crate::auth::account_pool::default_member(key, false),
+            row,
+        ));
     }
     let keys: Vec<_> = entries
         .iter()
@@ -163,9 +225,10 @@ pub(super) fn inventory_lines(
         })
         .collect();
     if lines.is_empty() {
-        lines.push(Line::raw(
+        lines.push(Line::from(Span::styled(
             "No auto-routing accounts · /login to add credential",
-        ));
+            Style::default().fg(dim_color()),
+        )));
     }
     lines
 }
@@ -304,7 +367,83 @@ pub(super) fn load_inventory() -> Inventory {
         logins,
         pool,
         expired,
+        antigravity: load_antigravity_quota(),
     }
+}
+
+/// Summarize Antigravity's per-model quotas into the shared pools Google
+/// meters them by. Models that share a remaining fraction and reset time draw
+/// from one pool, so a row shows a handful of limits instead of every model.
+fn load_antigravity_quota() -> Option<AntigravityQuota> {
+    if !crate::auth::antigravity::has_cached_auth() {
+        return None;
+    }
+    let email = match crate::auth::antigravity::load_tokens() {
+        Ok(tokens) => tokens.email,
+        Err(error) => {
+            crate::logging::debug(&format!("Header Antigravity tokens unavailable: {error}"));
+            None
+        }
+    };
+    let models = match crate::provider::antigravity::load_persisted_catalog() {
+        Some(catalog) => catalog.models,
+        None => Vec::new(),
+    };
+    Some(AntigravityQuota {
+        email,
+        pools: antigravity_quota_pools(&models),
+    })
+}
+
+pub(super) fn antigravity_quota_pools(
+    models: &[crate::provider::antigravity::CatalogModel],
+) -> Vec<(String, u16, Option<String>)> {
+    type QuotaPoolGroup<'a> = (
+        (u16, Option<String>),
+        Vec<&'a crate::provider::antigravity::CatalogModel>,
+    );
+    let mut groups: Vec<QuotaPoolGroup<'_>> = Vec::new();
+    for model in models {
+        let Some(remaining) = model.remaining_fraction_milli else {
+            continue;
+        };
+        if model.id.starts_with("tab_") || model.id.starts_with("chat_") {
+            continue;
+        }
+        let key = (remaining, model.reset_time.clone());
+        match groups.iter_mut().find(|(candidate, _)| *candidate == key) {
+            Some((_, members)) => members.push(model),
+            None => groups.push((key, vec![model])),
+        }
+    }
+    let mut pools: Vec<_> = groups
+        .into_iter()
+        .map(|((remaining, reset), members)| {
+            let has = |prefix: &str| members.iter().any(|m| m.id.starts_with(prefix));
+            let label = if has("claude") {
+                "Claude"
+            } else if members.iter().all(|m| m.id.starts_with("gemini-4-argon")) {
+                "Argon"
+            } else if has("gemini") {
+                "Gemini"
+            } else {
+                "Other"
+            };
+            (
+                label.to_string(),
+                1000u16.saturating_sub(remaining.min(1000)),
+                reset,
+            )
+        })
+        .collect();
+    let order = |label: &str| match label {
+        "Gemini" => 0,
+        "Argon" => 1,
+        "Claude" => 2,
+        _ => 3,
+    };
+    pools.sort_by_key(|(label, _, _)| order(label));
+    pools
 }
 
 /// Render every reported quota through the info widget's shared limit renderer.

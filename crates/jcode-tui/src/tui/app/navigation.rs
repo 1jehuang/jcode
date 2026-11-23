@@ -276,7 +276,7 @@ impl App {
         let Some(message) = self.display_messages.get(msg_idx) else {
             return false;
         };
-        let oauth = message.role == "system" && message.title.as_deref() == Some("OpenAI login");
+        let oauth = crate::tui::ui::is_oauth_login_progress_card(message);
         if message.role != "swarm" && !oauth {
             return false;
         }
@@ -317,14 +317,13 @@ impl App {
     pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
         if let Some(index) = super::super::ui::oauth_login_link_message_from_screen(column, row)
             && let Some(message) = self.display_messages.get(index)
-            && message.role == "system"
-            && message.title.as_deref() == Some("OpenAI login")
+            && crate::tui::ui::is_oauth_login_progress_card(message)
             && let Some(parsed) =
                 jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
-            && let Some(url) = parsed.body.lines().find_map(|line| {
-                line.strip_prefix("[Open OpenAI sign-in](")?
-                    .strip_suffix(')')
-            })
+            && let Some(url) = parsed
+                .body
+                .lines()
+                .find_map(|line| crate::tui::ui::parse_oauth_sign_in_link(line).map(|(_, url)| url))
         {
             let url = url.to_string();
             let opened = Self::open_auth_browser(&url);

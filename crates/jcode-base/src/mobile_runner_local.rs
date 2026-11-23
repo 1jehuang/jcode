@@ -199,7 +199,7 @@ pub fn spawn_local_runner(host: Arc<dyn LocalSessionHost>) {
         return;
     }
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = mobile_sync::daemon_http_client();
         let machine = machine_name();
         // Created on first use so a daemon without mobile sync opens no socket.
         let mut wakeups: Option<events::Wakeups> = None;

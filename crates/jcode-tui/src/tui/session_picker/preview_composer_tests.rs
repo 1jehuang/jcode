@@ -35,6 +35,7 @@ fn session() -> SessionInfo {
             session_id: "composer".into(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }

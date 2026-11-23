@@ -55,6 +55,68 @@ async fn last_user_text(effort: Option<&str>, message: &str) -> String {
 }
 
 #[tokio::test]
+async fn jarvis_delegation_policy_only_changes_the_attached_root() {
+    let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(EffortProvider { effort: None });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _guard = crate::tool::sdk::ConnectionGuard(id.clone());
+    let swarm = |tools: Vec<ToolDefinition>| {
+        tools
+            .into_iter()
+            .find(|tool| tool.name == "swarm")
+            .unwrap()
+            .description
+    };
+    let baseline = swarm(agent.tool_definitions_for_debug().await);
+    assert!(baseline.contains("keep working yourself"));
+    assert!(
+        !agent
+            .build_system_prompt_split(None)
+            .static_part
+            .contains("## Jarvis root coordination")
+    );
+    crate::tool::sdk::configure(
+        &id,
+        &id,
+        crate::protocol::SessionToolConfig {
+            system_prompt_append: Some("## Jarvis voice interaction\nSpeak briefly.".into()),
+            custom: vec![crate::protocol::SessionToolDefinition {
+                name: "speak".into(),
+                description: "Speak".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            }],
+            ..Default::default()
+        },
+        tx,
+    )
+    .unwrap();
+    let root = agent.build_system_prompt_split(None).static_part;
+    for rule in [
+        "only one sequential task",
+        "do not also call `swarm spawn`",
+        "do not dispatch workers",
+        "Never delegate around an approval",
+        "You own the result",
+    ] {
+        assert!(root.contains(rule), "missing {rule}");
+    }
+    let description = swarm(agent.tool_definitions_for_debug().await);
+    assert!(description.contains("single-lane work"));
+    assert!(!description.contains("keep working yourself"));
+    agent.session.parent_id = Some("coordinator".into());
+    assert_eq!(swarm(agent.tool_definitions_for_debug().await), baseline);
+    assert!(
+        !agent
+            .build_system_prompt_split(None)
+            .static_part
+            .contains("## Jarvis root coordination")
+    );
+}
+
+#[tokio::test]
 async fn swarm_effort_appends_reminder_to_user_message() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let text = last_user_text(Some("swarm"), "fix the parser").await;

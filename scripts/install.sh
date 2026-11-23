@@ -10,13 +10,98 @@ INSTALL_SUCCEEDED=0
 INSTALL_OS="unknown"
 INSTALL_ARCH="unknown"
 INSTALL_VERSION="unknown"
+INSTALL_CHANNEL="stable"
+EXPLICIT_CHANNEL=false
 tmpdir=""
 
 info() { printf '\033[1;34m%s\033[0m\n' "$*"; }
 err()  { printf '\033[1;31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
+usage() {
+  cat <<'EOF'
+Usage: install.sh [OPTIONS]
+
+Options:
+  --prerelease, --preview    Install the latest prerelease build, save the
+                             prerelease update channel, and live-reload running
+                             jcode sessions.
+  --stable                   Install the latest stable release and save the
+                             stable update channel.
+  --channel <name>           Select update channel: prerelease, preview, or stable.
+  --version <tag>            Install a specific release tag.
+  -h, --help                 Show this help message.
+
+Environment:
+  JCODE_CHANNEL=prerelease   Same as --prerelease.
+  JCODE_VERSION=<tag>        Same as --version <tag>.
+EOF
+}
+
+parse_channel() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    prerelease|pre-release|preview) printf 'preview' ;;
+    stable|release) printf 'stable' ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -n "${JCODE_CHANNEL:-}" ]; then
+  INSTALL_CHANNEL=$(parse_channel "$JCODE_CHANNEL") \
+    || err "Unknown JCODE_CHANNEL: $JCODE_CHANNEL (expected prerelease, preview, or stable)"
+  EXPLICIT_CHANNEL=true
+fi
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --prerelease|--preview)
+      INSTALL_CHANNEL="preview"
+      EXPLICIT_CHANNEL=true
+      shift
+      ;;
+    --stable)
+      INSTALL_CHANNEL="stable"
+      EXPLICIT_CHANNEL=true
+      shift
+      ;;
+    --channel)
+      [ "$#" -ge 2 ] || err "--channel requires a value (prerelease, preview, or stable)"
+      INSTALL_CHANNEL=$(parse_channel "$2") \
+        || err "Unknown channel: $2 (expected prerelease, preview, or stable)"
+      EXPLICIT_CHANNEL=true
+      shift 2
+      ;;
+    --channel=*)
+      val="${1#--channel=}"
+      INSTALL_CHANNEL=$(parse_channel "$val") \
+        || err "Unknown channel: $val (expected prerelease, preview, or stable)"
+      EXPLICIT_CHANNEL=true
+      shift
+      ;;
+    --version)
+      [ "$#" -ge 2 ] || err "--version requires a release tag"
+      JCODE_VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      JCODE_VERSION="${1#--version=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      err "Unknown option: $1 (use --help for usage)"
+      ;;
+  esac
+done
+
 valid_release_tag() {
-  printf '%s' "$1" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([+.-][[:alnum:].-]+)?$'
+  printf '%s' "$1" | grep -Eq '^(v[0-9]+\.[0-9]+\.[0-9]+([+.-][[:alnum:].-]+)?|selfdev-[a-z0-9]+-[0-9a-f]{40})$'
+}
+
+is_release_channel_marker() {
+  printf '%s' "$1" | grep -Eq '^(v?[0-9]+\.[0-9]+\.[0-9]+([+.-][[:alnum:].-]+)?|selfdev-[a-z0-9]+-[0-9a-f]{40}|main-[[:alnum:].-]+)$'
 }
 
 sha256_file() {
@@ -148,29 +233,192 @@ else
   INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
 fi
 
-# Prefer GitHub's stable redirect when it is reachable so publication changes
-# are visible immediately. jcode.sh keeps a static copy of the latest published
-# tag as an independent fallback for GitHub outages, blocks, and shared-network
-# throttling. Neither path uses the rate-limited unauthenticated GitHub API.
+# Resolve latest release tag for the selected channel.
+# Stable prefers GitHub's redirect with static jcode.sh metadata fallback so
+# unauthenticated GitHub API rate limits are avoided. Prerelease queries
+# GitHub's releases API and picks the newest published prerelease that carries
+# both this platform's artifact and SHA256SUMS.
 INSTALL_STAGE="release_lookup"
 VERSION="${JCODE_VERSION:-}"
+
+release_has_artifact() {
+  tag="$1"
+  sums=$(curl -fsSL --retry 2 --connect-timeout 10 \
+    "https://github.com/$REPO/releases/download/$tag/SHA256SUMS" 2>/dev/null || true)
+  for name in "$ARTIFACT.tar.gz" "$ARTIFACT" "$ARTIFACT.exe"; do
+    if printf '%s\n' "$sums" | awk -v a="$name" '$2 == a || $2 == "*" a { f=1 } END { exit !f }' \
+      && curl -fsSIL --retry 2 --connect-timeout 10 -o /dev/null \
+        "https://github.com/$REPO/releases/download/$tag/$name" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_latest_prerelease_tag() {
+  api_url="https://api.github.com/repos/$REPO/releases?per_page=100"
+  gh_token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -n "$gh_token" ]; then
+    releases_json=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      -H 'Accept: application/vnd.github+json' \
+      -H "Authorization: Bearer $gh_token" \
+      "$api_url" 2>/dev/null || true)
+  else
+    releases_json=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      -H 'Accept: application/vnd.github+json' \
+      "$api_url" 2>/dev/null || true)
+  fi
+  [ -n "$releases_json" ] || return 1
+
+  if command -v python3 >/dev/null 2>&1; then
+    selected=$(printf '%s' "$releases_json" | python3 -c '
+import json, re, sys
+artifact = sys.argv[1]
+exe = sys.argv[2]
+expected_assets = {f"{artifact}.tar.gz", f"{artifact}{exe}"}
+selfdev_re = re.compile(r"^selfdev-[a-z0-9]+-[0-9a-f]{40}$")
+semver_re = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-preview\.([1-9][0-9]*)$")
+
+try:
+    releases = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+
+best_key = None
+best_tag = None
+for rel in releases:
+    if not isinstance(rel, dict):
+        continue
+    if rel.get("draft") or not rel.get("prerelease"):
+        continue
+    published = (rel.get("published_at") or "").strip()
+    tag = (rel.get("tag_name") or "").strip()
+    if not published or not tag:
+        continue
+    semver_match = semver_re.match(tag)
+    if not (selfdev_re.match(tag) or semver_match):
+        continue
+    assets = rel.get("assets") or []
+    has_bin = any(
+        isinstance(a, dict)
+        and a.get("name") in expected_assets
+        and (a.get("size") or 0) > 0
+        and bool(a.get("browser_download_url"))
+        for a in assets
+    )
+    has_sums = any(
+        isinstance(a, dict)
+        and a.get("name") == "SHA256SUMS"
+        and (a.get("size") or 0) > 0
+        and bool(a.get("browser_download_url"))
+        for a in assets
+    )
+    if not (has_bin and has_sums):
+        continue
+    semver_key = tuple(int(g) for g in semver_match.groups()) if semver_match else (0, 0, 0, 0)
+    key = (published, semver_key)
+    if best_key is None or key > best_key:
+        best_key = key
+        best_tag = tag
+
+if best_tag:
+    print(best_tag)
+' "$ARTIFACT" "$([ "$IS_WINDOWS" = true ] && printf '.exe' || printf '')" 2>/dev/null || true)
+    if [ -n "$selected" ]; then
+      printf '%s\n' "$selected"
+      return 0
+    fi
+    return 1
+  fi
+
+  candidate_tags=$(printf '%s\n' "$releases_json" | awk '
+    /"tag_name":/ { gsub(/.*"tag_name": *"|".*/, ""); tag=$0; draft=0; pre=0 }
+    /"draft": *true/ { draft=1 }
+    /"prerelease": *true/ { pre=1 }
+    /"published_at":/ {
+      if (tag != "" && !draft && pre && $0 !~ /null/) print tag
+      tag=""; draft=0; pre=0
+    }
+  ' | grep -E '^(selfdev-[a-z0-9]+-[0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+-preview\.[1-9][0-9]*)$' || true)
+  for tag in $candidate_tags; do
+    if release_has_artifact "$tag"; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -z "$VERSION" ]; then
-  METADATA_VERSION=$(curl -fsSL --retry 2 --connect-timeout 10 \
-    "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
-  LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
-    -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
-  case "$LATEST_RELEASE_URL" in
-    */releases/tag/*) GITHUB_VERSION="${LATEST_RELEASE_URL##*/}" ;;
-    *) GITHUB_VERSION="" ;;
-  esac
-  if valid_release_tag "$GITHUB_VERSION"; then
-    VERSION="$GITHUB_VERSION"
-  elif valid_release_tag "$METADATA_VERSION"; then
-    VERSION="$METADATA_VERSION"
-    info "GitHub release lookup unavailable; using cached jcode.sh metadata ($VERSION)."
+  if [ "$INSTALL_CHANNEL" = "preview" ]; then
+    info "Looking up latest prerelease build for $ARTIFACT..."
+    VERSION=$(resolve_latest_prerelease_tag || true)
+    valid_release_tag "$VERSION" \
+      || err "No published prerelease build is available for $ARTIFACT yet. Check https://github.com/$REPO/releases or run without --prerelease for stable."
+  else
+    METADATA_VERSION=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      "$RELEASE_METADATA_BASE/latest/version" 2>/dev/null | tr -d '\r\n' || true)
+    LATEST_RELEASE_URL=$(curl -fsSIL --retry 2 --connect-timeout 10 \
+      -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null || true)
+    case "$LATEST_RELEASE_URL" in
+      */releases/tag/*) GITHUB_VERSION="${LATEST_RELEASE_URL##*/}" ;;
+      *) GITHUB_VERSION="" ;;
+    esac
+    if valid_release_tag "$GITHUB_VERSION"; then
+      VERSION="$GITHUB_VERSION"
+    elif valid_release_tag "$METADATA_VERSION"; then
+      VERSION="$METADATA_VERSION"
+      info "GitHub release lookup unavailable; using cached jcode.sh metadata ($VERSION)."
+    fi
   fi
 fi
 valid_release_tag "$VERSION" || err "Failed to determine latest version"
+
+# Release assets publish asynchronously per platform, so the latest stable
+# release may briefly lack this platform's binary or its SHA256SUMS entry.
+# When the version was not pinned on stable, fall back to the newest stable
+# release that has both.
+if [ -z "${JCODE_VERSION:-}" ] && [ "$INSTALL_CHANNEL" != "preview" ] && ! release_has_artifact "$VERSION"; then
+  info "Release $VERSION has no published $ARTIFACT asset yet; looking for the newest release that does..."
+  EXISTING_SEMVER=""
+  for existing_bin in "$INSTALL_DIR/jcode" "$INSTALL_DIR/jcode.exe"; do
+    if [ -x "$existing_bin" ]; then
+      EXISTING_SEMVER=$("$existing_bin" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+      break
+    fi
+  done
+  FOUND_FALLBACK=""
+  for page in 1 2 3 4 5; do
+    FALLBACK_TAGS=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null |
+      awk '
+        /"tag_name":/ { gsub(/.*"tag_name": *"|".*/, ""); tag=$0 }
+        /"draft": *true/ { draft=1 }
+        /"prerelease":/ { if ($0 ~ /true/ || draft) skip=1; if (tag != "" && !skip) print tag; tag=""; draft=0; skip=0 }
+      ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1nr -k2,2nr -k3,3nr || true)
+    [ -z "$FALLBACK_TAGS" ] && break
+    REACHED_EXISTING=false
+    for tag in $FALLBACK_TAGS; do
+      [ "$tag" = "$VERSION" ] && continue
+      if [ -n "$EXISTING_SEMVER" ]; then
+        # Never downgrade an existing install via fallback.
+        newest=$(printf '%s\n%s\n' "${tag#v}" "$EXISTING_SEMVER" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+        if [ "$newest" = "$EXISTING_SEMVER" ]; then
+          REACHED_EXISTING=true
+          break
+        fi
+      fi
+      if release_has_artifact "$tag"; then
+        info "Using $tag (newest release with a published $ARTIFACT asset)."
+        VERSION="$tag"
+        FOUND_FALLBACK="$tag"
+        break
+      fi
+    done
+    [ -n "$FOUND_FALLBACK" ] && break
+    [ "$REACHED_EXISTING" = true ] && break
+  done
+fi
 INSTALL_VERSION="${VERSION#v}"
 
 GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"
@@ -180,10 +428,11 @@ if [ "$IS_WINDOWS" = true ]; then
   builds_dir="$LOCALAPPDATA/jcode/builds"
 else
   EXE=""
-  builds_dir="$HOME/.jcode/builds"
+  builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
 fi
 stable_dir="$builds_dir/stable"
 current_dir="$builds_dir/current"
+shared_server_dir="$builds_dir/shared-server"
 version_dir="$builds_dir/versions"
 launcher_path="$INSTALL_DIR/jcode${EXE}"
 
@@ -255,7 +504,7 @@ if [ -n "$download_mode" ]; then
 fi
 
 INSTALL_STAGE="binary_install"
-mkdir -p "$INSTALL_DIR" "$stable_dir" "$current_dir" "$version_dir"
+mkdir -p "$INSTALL_DIR" "$stable_dir" "$current_dir" "$shared_server_dir" "$version_dir"
 
 version="${VERSION#v}"
 dest_version_dir="$version_dir/$version"
@@ -289,6 +538,10 @@ else
 fi
 
 chmod +x "$dest_version_dir/$bin_name" 2>/dev/null || true
+find "$dest_version_dir" -maxdepth 1 -type f -name '*.bin' -exec chmod +x {} + 2>/dev/null || true
+# Stamp every installed file with a uniform current mtime so freshness checks
+# treat the newly installed release as strictly newer than an older daemon.
+find "$dest_version_dir" -maxdepth 1 -type f -exec touch {} + 2>/dev/null || true
 
 if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
   termux_glibc_dir="/data/data/com.termux/files/usr/glibc/lib"
@@ -312,13 +565,39 @@ if [ "$IS_TERMUX" = true ] && [ "$IS_WINDOWS" = false ]; then
   fi
 fi
 
+stable_prev=""
+[ -f "$builds_dir/stable-version" ] && stable_prev=$(tr -d '\r\n' < "$builds_dir/stable-version" 2>/dev/null || true)
+shared_prev=""
+[ -f "$builds_dir/shared-server-version" ] && shared_prev=$(tr -d '\r\n' < "$builds_dir/shared-server-version" 2>/dev/null || true)
+
+should_advance_shared_server=false
+if [ ! -e "$shared_server_dir/$bin_name" ]; then
+  should_advance_shared_server=true
+elif [ -n "$shared_prev" ] && [ "$shared_prev" = "$stable_prev" ]; then
+  should_advance_shared_server=true
+elif [ -n "$shared_prev" ] && is_release_channel_marker "$shared_prev"; then
+  should_advance_shared_server=true
+fi
+
 if [ "$IS_WINDOWS" = true ]; then
+  if [ "$should_advance_shared_server" = true ]; then
+    cp -f "$dest_version_dir/$bin_name" "$shared_server_dir/$bin_name"
+    printf '%s\n' "$version" > "$builds_dir/shared-server-version"
+  fi
   cp -f "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
   printf '%s\n' "$version" > "$builds_dir/stable-version"
+  cp -f "$dest_version_dir/$bin_name" "$current_dir/$bin_name"
+  printf '%s\n' "$version" > "$builds_dir/current-version"
   cp -f "$stable_dir/$bin_name" "$launcher_path"
 else
+  if [ "$should_advance_shared_server" = true ]; then
+    ln -sfn "$dest_version_dir/$bin_name" "$shared_server_dir/$bin_name"
+    printf '%s\n' "$version" > "$builds_dir/shared-server-version"
+  fi
   ln -sfn "$dest_version_dir/$bin_name" "$stable_dir/$bin_name"
   printf '%s\n' "$version" > "$builds_dir/stable-version"
+  ln -sfn "$dest_version_dir/$bin_name" "$current_dir/$bin_name"
+  printf '%s\n' "$version" > "$builds_dir/current-version"
   if [ "$IS_TERMUX" = true ]; then
     rm -f "$launcher_path"
     cat > "$launcher_path" <<EOF
@@ -329,6 +608,66 @@ EOF
     chmod +x "$launcher_path"
   else
     ln -sfn "$stable_dir/$bin_name" "$launcher_path"
+  fi
+fi
+
+persist_update_channel() {
+  target_channel="$1"
+  cfg_home="${JCODE_HOME:-$HOME/.jcode}"
+  cfg_file="$cfg_home/config.toml"
+  if [ -x "$launcher_path" ] \
+    && "$launcher_path" --no-update update --channel "$target_channel" --set-channel-only </dev/null >/dev/null 2>&1 \
+    && [ -f "$cfg_file" ] \
+    && grep -Eq '^[[:space:]]*update_channel[[:space:]]*=[[:space:]]*"'"$target_channel"'"' "$cfg_file"; then
+    return 0
+  fi
+  mkdir -p "$cfg_home" 2>/dev/null || return 1
+  if [ ! -f "$cfg_file" ]; then
+    printf '[features]\nupdate_channel = "%s"\n' "$target_channel" > "$cfg_file"
+    return 0
+  fi
+  cfg_tmp="$tmpdir/config.toml.tmp"
+  awk -v ch="$target_channel" '
+    BEGIN { in_features=0; has_features=0; replaced=0 }
+    /^\[features\][[:space:]]*(#.*)?$/ {
+      in_features=1; has_features=1; print; next
+    }
+    /^\[/ {
+      if (in_features && !replaced) {
+        print "update_channel = \"" ch "\""
+        replaced=1
+      }
+      in_features=0
+      print
+      next
+    }
+    {
+      if (in_features && $0 ~ /^[[:space:]]*update_channel[[:space:]]*=/) {
+        print "update_channel = \"" ch "\""
+        replaced=1
+        next
+      }
+      print
+    }
+    END {
+      if (in_features && !replaced) {
+        print "update_channel = \"" ch "\""
+      } else if (!has_features) {
+        print ""
+        print "[features]"
+        print "update_channel = \"" ch "\""
+      }
+    }
+  ' "$cfg_file" > "$cfg_tmp" && mv "$cfg_tmp" "$cfg_file"
+}
+
+if [ "$EXPLICIT_CHANNEL" = true ]; then
+  if persist_update_channel "$INSTALL_CHANNEL"; then
+    if [ "$INSTALL_CHANNEL" = "preview" ]; then
+      info "Saved update channel: preview (automatic live updates will follow prereleases)."
+    else
+      info "Saved update channel: stable."
+    fi
   fi
 fi
 
@@ -364,8 +703,13 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
   reload_bin="$launcher_path"
   [ -x "$reload_bin" ] || reload_bin="$stable_dir/$bin_name"
   if [ -x "$reload_bin" ]; then
-    if "$reload_bin" server reload </dev/null >/dev/null 2>&1; then
-      info "Reloaded the running jcode server onto $VERSION (if one was active)."
+    if [ "$EXPLICIT_CHANNEL" = true ]; then
+      reload_args=(--no-update server reload --force)
+    else
+      reload_args=(--no-update server reload)
+    fi
+    if "$reload_bin" "${reload_args[@]}" </dev/null >/dev/null 2>&1; then
+      info "Live-reloaded running jcode server and connected sessions onto $VERSION (if active)."
     fi
   fi
 fi

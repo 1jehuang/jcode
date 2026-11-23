@@ -1,36 +1,23 @@
 #!/usr/bin/env bash
-# Published alpha.19 predates managed hosted Linux release targets. Bootstrap a
-# reviewed immutable source revision rather than trusting the version string.
+# Install the latest published Linux justrust client binary with SHA256 verification.
 set -euo pipefail
 [[ $# == 0 ]] || { echo 'usage: install_justrust_hosted_ci.sh' >&2; exit 1; }
-readonly revision=5c8c6e653d1874923cf94b93dd96aa3d312343f0
+case "$(uname -m)" in
+  x86_64|amd64) target=x86_64-unknown-linux-musl ;;
+  aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+  *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 work=$(mktemp -d "${RUNNER_TEMP:-${JCODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}}/justrust-hosted-client.XXXXXX")
-# Keep the installed binary until the job ends. Source excludes the vendored
-# compiler, server and any user configuration. No credentials are needed here.
-git init -q "$work/source"
-git -C "$work/source" remote add origin https://github.com/1jehuang/justrust.git
-git -C "$work/source" sparse-checkout set --no-cone \
-  '/Cargo.toml' '/Cargo.lock' '/src/' '/scripts/sign-release.py' '/docs/AGENTS-snippet.md' '/README.md' '/LICENSE*'
-git -C "$work/source" fetch --quiet --depth=1 --filter=blob:none origin "$revision"
-git -C "$work/source" checkout --quiet --detach FETCH_HEAD
-[[ $(git -C "$work/source" rev-parse HEAD) == "$revision" ]] || {
-  echo 'hosted justrust source revision mismatch' >&2
-  exit 1
-}
-# Apply only the reviewed managed-artifact fix, not an unrelated client upgrade.
-# Fail closed if the exact source pin can no longer accept the backport.
-patch=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/justrust-hosted-artifact-toolchain.patch
-git -C "$work/source" apply --check "$patch"
-git -C "$work/source" apply "$patch"
-# This small client bootstrap is local. Application release compilation is
-# required to be hosted by build_preview_linux_hosted.sh, with no fallback.
-JUSTRUST_RELEASE_BUILD=0 CARGO_TARGET_DIR="$work/target" \
-  cargo +1.99.0 install --path "$work/source" --locked --root "$work/install"
+mkdir -p "$work/install/bin"
+archive="justrust-${target}.tar.gz"
+base="https://github.com/1jehuang/justrust/releases/latest/download"
+curl -fsSL --retry 3 --connect-timeout 15 -o "$work/$archive" "$base/$archive"
+curl -fsSL --retry 3 --connect-timeout 15 -o "$work/$archive.sha256" "$base/$archive.sha256"
+(cd "$work" && sha256sum --check "$archive.sha256")
+tar -xzf "$work/$archive" -C "$work/install/bin" --strip-components=1 "justrust-${target}/justrust"
+chmod +x "$work/install/bin/justrust"
 "$work/install/bin/justrust" --version
-# Capability preflight also catches accidental use of an older published client.
-"$work/install/bin/justrust" zigbuild --help >/dev/null
 if [[ -n ${GITHUB_PATH:-} ]]; then
   printf '%s\n' "$work/install/bin" >> "$GITHUB_PATH"
 fi
-printf 'Hosted justrust client source: %s + managed-artifact backport\n' "$revision"
 printf 'Hosted justrust client binary: %s\n' "$work/install/bin/justrust"

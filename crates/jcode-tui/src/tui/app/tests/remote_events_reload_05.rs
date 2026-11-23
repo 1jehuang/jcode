@@ -178,6 +178,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(12);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "queued follow-up in flight".to_string(),
         images: vec![],
         is_system: true,
@@ -211,6 +212,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
     // clear it rather than re-queueing as a system continuation.
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "user retry message".to_string(),
         images: vec![],
         is_system: false,
@@ -238,6 +240,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
     // already dequeued into the in-flight pending slot.
     app.queued_messages.push("still queued".to_string());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "dispatched but unfinished".to_string(),
         images: vec![],
         is_system: true,

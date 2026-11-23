@@ -81,6 +81,7 @@ impl App {
                             "content": pending.content,
                             "images": pending.images,
                             "is_system": pending.is_system,
+                            "jarvis_voice": pending.jarvis_voice,
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
@@ -91,6 +92,13 @@ impl App {
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
                 if !pending.content.trim().is_empty() {
+                    for queued in &mut queued_messages {
+                        input::offset_image_markers(
+                            queued,
+                            self.queued_images.len(),
+                            pending.images.len(),
+                        );
+                    }
                     queued_messages.insert(0, pending.content.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
@@ -115,6 +123,7 @@ impl App {
                 })).collect::<Vec<_>>(),
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_images": inflight_continuation.into_iter().flat_map(|p| p.images.iter()).chain(self.queued_images.iter()).collect::<Vec<_>>(),
                 "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,

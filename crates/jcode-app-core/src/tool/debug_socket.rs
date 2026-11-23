@@ -103,7 +103,7 @@ impl Tool for DebugSocketTool {
 }
 
 /// Execute a debug command via the debug socket
-async fn execute_debug_command(
+pub(crate) async fn execute_debug_command(
     command: &str,
     session_id: Option<String>,
     timeout_secs: u64,

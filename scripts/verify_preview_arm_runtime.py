@@ -17,8 +17,8 @@ MEMBER = "jcode-linux-aarch64"
 def verify(archive, version):
     if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
         raise ValueError("ARM runtime acceptance requires native ARM64 Linux")
-    if not re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*", version):
-        raise ValueError("expected an explicit preview version identity")
+    if not re.fullmatch(r"v1\.0\.0-preview\.[1-9][0-9]*|v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+        raise ValueError("expected an explicit preview or stable version identity")
     # Do not extract archive paths, links or unexpected companion files. The ARM
     # contract is exactly one executable, unlike the x86 wrapper/payload archive.
     with tarfile.open(archive, "r:gz") as package:

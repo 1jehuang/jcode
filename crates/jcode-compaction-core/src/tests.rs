@@ -588,37 +588,13 @@ fn is_image(message: &Message) -> bool {
 }
 
 #[test]
-fn tool_image_decay_waits_for_trigger_then_keeps_newest() {
-    let mut messages: Vec<Message> = (0..TOOL_IMAGE_DECAY_TRIGGER_COUNT)
-        .map(|_| tool_image_msg(10))
-        .collect();
-    assert_eq!(
-        decay(&mut messages),
-        0,
-        "at the trigger count nothing decays"
-    );
-
-    messages.push(tool_image_msg(10));
-    let total = messages.len();
-    assert_eq!(decay(&mut messages), total - TOOL_IMAGE_DECAY_KEEP_COUNT);
-    for (index, message) in messages.iter().enumerate() {
-        assert_eq!(
-            is_image(message),
-            index >= total - TOOL_IMAGE_DECAY_KEEP_COUNT
-        );
-        // The tool_result itself is preserved for tool_use pairing.
-        assert!(matches!(
-            message.content[0],
-            ContentBlock::ToolResult { .. }
-        ));
+fn tool_image_count_alone_does_not_rewrite_history() {
+    let mut messages = Vec::new();
+    for _ in 0..40 {
+        messages.push(tool_image_msg(1024));
+        assert_eq!(decay(&mut messages), 0);
+        assert!(messages.iter().all(is_image));
     }
-    let ContentBlock::Text { text, .. } = &messages[0].content[1] else {
-        panic!("decayed image must become a text marker");
-    };
-    assert!(text.contains("Older tool screenshot omitted"));
-    assert!(text.contains("original_base64_chars=10"));
-    // Stable after decay: nothing more to do until the trigger is hit again.
-    assert_eq!(decay(&mut messages), 0);
 }
 
 #[test]
@@ -641,8 +617,8 @@ fn tool_image_decay_bounds_bytes_but_keeps_newest_huge_image() {
 #[test]
 fn tool_image_decay_ignores_user_pasted_images() {
     let mut messages = vec![image_msg(10)];
-    messages.extend((0..TOOL_IMAGE_DECAY_TRIGGER_COUNT + 5).map(|_| tool_image_msg(10)));
-    decay(&mut messages);
+    messages.extend((0..2).map(|_| tool_image_msg(TOOL_IMAGE_DECAY_KEEP_CHARS + 1)));
+    assert_eq!(decay(&mut messages), 1);
     assert!(
         is_image(&messages[0]),
         "user images are not tool screenshots"

@@ -353,11 +353,12 @@ pub(in super::super) async fn process_remote_followups(
                 app.visible_turn_started = Some(Instant::now());
             }
         }
+        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send(
             app,
             remote,
             combined.clone(),
-            vec![],
+            images.clone(),
             true,
             reminder.clone(),
             auto_retry,
@@ -376,6 +377,7 @@ pub(in super::super) async fn process_remote_followups(
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_images = images;
             }
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {

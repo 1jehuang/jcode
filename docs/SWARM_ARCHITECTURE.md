@@ -36,6 +36,10 @@ so each agent "owns" the subtree it spawned. An agent may stop any agent in its
 own subtree (itself or a transitive descendant); `force=true` is still required
 to stop sessions outside the requester's subtree (e.g. user-created peers).
 
+Interrupting a coordinator cancels only its own turn. Workers keep running
+and can still report back. To stop a worker, target it explicitly with
+`swarm stop`.
+
 When a mid-tree member leaves (stop, crash, disconnect, feature-off), its direct
 children are reparented rather than orphaned: they attach to their live
 grandparent, falling back to the current coordinator, else they become roots.

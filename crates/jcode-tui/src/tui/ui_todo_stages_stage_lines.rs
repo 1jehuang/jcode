@@ -5,6 +5,7 @@ use super::*;
 /// Render staged todos with a bounded row per lane and optional prerequisite
 /// progress. Later lanes retain phase dimming unless explicit prerequisites
 /// replace that barrier and have been satisfied.
+#[cfg(test)]
 pub(crate) fn push_stage_lines(
     lines: &mut Vec<Line<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -13,9 +14,29 @@ pub(crate) fn push_stage_lines(
     base_indent: &str,
     inner_width: usize,
 ) {
+    push_ordered_stage_lines(
+        lines,
+        todos,
+        agents,
+        background_tasks,
+        base_indent,
+        inner_width,
+        false,
+    );
+}
+
+pub(crate) fn push_ordered_stage_lines(
+    lines: &mut Vec<Line<'static>>,
+    todos: &[&crate::todo::TodoItem],
+    agents: &[TodoCardAgent],
+    background_tasks: &[TodoCardBackgroundTask],
+    base_indent: &str,
+    inner_width: usize,
+    active_first: bool,
+) {
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
-    let lanes: Vec<(usize, &crate::todo::stages::TodoLane)> = stages
+    let mut lanes: Vec<(usize, &crate::todo::stages::TodoLane)> = stages
         .iter()
         .enumerate()
         .flat_map(|(index, stage)| stage.lanes.iter().map(move |lane| (index, lane)))
@@ -55,6 +76,9 @@ pub(crate) fn push_stage_lines(
         .unwrap_or(0)
         .min(inner_width / 3);
 
+    if active_first {
+        lanes.sort_by_cached_key(|(_, lane)| work_rank(&items_of(lane), agents));
+    }
     for (phase, lane) in lanes {
         // A lane wears its phase's colour: bold while its phase is active,
         // dimmed (with its titles and dots) while the phase has not started.

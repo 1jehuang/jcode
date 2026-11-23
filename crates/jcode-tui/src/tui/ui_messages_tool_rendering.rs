@@ -301,6 +301,21 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
+    // This is the requested speech, not confirmation that the player ran.
+    if tools_ui::canonical_tool_name(&tc.name) == "speak"
+        && let Some(text) = tc.input.get("text").and_then(|v| v.as_str())
+        && row_width > 2
+    {
+        let plain = crate::message::strip_ansi_escape_sequences(text);
+        for paragraph in plain.lines() {
+            let clean: String = paragraph.chars().filter(|c| !c.is_control() && !matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect();
+            for mut row in markdown::wrap_line(Line::from(clean), row_width as usize - 2) {
+                row.spans
+                    .insert(0, Span::styled("│ ", Style::default().fg(dim_color())));
+                lines.push(row);
+            }
+        }
+    }
     lines.extend(tools_ui::codemode_preview(tc, row_width));
     if is_error && (tc.name != "batch" || batch_counts.is_none()) {
         lines.push(render_tool_failure_reason(&msg.content, row_width, 2));
