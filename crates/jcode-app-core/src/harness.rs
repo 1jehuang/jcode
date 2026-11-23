@@ -135,8 +135,8 @@ pub fn hard_constraints(content: &str) -> Vec<String> {
     let mut inside = false;
     for line in content.lines() {
         let t = line.trim();
-        if t.starts_with("## ") {
-            inside = t[3..].trim().eq_ignore_ascii_case("hard constraints");
+        if let Some(rest) = t.strip_prefix("## ") {
+            inside = rest.trim().eq_ignore_ascii_case("hard constraints");
             continue;
         }
         if inside && let Some(item) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {

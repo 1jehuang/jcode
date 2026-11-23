@@ -414,21 +414,9 @@ pub fn build_system_prompt_full_with_capabilities(
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
-
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
-    if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        parts.push(content);
-    }
-
-    // Add optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
-    if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        parts.push(content);
-    }
+    // Overlays + preferred-tool guidance come inside load_agents_md_files_from_dir.
+    info.prompt_overlay_chars = md_info.prompt_overlay_chars;
+    info.preferred_tools_chars = md_info.preferred_tools_chars;
 
     if let Some(memory) = memory_prompt {
         info.memory_chars = memory.len();
@@ -543,7 +531,9 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
         static_parts.push(selfdev_prompt);
     }
 
-    // Add AGENTS.md instructions (static per project)
+    // AGENTS.md, prompt overlays and preferred-tool guidance arrive as ONE session snapshot
+    // (load_agents_md_files_from_dir). Their files are symlinked into config repos that change
+    // mid-session; re-reading them per turn rewrote the cached prefix and forced a full KV miss.
     let (md_content, md_info) = agents_md;
     if let Some(content) = md_content {
         static_parts.push(content);
@@ -552,21 +542,8 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
-
-    // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
-    if let Some(content) = overlay_content {
-        info.prompt_overlay_chars = overlay_chars;
-        static_parts.push(content);
-    }
-
-    // Add optional preferred-tool guidance (static per project/user)
-    let (preferred_tools_content, preferred_tools_chars) =
-        load_preferred_tools_files_from_dir(working_dir);
-    if let Some(content) = preferred_tools_content {
-        info.preferred_tools_chars = preferred_tools_chars;
-        static_parts.push(content);
-    }
+    info.prompt_overlay_chars = md_info.prompt_overlay_chars;
+    info.preferred_tools_chars = md_info.preferred_tools_chars;
 
     // Add available skills list (fairly static)
     if let Some(skills_section) = build_available_skills_section(available_skills) {
@@ -967,10 +944,30 @@ fn load_agents_md_files_from_dirs(
 }
 
 /// Load AGENTS.md files from a specific working directory.
+///
+/// This is the session bootstrap snapshot: AGENTS.md plus the ~/.jcode and ./.jcode prompt overlays
+/// and preferred-tool guidance, captured together at session start / workspace change / reset so the
+/// cacheable system prefix never changes mid-session when those (often symlinked) files are edited.
 pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
     let project_dir = working_dir.unwrap_or(Path::new("."));
     let global_agents_md = crate::storage::user_home_path("AGENTS.md").ok();
-    load_agents_md_files_from_dirs(project_dir, global_agents_md.as_deref())
+    let (md, mut info) = load_agents_md_files_from_dirs(project_dir, global_agents_md.as_deref());
+    let mut parts: Vec<String> = md.into_iter().collect();
+    let (overlay, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    if let Some(content) = overlay {
+        info.prompt_overlay_chars = overlay_chars;
+        parts.push(content);
+    }
+    let (preferred, preferred_chars) = load_preferred_tools_files_from_dir(working_dir);
+    if let Some(content) = preferred {
+        info.preferred_tools_chars = preferred_chars;
+        parts.push(content);
+    }
+    if parts.is_empty() {
+        (None, info)
+    } else {
+        (Some(parts.join("\n\n")), info)
+    }
 }
 
 /// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/

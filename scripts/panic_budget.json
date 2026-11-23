@@ -1,6 +1,7 @@
 {
-  "total": 147,
+  "total": 146,
   "tracked_files": {
+    "crates/jcode-app-core/src/agent/harness_glue.rs": 1,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
     "crates/jcode-app-core/src/session_launch.rs": 1,
     "crates/jcode-app-core/src/tool/bash.rs": 2,

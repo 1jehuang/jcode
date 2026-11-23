@@ -1015,6 +1015,7 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     trimmed[fence_len..].trim().is_empty()
 }
 
+#[allow(dead_code)] // unused on master since incremental renderer rework, tracked in #12
 fn count_unescaped_double_dollar(line: &str) -> usize {
     let bytes = line.as_bytes();
     let mut count = 0usize;

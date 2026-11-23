@@ -28,6 +28,7 @@ pub(super) fn is_healthy() -> bool {
         reason = "inotify watcher is only implemented on Linux"
     )
 )]
+#[allow(clippy::needless_return)] // return is needed when the linux cfg block is compiled
 pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;
@@ -46,11 +47,13 @@ pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
 
 /// Whether an event on `name` inside the git dir can change the widget.
 /// Lock files and temp objects churn during every git command.
+#[allow(dead_code)] // unused on master, tracked in #12
 pub(super) fn git_dir_event_relevant(name: &str) -> bool {
     !(name.ends_with(".lock") || name.starts_with("tmp_") || name == "ORIG_HEAD.lock")
 }
 
 /// Directories never worth watching even if not gitignored.
+#[allow(dead_code)] // unused on master, tracked in #12
 pub(super) fn skip_dir(name: &str) -> bool {
     name == ".git"
 }

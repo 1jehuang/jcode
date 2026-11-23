@@ -2,6 +2,8 @@
 //! turn-completion gate) and inner tool gates (phase/prerequisite checks for
 //! native `codemode` and MCP). Real `Agent` and tool `Registry`; only the
 //! provider is scripted, and it records every request it receives.
+// The env guard is held across awaits on purpose: it serializes tests sharing process env.
+#![allow(clippy::await_holding_lock)]
 
 use anyhow::Result;
 use async_stream::stream;

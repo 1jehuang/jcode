@@ -413,6 +413,8 @@ impl BenchState {
                     }),
                     intent: None,
                     thought_signature: None,
+                    strategic_reasoning_and_analysis: String::new(),
+                    tool_invocation_payload: String::new(),
                 };
                 let tool_output = format!(
                     "{line}- target line {idx}\n{line}+ target line {idx} updated",

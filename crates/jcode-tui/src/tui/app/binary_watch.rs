@@ -22,6 +22,7 @@ pub(super) fn rearm() {
     PENDING.store(true, Ordering::Release);
 }
 
+#[allow(clippy::needless_return)] // return is needed when the linux cfg block is compiled
 pub(super) fn ensure_started() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;

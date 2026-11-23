@@ -98,6 +98,8 @@ impl TestEnvGuard {
         // outcomes nondeterministic across transports.
         jcode::env::set_var("JCODE_MEMORY_ENABLED", "0");
         jcode::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "0");
+        // Harness stop-gate injects correction turns that consume scripted responses.
+        jcode::env::set_var("JCODE_HARNESS_ENFORCEMENT", "0");
 
         Ok(Self {
             _lock: lock,

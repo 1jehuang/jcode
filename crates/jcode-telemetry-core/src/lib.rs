@@ -1067,10 +1067,6 @@ fn mark_command_family_usage(state: &mut SessionTelemetry, command: &str) {
     }
 }
 
-fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Value) {
-    mark_tool_feature_usage_in(state, classify_tool_category(name), name, input);
-}
-
 fn mark_tool_feature_usage_in(
     state: &mut SessionTelemetry,
     category: ToolCategory,

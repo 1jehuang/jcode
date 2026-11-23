@@ -3513,6 +3513,7 @@ pub(super) async fn process_message_streaming_mpsc(
 
 /// As [`process_message_streaming_mpsc`], asking the provider to enforce
 /// `response_schema` natively for this turn when it supports it.
+#[allow(dead_code)] // no caller on master yet, tracked in #12
 pub(super) async fn process_message_streaming_mpsc_with_schema(
     agent: Arc<Mutex<Agent>>,
     content: &str,
@@ -3556,6 +3557,7 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     .await
 }
 
+#[allow(dead_code)] // no caller on master yet, tracked in #12
 pub(super) async fn process_locked_message_streaming_mpsc_with_schema(
     agent: &mut Agent,
     content: &str,

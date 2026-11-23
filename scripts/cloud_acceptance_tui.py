@@ -160,6 +160,7 @@ class CloudTUI:
             "OPENAI_COMPAT_API_KEY": "synthetic-acceptance-key",
             "JCODE_OPENAI_COMPAT_DEFAULT_MODEL": "fake-model",
             "JCODE_NO_TELEMETRY": "1", "JCODE_TELEMETRY": "off", "JCODE_NO_AUTO_UPDATE": "1",
+            "JCODE_HARNESS_ENFORCEMENT": "0",
         }
         for key in ("host_key", "client_key"):
             run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.root / "ssh" / key)], env=self.env)

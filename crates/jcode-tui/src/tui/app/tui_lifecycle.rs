@@ -22,6 +22,34 @@ impl App {
         self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
     }
 
+    /// A mid-turn upstream stall (no stream events past the idle timeout) is transient far more
+    /// often than not, so resend the in-flight turn automatically: at most
+    /// `STREAM_STALL_RETRY_MAX_ATTEMPTS`, with exponential backoff (5s, 10s). Unlike the generic
+    /// retry this does not require the turn to have been sent with `auto_retry`.
+    pub(super) fn schedule_stream_stall_retry(&mut self, reason: &str) -> bool {
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if pending.retry_attempts >= Self::STREAM_STALL_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        pending.retry_attempts += 1;
+        pending.auto_retry = true;
+        let attempt = pending.retry_attempts;
+        let backoff_secs = stream_stall_backoff_secs(attempt);
+        let retry_at = Instant::now() + Duration::from_secs(backoff_secs);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.push_display_message(DisplayMessage::system(format!(
+            "{} Retrying automatically (attempt {}/{}, in {}s).",
+            reason.trim(),
+            attempt,
+            Self::STREAM_STALL_RETRY_MAX_ATTEMPTS,
+            backoff_secs
+        )));
+        true
+    }
+
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
@@ -1664,5 +1692,23 @@ impl App {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+}
+
+/// Exponential backoff for stream-stall resends: 5s, 10s, 20s, ... (attempt is 1-based).
+pub(super) fn stream_stall_backoff_secs(attempt: u8) -> u64 {
+    5u64 << u32::from(attempt.saturating_sub(1)).min(6)
+}
+
+#[cfg(test)]
+mod stream_stall_retry_tests {
+    use super::stream_stall_backoff_secs;
+
+    #[test]
+    fn stall_backoff_is_exponential_and_bounded() {
+        assert_eq!(stream_stall_backoff_secs(1), 5);
+        assert_eq!(stream_stall_backoff_secs(2), 10);
+        assert_eq!(stream_stall_backoff_secs(3), 20);
+        assert_eq!(stream_stall_backoff_secs(200), 5 << 6);
     }
 }

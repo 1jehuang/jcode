@@ -1992,7 +1992,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                 }
             }
             let stall_desc = format_stall_duration(stall_timeout);
-            if !app.schedule_pending_remote_retry(&format!(
+            if !app.schedule_stream_stall_retry(&format!(
                 "⚠ Stream stalled (no response for {stall_desc}). Processing cancelled.",
             )) {
                 // Keep a dispatched-but-unfinished queued follow-up on the
