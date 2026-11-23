@@ -343,6 +343,7 @@ fn handle_server_event_inner(
                 app.insert_thought_line(thought_line);
                 return eager_stream_redraw;
             }
+            app.stream_message_ended = false;
             app.streaming.response_output.text(&text);
             let mut needs_redraw = false;
             if matches!(
@@ -392,6 +393,7 @@ fn handle_server_event_inner(
             // client TPS timer), so the status arrives here as `Streaming`; flip it
             // to `Thinking` while reasoning deltas flow. The next `TextDelta` moves
             // it back to `Streaming`.
+            app.stream_message_ended = false;
             if !matches!(app.status, ProcessingStatus::RunningTool(_)) {
                 let thinking_start = *app.thinking_start.get_or_insert_with(Instant::now);
                 if !matches!(app.status, ProcessingStatus::Thinking(_)) {
@@ -744,6 +746,7 @@ fn handle_server_event_inner(
                 }
                 _ => crate::message::ConnectionPhase::Connecting,
             };
+            app.stream_message_ended = false;
             app.status = if matches!(cp, crate::message::ConnectionPhase::Streaming) {
                 app.resume_streaming_tps();
                 app.connection_phase_started = None;
