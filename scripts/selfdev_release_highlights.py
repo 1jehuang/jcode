@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 TAG = re.compile(r'selfdev-linux-([0-9a-f]{40})')
+SEMVER_TAG = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
 MAX_ITEMS = 8
 MAX_ITEM_CHARS = 360
 MAX_BUNDLED_ITEMS = 50
@@ -68,9 +69,20 @@ def body(sha, notes, tags):
         raise ValueError('invalid commit SHA')
     items = bullets(notes)
     previous = None
-    for tag in tags:  # API release order, newest first; ignore unrelated histories.
-        match = TAG.fullmatch(tag.strip())
-        if match and (base := match[1]) != sha:
+    for raw_tag in tags:  # API release order, newest first; ignore unrelated histories.
+        tag = raw_tag.strip()
+        base = None
+        if match := TAG.fullmatch(tag):
+            base = match[1]
+        elif SEMVER_TAG.fullmatch(tag):
+            resolved = subprocess.run(
+                ['git', 'rev-parse', '--verify', '--quiet', f'refs/tags/{tag}^{{commit}}'],
+                capture_output=True,
+                text=True,
+            )
+            if resolved.returncode == 0:
+                base = resolved.stdout.strip()
+        if base and base != sha:
             status = subprocess.run(['git', 'merge-base', '--is-ancestor', base, sha]).returncode
             if status == 0:
                 previous = base

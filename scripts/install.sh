@@ -380,13 +380,6 @@ valid_release_tag "$VERSION" || err "Failed to determine latest version"
 # release that has both.
 if [ -z "${JCODE_VERSION:-}" ] && [ "$INSTALL_CHANNEL" != "preview" ] && ! release_has_artifact "$VERSION"; then
   info "Release $VERSION has no published $ARTIFACT asset yet; looking for the newest release that does..."
-  FALLBACK_TAGS=$(curl -fsSL --retry 2 --connect-timeout 10 \
-    "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null |
-    awk '
-      /"tag_name":/ { gsub(/.*"tag_name": *"|".*/, ""); tag=$0 }
-      /"draft": *true/ { draft=1 }
-      /"prerelease":/ { if ($0 ~ /true/ || draft) skip=1; if (tag != "" && !skip) print tag; tag=""; draft=0; skip=0 }
-    ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1nr -k2,2nr -k3,3nr || true)
   EXISTING_SEMVER=""
   for existing_bin in "$INSTALL_DIR/jcode" "$INSTALL_DIR/jcode.exe"; do
     if [ -x "$existing_bin" ]; then
@@ -394,18 +387,36 @@ if [ -z "${JCODE_VERSION:-}" ] && [ "$INSTALL_CHANNEL" != "preview" ] && ! relea
       break
     fi
   done
-  for tag in $FALLBACK_TAGS; do
-    [ "$tag" = "$VERSION" ] && continue
-    if [ -n "$EXISTING_SEMVER" ]; then
-      # Never downgrade an existing install via fallback.
-      newest=$(printf '%s\n%s\n' "${tag#v}" "$EXISTING_SEMVER" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
-      if [ "$newest" = "$EXISTING_SEMVER" ]; then break; fi
-    fi
-    if release_has_artifact "$tag"; then
-      info "Using $tag (newest release with a published $ARTIFACT asset)."
-      VERSION="$tag"
-      break
-    fi
+  FOUND_FALLBACK=""
+  for page in 1 2 3 4 5; do
+    FALLBACK_TAGS=$(curl -fsSL --retry 2 --connect-timeout 10 \
+      "https://api.github.com/repos/$REPO/releases?per_page=100&page=$page" 2>/dev/null |
+      awk '
+        /"tag_name":/ { gsub(/.*"tag_name": *"|".*/, ""); tag=$0 }
+        /"draft": *true/ { draft=1 }
+        /"prerelease":/ { if ($0 ~ /true/ || draft) skip=1; if (tag != "" && !skip) print tag; tag=""; draft=0; skip=0 }
+      ' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1nr -k2,2nr -k3,3nr || true)
+    [ -z "$FALLBACK_TAGS" ] && break
+    REACHED_EXISTING=false
+    for tag in $FALLBACK_TAGS; do
+      [ "$tag" = "$VERSION" ] && continue
+      if [ -n "$EXISTING_SEMVER" ]; then
+        # Never downgrade an existing install via fallback.
+        newest=$(printf '%s\n%s\n' "${tag#v}" "$EXISTING_SEMVER" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+        if [ "$newest" = "$EXISTING_SEMVER" ]; then
+          REACHED_EXISTING=true
+          break
+        fi
+      fi
+      if release_has_artifact "$tag"; then
+        info "Using $tag (newest release with a published $ARTIFACT asset)."
+        VERSION="$tag"
+        FOUND_FALLBACK="$tag"
+        break
+      fi
+    done
+    [ -n "$FOUND_FALLBACK" ] && break
+    [ "$REACHED_EXISTING" = true ] && break
   done
 fi
 INSTALL_VERSION="${VERSION#v}"
