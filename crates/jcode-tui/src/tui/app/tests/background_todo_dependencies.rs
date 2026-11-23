@@ -78,6 +78,33 @@ fn goal_that_cannot_complete_pauses_its_pokes_survives_reload_and_resumes_when_c
 }
 
 #[test]
+fn delegated_work_suppresses_both_new_and_queued_pokes_until_worker_stops() {
+    with_temp_jcode_home(|| {
+        let mut app = waiting_dependency_test_app();
+        let mut item = dependency_todo("implement", "unrelated");
+        item.assigned_to = Some("worker".into());
+        crate::todo::save_todos(&app.session.id, std::slice::from_ref(&item)).unwrap();
+        app.remote_swarm_members = vec![
+            serde_json::from_value(serde_json::json!({
+                "session_id":"worker", "status":"running"
+            }))
+            .unwrap(),
+        ];
+        let mut queued = vec![
+            crate::todo::build_actionable_poke_message(&[item]),
+            "user request".into(),
+        ];
+        super::commands::drop_stale_incomplete_todo_pokes(&app, &mut queued);
+        assert_eq!(queued, ["user request"]);
+        for _ in 0..4 {
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+        }
+        app.remote_swarm_members[0].status = "failed".into();
+        assert!(app.schedule_auto_poke_followup_if_needed());
+    });
+}
+
+#[test]
 fn await_dependency_suppresses_pokes_and_survives_reload_until_terminal_or_timeout() {
     with_temp_jcode_home(|| {
         for timeout in [false, true] {

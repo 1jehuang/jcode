@@ -3,7 +3,8 @@
 # to the caller. Requires a reviewed client with managed glibc217/ARM64 support.
 # Published alpha.19 predates that support, despite sharing the version label
 # with newer source builds. Unsupported clients must fail, never build locally.
-# Usage: JCODE_BUILD_SEMVER=v1.0.0-preview.N bash scripts/build_preview_linux_hosted.sh TARGET
+# Shared by stable releases (release.yml) and previews (preview.yml).
+# Usage: JCODE_BUILD_SEMVER=vX.Y.Z|v1.0.0-preview.N bash scripts/build_preview_linux_hosted.sh TARGET
 set -euo pipefail
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -31,9 +32,14 @@ python3 - <<'PY'
 import os
 import re
 value = os.environ['JCODE_BUILD_SEMVER']
-match = re.fullmatch(r'v?1\.0\.0-preview\.([1-9][0-9]*)', value)
+# Stable releases (vMAJOR.MINOR.PATCH) share this hosted build path.
+core = r'(?:0|[1-9][0-9]{0,8})'
+stable = rf'v{core}\.{core}\.{core}'
+if re.fullmatch(stable, value):
+    raise SystemExit(0)
+match = re.fullmatch(rf'(?:v?1\.0\.0-preview|{stable}-selfdev)\.([1-9][0-9]*)', value)
 if not match or len(match[1]) > 20 or int(match[1]) > 18446744073709551615:
-    raise SystemExit('error: expected JCODE_BUILD_SEMVER=v1.0.0-preview.N with a positive u64 N')
+    raise SystemExit('error: expected vX.Y.Z, vX.Y.Z-selfdev.N, or v1.0.0-preview.N with a positive u64 N')
 PY
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"

@@ -226,25 +226,29 @@ fn onboarding_golden_walks_every_phase() {
     let width = 80u16;
     let height = 30u16;
 
-    // 1. No detected imports: "Log in to OpenAI?" Yes/No prompt.
+    // 1. No detected imports: 4-option login choice (OpenAI / Claude / API key / Skip).
     {
         let app = app_in_phase(OnboardingPhase::LoginOpenAi {
-            yes_highlighted: true,
+            choice: crate::tui::OnboardingLoginChoice::OpenAi,
         });
         let text = render_onboarding_text(&app, width, height);
         dump("LoginOpenAi (no imports)", &text);
-        // Lean prompt: just the question + the Yes/No lozenge pills. The Esc hint
-        // already covers the "skip / log in later" path, so no extra prose.
-        assert!(text.contains("Log in to OpenAI?"), "{text}");
-        assert!(text.contains("Yes") && text.contains("No"), "{text}");
+        assert!(text.contains("How would you like to log in?"), "{text}");
         assert!(
-            text.contains("\u{25D6} Yes \u{25D7}") && text.contains("\u{25D6} No \u{25D7}"),
-            "yes/no lozenge pills: {text}"
+            text.contains("\u{25D6} OpenAI \u{25D7}")
+                && text.contains("\u{25D6} Claude \u{25D7}")
+                && text.contains("\u{25D6} API key \u{25D7}")
+                && text.contains("\u{25D6} Skip \u{25D7}"),
+            "4-option login lozenge pills: {text}"
         );
-        // The redundant "Choose No to skip" line was removed.
+        // Narrow 40-column terminals split into two balanced rows without clipping.
+        let narrow = render_onboarding_text(&app, 40, height);
         assert!(
-            !text.contains("Choose \"No\" to skip"),
-            "redundant skip line should be gone: {text}"
+            narrow.contains("OpenAI")
+                && narrow.contains("Claude")
+                && narrow.contains("API key")
+                && narrow.contains("Skip"),
+            "narrow 40-col 4-option pills: {narrow}"
         );
     }
 
@@ -488,7 +492,7 @@ fn onboarding_golden_walks_failure_and_async_states() {
     }
     {
         let app = app_in_phase(OnboardingPhase::LoginOpenAi {
-            yes_highlighted: true,
+            choice: crate::tui::OnboardingLoginChoice::OpenAi,
         });
         let text = render_onboarding_text(&app, width, height);
         assert_guided_polish("LoginOpenAi", &text);
@@ -588,7 +592,7 @@ fn onboarding_import_happy_path_images() {
     // ---- login_openai: fresh install, nothing importable detected ----
     {
         let app = app_in_phase(OnboardingPhase::LoginOpenAi {
-            yes_highlighted: true,
+            choice: crate::tui::OnboardingLoginChoice::OpenAi,
         });
         write_onboarding_svg(&output_dir, "login-openai.svg", &app, width, height);
     }

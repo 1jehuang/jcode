@@ -33,6 +33,7 @@ fn remote_exact_failover_fixture() -> (App, crate::tui::backend::RemoteConnectio
     target.api_method = "openai-oauth@openai-fox".into();
     app.remote_model_options = vec![target];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".into(),
         images: vec![],
         is_system: false,
@@ -328,6 +329,7 @@ fn test_remote_failover_stops_when_cross_route_retry_budget_is_spent() {
         let payload = app.pending_fallback_resend.take().unwrap();
         app.pending_automatic_failover_route = None;
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: payload.content,
             images: payload.images,
             is_system: payload.is_system,
@@ -877,6 +879,7 @@ fn test_remote_auth_error_arms_fallback_offer_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -937,6 +940,7 @@ fn test_remote_usage_limit_shows_error_and_single_switch_line() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1039,6 +1043,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
         claude_oauth_route("claude-sonnet-4"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,
@@ -1148,6 +1153,122 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
     assert!(!app.is_processing, "no resend should fire");
+}
+
+#[test]
+fn test_antigravity_individual_quota_429_immediately_auto_fails_over_without_rate_limit_hold() {
+    let antigravity_429 = r#"Antigravity generateContent failed (HTTP 429 Too Many Requests): {
+  "error": {
+    "code": 429,
+    "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h16m14s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "QUOTA_EXHAUSTED",
+        "metadata": {
+          "model": "gemini-4-neon-low",
+          "quotaResetDelay": "2h16m14.39368445s"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "8174.393684450s"
+      }
+    ]
+  }
+}"#;
+
+    for initial_route_api_method in [Some("https".to_string()), None] {
+        with_temp_jcode_home(|| {
+            write_test_config(
+                "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = true\n",
+            );
+            seed_failover_openai_fox();
+            crate::auth::account_pool::AccountPool {
+                members: vec!["antigravity".into(), "openai:openai-fox".into()],
+                excluded: vec![],
+                ..Default::default()
+            }
+            .save()
+            .unwrap();
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _guard = rt.enter();
+            let mut app = create_test_app();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            app.is_remote = true;
+            app.remote_provider_name = Some("Antigravity".into());
+            app.remote_provider_model = Some("gemini-4-neon-low".into());
+            app.session.route_api_method = initial_route_api_method.clone();
+            app.remote_model_options = vec![
+                crate::provider::ModelRoute {
+                    model: "gemini-4-neon-high".into(),
+                    provider: "Antigravity".into(),
+                    api_method: "https".into(),
+                    available: true,
+                    detail: String::new(),
+                    usage: None,
+                    cheapness: None,
+                },
+                crate::provider::ModelRoute {
+                    model: "gpt-5.4".into(),
+                    provider: "OpenAI".into(),
+                    api_method: "openai-oauth@openai-fox".into(),
+                    available: true,
+                    detail: String::new(),
+                    usage: None,
+                    cheapness: None,
+                },
+            ];
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+            app.current_message_id = Some(42);
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                jarvis_voice: false,
+                content: "keep going".into(),
+                images: vec![],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Error {
+                    id: 42,
+                    message: antigravity_429.to_string(),
+                    retry_after_secs: None,
+                },
+                &mut remote,
+            );
+
+            assert!(
+                app.rate_limit_reset.is_none(),
+                "exhausted Antigravity quota must not park on rate_limit_reset (route_api_method={initial_route_api_method:?})"
+            );
+            assert!(
+                app.pending_fallback_offer.is_none(),
+                "pooled Antigravity failover must be automatic, not a manual Ctrl+Y offer (route_api_method={initial_route_api_method:?})"
+            );
+            assert_eq!(
+                app.pending_automatic_failover_route
+                    .as_ref()
+                    .map(|route| (route.api_method.as_str(), route.model.as_str())),
+                Some(("openai-oauth@openai-fox", "gpt-5.4")),
+                "must immediately stage failover to next pooled account (route_api_method={initial_route_api_method:?})"
+            );
+            assert_eq!(
+                app.pending_fallback_resend
+                    .as_ref()
+                    .map(|payload| payload.content.as_str()),
+                Some("keep going"),
+                "must retain failed turn payload for automatic resend"
+            );
+        });
+    }
 }
 
 #[path = "remote_failover_routes_additional_tests.rs"]

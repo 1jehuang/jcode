@@ -39,6 +39,7 @@ fn session(id: &str) -> SessionInfo {
             session_path: "unused".into(),
         },
         external_path: Some("unused".into()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }

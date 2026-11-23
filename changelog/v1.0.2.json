@@ -1,0 +1,8 @@
+{
+  "version": "1.0.2",
+  "date": "2026-11-19",
+  "title": "Preserve screenshot history",
+  "highlights": ["Reading a 13th screenshot no longer removes earlier images or invalidates the provider prompt cache just because of the image count."],
+  "improvements": [],
+  "fixes": ["Keep tool images intact until their combined base64 payload exceeds 48 MiB. Above that threshold, retain up to 24 MiB, always keeping the newest image."]
+}

@@ -43,10 +43,10 @@ pub(super) struct SearchRank {
     source_weight: u32,
     literal: bool,
     exact_field: bool,
+    intent_terms: usize,
     /// Bounded topical evidence from indexed user text, not titles or
     /// agent/tool chatter. Repeated mentions beat a one-off incidental hit.
     user_mentions: usize,
-    intent_terms: usize,
     metadata_terms: usize,
     whole_terms: usize,
     score: i64,
@@ -169,6 +169,7 @@ pub(super) struct Entry {
     save_label: Option<String>,
     has_prompt: bool,
     opening_prompt: String,
+    user_intention: String,
     intent_text: String,
     working_dir: Option<String>,
     server_name: Option<String>,
@@ -196,10 +197,12 @@ impl Entry {
                 .as_deref()
                 .unwrap_or("")
                 .to_owned(),
+            user_intention: session.user_intention.as_deref().unwrap_or("").to_owned(),
             intent_text: format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 session.title,
                 session.save_label.as_deref().unwrap_or(""),
+                session.user_intention.as_deref().unwrap_or(""),
                 session.first_user_prompt.as_deref().unwrap_or(""),
             ),
         }
@@ -225,12 +228,18 @@ impl Entry {
             && self.cloud == (session.server_icon.as_deref() == Some("☁"))
             && self.has_prompt == session.first_user_prompt.is_some()
             && self.opening_prompt == session.first_user_prompt.as_deref().unwrap_or("")
+            && self.user_intention == session.user_intention.as_deref().unwrap_or("")
     }
 
     fn exact_field(&self, query: &str) -> bool {
-        [&self.title, &self.short_name, &self.id]
-            .iter()
-            .any(|field| normalized_equals(field, query))
+        [
+            &self.title,
+            &self.short_name,
+            &self.id,
+            &self.user_intention,
+        ]
+        .iter()
+        .any(|field| normalized_equals(field, query))
             || self
                 .save_label
                 .as_ref()
@@ -286,7 +295,7 @@ fn build_candidates(
         // Literal metadata matches still go to the worker, which upgrades
         // their rank once it knows where in the transcript each word came from,
         // unless every word already comes from a user-intent field.
-        if !defer_metadata && missing_tokens.is_empty() && (tokens.len() < 4 || !entry.has_prompt) {
+        if !defer_metadata && missing_tokens.is_empty() && (tokens.len() < 2 || !entry.has_prompt) {
             let intent = lowercase_field(&entry.intent_text);
             if tokens.iter().all(|token| intent.contains(token.as_str())) {
                 continue;
@@ -339,7 +348,12 @@ fn prioritize_candidates(
         }
         let mut rank = literal_metadata_rank(&candidate.search_index, tokens)
             .with_exact_field(candidate.exact_field);
-        rank.opening_prompt = phrase.map_or(0, |phrase| phrase.rank(&candidate.opening_prompt));
+        rank.opening_prompt = phrase.map_or(0, |phrase| {
+            phrase
+                .rank(&candidate.opening_prompt)
+                .max(phrase.rank(&candidate.user_intention))
+                .max(phrase.rank(&candidate.title))
+        });
         let intent = lowercase_field(&candidate.intent_text);
         rank.intent_terms = tokens
             .iter()
@@ -365,13 +379,10 @@ fn opening_prompt_rank(prompt: &str, query: &str) -> usize {
 }
 
 fn phrase_words(text: &str, limit: usize) -> Vec<String> {
-    text.split_whitespace()
-        .take(limit)
-        .map(|word| {
-            word.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
+    text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
+        .take(limit)
+        .map(str::to_lowercase)
         .collect()
 }
 
@@ -385,7 +396,7 @@ struct PhraseQuery {
 impl PhraseQuery {
     fn new(query: &str) -> Option<Self> {
         let words = phrase_words(query, 256);
-        if words.len() < 4 || words.len() > 64 {
+        if !(2..=64).contains(&words.len()) {
             return None;
         }
         Some(Self {
@@ -400,6 +411,29 @@ impl PhraseQuery {
 
     fn rank(&self, prompt: &str) -> usize {
         let prompt = phrase_words(prompt, 2048);
+        let last_idx = self.words.len() - 1;
+        if self.words.len() < 4 {
+            // Short keyword queries need all words in one user message, not
+            // necessarily adjacent or in the order the user remembers them.
+            // Allow prefix matching on the last token so mid-word typing keeps
+            // the phrase rank stable.
+            return if self.words.iter().enumerate().all(|(i, word)| {
+                let needed = self.words[..=i].iter().filter(|w| *w == word).count();
+                let is_last = i == last_idx;
+                prompt
+                    .iter()
+                    .filter(|w| {
+                        *w == word || (is_last && word.len() >= 2 && w.starts_with(word.as_str()))
+                    })
+                    .take(needed)
+                    .count()
+                    == needed
+            }) {
+                self.words.len()
+            } else {
+                0
+            };
+        }
         if prompt.len() + 1 < self.words.len() * 4 / 5 {
             return 0;
         }
@@ -415,8 +449,12 @@ impl PhraseQuery {
                     .iter()
                     .zip(&self.prepared)
                     .zip(window)
-                    .filter(|((word, prepared), candidate)| {
+                    .enumerate()
+                    .filter(|(i, ((word, prepared), candidate))| {
                         word == candidate
+                            || (*i == last_idx
+                                && word.len() >= 2
+                                && candidate.starts_with(word.as_str()))
                             || (word.len() >= 4
                                 && candidate.len() <= 128
                                 && prepared.matches_search_text(candidate))
@@ -444,8 +482,14 @@ fn user_prompt_phrase_rank(paths: &[PathBuf], phrase: &PhraseQuery, cancel: &Ato
         }
         if let Some(segments) = text_cache::segments(path, cancel) {
             for (text, source) in segments.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    return 0;
+                }
                 if source == Source::User {
                     sink.best = sink.best.max(phrase.rank(text));
+                    if sink.best == phrase.words.len() {
+                        return sink.best;
+                    }
                 }
             }
             continue;

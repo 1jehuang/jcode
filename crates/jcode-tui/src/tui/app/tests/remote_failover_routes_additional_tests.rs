@@ -109,6 +109,7 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
         openai_oauth_route("gpt-5.5"),
     ];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "hi".to_string(),
         images: vec![],
         is_system: false,

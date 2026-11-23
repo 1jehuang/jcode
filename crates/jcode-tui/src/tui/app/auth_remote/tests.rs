@@ -586,7 +586,7 @@ fn ssh_inline_picker_filter_and_escape_match_local_navigation() {
         }
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.filter, "claude");
-        assert_eq!(picker.filtered.len(), 2);
+        assert_eq!(picker.filtered.len(), 3);
         app.handle_ssh_login_key(KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(
             app.inline_interactive_state
@@ -643,7 +643,7 @@ fn ssh_inline_picker_status_is_remote_only_and_failure_stays_unknown() {
                 "attention"
             );
             assert_eq!(
-                picker_provider(picker, "gemini").options[0].api_method,
+                picker_provider(picker, "antigravity").options[0].api_method,
                 "status unknown"
             );
             let api = picker_provider(picker, "openai-api");

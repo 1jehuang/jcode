@@ -80,25 +80,6 @@ pub(super) fn swarm_is_self_or_ancestor(
             .any(|candidate| candidate == ancestor)
 }
 
-/// Members spawned by `session_id`, directly or transitively.
-pub(super) fn swarm_descendants(
-    members: &HashMap<String, SwarmMember>,
-    session_id: &str,
-) -> Vec<String> {
-    let mut descendants: Vec<String> = members
-        .keys()
-        .filter(|candidate| {
-            candidate.as_str() != session_id
-                && swarm_ancestors(members, candidate)
-                    .iter()
-                    .any(|ancestor| ancestor == session_id)
-        })
-        .cloned()
-        .collect();
-    descendants.sort();
-    descendants
-}
-
 /// Fire the cancel signal of every turn `session_id` is currently running.
 /// Returns how many were fired.
 ///

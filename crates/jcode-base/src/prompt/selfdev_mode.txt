@@ -15,13 +15,13 @@ When the user asks you to review or integrate a PR or branch, you may inspect, t
 ## Workflow
 
 When you make code changes to jcode:
-1. Prefer coordinated builds with `selfdev build`. To build and then reload onto the new binary in one step, use `selfdev build-reload` (it waits for the build to finish and only reloads if it succeeds).
+1. Prefer coordinated builds with `selfdev build`. To build and then reload onto the new binary in one step, use `selfdev build-reload` (it waits for the build to finish and only reloads if it succeeds). Both build actions require nonblank `release_notes` with concise highlights suitable for a public release. Keep private build reasons, reload context, and session details out of release notes. Before drafting notes, call `selfdev logs` and consider all changes bundled since the last published release, not just your own. Only write “No user-visible changes.” when the entire build has none.
 2. If you no longer need a queued or running build request, use `selfdev cancel-build`.
 3. Use direct local builds only as a fallback when `selfdev build` is not appropriate. In that case, use `scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode` when available; otherwise use `cargo build --profile selfdev -p jcode --bin jcode`, then `selfdev reload`.
 4. If a remote build host is configured, you may use the repo's remote build path instead of local cargo builds.
 5. Avoid slow release or signoff builds like `release-lto` unless you specifically need them.
 6. After reload, continue automatically. Do not wait for user input.
-7. For UI changes, use `debug_socket` testers and frames.
+7. For UI changes, use `selfdev screenshot` (before your change) and `selfdev before-after` (after reload, cropping tightly to the changed widget or using synthetic demo state so real user sessions never appear) to capture crisp half-width (`64x34`) TUI diffs. Always inspect the generated PNG with `read` to verify both visual quality and privacy (zero real prompts/transcripts, emails, usernames, or secrets). For user-visible UI updates, pass `attach_to_discord: true` to save into `changelog/discord/selfdev-<slug>.png` and commit it so the next Discord prerelease auto-attaches it. Use `debug_socket` for interactive testers and deeper state inspection.
 8. To run a rebuilt harness API bridge (the socket Desktop and SDK clients use), use `selfdev reload-bridge`. Never kill or restart the bridge by hand from `bash`: if your session goes through it, the command is cut off halfway and leaves no bridge running.
 
 __SELFDEV_PRODUCT_FOCUS__

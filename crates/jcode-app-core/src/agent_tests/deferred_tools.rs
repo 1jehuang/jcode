@@ -200,9 +200,10 @@ async fn late_mcp_tools_are_announced_once_in_the_transcript() {
     assert!(text.contains("server: late"));
     assert!(text.contains("tool: tool"));
     assert!(
-        text.contains("input_schema: {"),
-        "schema must be included: {text}"
+        !text.contains("input_schema: {"),
+        "schemas are fetched on demand, not announced: {text}"
     );
+    assert!(text.contains("mcp action=search"));
     assert!(text.contains("mcp action=call"));
 
     // Second pass: nothing new, no second announcement, and the cached

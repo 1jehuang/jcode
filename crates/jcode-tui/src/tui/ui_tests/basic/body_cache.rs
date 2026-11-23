@@ -460,7 +460,9 @@ fn test_prepare_body_swarm_await_wake_is_not_a_numbered_prompt() {
                 .map(extract_line_text)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(text.contains("🐝 Swarm await"), "{text}");
+            assert!(!text.contains("🐝 Swarm await"), "{text}");
+            assert!(text.contains("1› first prompt"), "{text}");
+            assert!(text.contains("2› second prompt"), "{text}");
             assert!(!text.contains("worker transcript"), "{text}");
             assert!(!text.contains("Swarm await finished"), "{text}");
             assert_eq!(prepared.user_prompt_texts.len(), 2);
@@ -1093,9 +1095,18 @@ fn test_full_prep_cache_drops_superseded_streaming_frames() {
     cache.insert(key_for(10, 80), prepared());
     cache.insert(key_for(20, 80), prepared());
 
-    assert!(cache.get_exact(&key_for(0, 80)).is_some(), "settled frame kept");
-    assert!(cache.get_exact(&key_for(10, 80)).is_none(), "stale stream frame dropped");
-    assert!(cache.get_exact(&key_for(20, 80)).is_some(), "newest stream frame kept");
+    assert!(
+        cache.get_exact(&key_for(0, 80)).is_some(),
+        "settled frame kept"
+    );
+    assert!(
+        cache.get_exact(&key_for(10, 80)).is_none(),
+        "stale stream frame dropped"
+    );
+    assert!(
+        cache.get_exact(&key_for(20, 80)).is_some(),
+        "newest stream frame kept"
+    );
 }
 
 #[test]

@@ -307,7 +307,38 @@ async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
 }
 
 #[tokio::test]
-async fn cancel_without_local_task_still_signals_session_control() {
+async fn detached_coordinator_cancel_signals_only_its_own_turn() {
+    fn member(
+        session_id: &str,
+        parent: Option<&str>,
+    ) -> (SwarmMember, mpsc::UnboundedReceiver<ServerEvent>) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        (
+            SwarmMember {
+                session_id: session_id.to_string(),
+                event_tx,
+                event_txs: HashMap::new(),
+                working_dir: None,
+                swarm_id: Some("swarm-1".to_string()),
+                swarm_enabled: true,
+                status: "running".to_string(),
+                detail: None,
+                task_label: None,
+                friendly_name: Some(session_id.to_string()),
+                report_back_to_session_id: parent.map(str::to_string),
+                latest_completion_report: None,
+                role: "agent".to_string(),
+                joined_at: Instant::now(),
+                last_status_change: Instant::now(),
+                is_headless: true,
+                output_tail: None,
+                todo_progress: None,
+                todo_items: Vec::new(),
+                runtime: crate::protocol::SwarmMemberRuntime::default(),
+            },
+            event_rx,
+        )
+    }
     let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stop_signal = InterruptSignal::new();
     let control = SessionControlHandle::cancel_only(
@@ -330,6 +361,20 @@ async fn cancel_without_local_task_still_signals_session_control() {
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _) = broadcast::channel(8);
     let mut client_is_processing = true;
+    let worker = "detached_cancel_worker";
+    let nested = "detached_cancel_grandchild";
+    let worker_signal = InterruptSignal::new();
+    let nested_signal = InterruptSignal::new();
+    let _worker_turn =
+        crate::turn_cancel_registry::register_active_turn(worker, worker_signal.clone());
+    let _nested_turn =
+        crate::turn_cancel_registry::register_active_turn(nested, nested_signal.clone());
+    let (child, mut child_events) = member(worker, Some("session_detached_cancel"));
+    let (grandchild, mut nested_events) = member(nested, Some(worker));
+    swarm_members
+        .write()
+        .await
+        .extend([(worker.into(), child), (nested.into(), grandchild)]);
     let mut message_id = Some(99);
     let mut session_id = Some("session_detached_cancel".to_string());
     let mut task = None;
@@ -356,6 +401,19 @@ async fn cancel_without_local_task_still_signals_session_control() {
     )
     .await;
 
+    assert!(!worker_signal.is_set());
+    assert!(!nested_signal.is_set());
+    for id in [worker, nested] {
+        assert_eq!(swarm_members.read().await[id].status, "running");
+    }
+    for events in [&mut child_events, &mut nested_events] {
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, ServerEvent::TurnStopped { .. }));
+        }
+    }
+    assert_eq!(crate::server::swarm::cancel_active_turns(worker), 1);
+    assert!(worker_signal.is_set());
+    assert!(!nested_signal.is_set());
     assert!(stop_signal.is_set());
     assert!(!client_is_processing);
     assert!(message_id.is_none());

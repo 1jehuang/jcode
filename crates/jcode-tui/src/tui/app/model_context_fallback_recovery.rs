@@ -36,20 +36,20 @@ impl App {
                 || failover_decision.should_mark_provider_unavailable()
                 || crate::provider::parse_failover_prompt_message(error).is_some(),
         };
+        let source_identity = Self::fallback_pool_identity(&current_api_method);
         if !self.is_remote
             && failover_decision.should_mark_provider_unavailable()
-            && let Some((method, label)) = current_api_method.split_once('@')
+            && let Some((key, _)) = source_identity.as_ref()
         {
-            let provider = match method {
-                "claude-oauth" => Some("claude"),
-                "openai-oauth" => Some("openai"),
-                _ => None,
-            };
-            if let Some(provider) = provider {
+            if let Some((provider, label)) = key.split_once(':') {
                 crate::provider::models::record_provider_unavailable_for_account_label(
                     provider,
                     Some(label),
                     error,
+                );
+            } else {
+                crate::provider::models::record_provider_unavailable_for_account_label(
+                    key, None, error,
                 );
             }
         }
@@ -57,7 +57,6 @@ impl App {
             return false;
         }
         let pool = crate::auth::account_pool::AccountPool::load();
-        let source_identity = Self::fallback_pool_identity(&current_api_method);
         let source_is_pooled = match source_identity.as_ref() {
             Some((key, api_key)) => {
                 !pool.excluded.contains(key)

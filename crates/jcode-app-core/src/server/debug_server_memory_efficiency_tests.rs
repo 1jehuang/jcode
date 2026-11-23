@@ -1,6 +1,80 @@
 //! No-LLM fixtures for the server memory diagnostic's session-only fast path.
 use super::*;
 
+fn diagnostic_event(id: u64, message: &str) -> SwarmEvent {
+    SwarmEvent {
+        id,
+        session_id: format!("fixture-{id}"),
+        session_name: Some("測試".into()),
+        swarm_id: None,
+        event: crate::server::SwarmEventType::Notification {
+            notification_type: "info".into(),
+            message: message.into(),
+        },
+        timestamp: Instant::now(),
+        absolute_time: std::time::SystemTime::now(),
+    }
+}
+
+#[test]
+fn diagnostic_event_byte_count_matches_debug_bytes() {
+    for text in ["", "peer joined", "\0\n\t\\\"🦀é", &"long\n".repeat(32768)] {
+        let e = diagnostic_event(123, text);
+        assert_eq!(estimate_swarm_event_bytes(&e), format!("{e:?}").len());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "optimized alternating per-thread CPU benchmark"]
+fn diagnostic_event_byte_count_thread_cpu() {
+    use std::hint::black_box;
+    fn cpu_ns() -> i128 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: ts is writable for one timespec.
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) },
+            0
+        );
+        i128::from(ts.tv_sec) * 1_000_000_000 + i128::from(ts.tv_nsec)
+    }
+    let old = |e: &SwarmEvent| format!("{e:?}").len();
+    for (name, text, n, iters) in [
+        ("common", "join".into(), 64, 400),
+        ("escaped", "\0\n🦀".repeat(64), 64, 100),
+        ("large", "long\n".repeat(16384), 4, 12),
+    ] {
+        let events: Vec<_> = (0..n).map(|i| diagnostic_event(i, &text)).collect();
+        let functions: [fn(&SwarmEvent) -> usize; 2] = [old, estimate_swarm_event_bytes];
+        let mut times = [Vec::new(), Vec::new()];
+        for round in 0..16 {
+            for index in [round % 2, (round + 1) % 2] {
+                let start = cpu_ns();
+                for _ in 0..iters {
+                    black_box(
+                        black_box(&events)
+                            .iter()
+                            .map(functions[index])
+                            .sum::<usize>(),
+                    );
+                }
+                times[index].push((cpu_ns() - start) / iters);
+            }
+        }
+        for t in &mut times {
+            t.sort_unstable();
+        }
+        eprintln!(
+            "{name}: median thread CPU ns/history old={} new={}",
+            (times[0][7] + times[0][8]) / 2,
+            (times[1][7] + times[1][8]) / 2
+        );
+    }
+}
+
 struct PrivateHome {
     _dir: tempfile::TempDir,
     home: Option<std::ffi::OsString>,

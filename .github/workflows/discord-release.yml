@@ -15,6 +15,10 @@ on:
         description: Existing public release tag to announce
         required: true
         type: string
+      message_id:
+        description: Existing Discord message to edit in place (announced releases only)
+        required: false
+        type: string
 
 concurrency:
   group: discord-release-${{ inputs.tag || github.event.release.tag_name }}
@@ -35,10 +39,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Post release notes to Discord if not already announced
+        if: inputs.message_id == ''
         env:
           GH_TOKEN: ${{ github.token }}
           DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
           TAG: ${{ inputs.tag || github.event.release.tag_name }}
         run: python3 scripts/post_discord_release.py --tag "$TAG"
+
+      - name: Refresh existing announcement in place
+        if: github.event_name == 'workflow_dispatch' && inputs.message_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISCORD_RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ inputs.tag }}
+          MESSAGE_ID: ${{ inputs.message_id }}
+        run: python3 scripts/refresh_selfdev_discord.py

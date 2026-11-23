@@ -3609,6 +3609,24 @@ impl App {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
                     }
+                    PickerAction::AutoApiKey => {
+                        self.inline_interactive_state = None;
+                        self.start_auto_api_key_login();
+                    }
+                    PickerAction::ExpandLoginProviders => {
+                        if let Some(picker) = self.inline_interactive_state.as_mut() {
+                            let target_row = picker.selected;
+                            picker.entries.retain(|entry| {
+                                !matches!(entry.action, PickerAction::ExpandLoginProviders)
+                            });
+                            picker.preview = false;
+                            picker.column = 0;
+                            Self::apply_inline_interactive_filter(picker);
+                            if !picker.filtered.is_empty() {
+                                picker.selected = target_row.min(picker.filtered.len() - 1);
+                            }
+                        }
+                    }
                     PickerAction::RemoteLogin { provider, import } => {
                         self.inline_interactive_state = None;
                         self.select_ssh_login_action(provider, import);
@@ -3910,92 +3928,6 @@ impl App {
             _ => {}
         }
         Ok(())
-    }
-
-    pub(super) fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
-        jcode_fuzzy::fuzzy_score_tokens(pattern, text)
-    }
-
-    pub(super) fn apply_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        if picker.filter.is_empty() {
-            picker.filtered = (0..picker.entries.len()).collect();
-        } else {
-            let query = picker.filter.trim();
-            // Prepare the query once per keystroke instead of re-parsing and
-            // re-lowercasing it for every entry.
-            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
-            let mut scored: Vec<(usize, bool, i32)> = picker
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
-                    let filter_text = picker.filter_text(m);
-                    prepared.score(&filter_text).map(|s| {
-                        let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
-                        let bonus = usage_bonus + if m.recommended { 5 } else { 0 };
-                        (
-                            i,
-                            m.name.eq_ignore_ascii_case(query),
-                            s.saturating_add(bonus),
-                        )
-                    })
-                })
-                .collect();
-            scored.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then(b.2.cmp(&a.2))
-                    .then(
-                        picker.entries[a.0]
-                            .recommendation_rank
-                            .cmp(&picker.entries[b.0].recommendation_rank),
-                    )
-                    .then(picker.entries[a.0].name.cmp(&picker.entries[b.0].name))
-            });
-            picker.filtered = scored.into_iter().map(|(i, _, _)| i).collect();
-        }
-        if picker.filtered.is_empty() {
-            picker.selected = 0;
-        } else {
-            picker.selected = picker.selected.min(picker.filtered.len() - 1);
-        }
-    }
-
-    pub(super) fn tab_complete_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        if picker.filtered.is_empty() {
-            return;
-        }
-        if picker.filtered.len() == 1 {
-            let name = picker.entries[picker.filtered[0]].name.clone();
-            picker.filter = name;
-            Self::apply_inline_interactive_filter(picker);
-            return;
-        }
-        let names: Vec<&str> = picker
-            .filtered
-            .iter()
-            .map(|&i| picker.entries[i].name.as_str())
-            .collect();
-        let first = names[0].to_lowercase();
-        let first_chars: Vec<char> = first.chars().collect();
-        let mut prefix_len = first_chars.len();
-        for name in names.iter().skip(1) {
-            let lower = (*name).to_lowercase();
-            let chars: Vec<char> = lower.chars().collect();
-            let mut common = 0;
-            for (a, b) in first_chars.iter().zip(chars.iter()) {
-                if a == b {
-                    common += 1;
-                } else {
-                    break;
-                }
-            }
-            prefix_len = prefix_len.min(common);
-        }
-        if prefix_len > picker.filter.len() {
-            let first_original = &picker.entries[picker.filtered[0]].name;
-            picker.filter = first_original[..prefix_len].to_string();
-            Self::apply_inline_interactive_filter(picker);
-        }
     }
 }
 
