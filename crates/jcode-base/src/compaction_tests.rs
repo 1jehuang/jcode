@@ -1440,32 +1440,25 @@ async fn refused_compaction_keeps_original_messages_issue_2089() {
 }
 
 #[test]
-fn anthropic_oauth_route_caps_auto_compaction_budget_below_1m_window() {
+fn anthropic_oauth_route_keeps_full_1m_model_budget() {
+    // Regression: a 100k clamp on claude-oauth made a 1M model
+    // emergency-compact in a loop near 100k tokens.
     let _lock = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new();
     manager.set_route_api_method(Some("claude-oauth@fox"));
     manager.set_budget(1_000_000);
-    assert_eq!(manager.token_budget(), ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET);
-    // Survives reset (model switch reseed keeps the route).
+    assert_eq!(manager.token_budget(), 1_000_000);
     manager.reset();
     manager.set_budget(1_000_000);
-    assert_eq!(manager.token_budget(), ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET);
-    // Reactive trigger fires at ~80k observed tokens.
+    assert_eq!(manager.token_budget(), 1_000_000);
     manager.compaction_config = crate::config::CompactionConfig::default();
     manager.mode = crate::config::CompactionMode::Reactive;
     let messages: Vec<Message> = (0..(RECENT_TURNS_TO_KEEP + 2))
         .map(|i| make_text_message(Role::User, &format!("m{i}")))
         .collect();
     manager.notify_message_added();
-    manager.update_observed_input_tokens(79_000);
+    manager.update_observed_input_tokens(99_000);
     assert!(!manager.should_compact_with(&messages));
-    manager.update_observed_input_tokens(80_000);
-    assert!(manager.should_compact_with(&messages));
-    // API-key route keeps the full window.
-    manager.set_route_api_method(Some("claude-api"));
-    assert_eq!(manager.token_budget(), 1_000_000);
-    manager.set_route_api_method(None);
-    assert_eq!(manager.token_budget(), 1_000_000);
 }
 
 #[test]
@@ -1508,4 +1501,20 @@ fn compaction_model_falls_back_to_session_provider_when_unset_or_unswitchable() 
     let secondary: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
     manager.set_compaction_provider(Some(secondary.clone()));
     assert!(Arc::ptr_eq(&manager.summarizer(session), &secondary));
+}
+
+#[test]
+fn emergency_compaction_cooldown_blocks_refire_near_baseline() {
+    let mut manager = CompactionManager::new();
+    manager.set_budget(1_000_000);
+    manager.emergency_baseline_tokens = Some(95_000);
+    manager.turns_since_last_compact = 0;
+    let messages = vec![make_text_message(Role::User, "x")];
+    manager.update_observed_input_tokens(99_000);
+    assert!(manager.emergency_compaction_suppressed(&messages));
+    manager.turns_since_last_compact = manager.compaction_config.min_turns_between_compactions;
+    assert!(!manager.emergency_compaction_suppressed(&messages));
+    manager.turns_since_last_compact = 0;
+    manager.update_observed_input_tokens(260_000);
+    assert!(!manager.emergency_compaction_suppressed(&messages));
 }

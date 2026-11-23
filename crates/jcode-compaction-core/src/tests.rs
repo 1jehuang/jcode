@@ -514,11 +514,8 @@ fn anthropic_oauth_routes_get_the_automatically_capped_budget() {
         "anthropic-oauth",
         " Claude-OAuth@Work ",
     ] {
-        assert_eq!(
-            auto_compaction_budget_ceiling(method),
-            Some(ANTHROPIC_OAUTH_AUTO_COMPACT_BUDGET),
-            "{method}"
-        );
+        assert!(is_anthropic_oauth_route(method), "{method}");
+        assert_eq!(auto_compaction_budget_ceiling(method), None, "{method}");
     }
     // Metered API keys, other providers, and unknown routes keep the model
     // window: their limit is not the subscription ITPM bucket.
