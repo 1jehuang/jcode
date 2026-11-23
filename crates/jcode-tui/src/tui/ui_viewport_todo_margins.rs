@@ -7,6 +7,7 @@ fn project_pinned_todo_card<R>(
     payload: Option<&str>,
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
+    active_first: bool,
     project: impl FnOnce(&[Line<'static>]) -> R,
 ) -> R {
     if width < 16 || !crate::config::config().display.pin_todos {
@@ -17,12 +18,19 @@ fn project_pinned_todo_card<R>(
     };
     // Distinct title avoids sharing the width-capped transcript card's entry.
     let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
-    msg.title = Some("Pinned todos".to_string());
+    msg.title = Some(
+        if active_first {
+            "Pinned todos (overflow)"
+        } else {
+            "Pinned todos"
+        }
+        .to_string(),
+    );
     super::super::messages::project_cached_message_lines(
         &msg,
         width,
         diff_mode,
-        super::super::messages::render_pinned_todos_message,
+        |msg, width, mode| super::super::messages::pinned_todo_rows(msg, width, mode, active_first),
         project,
     )
 }
@@ -36,7 +44,7 @@ pub(super) fn pinned_todo_card_has_lines(
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
 ) -> bool {
-    project_pinned_todo_card(payload, diff_mode, width, |lines| !lines.is_empty())
+    project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
 }
 
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
@@ -52,19 +60,23 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         return (Vec::new(), None);
     }
 
-    let card_lines = project_pinned_todo_card(payload, diff_mode, width, <[Line<'static>]>::to_vec);
     PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
-    if card_lines.is_empty() {
-        return (Vec::new(), None);
-    }
-    let mut card_lines = card_lines;
-    super::super::messages::animate_lane_spinners(&mut card_lines);
 
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget.max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let has_more = card_lines.len() > content_budget && !expanded;
+    let normal = project_pinned_todo_card(payload, diff_mode, width, false, |rows| {
+        (expanded || rows.len() <= content_budget).then(|| rows.to_vec())
+    });
+    let has_more = normal.is_none();
+    let mut card_lines = normal.unwrap_or_else(|| {
+        project_pinned_todo_card(payload, diff_mode, width, true, <[Line<'static>]>::to_vec)
+    });
+    if card_lines.is_empty() {
+        return (Vec::new(), None);
+    }
+    super::super::messages::animate_lane_spinners(&mut card_lines);
     let mut more_line = None;
     if has_more {
         let shown = content_budget.saturating_sub(1);

@@ -7,9 +7,9 @@ use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use crate::{browser, gateway, memory, session, storage, tui};
+use crate::{browser, gateway, memory, session, storage};
 
-use super::{output::terminal_title, terminal::init_tui_runtime};
+mod ambient;
 
 mod menubar;
 mod provider_setup;
@@ -32,13 +32,7 @@ pub use restart::{
     run_restart_restore_command, run_restart_save_command, run_restart_status_command,
 };
 
-pub enum AmbientSubcommand {
-    Status,
-    Log,
-    Trigger,
-    Stop,
-    RunVisible,
-}
+pub use ambient::{AmbientSubcommand, run_ambient_command};
 
 pub enum CloudSubcommand {
     Sessions(CloudSessionsSubcommand),
@@ -1399,22 +1393,6 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-pub async fn run_ambient_command(cmd: AmbientSubcommand) -> Result<()> {
-    if let AmbientSubcommand::RunVisible = cmd {
-        return run_ambient_visible().await;
-    }
-
-    let debug_cmd = match cmd {
-        AmbientSubcommand::Status => "ambient:status",
-        AmbientSubcommand::Log => "ambient:log",
-        AmbientSubcommand::Trigger => "ambient:trigger",
-        AmbientSubcommand::Stop => "ambient:stop",
-        AmbientSubcommand::RunVisible => unreachable!(),
-    };
-
-    super::debug::run_debug_command(debug_cmd, "", None, None, false).await
-}
-
 pub async fn run_transcript_command(
     text: Option<String>,
     mode: crate::protocol::TranscriptMode,
@@ -1461,6 +1439,8 @@ pub struct CompanionFlags {
     pub no_voice: bool,
     pub no_voice_waveform: bool,
     pub no_voice_notifications: bool,
+    pub no_jarvis_fn_key: bool,
+    pub no_jarvis_fn_launch: bool,
     pub no_open: bool,
     pub no_spawn_terminal: bool,
     pub no_lid: bool,
@@ -1472,6 +1452,8 @@ impl CompanionFlags {
         options.voice &= !self.no_voice;
         options.voice_waveform &= !self.no_voice_waveform;
         options.voice_notifications &= !self.no_voice_notifications;
+        options.jarvis_fn_key &= !self.no_jarvis_fn_key;
+        options.jarvis_fn_launch &= !self.no_jarvis_fn_launch;
         options.open &= !self.no_open;
         options.spawn_terminal &= !self.no_spawn_terminal;
         options.lid &= !self.no_lid;
@@ -1560,51 +1542,6 @@ pub fn run_session_rename_command(
         );
     }
 
-    Ok(())
-}
-
-async fn run_ambient_visible() -> Result<()> {
-    use crate::ambient::VisibleCycleContext;
-
-    let context = VisibleCycleContext::load().map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to load visible cycle context: {}\nIs the ambient runner running?",
-            e
-        )
-    })?;
-
-    let (provider, registry) = super::provider_init::init_provider_and_registry(
-        &super::provider_init::ProviderChoice::Auto,
-        None,
-    )
-    .await?;
-
-    registry.register_ambient_tools().await;
-
-    let safety = std::sync::Arc::new(crate::safety::SafetySystem::new());
-    crate::tool::ambient::init_safety_system(safety);
-
-    let (terminal, tui_runtime) = init_tui_runtime()?;
-
-    let mut app = tui::App::new(provider, registry);
-    app.set_ambient_mode(context.system_prompt, context.initial_message);
-
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::SetTitle(terminal_title("🤖 jcode ambient cycle"))
-    );
-
-    let result = app.run(terminal).await;
-
-    tui_runtime.finish(true);
-
-    if let Some(cycle_result) = crate::tool::ambient::take_cycle_result() {
-        let result_path = VisibleCycleContext::result_path()?;
-        crate::storage::write_json(&result_path, &cycle_result)?;
-        eprintln!("Ambient cycle result saved.");
-    }
-
-    result?;
     Ok(())
 }
 

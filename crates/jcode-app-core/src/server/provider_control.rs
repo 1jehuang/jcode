@@ -607,8 +607,14 @@ pub(super) async fn handle_set_reasoning_effort(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        agent_guard.set_reasoning_effort(&effort)
+    let (result, updated_model) = if let Ok(mut agent_guard) = agent.try_lock() {
+        let prev_model = agent_guard.provider_model();
+        let result = agent_guard.set_reasoning_effort(&effort);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|new_model| new_model != &prev_model);
+        (result, updated_model)
     } else {
         spawn_deferred_reasoning_effort_change(
             id,
@@ -619,12 +625,13 @@ pub(super) async fn handle_set_reasoning_effort(
         return;
     };
 
-    send_reasoning_effort_result(id, result, client_event_tx);
+    send_reasoning_effort_result(id, result, updated_model, client_event_tx);
 }
 
 fn send_reasoning_effort_result(
     id: u64,
     result: anyhow::Result<Option<String>>,
+    model: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
@@ -632,6 +639,7 @@ fn send_reasoning_effort_result(
             let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                 id,
                 effort,
+                model,
                 error: None,
             });
         }
@@ -639,6 +647,7 @@ fn send_reasoning_effort_result(
             let _ = client_event_tx.send(ServerEvent::ReasoningEffortChanged {
                 id,
                 effort: None,
+                model: None,
                 error: Some(e.to_string()),
             });
         }
@@ -655,14 +664,19 @@ fn spawn_deferred_reasoning_effort_change(
     crate::runtime_activity::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
+        let prev_model = agent_guard.provider_model();
         let result = agent_guard.set_reasoning_effort(&effort);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|new_model| new_model != &prev_model);
         crate::logging::info(&format!(
             "Deferred reasoning effort change completed request_id={} requested={} success={}",
             id,
             effort,
             result.is_ok()
         ));
-        send_reasoning_effort_result(id, result, &client_event_tx);
+        send_reasoning_effort_result(id, result, updated_model, &client_event_tx);
         log_provider_control_completed("set_reasoning_effort", id, queued_at);
     });
 }

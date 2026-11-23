@@ -75,26 +75,19 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
             &mut connection,
         ))
         .unwrap();
-        assert!(
-            app.queued_messages.is_empty(),
-            "no image-less prompt may be queued"
+        assert_eq!(
+            app.queued_messages.as_slice(),
+            std::slice::from_ref(&expected)
         );
+        assert_eq!(app.queued_images.as_slice(), std::slice::from_ref(&image));
+        assert!(app.input.is_empty());
+        assert!(app.pending_images.is_empty());
+        assert_eq!(connection.next_request_id_for_test(), next_id);
+        assert!(input::retrieve_pending_message_for_edit(&mut app));
         assert_eq!(app.input, expected);
         assert_eq!(app.cursor_pos, expected.len());
-        app.sync_model_picker_preview_from_input();
         assert_eq!(app.pending_images, vec![image]);
-        assert_eq!(connection.next_request_id_for_test(), next_id);
-        assert!(
-            app.status_notice
-                .as_ref()
-                .is_some_and(|(notice, _)| { notice.contains("Images cannot be queued") })
-        );
-        assert!(app.display_messages().iter().any(|message| {
-            message.content.contains("Message not queued")
-                && message
-                    .content
-                    .contains("text and images are still in the input")
-        }));
+        assert!(app.queued_images.is_empty());
     }
 }
 

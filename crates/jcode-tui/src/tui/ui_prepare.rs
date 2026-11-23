@@ -201,14 +201,7 @@ fn push_user_prompt_lines(
 ) {
     let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
         + unicode_width::UnicodeWidthStr::width("› ");
-    // Voice prompts carry <transcription> tags for the model. Show the spoken
-    // words with a mic marker instead, like Jcode Desktop.
-    let (visible, transcribed) = jcode_session_types::strip_transcription(content);
-    let content: &str = if transcribed {
-        &format!("🎙 {visible}")
-    } else {
-        content
-    };
+    // Callers supply already projected user-facing content.
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     for (line_idx, content_line) in normalized.split('\n').enumerate() {
         let raw_line = raw_plain_lines.len();

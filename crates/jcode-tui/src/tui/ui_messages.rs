@@ -14,7 +14,7 @@ mod todo_payload_cache_tests;
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line};
+use todo_stages::{agent_roster_spans, push_stage_pips, render_todo_item_line};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -376,6 +376,33 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
         && !is_kv_cache_footer(msg)
 }
 
+pub(crate) fn is_routine_swarm_await_result(msg: &DisplayMessage) -> bool {
+    if !matches!(msg.effective_role(), "system" | "background_task" | "swarm") {
+        return false;
+    }
+    let summary = if msg
+        .content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+    {
+        compact_swarm_await_summary(&msg.content)
+    } else if msg.title.as_deref() == Some("🐝 Swarm await") {
+        msg.content.to_string()
+    } else {
+        return false;
+    };
+    let Some((_, statuses)) = summary.split_once(" matched · ") else {
+        return false;
+    };
+    !summary.starts_with("recovered")
+        && !summary.starts_with("timed out")
+        && statuses.split(", ").all(|status| {
+            status.split_once(' ').is_some_and(|(count, state)| {
+                count.parse::<usize>().is_ok() && matches!(state, "ready" | "completed" | "running")
+            })
+        })
+}
+
 pub(crate) fn is_swarm_await_started(msg: &DisplayMessage) -> bool {
     matches!(msg.effective_role(), "system" | "background_task" | "swarm")
         && msg
@@ -391,6 +418,29 @@ pub(super) fn starts_with_reasoning(content: &str) -> bool {
     content.trim_start().starts_with("*\u{2063}")
 }
 
+pub(crate) const OAUTH_LOGIN_DETAILS_MARKER: &str = "\n\n<!-- oauth-details -->\n\n";
+
+/// Parse a compact OAuth/device sign-in markdown link line such as
+/// `[Open Claude sign-in](https://...)` into `(label, url)`.
+pub(crate) fn parse_oauth_sign_in_link(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('[')?;
+    let (label, url_part) = rest.split_once("](")?;
+    let url = url_part.strip_suffix(')')?;
+    if label.starts_with("Open ") && label.ends_with(" sign-in") && !url.is_empty() {
+        Some((label, url))
+    } else {
+        None
+    }
+}
+
+/// Whether `msg` is a collapsible OAuth or device-code login progress card.
+pub(crate) fn is_oauth_login_progress_card(msg: &DisplayMessage) -> bool {
+    msg.role == "system"
+        && msg.title.is_some()
+        && jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+            .is_some_and(|parsed| parsed.body.contains(OAUTH_LOGIN_DETAILS_MARKER))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
@@ -402,25 +452,40 @@ pub(crate) fn render_system_message(
     if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
         return lines;
     }
-    if msg.title.as_deref() == Some("OpenAI login")
+    if let Some(title) = msg.title.as_deref()
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+        && let Some((summary, details)) = parsed.body.split_once(OAUTH_LOGIN_DETAILS_MARKER)
     {
-        let (summary, details) = parsed
-            .body
-            .split_once("\n\n<!-- oauth-details -->\n\n")
-            .unwrap_or((parsed.body, ""));
         let mut lines = vec![Line::from(Span::styled(
-            "OpenAI login",
+            title.to_string(),
             Style::default().fg(system_message_color()).bold(),
         ))];
         // Generic markdown links append the full destination visibly. Keep this
         // label short, and resolve its click from the owning message instead.
         for line in summary.lines() {
-            if line.starts_with("[Open OpenAI sign-in](") {
+            if let Some((label, _url)) = parse_oauth_sign_in_link(line) {
                 lines.push(Line::from(Span::styled(
-                    "Open OpenAI sign-in",
+                    label.to_string(),
                     Style::default().fg(super::accent_color()).underlined(),
                 )));
+            } else if let Some(rest) = line.strip_prefix("Code: ") {
+                let mut parts = rest.splitn(2, "  ");
+                let code = parts.next().unwrap_or(rest);
+                let suffix = parts.next();
+                let mut spans = vec![
+                    Span::styled("Code: ", Style::default().fg(system_message_color())),
+                    Span::styled(
+                        code.to_string(),
+                        Style::default().fg(super::accent_color()).bold(),
+                    ),
+                ];
+                if let Some(extra) = suffix {
+                    spans.push(Span::styled(
+                        format!("  {extra}"),
+                        Style::default().fg(system_message_color()),
+                    ));
+                }
+                lines.push(Line::from(spans));
             } else {
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
@@ -1023,7 +1088,7 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true)
+    render_todos_message_with_cap(msg, width, diff_mode, true, false)
 }
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
@@ -1122,12 +1187,22 @@ pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
 /// Todo card for the pinned band at the top of the viewport. The band owns
 /// its full rows (info widgets never dock beside it), so the card spans the
 /// whole available width instead of the transcript's readability cap.
+#[cfg(test)]
 pub(crate) fn render_pinned_todos_message(
     msg: &DisplayMessage,
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, false)
+    pinned_todo_rows(msg, width, diff_mode, false)
+}
+
+pub(super) fn pinned_todo_rows(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    active_first: bool,
+) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, false, active_first)
         .into_iter()
         .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
         .collect()
@@ -1138,6 +1213,7 @@ fn render_todos_message_with_cap(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
     cap_width: bool,
+    active_first: bool,
 ) -> Vec<Line<'static>> {
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
@@ -1205,7 +1281,7 @@ fn render_todos_message_with_cap(
                 .map(str::to_string)
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
-        let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
+        let mut all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
         if crate::todo::stages::has_stages(todos.iter()) {
             // Stage grid: groups become lanes inside each stage, so they are
             // drawn as column headers instead of goal sections.
@@ -1217,13 +1293,14 @@ fn render_todos_message_with_cap(
             ));
             let goal = todo_card_goal_for_group(&goals, None);
             push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-            push_stage_lines(
+            todo_stages::push_ordered_stage_lines(
                 &mut lines,
                 &all_refs,
                 &agents,
                 &background_tasks,
                 base_indent,
                 inner_width,
+                active_first,
             );
         } else if has_groups {
             lines.push(render_todo_stage_status_header(
@@ -1242,6 +1319,12 @@ fn render_todos_message_with_cap(
                 }
             }
             groups.sort_by_key(|(key, _)| key.is_none());
+            if active_first {
+                for (_, items) in &mut groups {
+                    items.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
+                }
+                groups.sort_by_key(|(_, items)| todo_stages::work_rank(items, &agents));
+            }
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
@@ -1272,6 +1355,9 @@ fn render_todos_message_with_cap(
             ));
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            }
+            if active_first {
+                all_refs.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
             }
             push_todo_item_lines(
                 &mut lines,
@@ -2808,6 +2894,9 @@ pub(crate) fn render_background_task_message(
         .unwrap_or_default();
     }
     if let Some(progress) = parse_background_task_progress_notification_markdown(&msg.content) {
+        if progress.tool_name == "selfdev-build" {
+            return render_selfdev_status("◌", &progress.summary, width);
+        }
         if progress.tool_name == "swarm" {
             return render_compact_swarm_background_progress(&progress, width);
         }
@@ -2823,6 +2912,16 @@ pub(crate) fn render_background_task_message(
         &parsed.tool_name,
         parsed.display_name.as_deref(),
     );
+    if parsed.tool_name == "selfdev-build" {
+        let state = match parsed.status.as_str() {
+            "running" => Some(("◌", "running")),
+            "↻ superseded" => Some(("↻", "superseded")),
+            _ => None,
+        };
+        if let Some((icon, state)) = state {
+            return render_selfdev_status(icon, &format!("{state} · {}", parsed.duration), width);
+        }
+    }
     let is_swarm = parsed.tool_name == "swarm";
     if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
@@ -3041,6 +3140,29 @@ pub(crate) fn render_background_task_message(
     let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+fn render_selfdev_status(icon: &str, detail: &str, width: u16) -> Vec<Line<'static>> {
+    let centered = markdown::center_code_blocks();
+    let block_width = if centered {
+        super::centered_content_block_width(width, 96)
+    } else {
+        width as usize
+    };
+    let muted = Style::default().fg(dim_color());
+    let row = Line::from(vec![
+        Span::styled(format!("  {icon} "), muted),
+        Span::styled("selfdev build", Style::default().fg(tool_color())),
+        Span::styled(format!(" · {detail}"), muted),
+    ]);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &row,
+        block_width.saturating_sub(1),
+    )];
+    if centered {
+        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
     lines
 }
@@ -4320,125 +4442,5 @@ mod agent_color_tests;
 mod tests;
 
 #[cfg(test)]
-mod kv_cache_footer_tests {
-    #[test]
-    fn preserves_prefix_evidence_tag_and_keeps_footer_width_bounded() {
-        let body = "KV cache miss [low read] [prefix unchanged] turn 2 call 3: 4.35K cached / 20K expected tokens: ~15.6K tokens resent (cause unconfirmed).";
-        assert_eq!(
-            super::kv_cache_footer_summary(body).as_deref(),
-            Some("15.6K KV cache miss · low read · prefix unchanged · 22% hit")
-        );
-        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        for width in [0_u16, 1, 2, 3, 12, 30, 80, 120] {
-            let lines = super::render_kv_cache_footer(&message, width).unwrap();
-            assert_eq!(lines.len(), 1);
-            assert!(lines[0].width() <= usize::from(width));
-            if width >= 80 {
-                assert!(lines[0].to_string().contains("prefix unchanged"));
-            }
-        }
-        let unrelated = "KV cache miss [low read] turn 2: ~15K tokens resent (detail mentions [prefix unchanged]).";
-        assert!(
-            !super::kv_cache_footer_summary(unrelated)
-                .unwrap()
-                .contains("prefix unchanged")
-        );
-    }
-
-    #[test]
-    fn cache_miss_footer_colors_only_the_label_by_absolute_token_loss() {
-        for (amount, expected) in [
-            ("0", super::dim_color()),
-            ("4.2K", super::dim_color()),
-            ("9,999", super::dim_color()),
-            ("10K", super::warning_color()),
-            ("20.4k", super::warning_color()),
-            ("49,999", super::warning_color()),
-            ("50K", super::error_color()),
-            ("86.1K", super::error_color()),
-            ("1.2M", super::error_color()),
-            ("unknown", super::warning_color()),
-            ("NaN", super::warning_color()),
-            ("inf", super::warning_color()),
-            ("-1", super::warning_color()),
-        ] {
-            // Hit percentage is intentionally identical across severities.
-            let message = super::DisplayMessage::system(format!(
-                "ℹ️ KV cache miss [low read] [prefix unchanged]: 4K cached / 20K expected tokens: ~{amount} tokens resent"
-            ));
-            let lines = super::render_kv_cache_footer(&message, 160).unwrap();
-            assert_eq!(lines[0].spans[0].style.fg, Some(super::dim_color()));
-            assert_eq!(lines[0].spans[1].style.fg, Some(expected), "{amount}");
-            assert_eq!(lines[0].spans[1].content, format!("{amount} KV cache miss"));
-            assert_eq!(lines[0].spans[2].style.fg, Some(super::dim_color()));
-            assert_eq!(
-                lines[0].spans[2].content,
-                " · low read · prefix unchanged · 20% hit"
-            );
-            for width in 0..=100 {
-                let clipped = super::render_kv_cache_footer(&message, width).unwrap();
-                assert_eq!(clipped.len(), 1);
-                assert!(
-                    clipped[0].width() <= usize::from(width),
-                    "{amount}, {width}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn missing_amount_stays_amber_and_refreshes_are_not_loss_severity() {
-        for body in [
-            "KV cache miss [low read]: provider reported no cache read",
-            "KV cache miss without structured evidence",
-        ] {
-            let message = super::DisplayMessage::system(body);
-            let lines = super::render_kv_cache_footer(&message, 120).unwrap();
-            assert_eq!(lines[0].spans[1].style.fg, Some(super::warning_color()));
-        }
-        for (icon, color) in [("ℹ️ ", super::dim_color()), ("⚠️ ", super::warning_color())]
-        {
-            let message = super::DisplayMessage::system(format!(
-                "{icon}KV cache refresh [compaction]: ~100K tokens resent"
-            ));
-            let lines = super::render_kv_cache_footer(&message, 120).unwrap();
-            assert_eq!(lines[0].spans[1].style.fg, Some(color));
-            assert_eq!(lines[0].spans[2].style.fg, Some(super::dim_color()));
-        }
-    }
-
-    #[test]
-    fn only_system_cache_notices_attach() {
-        let body = "KV cache miss [low read]: ~4K tokens resent";
-        let message = super::DisplayMessage::system(format!("ℹ️ {body}"));
-        assert!(!super::needs_message_separator(&message));
-        let lines = super::render_kv_cache_footer(&message, 80).unwrap();
-        assert_eq!(lines[0].spans[1].style.fg, Some(super::dim_color()));
-        let assistant = super::DisplayMessage::assistant(body);
-        assert!(super::needs_message_separator(&assistant));
-        assert!(super::render_kv_cache_footer(&assistant, 80).is_none());
-        assert!(super::needs_message_separator(
-            &super::DisplayMessage::system("ordinary notice")
-        ));
-        let refresh =
-            super::DisplayMessage::system("KV cache refresh [compaction]: ~4K tokens resent");
-        assert!(!super::needs_message_separator(&refresh));
-        assert_eq!(
-            super::render_kv_cache_footer(&refresh, 80).unwrap()[0].spans[1]
-                .style
-                .fg,
-            Some(super::dim_color())
-        );
-    }
-
-    #[test]
-    fn summarizes_miss_reason_missed_and_hit_pct() {
-        let s = super::kv_cache_footer_summary(
-            "KV cache miss [provider switch] turn 3 call 2: 28.6K cached / 47.6K expected tokens: ~19.0K tokens resent (x). See KV_CACHE_USAGE in logs.",
-        );
-        assert_eq!(
-            s.as_deref(),
-            Some("19.0K KV cache miss · provider switch · 60% hit")
-        );
-    }
-}
+#[path = "ui_messages/kv_cache_footer_tests.rs"]
+mod kv_cache_footer_tests;

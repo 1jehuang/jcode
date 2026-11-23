@@ -32,10 +32,12 @@ pub(super) fn load(cache: &RefCell<Option<RemoteTodoCache>>, raw: Option<&str>) 
         None => serde_json::Value::Null,
     };
     let state = Arc::new((
-        serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
-            crate::logging::debug(&format!("Invalid remote todos: {error}"));
-            Vec::new()
-        }),
+        super::visible_todos(
+            serde_json::from_value(payload["todos"].clone()).unwrap_or_else(|error| {
+                crate::logging::debug(&format!("Invalid remote todos: {error}"));
+                Vec::new()
+            }),
+        ),
         serde_json::from_value(payload["plan"].clone()).unwrap_or_else(|error| {
             crate::logging::debug(&format!("Invalid remote todo plan: {error}"));
             crate::todo::TodoPlan::default()
@@ -63,6 +65,20 @@ mod tests {
 
     fn payload(intent: &str) -> String {
         json!({"todos":[{"id":"t1", "content":"keep task details", "status":"pending", "priority":"high"}], "plan":{"user_intention":intent, "understands_user_intent":"clear"}, "goals":[]}).to_string()
+    }
+
+    #[test]
+    fn live_list_filters_cancelled_without_rewriting_source_snapshot() {
+        let cache = RefCell::new(None);
+        let raw = json!({"todos":[
+            {"id":"a","content":"Retired","status":"cancelled","priority":"low"},
+            {"id":"b","content":"Finished","status":"completed","priority":"low"}
+        ]})
+        .to_string();
+        let state = load(&cache, Some(&raw));
+        assert_eq!(state.0.len(), 1);
+        assert_eq!(state.0[0].id, "b");
+        assert_eq!(cache.borrow().as_ref().unwrap().raw, raw);
     }
 
     #[test]

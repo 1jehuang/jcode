@@ -133,10 +133,18 @@ impl App {
                     crate::auth::AuthState::Expired => "attention",
                     crate::auth::AuthState::NotConfigured => "setup",
                 };
+                let provider_label = if matches!(
+                    provider.target,
+                    crate::provider_catalog::LoginProviderTarget::AutoImport
+                ) {
+                    "import"
+                } else {
+                    provider.auth_kind.label()
+                };
                 PickerEntry {
                     name: provider.display_name.to_string(),
                     options: vec![PickerOption {
-                        provider: provider.auth_kind.label().to_string(),
+                        provider: provider_label.to_string(),
                         api_method: state_label.to_string(),
                         available: true,
                         detail: format!("{} · {}", assessment.method_detail, provider.menu_detail),
@@ -162,13 +170,123 @@ impl App {
             .collect::<Vec<_>>();
 
         if !logout {
-            let mut saved_accounts =
+            let saved_entries =
                 super::super::auth_account_picker_saved_accounts::saved_login_picker_entries(
                     self.provider.name(),
                     self.provider.oauth_account_label().as_deref(),
                 );
-            saved_accounts.extend(models);
-            models = saved_accounts;
+            let auto_api_key_entry = PickerEntry {
+                name: "Paste an API key".to_string(),
+                options: vec![PickerOption {
+                    provider: "auto-detect".to_string(),
+                    api_method: "API key".to_string(),
+                    available: true,
+                    detail: "Auto-detects Anthropic, OpenAI, OpenRouter, Gemini, xAI, Groq, Hugging Face & more".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: PickerAction::AutoApiKey,
+                selected_option: 0,
+                is_current: false,
+                is_default: false,
+                is_favorite: false,
+                recommended: true,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            };
+
+            let mut starter_entries = Vec::new();
+            let mut configured_hidden_entries = Vec::new();
+            let mut unconfigured_hidden_entries = Vec::new();
+            let mut openai_entry = None;
+            let mut claude_entry = None;
+            let mut gemini_entry = None;
+            let mut auto_import_entry = None;
+
+            for entry in models {
+                match entry.action {
+                    PickerAction::Login(provider) => match provider.target {
+                        crate::provider_catalog::LoginProviderTarget::OpenAi => {
+                            openai_entry = Some(entry);
+                        }
+                        crate::provider_catalog::LoginProviderTarget::Claude => {
+                            claude_entry = Some(entry);
+                        }
+                        crate::provider_catalog::LoginProviderTarget::Antigravity
+                        | crate::provider_catalog::LoginProviderTarget::Gemini => {
+                            if gemini_entry.is_none() {
+                                gemini_entry = Some(entry);
+                            } else {
+                                unconfigured_hidden_entries.push(entry);
+                            }
+                        }
+                        crate::provider_catalog::LoginProviderTarget::AutoImport => {
+                            auto_import_entry = Some(entry);
+                        }
+                        _ => {
+                            let is_configured_or_attention = entry.is_current
+                                || entry
+                                    .options
+                                    .first()
+                                    .is_some_and(|opt| opt.api_method == "attention");
+                            if is_configured_or_attention {
+                                configured_hidden_entries.push(entry);
+                            } else {
+                                unconfigured_hidden_entries.push(entry);
+                            }
+                        }
+                    },
+                    _ => configured_hidden_entries.push(entry),
+                }
+            }
+
+            if let Some(entry) = openai_entry {
+                starter_entries.push(entry);
+            }
+            if let Some(entry) = claude_entry {
+                starter_entries.push(entry);
+            }
+            if let Some(entry) = gemini_entry {
+                starter_entries.push(entry);
+            }
+            starter_entries.push(auto_api_key_entry);
+            if let Some(entry) = auto_import_entry {
+                starter_entries.push(entry);
+            }
+
+            let mut hidden_entries = saved_entries;
+            hidden_entries.extend(configured_hidden_entries);
+            hidden_entries.extend(unconfigured_hidden_entries);
+
+            if !hidden_entries.is_empty() {
+                let hidden_count = hidden_entries.len();
+                starter_entries.push(PickerEntry {
+                    name: format!("More providers ({})…", hidden_count),
+                    options: vec![PickerOption {
+                        provider: "all".to_string(),
+                        api_method: "expand".to_string(),
+                        available: true,
+                        detail: "OpenRouter, Ollama, DeepSeek, Groq, Bedrock, Custom · or type to filter".to_string(),
+                        estimated_reference_cost_micros: None,
+                    }],
+                    action: PickerAction::ExpandLoginProviders,
+                    selected_option: 0,
+                    is_current: false,
+                    is_default: false,
+                    is_favorite: false,
+                    recommended: false,
+                    recommendation_rank: usize::MAX,
+                    usage_score: 0,
+                    old: false,
+                    created_date: None,
+                    effort: None,
+                });
+            }
+
+            starter_entries.extend(hidden_entries);
+            models = starter_entries;
         }
 
         if logout {
@@ -200,7 +318,7 @@ impl App {
         }
 
         self.inline_view_state = None;
-        self.inline_interactive_state = Some(InlineInteractiveState {
+        let mut picker = InlineInteractiveState {
             kind: PickerKind::Login,
             filtered: (0..models.len()).collect(),
             entries: models,
@@ -208,7 +326,9 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
-        });
+        };
+        Self::apply_inline_interactive_filter(&mut picker);
+        self.inline_interactive_state = Some(picker);
         self.input.clear();
         self.cursor_pos = 0;
     }

@@ -125,6 +125,52 @@ fn yes_no_pill_line(yes_highlighted: bool, align: Alignment) -> Line<'static> {
     Line::from(spans).alignment(align)
 }
 
+/// Build the 4-option first-run login choice pills (OpenAI, Claude, API key,
+/// Skip). Fits on a single row at 46+ columns and gracefully stacks into two
+/// balanced rows on narrower terminals so pills never clip or wrap mid-cap.
+fn login_choice_pill_lines(
+    selected: crate::tui::OnboardingLoginChoice,
+    width: u16,
+    align: Alignment,
+) -> Vec<Line<'static>> {
+    use crate::tui::OnboardingLoginChoice as Choice;
+    if width >= 46 {
+        let mut spans = Vec::new();
+        for (i, option) in Choice::ALL.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            spans.extend(lozenge_pill_spans(option.label(), option == selected));
+        }
+        vec![Line::from(spans).alignment(align)]
+    } else {
+        let mut top = Vec::new();
+        top.extend(lozenge_pill_spans(
+            Choice::OpenAi.label(),
+            selected == Choice::OpenAi,
+        ));
+        top.push(Span::raw("  "));
+        top.extend(lozenge_pill_spans(
+            Choice::Claude.label(),
+            selected == Choice::Claude,
+        ));
+        let mut bottom = Vec::new();
+        bottom.extend(lozenge_pill_spans(
+            Choice::ApiKey.label(),
+            selected == Choice::ApiKey,
+        ));
+        bottom.push(Span::raw("  "));
+        bottom.extend(lozenge_pill_spans(
+            Choice::Skip.label(),
+            selected == Choice::Skip,
+        ));
+        vec![
+            Line::from(top).alignment(align),
+            Line::from(bottom).alignment(align),
+        ]
+    }
+}
+
 /// A rounded "Continue" pill button. Rendered above the import list so the user
 /// can reach the commit action just by arrowing up out of the rows (no need to
 /// read a "Press Enter" instruction). Uses the same lozenge style as the Yes/No
@@ -437,7 +483,7 @@ fn keyboard_hint_line() -> Line<'static> {
 
 /// The phase-specific body of the welcome screen (everything below the title and
 /// keyboard hint), so this no longer emits the title itself.
-fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
+fn welcome_body_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let align = Alignment::Center;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -601,10 +647,10 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
             push_esc_skip_hint(&mut lines, align);
             return lines;
         }
-        OnboardingWelcomeKind::LoginOpenAi { yes_highlighted } => {
+        OnboardingWelcomeKind::LoginOpenAi { choice } => {
             lines.push(
                 Line::from(Span::styled(
-                    "Log in to OpenAI?",
+                    "How would you like to log in?",
                     Style::default()
                         .fg(welcome_accent())
                         .add_modifier(Modifier::BOLD),
@@ -613,11 +659,9 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
             );
             lines.push(Line::from(""));
 
-            // Rounded Yes/No lozenge pills; the selection is shown visually (the
-            // filled capsule), so no instruction sentence is needed.
-            lines.push(yes_no_pill_line(yes_highlighted, align));
-            // The Esc hint below already says you can log in later with /login,
-            // so we don't repeat a "choose No to skip" line here.
+            // Rounded lozenge pills for the 4 primary choices; selection is
+            // carried by fill + BOLD so monochrome terminals stay legible.
+            lines.extend(login_choice_pill_lines(choice, width, align));
             push_esc_skip_hint(&mut lines, align);
             return lines;
         }
@@ -710,12 +754,12 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
     if area.width < 4 || area.height < 6 {
         // Too small for the full treatment: fall back to a minimal welcome.
         let mut lines = vec![welcome_title_line()];
-        lines.extend(welcome_body_lines(app));
+        lines.extend(welcome_body_lines(app, area.width));
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
 
-    let body = welcome_body_lines(app);
+    let body = welcome_body_lines(app, area.width);
     let body_h = body.len() as u16;
     const TITLE_H: u16 = 1;
     const HINT_H: u16 = 1;

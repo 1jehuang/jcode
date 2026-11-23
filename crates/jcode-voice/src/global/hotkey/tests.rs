@@ -210,6 +210,11 @@ fn fake_listener() -> (Listener, File, PathBuf) {
         capture: None,
         pending: None,
         adopt_until: None,
+        fn_trigger: false,
+        fn_key: KEY_FN,
+        fn_hold: None,
+        fn_last: None,
+        fn_repeating: false,
         next_scan: Instant::now() + Duration::from_secs(1000),
         healthy: true,
         registration_ok: false,
@@ -374,4 +379,188 @@ fn unsafe_directory_is_rejected() {
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(Registration::new(dir.clone()).is_err());
     fs::remove_dir(dir).unwrap();
+}
+fn fn_listener() -> (Listener, File, PathBuf) {
+    let (mut listener, writer, dir) = fake_listener();
+    // Not via set_fn_trigger: that reopens real devices.
+    listener.fn_trigger = true;
+    (listener, writer, dir)
+}
+/// Age an armed Fn press past the arming delay without sleeping.
+fn age_fn(listener: &mut Listener) {
+    if let Some(FnHold::Armed(_, start)) = listener.fn_hold.as_mut() {
+        *start = Instant::now() - FN_ARM;
+    }
+}
+#[test]
+fn bare_fn_hold_arms_then_releases() {
+    let (mut listener, mut writer, dir) = fn_listener();
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    assert!(listener.poll().is_empty(), "arming delay before recording");
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, KEY_FN as u16, 2);
+    assert!(listener.poll().is_empty(), "repeat is ignored");
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnRelease]);
+    assert!(listener.poll().is_empty());
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn quick_fn_tap_is_a_tap_and_fn_chords_never_record() {
+    // Tap shorter than the arming delay.
+    let (mut listener, mut writer, dir) = fn_listener();
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnTap], "short bare tap");
+    age_fn(&mut listener);
+    assert!(listener.poll().is_empty());
+    // Fn+F-key (brightness) before arming.
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    send(&mut writer, 1, 225, 1);
+    send(&mut writer, 1, 225, 0);
+    age_fn(&mut listener);
+    assert!(listener.poll().is_empty());
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    assert!(listener.poll().is_empty());
+    // Fn while Ctrl is already down.
+    send(&mut writer, 1, 29, 1);
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    assert!(listener.poll().is_empty());
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    send(&mut writer, 1, 29, 0);
+    assert!(listener.poll().is_empty());
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn chord_after_fn_recording_started_cancels_it() {
+    for key in [29u16, 103, 59] {
+        let (mut listener, mut writer, dir) = fn_listener();
+        send(&mut writer, 1, KEY_FN as u16, 1);
+        assert!(listener.poll().is_empty());
+        age_fn(&mut listener);
+        assert_eq!(listener.poll(), vec![Edge::FnPress]);
+        send(&mut writer, 1, key, 1);
+        assert_eq!(listener.poll(), vec![Edge::FnCancel]);
+        send(&mut writer, 1, key, 0);
+        send(&mut writer, 1, KEY_FN as u16, 0);
+        assert!(listener.poll().is_empty(), "spoiled hold has no release");
+        drop(listener);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+#[test]
+fn fn_is_ignored_unless_enabled_and_never_disturbs_copilot() {
+    let (mut listener, mut writer, dir) = fake_listener();
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    assert!(listener.poll().is_empty());
+    assert!(listener.fn_hold.is_none());
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+    // Enabled: Copilot alone still routes as before, ineligible Fn still works.
+    let (mut listener, mut writer, dir) = fn_listener();
+    send(&mut writer, 1, ASSISTANT as u16, 1);
+    assert_eq!(listener.poll(), vec![Edge::Press]);
+    send(&mut writer, 1, ASSISTANT as u16, 0);
+    assert_eq!(listener.poll(), vec![Edge::Release]);
+    listener.set_eligible(false);
+    send(&mut writer, 1, KEY_FN as u16, 1);
+    listener.poll();
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, KEY_FN as u16, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnRelease]);
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn fn_hold_cancels_on_disconnect_and_deadline() {
+    for deadline in [false, true] {
+        let (mut listener, mut writer, dir) = fn_listener();
+        send(&mut writer, 1, KEY_FN as u16, 1);
+        listener.poll();
+        age_fn(&mut listener);
+        assert_eq!(listener.poll(), vec![Edge::FnPress]);
+        if deadline {
+            if let Some(FnHold::Held(_, start)) = listener.fn_hold.as_mut() {
+                *start = Instant::now() - DEADLINE;
+            }
+        } else {
+            drop(writer);
+        }
+        assert_eq!(listener.poll(), vec![Edge::FnCancel]);
+        assert!(listener.poll().is_empty());
+        drop(listener);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+#[test]
+fn stuck_fn_press_arrives_as_repeats_and_ends_when_they_stop() {
+    let (mut listener, mut writer, dir) = fn_listener();
+    // The kernel thinks Fn is down, so a fresh press only autorepeats.
+    send(&mut writer, 1, KEY_FN as u16, 2);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    send(&mut writer, 1, KEY_FN as u16, 2);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, KEY_FN as u16, 2);
+    assert!(listener.poll().is_empty(), "repeats while held");
+    // Repeats stop with no key-up: released.
+    listener.fn_last = Some(Instant::now() - FN_REPEAT_LOST);
+    assert_eq!(listener.poll(), vec![Edge::FnRelease]);
+    assert!(listener.poll().is_empty());
+    // Continuous repeats without silence never start a new hold.
+    send(&mut writer, 1, KEY_FN as u16, 2);
+    assert!(listener.poll().is_empty());
+    assert!(listener.fn_hold.is_none());
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn right_shift_trigger_taps_holds_and_types_capitals() {
+    let (mut listener, mut writer, dir) = fn_listener();
+    listener.fn_key = KEY_RIGHTSHIFT;
+    let rs = KEY_RIGHTSHIFT as u16;
+    // Bare tap.
+    send(&mut writer, 1, rs, 1);
+    send(&mut writer, 1, rs, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnTap]);
+    // Bare hold.
+    send(&mut writer, 1, rs, 1);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, rs, 0);
+    assert_eq!(listener.poll(), vec![Edge::FnRelease]);
+    // Right Shift + a letter (typing a capital) is never a trigger.
+    send(&mut writer, 1, rs, 1);
+    send(&mut writer, 1, 30, 1);
+    send(&mut writer, 1, 30, 0);
+    send(&mut writer, 1, rs, 0);
+    assert!(listener.poll().is_empty());
+    age_fn(&mut listener);
+    assert!(listener.poll().is_empty());
+    // A long capital-letter hold cancels instead of finishing.
+    send(&mut writer, 1, rs, 1);
+    listener.poll();
+    age_fn(&mut listener);
+    assert_eq!(listener.poll(), vec![Edge::FnPress]);
+    send(&mut writer, 1, 30, 1);
+    assert_eq!(listener.poll(), vec![Edge::FnCancel]);
+    send(&mut writer, 1, rs, 0);
+    assert!(listener.poll().is_empty());
+    drop(listener);
+    fs::remove_dir_all(dir).unwrap();
+}
+#[test]
+fn right_shift_chord_mask_includes_letters_fn_mask_does_not() {
+    assert!(chord_keys(KEY_RIGHTSHIFT).any(|k| k == 30));
+    assert!(!chord_keys(KEY_FN).any(|k| k == 30));
+    assert!(!chord_keys(KEY_RIGHTSHIFT).any(|k| k == KEY_RIGHTSHIFT));
 }

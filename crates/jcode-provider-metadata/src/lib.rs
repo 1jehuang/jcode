@@ -142,9 +142,15 @@ pub struct ResolvedOpenAiCompatibleProfile {
     pub requires_api_key: bool,
 }
 
+mod api_key_detect;
 mod catalog;
 mod muse;
 
+pub use api_key_detect::{
+    AMBIGUOUS_SK_CANDIDATES, ApiKeyDetection, detect_api_key_provider, format_api_key_candidates,
+    is_api_key_login_provider, is_auto_api_key_login_alias, normalize_pasted_api_key,
+    resolve_api_key_provider_input,
+};
 pub use catalog::*;
 use catalog::{LOGIN_PROVIDERS, OPENAI_COMPAT_PROFILES};
 pub use muse::{

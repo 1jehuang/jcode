@@ -138,8 +138,10 @@ session_picker_enter = "current-terminal"
 # [jarvis.listening]
 # max_audio_seconds_per_hour = 600
 # max_classifications_per_hour = 120
-# max_agent_turns_per_hour = 20
-# action_probability = 0.97
+# max_agent_turns_per_hour = 0 # 0 disables the agent-turn cap
+# action_probability = 0.5  # 0.5..1; Fn tap sends recent speech without the gate
+# trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
+# warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
 
 [dictation]
 # External speech-to-text command.
@@ -511,6 +513,9 @@ reactive_threshold_tokens = 400000
 proactive_floor = 0.40
 proactive_floor_tokens = 150000
 # Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Per-provider threshold overrides (unset fields inherit from [compaction]):
+# [compaction.providers.gemini]
+# reactive_threshold_tokens = 300000
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -901,6 +906,19 @@ voice_waveform = true
 # Desktop notifications for voice state. When off, recording still needs the
 # waveform to be shown in a Jcode CLI as its visible indicator.
 voice_notifications = true
+# Hold the laptop Fn key to talk to the running always-on Jarvis session
+# (`jcode --jarvis-always-on`) from any window, without changing focus. Needs
+# Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
+# laptops via a udev hwdb remap). Fn shortcuts never record.
+jarvis_fn_key = false
+# Key for that: "fn" or "rightshift" (when Fn never reaches Linux). A bare
+# tap sends what Jarvis just heard; Right Shift with another key types normally.
+jarvis_key = "fn"
+# With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
+# in a new terminal and sends what you said once it is ready.
+jarvis_fn_launch = true
+# Extra flags for that Jarvis, after --jarvis-always-on, e.g. ["--jarvis-screen"].
+jarvis_fn_launch_args = []
 # Open URLs and files for the server. Off: clients use their own opener.
 open = true
 # Open new terminal windows for the server. Off: clients launch locally.

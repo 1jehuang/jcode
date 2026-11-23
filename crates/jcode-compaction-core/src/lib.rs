@@ -831,20 +831,8 @@ pub fn strip_large_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentB
     stripped
 }
 
-/// Inline tool-result images (computer-use and browser screenshots) are decayed
-/// once the transcript holds more than this many of them. See
-/// [`decay_old_tool_images_in_contents`].
-pub const TOOL_IMAGE_DECAY_TRIGGER_COUNT: usize = 12;
-
-/// Inline tool-result images are also decayed once their combined base64
-/// payload exceeds this many characters.
+/// Trigger on actual byte pressure, not image count, to preserve cached history.
 pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
-
-/// After decay, at most this many of the newest tool-result images keep their
-/// inline data. The gap to the trigger count is hysteresis: decay rewrites
-/// older messages (invalidating provider prompt caches and forcing a full
-/// snapshot write), so it only runs every few screenshots instead of on each.
-pub const TOOL_IMAGE_DECAY_KEEP_COUNT: usize = 6;
 
 /// After decay, the retained tool-result images fit within this many base64
 /// characters, except that the newest image is always kept regardless of size.
@@ -855,11 +843,10 @@ pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
 ///
 /// Only images in messages that carry a `ToolResult` are considered, so images
 /// the user pasted are untouched. Nothing happens until the tool images exceed
-/// [`TOOL_IMAGE_DECAY_TRIGGER_COUNT`] or [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`].
-/// Then every tool image except the newest [`TOOL_IMAGE_DECAY_KEEP_COUNT`]
-/// (that also fit within [`TOOL_IMAGE_DECAY_KEEP_CHARS`]) is replaced with a
-/// short text marker. The newest image always survives so the model still sees
-/// the screenshot it just asked for.
+/// [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`]. Older images outside the retained byte
+/// budget ([`TOOL_IMAGE_DECAY_KEEP_CHARS`]) are replaced with a short text
+/// marker. The newest image always survives so the model still sees the
+/// screenshot it just asked for.
 ///
 /// Returns the number of images replaced.
 pub fn decay_old_tool_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
@@ -883,19 +870,18 @@ pub fn decay_old_tool_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[Conte
         }
     }
 
-    if images.len() <= TOOL_IMAGE_DECAY_TRIGGER_COUNT && total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
+    if total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
         return 0;
     }
 
-    let mut kept_count = 0usize;
+    let mut kept_any = false;
     let mut kept_chars = 0usize;
     let mut stripped = 0usize;
     for (ci, bi, payload_len) in images.into_iter().rev() {
-        let keep = kept_count == 0
-            || (kept_count < TOOL_IMAGE_DECAY_KEEP_COUNT
-                && kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS);
+        let keep =
+            !kept_any || kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS;
         if keep {
-            kept_count += 1;
+            kept_any = true;
             kept_chars = kept_chars.saturating_add(payload_len);
             continue;
         }

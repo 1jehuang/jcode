@@ -28,6 +28,12 @@ pub struct CompanionOptions {
     pub voice_waveform: bool,
     /// Desktop notifications for push-to-talk state.
     pub voice_notifications: bool,
+    /// Bare Fn hold talks to the always-on Jarvis session.
+    pub jarvis_fn_key: bool,
+    /// `"fn"` or `"rightshift"`.
+    pub jarvis_key: String,
+    /// Fn opens an always-on Jarvis when none is running.
+    pub jarvis_fn_launch: bool,
     /// Handle `open` / `reveal` requests.
     pub open: bool,
     /// Handle `spawn_terminal` requests.
@@ -46,6 +52,9 @@ impl CompanionOptions {
             browser_updates: config.browser_updates,
             voice_waveform: config.voice_waveform,
             voice_notifications: config.voice_notifications,
+            jarvis_fn_key: config.jarvis_fn_key,
+            jarvis_key: config.jarvis_key.clone(),
+            jarvis_fn_launch: config.jarvis_fn_launch,
             open: config.open,
             spawn_terminal: config.spawn_terminal,
             lid: config.lid,
@@ -80,6 +89,9 @@ impl Default for CompanionOptions {
             browser_updates: true,
             voice_waveform: true,
             voice_notifications: true,
+            jarvis_fn_key: false,
+            jarvis_key: "fn".to_string(),
+            jarvis_fn_launch: true,
             open: true,
             spawn_terminal: true,
             lid: true,
@@ -342,6 +354,9 @@ pub async fn run(options: CompanionOptions) -> Result<()> {
         crate::voice::spawn(crate::voice::VoiceIndicators {
             notifications: options.voice_notifications,
             waveform: options.voice_waveform,
+            jarvis_fn_key: options.jarvis_fn_key,
+            jarvis_key: crate::voice::jarvis_key_code(&options.jarvis_key),
+            jarvis_fn_launch: options.jarvis_fn_launch,
         });
     }
     if options.browser_updates {

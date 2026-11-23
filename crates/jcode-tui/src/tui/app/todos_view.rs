@@ -577,10 +577,16 @@ fn load_current_session_todos(session_id: Option<&str>) -> Vec<TodoItem> {
     let Some(session_id) = session_id else {
         return Vec::new();
     };
-    crate::todo::load_todos(session_id).unwrap_or_else(|error| {
+    visible_todos(crate::todo::load_todos(session_id).unwrap_or_else(|error| {
         crate::logging::debug(&format!("Could not load current todos: {error}"));
         Vec::new()
-    })
+    }))
+}
+
+// Project live lists without rewriting old snapshots or replay events.
+fn visible_todos(mut items: Vec<TodoItem>) -> Vec<TodoItem> {
+    items.retain(|item| !crate::todo::todo_status_is_cancelled(&item.status));
+    items
 }
 
 fn load_current_session_goals(session_id: Option<&str>) -> Vec<crate::todo::TodoGoal> {

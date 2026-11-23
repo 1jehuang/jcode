@@ -78,6 +78,9 @@ pub struct TodoSnapshot {
     /// or terminal task IDs must not suppress actionable work.
     #[serde(default)]
     pub running_background_tasks: Vec<String>,
+    /// Assigned worker sessions confirmed to have a live turn, never the root itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running_workers: Vec<String>,
 }
 
 /// A dependency blocks a todo only while the referenced task is running.
@@ -299,6 +302,10 @@ impl FollowUpPolicy {
             .copied()
             .filter(|todo| {
                 !todo_requires_user_auth(todo)
+                    && !todo
+                        .assigned_to
+                        .as_ref()
+                        .is_some_and(|id| snapshot.running_workers.contains(id))
                     && !todo_goal_cannot_complete(todo, goals)
                     && !todo_waits_on_running_task(todo, |id| {
                         snapshot

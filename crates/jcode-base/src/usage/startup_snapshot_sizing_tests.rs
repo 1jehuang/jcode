@@ -70,6 +70,18 @@ fn serialization_errors_are_not_swallowed() {
 #[ignore = "release-only CPU comparison probe"]
 fn release_sizing_probe() {
     use std::{hint::black_box, time::Instant};
+    #[cfg(target_os = "linux")]
+    fn thread_cpu_ns() -> u128 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) },
+            0
+        );
+        time.tv_sec as u128 * 1_000_000_000 + time.tv_nsec as u128
+    }
     for accounts in [1, 128] {
         let snapshot = fixture(accounts);
         let iterations = if accounts == 1 { 200_000 } else { 5_000 };
@@ -82,6 +94,8 @@ fn release_sizing_probe() {
                 [true, false]
             } {
                 let start = Instant::now();
+                #[cfg(target_os = "linux")]
+                let cpu_start = thread_cpu_ns();
                 for _ in 0..iterations {
                     let len = if count_only {
                         serialized_byte_len(black_box(&snapshot)).unwrap()
@@ -90,7 +104,11 @@ fn release_sizing_probe() {
                     };
                     black_box(len);
                 }
+                #[cfg(target_os = "linux")]
+                let elapsed = (thread_cpu_ns() - cpu_start) as f64 / iterations as f64;
+                #[cfg(not(target_os = "linux"))]
                 let elapsed = start.elapsed().as_nanos() as f64 / iterations as f64;
+                black_box(start.elapsed());
                 if count_only {
                     new.push(elapsed);
                 } else {
@@ -101,7 +119,7 @@ fn release_sizing_probe() {
         old.sort_by(f64::total_cmp);
         new.sort_by(f64::total_cmp);
         eprintln!(
-            "accounts/provider={accounts} bytes={} old_ns={:.1} count_ns={:.1} ratio={:.3}",
+            "accounts/provider={accounts} bytes={} old_cpu_ns={:.1} count_cpu_ns={:.1} ratio={:.3}",
             serialized_byte_len(&snapshot).unwrap(),
             old[4],
             new[4],

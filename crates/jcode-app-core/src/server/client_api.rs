@@ -48,6 +48,7 @@ impl Client {
 
         let request = Request::Message {
             id,
+            jarvis_voice: false,
             content: content.to_string(),
             images: vec![],
             system_reminder: None,

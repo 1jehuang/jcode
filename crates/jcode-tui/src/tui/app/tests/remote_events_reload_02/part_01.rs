@@ -972,6 +972,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(7);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

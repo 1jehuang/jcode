@@ -24,12 +24,118 @@ pub const MIN_MISSED_TOKENS: u64 = 1_024;
 /// 1024; treating them as misses produced constant false alarms.
 pub const OPENAI_MIN_MISSED_TOKENS: u64 = 2_048;
 
-/// Noise floor for a provider identity (`openai`, `openai-api`, `OpenAI`, ...).
+/// Gemini implicit caching (direct and via Antigravity OAuth) leaves roughly
+/// the last ~2K tokens of the previous request uncached. Byte-identical
+/// appends with verified unchanged prefixes showed shortfalls of 826-2057
+/// tokens (clustered at 2049), which surfaced as constant false `low_read`
+/// alarms under the generic 1024 floor.
+pub const GEMINI_MIN_MISSED_TOKENS: u64 = 3_072;
+
+/// Prior tail-gap tolerance for a provider identity (`openai`, `OpenAI`, ...).
+/// For implicit-cache providers this is only the seed used until
+/// [`TailGapModel`] has learned the session's actual tail gap.
 pub fn min_missed_tokens_for_provider(provider: &str) -> u64 {
-    if provider.trim().to_ascii_lowercase().starts_with("openai") {
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.starts_with("openai") {
         OPENAI_MIN_MISSED_TOKENS
+    } else if provider.starts_with("antigravity") || provider.starts_with("gemini") {
+        GEMINI_MIN_MISSED_TOKENS
     } else {
         MIN_MISSED_TOKENS
+    }
+}
+
+/// Providers whose prompt cache is implicit (automatic prefix caching). They
+/// never cache up to the exact end of the previous request, so the shortfall
+/// against that boundary is a normal tail gap, not a loss. Explicit-breakpoint
+/// providers (Anthropic) cache exactly and keep the strict boundary check.
+pub fn provider_caches_implicitly(provider: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    provider.starts_with("openai")
+        || provider.starts_with("antigravity")
+        || provider.starts_with("gemini")
+}
+
+/// Clean tail gaps needed before the learned tolerance replaces the prior.
+const TAIL_GAP_MIN_SAMPLES: usize = 4;
+const TAIL_GAP_WINDOW: usize = 32;
+
+/// Learns the normal tail gap of an implicit-cache provider and flags only
+/// real losses:
+/// 1. Regression: the cache read shrank versus the previous request's read.
+///    An append-only conversation must read at least as much as last time.
+/// 2. Outlier: the gap to the previous boundary exceeds what this session
+///    normally shows. This also catches a stalled cache, whose gap keeps
+///    growing while reads stay flat.
+#[derive(Debug, Clone, Default)]
+pub struct TailGapModel {
+    provider: String,
+    gaps: std::collections::VecDeque<u64>,
+    prev_read: Option<u64>,
+}
+
+impl TailGapModel {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Allowed gap to the previous boundary before it counts as a miss.
+    pub fn tolerance(&self, provider: &str) -> u64 {
+        let prior = min_missed_tokens_for_provider(provider);
+        if !provider_caches_implicitly(provider) {
+            return prior;
+        }
+        let learned_max = if self.same_provider(provider) {
+            self.gaps.iter().copied().max()
+        } else {
+            None
+        };
+        match learned_max {
+            Some(max) if self.gaps.len() >= TAIL_GAP_MIN_SAMPLES => {
+                // Headroom over the largest normal gap, bounded so a run of
+                // odd samples can never hide a real loss.
+                (max + (max / 4).max(512)).clamp(MIN_MISSED_TOKENS, prior * 4)
+            }
+            Some(max) => prior.max(max + 512).min(prior * 4),
+            None => prior,
+        }
+    }
+
+    /// Whether a shortfall of `expected - read` is a real cache loss.
+    pub fn is_miss(&self, provider: &str, expected: u64, read: u64) -> bool {
+        let missed = expected.saturating_sub(read);
+        if missed < MIN_MISSED_TOKENS {
+            return false;
+        }
+        if !provider_caches_implicitly(provider) {
+            return missed >= min_missed_tokens_for_provider(provider);
+        }
+        if self.same_provider(provider)
+            && let Some(prev) = self.prev_read
+            && read.saturating_add(MIN_MISSED_TOKENS) <= prev
+        {
+            return true;
+        }
+        missed > self.tolerance(provider)
+    }
+
+    /// Record a completed request. Flagged misses never train the model.
+    pub fn observe(&mut self, provider: &str, expected: u64, read: u64, flagged: bool) {
+        if !self.same_provider(provider) {
+            self.reset();
+            self.provider = provider.to_string();
+        }
+        if !flagged && expected > 0 && provider_caches_implicitly(provider) {
+            self.gaps.push_back(expected.saturating_sub(read));
+            if self.gaps.len() > TAIL_GAP_WINDOW {
+                self.gaps.pop_front();
+            }
+        }
+        self.prev_read = Some(read);
+    }
+
+    fn same_provider(&self, provider: &str) -> bool {
+        self.provider == provider
     }
 }
 
@@ -419,6 +525,7 @@ struct Pending {
 pub struct KvCacheMonitor {
     baseline: Option<Baseline>,
     pending: Option<Pending>,
+    tail: TailGapModel,
 }
 
 impl KvCacheMonitor {
@@ -429,6 +536,7 @@ impl KvCacheMonitor {
     pub fn reset(&mut self) {
         self.baseline = None;
         self.pending = None;
+        self.tail.reset();
     }
 
     pub fn begin_request(&mut self, route: RequestRoute, signature: RequestSignature) {
@@ -472,7 +580,15 @@ impl KvCacheMonitor {
         let miss = self
             .baseline
             .as_ref()
-            .and_then(|baseline| classify(baseline, &pending, read_tokens));
+            .and_then(|baseline| classify(baseline, &pending, read_tokens, &self.tail));
+        if let (Some(baseline), Some(read)) = (self.baseline.as_ref(), read_tokens) {
+            self.tail.observe(
+                &pending.route.provider,
+                baseline.reusable_cache_tokens,
+                read,
+                miss.is_some(),
+            );
+        }
         if reusable_cache_tokens > 0 {
             self.baseline = Some(Baseline {
                 route: pending.route,
@@ -490,6 +606,7 @@ fn classify(
     baseline: &Baseline,
     pending: &Pending,
     read_tokens: Option<u64>,
+    tail: &TailGapModel,
 ) -> Option<KvCacheMiss> {
     let read_tokens = read_tokens?;
     let expected = baseline.reusable_cache_tokens;
@@ -497,7 +614,7 @@ fn classify(
         return None;
     }
     let missed = expected.saturating_sub(read_tokens);
-    if missed < min_missed_tokens_for_provider(&pending.route.provider) {
+    if !tail.is_miss(&pending.route.provider, expected, read_tokens) {
         return None;
     }
     let reason = reason(baseline, pending, read_tokens)?;
@@ -832,6 +949,84 @@ mod tests {
         assert_eq!(miss.reason, MissReason::LowRead);
     }
 
+    fn gemini_route() -> RequestRoute {
+        RequestRoute {
+            provider: "Antigravity".into(),
+            model: "gemini-4-neon-low".into(),
+            upstream_provider: None,
+            account: None,
+            cache_ttl_secs: None,
+            ttl_is_estimate: true,
+        }
+    }
+
+    /// Replay (reusable, read) pairs; returns the indices that were flagged.
+    fn replay(monitor: &mut KvCacheMonitor, calls: &[(u64, u64)]) -> Vec<usize> {
+        let mut flagged = Vec::new();
+        let mut hashes = vec![10u64];
+        for (i, &(reusable, read)) in calls.iter().enumerate() {
+            hashes.push(100 + i as u64);
+            monitor.begin_request(gemini_route(), sig(&hashes));
+            if monitor.finish_request(reusable, Some(read)).is_some() {
+                flagged.push(i);
+            }
+        }
+        flagged
+    }
+
+    /// Real Antigravity session (2026-11-21): unchanged prefix, reads grow
+    /// every call, tail gap 826-2057 tokens. None of these is a loss.
+    const ANTIGRAVITY_SESSION: &[(u64, u64)] = &[
+        (21_135, 0),
+        (21_193, 19_078),
+        (32_053, 21_194),
+        (32_945, 30_004),
+        (34_593, 32_119),
+        (35_921, 33_114),
+        (36_353, 33_872),
+        (37_941, 34_304),
+        (39_438, 36_827),
+        (41_113, 38_405),
+        (41_439, 39_064),
+    ];
+
+    #[test]
+    fn implicit_cache_tail_gap_is_not_a_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        assert_eq!(
+            replay(&mut monitor, ANTIGRAVITY_SESSION),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn implicit_cache_regression_is_a_miss() {
+        let mut monitor = KvCacheMonitor::new();
+        let mut calls = ANTIGRAVITY_SESSION.to_vec();
+        // Read falls back to ~the system/tools prefix: a real loss.
+        calls.push((41_800, 12_000));
+        assert_eq!(replay(&mut monitor, &calls), vec![calls.len() - 1]);
+    }
+
+    #[test]
+    fn implicit_cache_stall_is_caught_as_outlier_gap() {
+        let mut monitor = KvCacheMonitor::new();
+        let mut calls = ANTIGRAVITY_SESSION.to_vec();
+        // Reads stop growing while the conversation grows. The first stalled
+        // call is within the learned tail gap; once the gap balloons past
+        // anything this session normally shows, it is flagged.
+        calls.push((48_000, 39_064));
+        calls.push((55_000, 39_064));
+        assert_eq!(replay(&mut monitor, &calls), vec![calls.len() - 1]);
+    }
+
+    #[test]
+    fn explicit_cache_keeps_strict_boundary_check() {
+        let model = TailGapModel::default();
+        assert!(model.is_miss("claude", 40_000, 38_900));
+        assert!(!model.is_miss("claude", 40_000, 39_100));
+    }
+
     #[test]
     fn noise_floor_is_provider_specific() {
         assert_eq!(
@@ -847,6 +1042,14 @@ mod tests {
             OPENAI_MIN_MISSED_TOKENS
         );
         assert_eq!(min_missed_tokens_for_provider("claude"), MIN_MISSED_TOKENS);
+        assert_eq!(
+            min_missed_tokens_for_provider("Antigravity"),
+            GEMINI_MIN_MISSED_TOKENS
+        );
+        assert_eq!(
+            min_missed_tokens_for_provider("gemini"),
+            GEMINI_MIN_MISSED_TOKENS
+        );
     }
 
     #[test]
