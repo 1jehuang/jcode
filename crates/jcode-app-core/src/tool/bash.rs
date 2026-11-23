@@ -1192,7 +1192,17 @@ impl BashTool {
         }
     }
 
-    /// Execute a command in the background
+    /// Execute a command in the background.
+    ///
+    /// Detached background execution relies on Unix process semantics (setsid,
+    /// nohup-style shell wrappers) so it is only available on Unix targets.
+    #[cfg(not(unix))]
+    async fn execute_background(&self, _params: BashInput, _ctx: ToolContext) -> Result<ToolOutput> {
+        anyhow::bail!("Background task execution is not supported on this platform");
+    }
+
+    /// Execute a command in the background.
+    #[cfg(unix)]
     async fn execute_background(&self, params: BashInput, ctx: ToolContext) -> Result<ToolOutput> {
         let command = params.command.clone();
         let description = params.intent.clone();
