@@ -202,11 +202,24 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     assert!(!text.contains('\n'));
     status.phase = "streaming".into();
     status.output_tps_milli = Some(12_500);
+    status.status_detail = Some("opening websocket".into());
+    let streaming_line = live_processing_status_line(&status, None, "⠋");
+    let streaming_text = streaming_line.to_string();
     assert!(
-        live_processing_status_line(&status, None, "⠋")
-            .to_string()
-            .contains("12.5 tps")
+        streaming_text.contains("streaming…") && streaming_text.contains("12.5 tps"),
+        "{streaming_text}"
     );
+    assert!(
+        !streaming_text.contains("opening websocket"),
+        "stale websocket-opening detail should not show once streaming: {streaming_text}"
+    );
+    let stalled_line = live_processing_status_line(&status, Some(5.0), "⠋");
+    assert_eq!(stalled_line.spans[1].style.fg, Some(rgb(255, 193, 7)));
+    status.stream_message_ended = true;
+    let finalizing_text = live_processing_status_line(&status, Some(5.0), "⠋").to_string();
+    assert!(finalizing_text.contains("finalizing…"), "{finalizing_text}");
+    status.stream_message_ended = false;
+    status.status_detail = None;
     status.input_tokens = None;
     status.output_tokens = None;
     status.connection_type = None;
