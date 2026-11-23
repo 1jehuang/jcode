@@ -68,7 +68,7 @@ pub(crate) use redraw_schedule::{
     REDRAW_REMOTE_STARTUP, REDRAW_STATIC_STREAM, REDRAW_SWARM_SPINNER,
     current_full_frame_redraw_reason, idle_donut_active, last_full_frame_redraw_reason,
     periodic_redraw_required, periodic_redraw_required_excluding_idle_animation, redraw_interval,
-    redraw_interval_with_policy,
+    redraw_interval_with_policy, redraw_interval_with_policy_and_animation,
 };
 mod remote_diff;
 pub mod screenshot;

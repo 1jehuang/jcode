@@ -778,10 +778,20 @@ impl App {
 
         loop {
             self.sync_sleep_guard();
+            // Only pace the loop at animation cadence for ticks the renderer can
+            // actually serve cheaply. The partial-repaint guards refuse while the
+            // palette is open or the composer changed; pacing animation FPS anyway
+            // turned every one of those wakes into a full frame (~200 KB/s of
+            // terminal output with the slash menu up). See issue #1905.
+            let idle_animation_cheap = status_spinner_renderer.idle_animation_only_available(&self);
             let desired_redraw = if self.cloud_job.is_some() {
                 Duration::from_millis(100)
             } else {
-                crate::tui::redraw_interval(&self)
+                crate::tui::redraw_interval_with_policy_and_animation(
+                    &self,
+                    &crate::perf::tui_policy(),
+                    idle_animation_cheap,
+                )
             };
             if desired_redraw != redraw_period {
                 redraw_period = desired_redraw;
@@ -793,7 +803,7 @@ impl App {
                 // when nothing else is due. This is the single draw site, so
                 // gating here covers every redraw source (ticks, input, bus
                 // events), not just the animation tick.
-                if status_spinner_renderer.idle_animation_only_available(&self)
+                if idle_animation_cheap
                     && status_spinner_renderer.draw_idle_animation_only(&self, &mut terminal)?
                 {
                     needs_redraw = false;
