@@ -66,21 +66,68 @@ fn cloud_move_selection_defaults_to_swarm_and_independent_sessions_are_explicit(
     );
 }
 
+#[inline(never)]
+fn parse_update_command(argv: &[&str]) -> Result<(Option<String>, bool, bool, bool), clap::Error> {
+    let owned: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
+    std::thread::Builder::new()
+        .name("parse-update-cli".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let args = Args::try_parse_from(owned)?;
+            match args.command {
+                Some(Command::Update {
+                    channel,
+                    prerelease,
+                    stable,
+                    set_channel_only,
+                }) => Ok((channel, prerelease, stable, set_channel_only)),
+                other => panic!("expected Command::Update, got {other:?}"),
+            }
+        })
+        .expect("spawn parse-update-cli thread")
+        .join()
+        .expect("parse-update-cli thread panicked")
+}
+
 #[test]
 fn update_channel_cli_is_explicit_and_limited_to_preview_and_stable() {
-    for channel in ["preview", "stable"] {
-        let args = Args::try_parse_from(["jcode", "update", "--channel", channel]).unwrap();
-        assert!(
-            matches!(args.command, Some(Command::Update { channel: Some(value) }) if value == channel)
+    for channel in ["preview", "prerelease", "stable"] {
+        assert_eq!(
+            parse_update_command(&["jcode", "update", "--channel", channel]).unwrap(),
+            (Some(channel.to_string()), false, false, false)
         );
     }
-    let args = Args::try_parse_from(["jcode", "update"]).unwrap();
-    assert!(matches!(
-        args.command,
-        Some(Command::Update { channel: None })
-    ));
+    for flag in ["--prerelease", "--preview"] {
+        assert_eq!(
+            parse_update_command(&["jcode", "update", flag]).unwrap(),
+            (None, true, false, false)
+        );
+    }
+    assert_eq!(
+        parse_update_command(&["jcode", "update", "--stable"]).unwrap(),
+        (None, false, true, false)
+    );
+    assert_eq!(
+        parse_update_command(&["jcode", "update"]).unwrap(),
+        (None, false, false, false)
+    );
+    assert_eq!(
+        parse_update_command(&[
+            "jcode",
+            "update",
+            "--channel",
+            "preview",
+            "--set-channel-only",
+        ])
+        .unwrap(),
+        (Some("preview".to_string()), false, false, true)
+    );
+    assert!(parse_update_command(&["jcode", "update", "--prerelease", "--stable"]).is_err());
+    assert!(
+        parse_update_command(&["jcode", "update", "--prerelease", "--channel", "stable"]).is_err()
+    );
     for channel in ["main", "nightly", "unknown"] {
-        assert!(Args::try_parse_from(["jcode", "update", "--channel", channel]).is_err());
+        assert!(parse_update_command(&["jcode", "update", "--channel", channel]).is_err());
     }
 }
 
@@ -595,7 +642,9 @@ fn login_no_browser_flag_parses() {
             flow_id,
             cancel,
             device_code,
+            region,
         }) => {
+            assert!(region.is_none());
             assert!(provider.is_none());
             assert!(account.is_none());
             assert!(no_browser);

@@ -371,6 +371,7 @@ fn external_session(id: &str, path: &Path) -> SessionInfo {
             session_path: path.to_string_lossy().into_owned(),
         },
         external_path: Some(path.to_string_lossy().into_owned()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }
@@ -400,6 +401,7 @@ fn candidate_priority_prefers_opening_then_intent_and_preserves_ties() {
             save_label: None,
             has_prompt: !opening.is_empty(),
             opening_prompt: opening.into(),
+            user_intention: String::new(),
             intent_text: intent.into(),
             working_dir: None,
             server_name: None,

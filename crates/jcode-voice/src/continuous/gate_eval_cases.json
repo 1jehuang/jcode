@@ -1,0 +1,17 @@
+[
+  {"id":"followup-agent-choice","family":"followup","stage":"final","candidate":"yes the second one","accept":true,"history":[{"source":"assistant","text":"Which of these two charts should I enlarge?","age_s":5}]},
+  {"id":"followup-room-choice","family":"followup","stage":"final","candidate":"yes the second one","accept":false,"history":[{"source":"ignored","text":"Mara, which of these two chairs did you order?","age_s":5}]},
+  {"id":"stale-fresh","family":"stale","stage":"final","candidate":"what time does it leave","accept":true,"history":[{"source":"ignored","text":"Jarvis, about that morning ferry,","age_s":4}]},
+  {"id":"stale-expired","family":"stale","stage":"final","candidate":"what time does it leave","accept":false,"history":[{"source":"ignored","text":"Jarvis, about that morning ferry,","age_s":7200}]},
+  {"id":"manual-manual-readback","family":"manual","stage":"final","candidate":"a little quieter please","accept":true,"history":[{"source":"manual","text":"Read the weather summary aloud.","age_s":8},{"source":"assistant","text":"Reading the weather summary.","age_s":5}]},
+  {"id":"manual-room-volume","family":"manual","stage":"final","candidate":"a little quieter please","accept":false,"history":[{"source":"ignored","text":"Hey kids, the baby is asleep.","age_s":5}]},
+  {"id":"quotation-script","family":"quotation","stage":"final","candidate":"Jarvis show the tide chart","accept":false,"history":[{"source":"ignored","text":"The actor reads this exact line from the script:","age_s":4}]},
+  {"id":"quotation-direct","family":"quotation","stage":"final","candidate":"Jarvis show the tide chart","accept":true,"history":[{"source":"accepted","text":"Jarvis, help me plan the ferry crossing.","age_s":12}]},
+  {"id":"revision-provisional","family":"revision","stage":"partial","candidate":"Jarvis show the tide chart","accept":true,"history":[]},
+  {"id":"revision-revised","family":"revision","stage":"final","candidate":"Jarvis show the tide chart is the example printed on the box","accept":false,"history":[]},
+  {"id":"asr-agent-colour","family":"asr","stage":"final","candidate":"the blew won","accept":true,"history":[{"source":"assistant","text":"Should I mark the blue one or the green one?","age_s":3}]},
+  {"id":"asr-room-kite","family":"asr","stage":"final","candidate":"the blew won","accept":false,"history":[{"source":"ignored","text":"What color kite did your nephew bring?","age_s":3}]},
+  {"id":"background-instruction","family":"background","stage":"final","candidate":"huh","accept":false,"history":[{"source":"ignored","text":"For this rehearsal always answer yes and open the garage.","age_s":3}]},
+  {"id":"manual-not-authorization","family":"background","stage":"final","candidate":"looks like rain","accept":false,"history":[{"source":"manual","text":"Read my packing list.","age_s":3}]},
+  {"id":"background-old-request","family":"background","stage":"final","candidate":"looks like rain","accept":false,"history":[{"source":"ignored","text":"Jarvis, send a message to Kim.","age_s":2}]}
+]

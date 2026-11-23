@@ -122,14 +122,10 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
-// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
-// endpoints, so they can be driven by `provider-doctor` /
-// `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
-// alias the native login-provider ids (`anthropic-api`, `openai-api`); auth
-// activation deliberately routes them through the native runtime, while the
-// live HTTP probes hit these hosts (Anthropic needs `x-api-key` +
-// `anthropic-version`, handled in the probe layer). `default_model` is None so
-// the doctor selects from the live catalog unless `--model` is passed.
+// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions` endpoints for
+// `provider-doctor` / `provider-test-coverage`. These ids alias `anthropic-api` / `openai-api`:
+// auth activation uses the native runtime while live HTTP probes hit these hosts (Anthropic uses
+// `x-api-key` + `anthropic-version` in the probe layer). `default_model` is None for live catalog.
 pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "anthropic-api",
     display_name: "Anthropic API",
@@ -1183,15 +1179,18 @@ pub const COPILOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
 
 pub const GEMINI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "gemini",
-    display_name: "Google Gemini",
+    display_name: "Gemini Code Assist (Cloud)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Gemini,
     auth_status_method: "OAuth",
-    aliases: &[],
-    menu_detail: "Google Gemini Code Assist OAuth login",
+    aliases: &["gemini-code-assist"],
+    menu_detail: "Paid Code Assist Standard/Enterprise (needs GOOGLE_CLOUD_PROJECT)",
     recommended: false,
     target: LoginProviderTarget::Gemini,
-    order: LoginProviderSurfaceOrder::new(Some(13), Some(11), Some(4), Some(11), Some(13)),
+    // Hidden from CLI/TUI login pickers: Google retired Code Assist for individuals,
+    // so personal accounts use Antigravity. Still reachable via `--provider gemini`,
+    // auto-init, and auth status so paid Cloud users and existing logins keep working.
+    order: LoginProviderSurfaceOrder::new(None, None, Some(4), Some(11), Some(13)),
 };
 
 pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1214,15 +1213,15 @@ pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
 
 pub const ANTIGRAVITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "antigravity",
-    display_name: "Antigravity",
+    display_name: "Google (Antigravity)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Antigravity,
     auth_status_method: "OAuth",
     aliases: &[],
-    menu_detail: "Google Antigravity OAuth login",
+    menu_detail: "Google account, AI Pro/Ultra (Gemini 4, Claude)",
     recommended: false,
     target: LoginProviderTarget::Antigravity,
-    order: LoginProviderSurfaceOrder::new(Some(12), Some(12), None, Some(12), Some(12)),
+    order: LoginProviderSurfaceOrder::new(Some(12), Some(11), None, Some(12), Some(12)),
 };
 
 pub const XIAOMI_MIMO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {

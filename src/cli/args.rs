@@ -283,17 +283,23 @@ pub(crate) enum Command {
         #[command(flatten)]
         google: GoogleLoginArgs,
 
-        /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
+        /// API base / endpoint URL (OpenAI-compatible profiles, Azure endpoint).
         #[arg(long)]
         api_base: Option<String>,
 
-        /// OpenAI-compatible API key. If omitted, jcode prompts securely when needed.
+        /// API key for any API-key provider. Use `-` to read it from stdin.
+        /// If omitted, jcode prompts securely when needed.
         #[arg(long)]
         api_key: Option<String>,
 
-        /// Environment variable name to store/use for an OpenAI-compatible API key.
+        /// Read the API key from this environment variable (keeps secrets out of argv).
+        /// For openai-compatible, also records which variable to use at runtime.
         #[arg(long)]
         api_key_env: Option<String>,
+
+        /// AWS region for Bedrock (default us-east-2).
+        #[arg(long)]
+        region: Option<String>,
     },
 
     /// Log in to and manage your Jcode account
@@ -313,9 +319,21 @@ pub(crate) enum Command {
 
     /// Update jcode to the latest version
     Update {
-        /// Persist an update channel (stable permits returning from preview).
-        #[arg(long, value_parser = ["preview", "stable"])]
+        /// Persist an update channel (stable permits returning from prerelease/preview).
+        #[arg(long, value_parser = ["preview", "prerelease", "stable"])]
         channel: Option<String>,
+
+        /// Switch to prerelease builds, install the latest prerelease, and live-reload running sessions.
+        #[arg(long, alias = "preview", conflicts_with_all = ["channel", "stable"])]
+        prerelease: bool,
+
+        /// Switch back to stable releases, install the latest stable release, and live-reload running sessions.
+        #[arg(long, conflicts_with_all = ["channel", "prerelease"])]
+        stable: bool,
+
+        /// Only persist the selected update channel without checking, downloading, or reloading.
+        #[arg(long, hide = true)]
+        set_channel_only: bool,
     },
 
     /// Show build/version information in human or JSON form
@@ -443,6 +461,14 @@ pub(crate) enum Command {
         /// Do not show desktop notifications for push-to-talk
         #[arg(long)]
         no_voice_notifications: bool,
+
+        /// Do not use the Fn key as push-to-talk for always-on Jarvis
+        #[arg(long)]
+        no_jarvis_fn_key: bool,
+
+        /// Do not open an always-on Jarvis when Fn is held and none is running
+        #[arg(long)]
+        no_jarvis_fn_launch: bool,
 
         /// Do not handle open/reveal requests (clients open locally)
         #[arg(long)]

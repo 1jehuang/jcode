@@ -75,6 +75,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_images = restored.queued_images;
         self.queued_commands = restored.queued_commands;
         if self.has_queued_followups() {
             if self.is_remote {

@@ -12,19 +12,26 @@ use chrono::Utc;
 use jcode_base::auth::gemini as gemini_auth;
 use jcode_message_types::{ConnectionPhase, Message, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, Provider};
+use jcode_provider_gemini::stream::{
+    GeminiSseEnvelope, GeminiSseParser, GeminiStreamAccumulator, GeminiStreamFinish,
+    decode_sse_chunk,
+};
 pub use jcode_provider_gemini::{
     AVAILABLE_MODELS, CODE_ASSIST_API_VERSION, CODE_ASSIST_ENDPOINT, ClientMetadata,
     CodeAssistGenerateRequest, CodeAssistGenerateResponse, DEFAULT_MODEL, GEMINI_API_ENDPOINT,
     GEMINI_API_VERSION, GeminiCandidate, GeminiContent, GeminiFunctionCall,
-    GeminiFunctionCallingConfig, GeminiFunctionDeclaration, GeminiFunctionResponse, GeminiPart,
-    GeminiPromptFeedback, GeminiRuntimeState, GeminiTool, GeminiToolConfig, GeminiUsageMetadata,
-    GeminiUserTier, IneligibleTier, InlineData, LoadCodeAssistRequest, LoadCodeAssistResponse,
-    LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse, ProjectRef,
-    USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse, build_contents,
-    build_system_instruction_with_tool_guard, build_tools, choose_onboard_tier, client_metadata,
-    extract_gemini_model_ids, gemini_fallback_models, google_cloud_project_from_env,
-    ineligible_or_project_error, is_gemini_model_id, load_code_assist_request,
-    merge_gemini_model_lists, validate_load_code_assist_response,
+    GeminiFunctionCallingConfig, GeminiFunctionDeclaration, GeminiFunctionResponse,
+    GeminiGenerationConfig, GeminiPart, GeminiPromptFeedback, GeminiRuntimeState,
+    GeminiThinkingConfig, GeminiThinkingRequestMode, GeminiTool, GeminiToolConfig,
+    GeminiUsageMetadata, GeminiUserTier, IneligibleTier, InlineData, LoadCodeAssistRequest,
+    LoadCodeAssistResponse, LongRunningOperationResponse, OnboardUserRequest, OnboardUserResponse,
+    ProjectRef, USER_TIER_FREE, VertexGenerateContentRequest, VertexGenerateContentResponse,
+    build_contents, build_generation_config_for_thoughts,
+    build_generation_config_for_thoughts_with_mode, build_system_instruction_with_tool_guard,
+    build_tools, choose_onboard_tier, client_metadata, extract_gemini_model_ids,
+    google_cloud_project_from_env, ineligible_or_project_error, is_gemini_model_id,
+    is_thinking_config_rejected_error, load_code_assist_request, merge_gemini_model_lists,
+    retired_individual_tier_error, validate_load_code_assist_response,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -32,6 +39,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -183,6 +191,9 @@ impl GeminiProvider {
             };
 
         validate_load_code_assist_response(&load_res)?;
+        if let Some(err) = retired_individual_tier_error(&load_res, project_id_env.is_some()) {
+            return Err(err);
+        }
 
         let project_id = if load_res.current_tier.is_some() {
             if let Some(project_id) = load_res.cloudaicompanion_project.clone() {
@@ -282,8 +293,7 @@ impl GeminiProvider {
     ) -> Result<T> {
         let tokens = gemini_auth::load_or_refresh_tokens().await?;
         let url = format!("{}:{method}", Self::base_url());
-        let body_value =
-            serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+        let body_bytes = replayable_json_body(body)?;
         // Code Assist enforces a short-window burst limiter that returns 429
         // RESOURCE_EXHAUSTED with "quota will reset after 0s" even when the
         // daily bucket has plenty left. Those clear within seconds, so retry
@@ -300,7 +310,7 @@ impl GeminiProvider {
                             .post(&url)
                             .bearer_auth(&tokens.access_token)
                             .header(reqwest::header::CONTENT_TYPE, "application/json")
-                            .json(&body_value)
+                            .body(body_bytes.clone())
                     },
                     &url,
                 )
@@ -347,6 +357,105 @@ impl GeminiProvider {
         }
     }
 
+    /// POST a JSON body to a Code Assist SSE streaming endpoint (`?alt=sse`)
+    /// with the same transient 429/5xx retry policy as `post_json`, returning
+    /// the raw streaming `reqwest::Response` once HTTP 200 OK is established.
+    async fn post_sse(&self, method: &str, body: &impl Serialize) -> Result<reqwest::Response> {
+        let tokens = gemini_auth::load_or_refresh_tokens().await?;
+        let url = format!("{}:{method}?alt=sse", Self::base_url());
+        let body_bytes = replayable_json_body(body)?;
+        let mut attempt: u32 = 0;
+        loop {
+            let resp = self
+                .send_with_retry(
+                    |client| {
+                        client
+                            .post(&url)
+                            .bearer_auth(&tokens.access_token)
+                            .header(reqwest::header::CONTENT_TYPE, "application/json")
+                            .header(reqwest::header::ACCEPT, "text/event-stream")
+                            .body(body_bytes.clone())
+                    },
+                    &url,
+                )
+                .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let retry_after = jcode_provider_core::retry_after::retry_after(resp.headers());
+                let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                if let Some(delay) = gemini_http_retry_delay(
+                    method,
+                    status,
+                    &body,
+                    attempt,
+                    retry_after.map(|hint| hint.remaining()),
+                ) {
+                    jcode_base::logging::warn(&format!(
+                        "Gemini {} hit transient HTTP {} (attempt {}/{}); retrying in {:?}",
+                        method,
+                        status.as_u16(),
+                        attempt + 1,
+                        MAX_HTTP_RETRIES,
+                        delay
+                    ));
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                    format!(
+                        "Gemini request {} failed (HTTP {}): {}",
+                        method,
+                        status,
+                        body.trim()
+                    ),
+                    retry_after,
+                ));
+            }
+
+            return Ok(resp);
+        }
+    }
+
+    /// POST a JSON body to an official Gemini Developer API SSE streaming
+    /// endpoint (`?alt=sse`), authenticating with `x-goog-api-key`.
+    async fn post_sse_api_key(
+        &self,
+        url: &str,
+        api_key: &str,
+        body: &impl Serialize,
+        label: &str,
+    ) -> Result<reqwest::Response> {
+        let body_bytes = replayable_json_body(body)?;
+        let resp = self
+            .send_with_retry(
+                |client| {
+                    client
+                        .post(url)
+                        .header("x-goog-api-key", api_key)
+                        .header(reqwest::header::CONTENT_TYPE, "application/json")
+                        .header(reqwest::header::ACCEPT, "text/event-stream")
+                        .body(body_bytes.clone())
+                },
+                url,
+            )
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
+            anyhow::bail!(
+                "Gemini request {} failed (HTTP {}): {}",
+                label,
+                status,
+                body.trim()
+            );
+        }
+
+        Ok(resp)
+    }
+
     /// POST a JSON body to the official Gemini Developer API, authenticating
     /// with an `x-goog-api-key` header instead of an OAuth bearer token.
     async fn post_json_api_key<T: DeserializeOwned>(
@@ -356,8 +465,7 @@ impl GeminiProvider {
         body: &impl Serialize,
         label: &str,
     ) -> Result<T> {
-        let body_value =
-            serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+        let body_bytes = replayable_json_body(body)?;
         let resp = self
             .send_with_retry(
                 |client| {
@@ -365,7 +473,7 @@ impl GeminiProvider {
                         .post(url)
                         .header("x-goog-api-key", api_key)
                         .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(&body_value)
+                        .body(body_bytes.clone())
                 },
                 url,
             )
@@ -463,7 +571,7 @@ impl GeminiProvider {
     /// bounds this to a single retry per distinct construct.
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors generate_content so the retry re-sends an identical turn"
+        reason = "mirrors stream_generate_content so the retry re-sends an identical turn"
     )]
     async fn retry_after_schema_rejection(
         &self,
@@ -474,7 +582,8 @@ impl GeminiProvider {
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
-    ) -> Option<Result<CodeAssistGenerateResponse>> {
+        thinking_mode: GeminiThinkingRequestMode,
+    ) -> Option<Result<(reqwest::Response, GeminiSseEnvelope)>> {
         let dialect = &jcode_schema_dialect::registry::GEMINI;
         match jcode_schema_dialect::recover_from_error(error, dialect) {
             jcode_schema_dialect::RecoveryAction::NotSchemaRelated => None,
@@ -485,14 +594,26 @@ impl GeminiProvider {
             jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
                 jcode_base::logging::warn(&format!("Gemini {description}"));
                 Some(
-                    self.generate_content(state, model, messages, tools, system, resume_session_id)
-                        .await,
+                    self.stream_generate_content(
+                        state,
+                        model,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        thinking_mode,
+                    )
+                    .await,
                 )
             }
         }
     }
 
-    async fn generate_content(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit per-request parameters avoid hidden mutable state on GeminiProvider"
+    )]
+    async fn stream_generate_content(
         &self,
         state: &GeminiRuntimeState,
         model: &str,
@@ -500,7 +621,10 @@ impl GeminiProvider {
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
-    ) -> Result<CodeAssistGenerateResponse> {
+        thinking_mode: GeminiThinkingRequestMode,
+    ) -> Result<(reqwest::Response, GeminiSseEnvelope)> {
+        let generation_config =
+            build_generation_config_for_thoughts_with_mode(model, thinking_mode);
         let request = CodeAssistGenerateRequest {
             model: model.to_string(),
             project: state.project_id.clone(),
@@ -519,6 +643,7 @@ impl GeminiProvider {
                         function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
                     })
                 },
+                generation_config,
                 session_id: Some(
                     resume_session_id
                         .filter(|value| !value.trim().is_empty())
@@ -532,32 +657,79 @@ impl GeminiProvider {
 
         match Self::auth_mode() {
             GeminiAuthMode::ApiKey(api_key) => {
-                // The Developer API consumes the inner generateContent body
-                // directly (no Code Assist envelope) and returns the response
-                // without the `{ response: ... }` wrapper, so adapt both sides.
+                // The Developer API consumes the inner request body directly
+                // (no Code Assist envelope) and emits bare
+                // VertexGenerateContentResponse SSE frames.
                 let mut inner = request.request;
                 inner.session_id = None;
                 let url = format!(
-                    "{}/models/{}:generateContent",
+                    "{}/models/{}:streamGenerateContent?alt=sse",
                     Self::developer_api_base_url(),
                     model
                 );
-                let response: VertexGenerateContentResponse = self
-                    .post_json_api_key(&url, &api_key, &inner, "generateContent")
+                let response = self
+                    .post_sse_api_key(&url, &api_key, &inner, "streamGenerateContent")
                     .await
-                    .context("Gemini generateContent failed")?;
-                Ok(CodeAssistGenerateResponse {
-                    trace_id: None,
-                    response: Some(response),
-                })
+                    .context("Gemini streamGenerateContent failed")?;
+                Ok((response, GeminiSseEnvelope::DeveloperApi))
             }
-            GeminiAuthMode::Oauth => self
-                .post_json("generateContent", &request)
-                .await
-                .context("Gemini generateContent failed"),
+            GeminiAuthMode::Oauth => {
+                let response = self
+                    .post_sse("streamGenerateContent", &request)
+                    .await
+                    .context("Gemini streamGenerateContent failed")?;
+                Ok((response, GeminiSseEnvelope::CodeAssist))
+            }
         }
     }
 }
+
+impl GeminiProvider {
+    /// Whether the active route can use Interactions tool retrieval: an
+    /// official Developer API key (Code Assist OAuth has no Interactions
+    /// endpoint) and a model that supports `defer_loading`.
+    fn native_deferred_route(model: &str) -> bool {
+        matches!(Self::auth_mode(), GeminiAuthMode::ApiKey(_))
+            && jcode_provider_gemini::interactions::model_supports_tool_retrieval(model)
+    }
+
+    /// Stateless `POST /interactions` call used when deferred tools are
+    /// present. See `jcode_provider_gemini::interactions`.
+    async fn create_interaction(
+        &self,
+        api_key: &str,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Result<jcode_provider_gemini::interactions::InteractionResponse> {
+        let system_instruction =
+            build_system_instruction_with_tool_guard(system, !tools.is_empty())
+                .and_then(|content| content.parts.into_iter().find_map(|part| part.text));
+        let body = jcode_provider_gemini::interactions::build_interaction_request(
+            model,
+            messages,
+            tools,
+            system_instruction,
+        );
+        let url = format!("{}/interactions", Self::developer_api_base_url());
+        self.post_json_api_key(&url, api_key, &body, "interactions")
+            .await
+            .context("Gemini interactions request failed")
+    }
+}
+
+// Serialize through Value to retain the legacy recursively sorted object order.
+// Keep only replayable bytes across HTTP awaits, rather than a second JSON tree.
+fn replayable_json_body(body: &impl Serialize) -> Result<bytes::Bytes> {
+    let value = serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
+    serde_json::to_vec(&value)
+        .map(bytes::Bytes::from)
+        .context("Failed to serialize Gemini request body")
+}
+
+#[cfg(test)]
+mod request_body_tests;
 
 fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
     let mut payload = json!({
@@ -656,10 +828,15 @@ mod canonical_input_tests {
                     tool_config: (variant > 0).then_some(GeminiToolConfig {
                         function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
                     }),
+                    generation_config: None,
                     session_id: Some("session".into()),
                 },
             };
             let original_wire = serde_json::to_vec(&request).unwrap();
+            assert_eq!(
+                replayable_json_body(&request).unwrap().as_ref(),
+                serde_json::to_vec(&serde_json::to_value(&request).unwrap()).unwrap()
+            );
             let contents = serde_json::to_value(&request.request.contents).unwrap();
             let system = request
                 .request
@@ -747,7 +924,12 @@ fn gemini_http_retry_delay(
 ) -> Option<Duration> {
     // Onboarding mutates account state. Do not replay it automatically when a
     // server error cannot tell us whether the first request completed.
-    if attempt >= MAX_HTTP_RETRIES || !matches!(method, "generateContent" | "loadCodeAssist") {
+    if attempt >= MAX_HTTP_RETRIES
+        || !matches!(
+            method,
+            "generateContent" | "streamGenerateContent" | "loadCodeAssist"
+        )
+    {
         return None;
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -792,7 +974,7 @@ fn gemini_http_client() -> reqwest::Client {
         .default_headers(headers)
         .http1_only()
         .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(90))
+        .read_timeout(Duration::from_secs(120))
         .pool_max_idle_per_host(0)
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()

@@ -107,11 +107,23 @@ fn is_incomplete_todo_poke(message: &str) -> bool {
 /// after a server busy rejection) while the model finishes every todo.
 /// Sending it afterwards nags about finished work, so drop it at dispatch.
 pub(super) fn drop_stale_incomplete_todo_pokes(app: &App, messages: &mut Vec<String>) {
-    if messages.iter().any(|m| is_incomplete_todo_poke(m)) && incomplete_poke_todos(app).is_empty()
-    {
-        crate::logging::info("Dropping stale incomplete-todo poke: no open todos remain");
-        messages.retain(|m| !is_incomplete_todo_poke(m));
+    if !messages.iter().any(|m| is_incomplete_todo_poke(m)) {
+        return;
     }
+    let actionable: Vec<_> = incomplete_poke_todos(app)
+        .into_iter()
+        .filter(|todo| !app.todo_is_paused_for_auto_followup(todo))
+        .collect();
+    messages.retain_mut(|message| {
+        if !is_incomplete_todo_poke(message) {
+            return true;
+        }
+        if actionable.is_empty() {
+            return false;
+        }
+        *message = build_poke_message(&actionable);
+        true
+    });
 }
 
 pub(super) fn queued_messages_are_only_pokes(messages: &[String]) -> bool {
@@ -151,64 +163,10 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
 
 #[path = "commands_auto_poke_errors.rs"]
 mod auto_poke_errors;
-pub(super) use auto_poke_errors::is_non_retryable_auto_poke_error;
-
-/// Whether `error` is a transient connectivity failure (DNS, name resolution,
-/// routing, unreachable host) that the agent itself cannot repair by resending
-/// immediately. These are NOT non-retryable: they resolve once the network
-/// environment recovers, so callers route them to a network-wait/resume path
-/// rather than stopping auto-poke. Kept separate from
-/// [`is_non_retryable_auto_poke_error`] precisely so a transient disconnect is
-/// never treated as a permanent failure.
-pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
-    // Delegate to the shared connectivity classifier (jcode-app-core's
-    // network_retry) so this list can never drift out of sync with the wait-
-    // for-network path, then add wrappers specific to this call site.
-    if crate::network_retry::classify_message(error).is_some() {
-        return true;
-    }
-
-    let lower = error.to_ascii_lowercase();
-
-    let connectivity_markers = [
-        "failed to send openai-compatible chat request",
-        "could not resolve host",
-        "couldn't resolve host",
-    ];
-
-    connectivity_markers
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
-
-/// Whether `error` is a deterministic model/endpoint-capability failure that can
-/// never succeed by resending the identical request: the configured model is not
-/// valid for the configured endpoint (e.g. Volcengine Ark's coding-plan endpoint
-/// returning `404 UnsupportedModel` for a model that lacks the coding plan
-/// feature, or a plain model-not-found). Unlike the broader
-/// [`is_non_retryable_auto_poke_error`] set (which also covers billing, payload
-/// size, auth, etc.), this is narrow enough that we can fail fast *regardless of
-/// auto-poke* during reconnect/recovery continuation instead of burning the
-/// retry budget on a request that is structurally guaranteed to 4xx. See #387.
-pub(super) fn is_fatal_model_endpoint_error(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-
-    let model_endpoint_markers = [
-        "unsupportedmodel",
-        "unsupported model",
-        "does not support the coding plan",
-        "coding plan feature",
-        "model_not_found",
-        "model_not_supported",
-        "invalid model",
-        "the model does not exist",
-        "model does not exist",
-    ];
-
-    model_endpoint_markers
-        .iter()
-        .any(|marker| lower.contains(marker))
-}
+pub(super) use auto_poke_errors::{
+    is_auto_poke_connectivity_error, is_fatal_model_endpoint_error,
+    is_non_retryable_auto_poke_error,
+};
 
 pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str) -> bool {
     if !app.auto_poke_incomplete_todos || !is_non_retryable_auto_poke_error(error) {
@@ -2757,6 +2715,11 @@ pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if let Some(rest) = slash_command_rest(trimmed, "/voice history") {
+        let notice = app.jarvis_listener.queue_history(rest);
+        app.set_status_notice(notice);
+        return true;
+    }
     if trimmed == "/voice" {
         app.toggle_voice_input();
         return true;

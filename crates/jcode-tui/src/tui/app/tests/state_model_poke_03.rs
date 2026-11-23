@@ -790,15 +790,7 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
         .clone();
     assert!(prompt.contains("Cerebras API Key"), "{prompt}");
     assert!(
-        prompt.contains("Stored variable: CEREBRAS_API_KEY"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Endpoint: https://api.cerebras.ai/v1"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Suggested default model: gpt-oss-120b"),
+        prompt.contains("Default model: gpt-oss-120b"),
         "{prompt}"
     );
     assert!(prompt.contains("Paste your API key below"), "{prompt}");
@@ -834,11 +826,9 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                         .unwrap()
                         .join("cerebras.env");
                     assert!(
-                        login
-                            .message
-                            .contains(&format!("Stored at {}.", expected_path.display())),
-                        "{}",
-                        login.message
+                        expected_path.exists(),
+                        "expected saved key file at {}",
+                        expected_path.display()
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));
@@ -2182,14 +2172,16 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
     // Navigate deliberately to the offline API-key flow by semantic action,
     // rather than assuming a fixed number of saved-account/add-account rows.
     let picker = app.inline_interactive_state.as_ref().unwrap();
-    let target = picker
-        .filtered
-        .iter()
-        .position(|&index| {
-            matches!(&picker.entries[index].action, crate::tui::PickerAction::Login(provider)
-                if provider.id == "anthropic-api")
-        })
-        .expect("Anthropic API key login should be listed");
+        let target = picker
+            .filtered
+            .iter()
+            .position(|&index| {
+                matches!(
+                    &picker.entries[index].action,
+                    crate::tui::PickerAction::AutoApiKey
+                )
+            })
+            .expect("Paste an API key login should be listed in starter view");
     for _ in 0..target {
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -2204,6 +2196,128 @@ fn test_login_preview_enter_after_navigation_starts_selected_login() {
     assert!(
         app.pending_login.is_some(),
         "selected provider login flow should start"
+    );
+}
+
+#[test]
+fn test_login_picker_starts_collapsed_with_more_providers_and_expands_on_enter() {
+    let mut app = create_test_app();
+    app.open_login_picker_inline();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("login picker should be open");
+    assert_eq!(picker.kind, crate::tui::PickerKind::Login);
+    // Starter view should stay compact (<= 7 rows, never pushed below the fold
+    // by saved accounts or other configured providers) and end with
+    // "More providers (N)…".
+    assert!(
+        picker.filtered.len() <= 7,
+        "starter list should stay compact (<= 7 rows), got {}",
+        picker.filtered.len()
+    );
+    assert!(
+        picker.filtered.len() < picker.entries.len(),
+        "starter list ({}) should be shorter than full catalog ({})",
+        picker.filtered.len(),
+        picker.entries.len()
+    );
+    let expand_pos = picker
+        .filtered
+        .iter()
+        .position(|&index| {
+            matches!(
+                picker.entries[index].action,
+                crate::tui::PickerAction::ExpandLoginProviders
+            )
+        })
+        .expect("More providers expand row should be visible in starter view");
+    assert!(
+        picker.filtered.iter().any(|&i| matches!(
+            picker.entries[i].action,
+            crate::tui::PickerAction::AutoApiKey
+        )),
+        "Paste an API key should be in starter view"
+    );
+    let starter_names: Vec<&str> = picker
+        .filtered
+        .iter()
+        .map(|&i| picker.entries[i].name.as_str())
+        .collect();
+    assert_eq!(
+        &starter_names[..5],
+        &[
+            "OpenAI",
+            "Anthropic/Claude",
+            "Google (Antigravity)",
+            "Paste an API key",
+            "Auto Import",
+        ],
+        "starter view should list OpenAI, Anthropic/Claude, Google (Antigravity), Paste an API key, Auto Import first; got {:?}",
+        starter_names
+    );
+    assert!(
+        !starter_names.contains(&"GitHub Copilot"),
+        "GitHub Copilot should be collapsed under More providers"
+    );
+    assert!(
+        !picker.filtered.iter().any(|&i| picker.entries[i].name == "Z.AI"),
+        "non-starter unconfigured provider should be collapsed by default"
+    );
+
+    // Typing a filter immediately searches hidden providers without expanding.
+    for ch in "z.ai".chars() {
+        app.handle_key(KeyCode::Char(ch), KeyModifiers::empty())
+            .unwrap();
+    }
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(
+        picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
+        "typing filter should immediately surface hidden providers like Z.AI"
+    );
+    assert!(
+        !picker.filtered.iter().any(|&i| matches!(
+            picker.entries[i].action,
+            crate::tui::PickerAction::ExpandLoginProviders
+        )),
+        "More providers expand row should not clutter filtered search results"
+    );
+    for _ in 0.."z.ai".len() {
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+            .unwrap();
+    }
+
+    // Clearing the filter returns to the collapsed starter list, and pressing
+    // Enter on "More providers" expands in place without closing picker.
+    for _ in 0..expand_pos {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("expanding More providers should keep login picker open");
+    assert_eq!(picker.filtered.len(), picker.entries.len());
+    assert!(
+        picker
+            .filtered
+            .iter()
+            .any(|&i| picker.entries[i].name == "Z.AI"),
+        "expanded login picker should reveal hidden providers like Z.AI"
+    );
+    assert!(
+        !picker.entries.iter().any(|e| matches!(
+            e.action,
+            crate::tui::PickerAction::ExpandLoginProviders
+        )),
+        "ExpandLoginProviders row should be removed once expanded"
     );
 }
 

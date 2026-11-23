@@ -978,6 +978,7 @@ fn reasoning_trace_serde_round_trip() {
 fn format_background_task_stalled_markdown_renders_tail_and_guidance() {
     let rendered =
         format_background_task_stalled_markdown(&jcode_background_types::BackgroundTaskStalled {
+            elapsed_review: false,
             task_id: "stall01".to_string(),
             tool_name: "bash".to_string(),
             display_name: Some("long training run".to_string()),
@@ -1003,6 +1004,7 @@ fn format_background_task_stalled_markdown_renders_tail_and_guidance() {
 fn format_background_task_stalled_markdown_handles_empty_tail() {
     let rendered =
         format_background_task_stalled_markdown(&jcode_background_types::BackgroundTaskStalled {
+            elapsed_review: false,
             task_id: "stall02".to_string(),
             tool_name: "bash".to_string(),
             display_name: None,
@@ -1019,6 +1021,34 @@ fn format_background_task_stalled_markdown_handles_empty_tail() {
         "**Background task stalled** `stall02` · `bash` · no output or progress for 60s"
     ));
     assert!(rendered.contains("_No output captured yet._"));
+}
+
+#[test]
+fn elapsed_review_reports_runtime_without_claiming_silence() {
+    let message =
+        format_background_task_stalled_markdown(&jcode_background_types::BackgroundTaskStalled {
+            elapsed_review: true,
+            task_id: "active".into(),
+            tool_name: "bash".into(),
+            display_name: None,
+            session_id: "session".into(),
+            stall_wake_seconds: 60,
+            running_secs: 65.0,
+            output_tail: "step 3".into(),
+            output_file: Default::default(),
+            notify: true,
+            wake: true,
+        });
+    for expected in [
+        "elapsed review",
+        "running 65s",
+        "step 3",
+        "slow step",
+        "without restarting",
+    ] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert!(!message.contains("stalled") && !message.contains("no output or progress"));
 }
 
 #[test]

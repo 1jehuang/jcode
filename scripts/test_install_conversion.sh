@@ -49,7 +49,47 @@ case "$url" in
     [ "${BAD_CHECKSUM:-0}" != "1" ] || checksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     printf '%s  %s\n' "$checksum" "${TEST_CHECKSUM_ASSET:-jcode-linux-x86_64.tar.gz}"
     ;;
-  *github.com*/releases/download/v1.2.3/SHA256SUMS)
+  *api.github.com/repos/1jehuang/jcode/releases*)
+    if [ "${EMPTY_PRERELEASES:-0}" = "1" ]; then
+      printf '[]\n'
+      exit 0
+    fi
+    cat <<'JSON'
+[
+  {
+    "tag_name": "v1.2.3",
+    "draft": false,
+    "prerelease": false,
+    "published_at": "2026-11-22T05:00:00Z",
+    "assets": [
+      { "name": "jcode-linux-x86_64.tar.gz", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/v1.2.3/jcode-linux-x86_64.tar.gz" },
+      { "name": "SHA256SUMS", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/v1.2.3/SHA256SUMS" }
+    ]
+  },
+  {
+    "tag_name": "selfdev-linux-e8d3ca609344a00de3731cdb4b6a0bce3adb0510",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-11-22T04:23:36Z",
+    "assets": [
+      { "name": "jcode-linux-x86_64.tar.gz", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/selfdev-linux-e8d3ca609344a00de3731cdb4b6a0bce3adb0510/jcode-linux-x86_64.tar.gz" },
+      { "name": "SHA256SUMS", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/selfdev-linux-e8d3ca609344a00de3731cdb4b6a0bce3adb0510/SHA256SUMS" }
+    ]
+  },
+  {
+    "tag_name": "selfdev-linux-2248281ef64759b991254c377ba2211d53e04868",
+    "draft": false,
+    "prerelease": true,
+    "published_at": "2026-11-22T04:12:41Z",
+    "assets": [
+      { "name": "jcode-linux-x86_64.tar.gz", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/selfdev-linux-2248281ef64759b991254c377ba2211d53e04868/jcode-linux-x86_64.tar.gz" },
+      { "name": "SHA256SUMS", "size": 100, "browser_download_url": "https://github.com/1jehuang/jcode/releases/download/selfdev-linux-2248281ef64759b991254c377ba2211d53e04868/SHA256SUMS" }
+    ]
+  }
+]
+JSON
+    ;;
+  *github.com*/releases/download/*/SHA256SUMS)
     checksum='8d57abb57a0dae3ff23c8f0df1f51951b7772822e0d560e860d6f68c24ef6d3d'
     [ "${BAD_CHECKSUM:-0}" != "1" ] || checksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     printf '%s  %s\n' "$checksum" "${TEST_CHECKSUM_ASSET:-jcode-linux-x86_64.tar.gz}"
@@ -83,6 +123,9 @@ cat > "$dest/$artifact" <<'BIN'
 if [ "${1:-}" = "--version" ]; then printf 'jcode 1.2.3\n'; fi
 if [ "${1:-}" = "setup-hotkey" ] && [ -n "${HOTKEY_SETUP_LOG:-}" ]; then
   printf '%s\n' "$*" >> "$HOTKEY_SETUP_LOG"
+fi
+if [ "${1:-}" = "--no-update" ] && [ "${2:-}" = "server" ] && [ -n "${SERVER_RELOAD_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$SERVER_RELOAD_LOG"
 fi
 BIN
 chmod +x "$dest/$artifact"
@@ -199,5 +242,60 @@ INSTALL_TELEMETRY_LOG="$privacy_log" \
 bash "$repo_dir/scripts/install.sh" >/dev/null
 test ! -e "$privacy_log"
 test ! -e "$tmp/home-private/.jcode/install_conversion_id"
+
+# --prerelease installs the newest selfdev prerelease, advances shared-server/current/stable,
+# persists update_channel = "preview", and triggers live server reload.
+prerelease_reload_log="$tmp/prerelease-reload.log"
+prerelease_tag="selfdev-linux-e8d3ca609344a00de3731cdb4b6a0bce3adb0510"
+PATH="$tmp/bin:$PATH" \
+HOME="$tmp/home-prerelease" \
+JCODE_HOME="$tmp/home-prerelease/.jcode" \
+JCODE_INSTALL_DIR="$tmp/install-prerelease" \
+JCODE_NO_TELEMETRY=1 \
+SERVER_RELOAD_LOG="$prerelease_reload_log" \
+bash "$repo_dir/scripts/install.sh" --prerelease >/dev/null
+test "$(cat "$tmp/home-prerelease/.jcode/builds/stable-version")" = "$prerelease_tag"
+test "$(cat "$tmp/home-prerelease/.jcode/builds/current-version")" = "$prerelease_tag"
+test "$(cat "$tmp/home-prerelease/.jcode/builds/shared-server-version")" = "$prerelease_tag"
+grep -Eq '^update_channel = "preview"$' "$tmp/home-prerelease/.jcode/config.toml"
+grep -q -- '--no-update server reload --force' "$prerelease_reload_log"
+
+# Switching back with --stable updates config.toml in place without losing unrelated settings.
+printf '\n[ui]\ntheme = "dark"\n' >> "$tmp/home-prerelease/.jcode/config.toml"
+PATH="$tmp/bin:$PATH" \
+HOME="$tmp/home-prerelease" \
+JCODE_HOME="$tmp/home-prerelease/.jcode" \
+JCODE_INSTALL_DIR="$tmp/install-prerelease" \
+JCODE_SKIP_SERVER_RELOAD=1 \
+JCODE_NO_TELEMETRY=1 \
+bash "$repo_dir/scripts/install.sh" --stable >/dev/null
+test "$(cat "$tmp/home-prerelease/.jcode/builds/stable-version")" = "1.2.3"
+test "$(cat "$tmp/home-prerelease/.jcode/builds/shared-server-version")" = "1.2.3"
+grep -Eq '^update_channel = "stable"$' "$tmp/home-prerelease/.jcode/config.toml"
+grep -Eq '^theme = "dark"$' "$tmp/home-prerelease/.jcode/config.toml"
+
+# A deliberately pinned local self-dev shared-server version is preserved.
+printf '%s\n' "56f43c3d-dirty-deadbeef" > "$tmp/home-prerelease/.jcode/builds/shared-server-version"
+PATH="$tmp/bin:$PATH" \
+HOME="$tmp/home-prerelease" \
+JCODE_HOME="$tmp/home-prerelease/.jcode" \
+JCODE_INSTALL_DIR="$tmp/install-prerelease" \
+JCODE_SKIP_SERVER_RELOAD=1 \
+JCODE_NO_TELEMETRY=1 \
+bash "$repo_dir/scripts/install.sh" --prerelease >/dev/null
+test "$(cat "$tmp/home-prerelease/.jcode/builds/shared-server-version")" = "56f43c3d-dirty-deadbeef"
+
+# --prerelease fails cleanly when no prerelease exists for this platform.
+if PATH="$tmp/bin:$PATH" \
+  HOME="$tmp/home-no-prerelease" \
+  JCODE_HOME="$tmp/home-no-prerelease/.jcode" \
+  JCODE_INSTALL_DIR="$tmp/install-no-prerelease" \
+  JCODE_SKIP_SERVER_RELOAD=1 \
+  JCODE_NO_TELEMETRY=1 \
+  EMPTY_PRERELEASES=1 \
+  bash "$repo_dir/scripts/install.sh" --prerelease >/dev/null 2>&1; then
+  echo "expected missing prerelease failure" >&2
+  exit 1
+fi
 
 echo "installer conversion telemetry tests passed"

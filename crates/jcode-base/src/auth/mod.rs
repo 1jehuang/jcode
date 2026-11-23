@@ -2,6 +2,7 @@ pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
+pub mod api_key_login;
 pub mod azure;
 pub mod claude;
 pub mod codex;
@@ -485,6 +486,7 @@ impl AuthStatus {
     pub fn has_any_untrusted_external_auth() -> bool {
         crate::auth::codex::has_unconsented_legacy_credentials()
             || crate::auth::claude::has_unconsented_external_auth().is_some()
+            || crate::auth::claude::has_unconsented_native_auth()
             || crate::auth::external::has_any_unconsented_external_auth()
             || crate::auth::gemini::has_unconsented_cli_auth()
             || crate::auth::copilot::has_unconsented_external_auth().is_some()

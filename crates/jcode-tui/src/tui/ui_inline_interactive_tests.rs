@@ -335,9 +335,12 @@ fn picker_render_width_uses_intrinsic_content_width() {
     let model = display_width(picker_entry_display_name(&picker.entries[0]).as_str())
         .max(display_width(picker.primary_label()));
     let provider = display_width("openai").max(display_width(picker.secondary_label(false))) + 1;
-    let via = display_width(api_method_display("oauth").as_str())
-        .max(display_width(picker.tertiary_label()))
-        + 1;
+    let via = display_width(api_method_display("oauth").as_str()).max(
+        display_width(picker.tertiary_label())
+            + display_width(
+                picker_header_count_str(picker.filtered.len(), picker.entries.len()).as_str(),
+            ),
+    ) + 1;
     assert_eq!(
         width,
         3 + model + provider + via,

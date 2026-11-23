@@ -126,6 +126,43 @@ fn reactive_threshold_accepts_tokens_or_percentage() {
 }
 
 #[test]
+fn per_provider_reactive_threshold_overrides_global() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.set_mode(crate::config::CompactionMode::Reactive);
+    manager.compaction_config.reactive_threshold = 0.80;
+    manager.compaction_config.reactive_threshold_tokens = 400_000;
+    manager.compaction_config.providers.insert(
+        "gemini".to_string(),
+        crate::config::ProviderCompactionConfig {
+            reactive_threshold_tokens: Some(300_000),
+            ..Default::default()
+        },
+    );
+
+    let messages: Vec<_> = (0..20)
+        .map(|_| make_text_message(Role::User, "x"))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+
+    // Without provider or on Claude, global 400k applies
+    manager.active_provider = Some("Claude".to_string());
+    manager.update_observed_input_tokens(300_000);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(400_000);
+    assert!(manager.should_compact_with(&messages));
+
+    // On Gemini, 300k override applies (case-insensitive)
+    manager.active_provider = Some("Gemini".to_string());
+    manager.update_observed_input_tokens(299_999);
+    assert!(!manager.should_compact_with(&messages));
+    manager.update_observed_input_tokens(300_000);
+    assert!(manager.should_compact_with(&messages));
+}
+
+#[test]
 fn test_should_compact_uses_observed_tokens() {
     let mut manager = CompactionManager::new().with_budget(1_000);
 
