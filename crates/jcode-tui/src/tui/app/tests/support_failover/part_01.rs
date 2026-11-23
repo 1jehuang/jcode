@@ -13,7 +13,7 @@ use std::sync::{Arc as StdArc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 fn cleanup_background_task_files(task_id: &str) {
-    let task_dir = std::env::temp_dir().join("jcode-bg-tasks");
+    let task_dir = crate::storage::background_task_dir();
     let _ = std::fs::remove_file(task_dir.join(format!("{}.status.json", task_id)));
     let _ = std::fs::remove_file(task_dir.join(format!("{}.output", task_id)));
 }

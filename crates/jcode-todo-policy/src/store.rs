@@ -159,7 +159,7 @@ pub fn load_snapshot(home: &Path, session_id: &str) -> TodoSnapshot {
     load_snapshot_with_background_dir(
         home,
         session_id,
-        &std::env::temp_dir().join("jcode-bg-tasks"),
+        &jcode_storage::background_task_dir(),
     )
 }
 

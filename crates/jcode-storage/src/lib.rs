@@ -169,6 +169,14 @@ pub fn jcode_dir() -> Result<PathBuf> {
     Ok(home.join(".jcode"))
 }
 
+/// Directory for background task status and output files.
+pub fn background_task_dir() -> PathBuf {
+    let root = std::env::var("JCODE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    root.join("jcode-bg-tasks")
+}
+
 /// Whether `JCODE_HOME` redirects this process away from the user's real
 /// `~/.jcode` directory.
 ///

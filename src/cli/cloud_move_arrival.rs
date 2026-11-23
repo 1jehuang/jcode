@@ -117,7 +117,7 @@ pub(super) fn arrival_notice(manifest: &MoveManifest) -> String {
 
 pub(super) fn describe_local_only_state(session_id: &str) -> Vec<String> {
     let mut items = Vec::new();
-    let dir = std::env::temp_dir().join("jcode-bg-tasks");
+    let dir = crate::storage::background_task_dir();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();

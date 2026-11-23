@@ -20,7 +20,7 @@ impl<T> Drop for AbortAdoptedTask<T> {
 
 /// Directory for background task output files
 pub(super) fn task_dir() -> PathBuf {
-    std::env::temp_dir().join("jcode-bg-tasks")
+    jcode_storage::background_task_dir()
 }
 
 pub(super) const EXIT_MARKER_PREFIX: &str = "--- Command finished with exit code: ";

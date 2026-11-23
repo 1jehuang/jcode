@@ -409,8 +409,7 @@ impl BuildRequest {
     fn status_path(&self) -> Option<PathBuf> {
         self.status_file.as_ref().map(PathBuf::from).or_else(|| {
             self.background_task_id.as_ref().map(|task_id| {
-                std::env::temp_dir()
-                    .join("jcode-bg-tasks")
+                crate::storage::background_task_dir()
                     .join(format!("{}.status.json", task_id))
             })
         })
