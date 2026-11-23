@@ -128,7 +128,16 @@ pub(in super::super) fn draw_status(
             ProcessingStatus::Streaming => {
                 let mut snapshot = live_status_snapshot(app, elapsed);
                 snapshot.phase = "streaming".into();
-                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if app.stream_reveal_pending() {
+                    snapshot.stream_message_ended = false;
+                }
+                let effective_stale_secs = if app.stream_message_ended() {
+                    None
+                } else {
+                    stale_secs
+                };
+                let mut spans =
+                    live_processing_status_line(&snapshot, effective_stale_secs, spinner).spans;
                 if let Some(upstream) = app.upstream_provider() {
                     spans.push(Span::styled(
                         format!(" · via {upstream}"),

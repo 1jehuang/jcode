@@ -61,6 +61,7 @@ pub(super) fn handle_tool_done(
     // input/intent are still waiting for their own ToolDone; clearing the
     // whole list here made their rows render with no intent or summary.
     app.streaming_tool_calls.retain(|tc| tc.id != id);
+    app.stream_message_ended = false;
     app.status = ProcessingStatus::Streaming;
     true
 }

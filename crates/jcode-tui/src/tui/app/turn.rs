@@ -775,6 +775,7 @@ impl App {
                                         self.update_terminal_title();
                                     }
                                     StreamEvent::ConnectionPhase { phase } => {
+                                        self.stream_message_ended = false;
                                         let was_connecting = matches!(
                                             self.status,
                                             ProcessingStatus::Connecting(_)
