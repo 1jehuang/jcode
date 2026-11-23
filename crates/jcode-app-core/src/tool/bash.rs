@@ -626,6 +626,7 @@ struct ProcessGroupKillGuard {
 
 #[cfg(unix)]
 impl ProcessGroupKillGuard {
+    #[allow(dead_code)]
     fn new(pid: Option<u32>) -> Self {
         Self { pid }
     }
