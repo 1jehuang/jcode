@@ -1364,13 +1364,30 @@ fn overscroll_fact_spans(
     out
 }
 
+fn overscroll_is_standard_effort_word(word: &str) -> bool {
+    let trimmed = word.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
 fn overscroll_model_already_includes_effort(model: &str, effort: &str) -> bool {
     let effort = effort.trim();
-    !effort.is_empty()
-        && model
-            .split_whitespace()
-            .last()
-            .is_some_and(|word| word.eq_ignore_ascii_case(effort))
+    if effort.is_empty() {
+        return false;
+    }
+    let Some(last_word) = model.split_whitespace().last() else {
+        return false;
+    };
+    if last_word.eq_ignore_ascii_case(effort) {
+        return true;
+    }
+    // Models that encode their own thinking/effort level in their name (e.g.
+    // "Gemini 4 Neon Low") should never render a second standard effort suffix
+    // like "Gemini 4 Neon Low medium". Non-standard sentinels like "swarm"
+    // remain visible.
+    overscroll_is_standard_effort_word(last_word) && overscroll_is_standard_effort_word(effort)
 }
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns

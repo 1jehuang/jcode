@@ -920,6 +920,15 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
         "expected no duplicate effort suffix, got: {rendered}"
     );
 
+    facts.effort = Some("medium".to_string());
+    let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
+    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        mismatched_rendered.contains("Gemini 4 Neon Low")
+            && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),
+        "expected no conflicting effort suffix on effort-named model, got: {mismatched_rendered}"
+    );
+
     facts.effort = overscroll_short_reasoning("swarm").map(str::to_string);
     let (swarm_spans, _) = overscroll_fit_facts(&facts, 80);
     let swarm_rendered: String = swarm_spans.iter().map(|s| s.content.as_ref()).collect();
