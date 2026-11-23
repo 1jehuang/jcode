@@ -100,64 +100,6 @@ pub(super) fn cancel_active_turns(session_id: &str) -> usize {
     signals.len()
 }
 
-/// Stop the running turns of every worker `session_id` spawned (workers run
-/// their own server-side turns, so cancelling only the coordinator left them
-/// spending tokens). Idle workers are left alone. Returns the stopped ids.
-pub(super) async fn cancel_spawned_descendant_turns(
-    session_id: &str,
-    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
-    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
-    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
-) -> Vec<String> {
-    let descendants = swarm_descendants(&*swarm_members.read().await, session_id);
-    let mut stopped = Vec::new();
-    for descendant in descendants {
-        let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
-        if signals.is_empty() {
-            continue;
-        }
-        for signal in &signals {
-            signal.fire();
-        }
-        // Workers usually have no attached client; the status update below
-        // is what the coordinator's swarm view shows.
-        fanout_session_event(
-            swarm_members,
-            &descendant,
-            ServerEvent::TurnStopped {
-                reason: crate::protocol::TurnStopReason::Interrupted,
-                message: format!("Stopped because its coordinator {session_id} was interrupted."),
-                provider_stop_reason: None,
-            },
-        )
-        .await;
-        update_member_status(
-            &descendant,
-            "stopped",
-            Some("coordinator interrupted".to_string()),
-            swarm_members,
-            swarms_by_id,
-            event_history,
-            event_counter,
-            swarm_event_tx,
-        )
-        .await;
-        stopped.push(descendant);
-    }
-    if !stopped.is_empty() {
-        let names = stopped.join(",");
-        crate::logging::info(&format!(
-            "SWARM_CASCADE_CANCEL coordinator={session_id} stopped={names}"
-        ));
-    }
-    stopped
-}
-
-#[cfg(test)]
-#[path = "swarm_cascade_tests.rs"]
-mod swarm_cascade_tests;
 #[path = "swarm_hooks.rs"]
 pub(super) mod swarm_hooks;
 
