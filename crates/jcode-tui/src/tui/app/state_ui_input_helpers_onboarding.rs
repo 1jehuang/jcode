@@ -52,10 +52,8 @@ impl App {
                     }),
                 }
             }
-            Some(OnboardingPhase::LoginOpenAi { yes_highlighted }) => {
-                OnboardingWelcomeKind::LoginOpenAi {
-                    yes_highlighted: *yes_highlighted,
-                }
+            Some(OnboardingPhase::LoginOpenAi { choice }) => {
+                OnboardingWelcomeKind::LoginOpenAi { choice: *choice }
             }
             Some(OnboardingPhase::ModelSelect) => OnboardingWelcomeKind::Suggestions,
             Some(OnboardingPhase::ContinuePrompt {

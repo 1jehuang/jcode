@@ -1,0 +1,26 @@
+{
+  "version": "1.1.0",
+  "date": "2026-11-22",
+  "title": "Streamlined login & onboarding, live Gemini thoughts, and inline Markdown images",
+  "highlights": [
+    "Streamlined /login and first-run onboarding now present a compact starter list (OpenAI, Anthropic, Gemini, API key, Auto Import) with paste-any-key auto-detection, masking, and collapsible OAuth/device progress cards.",
+    "Active turns now wait for network recovery and automatically resume after disconnects instead of failing mid-response.",
+    "Local Markdown images now render inline in the TUI via Kitty and Sixel graphics."
+  ],
+  "improvements": [
+    "Gemini and Antigravity now stream live thought summaries over SSE with dynamic thinking budgets, and Antigravity supports reasoning-effort switching via sibling models.",
+    "One-command prerelease switching and live reload are now supported across the installer, CLI, and TUI.",
+    "Session picker search now indexes todo-plan intentions with prefix phrase matching, single-word intent ranking, and match-reason hints.",
+    "Per-provider context compaction threshold overrides can now be configured.",
+    "Gemini now supports native deferred tool loading via Interactions tool retrieval, and late MCP tools are announced as a compact one-line summary with on-demand schema lookup.",
+    "KV cache diagnostics now learn implicit-cache tail gaps and flag read regressions or outlier gaps.",
+    "Always-on Jarvis capture now suppresses itself during companion push-to-talk and defaults the Jev action-probability threshold to 0.5."
+  ],
+  "fixes": [
+    "Prevented infinite client/server reload loops on Termux and duplicate installs.",
+    "Fixed automatic account failover routing for Antigravity quota 429 responses and advertised image input support on Antigravity.",
+    "Fixed auto-import credential detection, validation, and TUI activation issues.",
+    "Set Gemini 4 context fallback to 1M tokens and hid retired Gemini OAuth rows from the account router when no Cloud project is configured.",
+    "Normalized Jarvis user roles on soft-interrupt injections so final transcripts render cleanly."
+  ]
+}

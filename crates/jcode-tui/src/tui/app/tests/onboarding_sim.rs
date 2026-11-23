@@ -42,17 +42,17 @@ fn rehearsal_starts_the_real_first_run_flow_and_exits() {
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
+                choice: crate::tui::OnboardingLoginChoice::OpenAi
             })
         ));
 
-        // Keys reach the real handlers: l moves the highlight to "No".
+        // Keys reach the real handlers: l moves the highlight to "Claude".
         app.handle_key(KeyCode::Char('l'), KeyModifiers::NONE)
             .unwrap();
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: false
+                choice: crate::tui::OnboardingLoginChoice::Claude
             })
         ));
 
@@ -171,7 +171,7 @@ fn alt_5_restarts_the_rehearsal_from_a_pristine_first_screen() {
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
+                choice: crate::tui::OnboardingLoginChoice::OpenAi
             })
         ));
         assert!(app.onboarding_import_in_progress.is_none());

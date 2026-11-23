@@ -568,14 +568,21 @@ fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTas
         ),
         percent,
     );
-    app.set_status_notice(format!(
-        "Background task stalled · {} · no output for {}s",
-        crate::message::background_task_display_label(
-            &task.tool_name,
-            task.display_name.as_deref()
-        ),
-        task.stall_wake_seconds
-    ));
+    let label = crate::message::background_task_display_label(
+        &task.tool_name,
+        task.display_name.as_deref(),
+    );
+    app.set_status_notice(if task.elapsed_review {
+        format!(
+            "Background task review · {label} · running {:.0}s",
+            task.running_secs
+        )
+    } else {
+        format!(
+            "Background task stalled · {label} · no output for {}s",
+            task.stall_wake_seconds
+        )
+    });
 
     if !app.is_processing {
         app.push_display_message(DisplayMessage::background_task(notification.clone()));

@@ -243,6 +243,7 @@ impl App {
                 label: "fixture".to_string(),
                 expected_state: "fixture".to_string(),
                 redirect_uri: "http://localhost:1455/auth/callback".to_string(),
+                device_fallback_cancelled: None,
             });
             self.follow_chat_bottom();
             serde_json::json!({"ok": true, "fixture": "login-progress"}).to_string()
@@ -549,6 +550,186 @@ impl App {
                 })
                 .collect();
             serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
+        } else if cmd == "cells" || cmd.starts_with("cells:") {
+            let (default_w, default_h) = crate::tui::visual_debug::latest_frame()
+                .map(|f| f.terminal_size)
+                .unwrap_or((100, 36));
+            let spec = cmd.strip_prefix("cells:").unwrap_or("").trim();
+            let (synthetic, size_spec) = if let Some(rest) = spec.strip_prefix("synthetic:") {
+                (true, rest.trim())
+            } else if spec == "synthetic" {
+                (true, "")
+            } else {
+                (false, spec)
+            };
+            let (w, h) = size_spec
+                .split_once('x')
+                .and_then(|(ws, hs)| {
+                    let w = ws.parse::<u16>().ok()?.clamp(20, 300);
+                    let h = hs.parse::<u16>().ok()?.clamp(8, 120);
+                    Some((w, h))
+                })
+                .unwrap_or((default_w.clamp(20, 300), default_h.clamp(8, 120)));
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = match ratatui::Terminal::new(backend) {
+                Ok(t) => t,
+                Err(e) => return format!("cells error: {}", e),
+            };
+            let draw_result = if synthetic {
+                let saved_messages = std::mem::replace(
+                    &mut self.display_messages,
+                    vec![
+                        DisplayMessage::user(
+                            "Review the workspace setup and check the active configuration.",
+                        ),
+                        DisplayMessage::assistant("All checks passed. Ready for the next command."),
+                    ],
+                );
+                let saved_user_count = std::mem::replace(&mut self.display_user_message_count, 1);
+                let saved_scroll = std::mem::replace(&mut self.scroll_offset, 0);
+                let saved_auto_scroll = std::mem::replace(&mut self.auto_scroll_paused, false);
+                let saved_processing = std::mem::replace(&mut self.is_processing, false);
+                let saved_streaming = std::mem::take(&mut self.streaming.streaming_text);
+                let saved_queued = std::mem::take(&mut self.queued_messages);
+                let saved_interleave = self.interleave_message.take();
+                let saved_soft = std::mem::take(&mut self.pending_soft_interrupts);
+                let saved_input = std::mem::take(&mut self.input);
+                let saved_cursor = std::mem::replace(&mut self.cursor_pos, 0);
+                let saved_status = std::mem::replace(&mut self.status, ProcessingStatus::Idle);
+                let saved_notice = self.status_notice.take();
+                self.bump_display_messages_version_no_stats();
+
+                let res = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
+
+                self.display_messages = saved_messages;
+                self.display_user_message_count = saved_user_count;
+                self.scroll_offset = saved_scroll;
+                self.auto_scroll_paused = saved_auto_scroll;
+                self.is_processing = saved_processing;
+                self.streaming.streaming_text = saved_streaming;
+                self.queued_messages = saved_queued;
+                self.interleave_message = saved_interleave;
+                self.pending_soft_interrupts = saved_soft;
+                self.input = saved_input;
+                self.cursor_pos = saved_cursor;
+                self.status = saved_status;
+                self.status_notice = saved_notice;
+                self.bump_display_messages_version_no_stats();
+                res
+            } else {
+                terminal.draw(|frame| crate::tui::ui::draw(frame, self))
+            };
+            if let Err(e) = draw_result {
+                return format!("cells error: {}", e);
+            }
+            let buf = terminal.backend().buffer();
+            let color_to_rgb = |c: ratatui::style::Color| -> Option<[u8; 3]> {
+                use ratatui::style::Color;
+                match c {
+                    Color::Reset => None,
+                    Color::Rgb(r, g, b) => Some([r, g, b]),
+                    Color::Black => Some([16, 18, 24]),
+                    Color::Red => Some([235, 111, 146]),
+                    Color::Green => Some([120, 232, 168]),
+                    Color::Yellow => Some([246, 193, 119]),
+                    Color::Blue => Some([138, 180, 248]),
+                    Color::Magenta => Some([196, 167, 231]),
+                    Color::Cyan => Some([120, 210, 230]),
+                    Color::Gray => Some([180, 188, 200]),
+                    Color::DarkGray => Some([108, 118, 134]),
+                    Color::LightRed => Some([255, 138, 128]),
+                    Color::LightGreen => Some([158, 245, 192]),
+                    Color::LightYellow => Some([255, 224, 150]),
+                    Color::LightBlue => Some([168, 204, 255]),
+                    Color::LightMagenta => Some([216, 190, 250]),
+                    Color::LightCyan => Some([156, 230, 245]),
+                    Color::White => Some([235, 240, 248]),
+                    Color::Indexed(idx) => {
+                        if idx < 16 {
+                            let base: [[u8; 3]; 16] = [
+                                [16, 18, 24],
+                                [235, 111, 146],
+                                [120, 232, 168],
+                                [246, 193, 119],
+                                [138, 180, 248],
+                                [196, 167, 231],
+                                [120, 210, 230],
+                                [180, 188, 200],
+                                [108, 118, 134],
+                                [255, 138, 128],
+                                [158, 245, 192],
+                                [255, 224, 150],
+                                [168, 204, 255],
+                                [216, 190, 250],
+                                [156, 230, 245],
+                                [235, 240, 248],
+                            ];
+                            Some(base[idx as usize])
+                        } else if idx < 232 {
+                            let n = idx - 16;
+                            let r = (n / 36) % 6;
+                            let g = (n / 6) % 6;
+                            let b = n % 6;
+                            let to_c = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                            Some([to_c(r), to_c(g), to_c(b)])
+                        } else {
+                            let v = 8 + (idx - 232) * 10;
+                            Some([v, v, v])
+                        }
+                    }
+                }
+            };
+            let mut rows = Vec::with_capacity(h as usize);
+            for y in 0..h {
+                let mut runs: Vec<serde_json::Value> = Vec::new();
+                let mut cur_text = String::new();
+                type CellStyleKey = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
+                let mut cur_style: Option<CellStyleKey> = None;
+                for x in 0..w {
+                    let cell = &buf[(x, y)];
+                    let fg = color_to_rgb(cell.fg);
+                    let bg = color_to_rgb(cell.bg);
+                    let mut flags: u8 = 0;
+                    if cell.modifier.contains(ratatui::style::Modifier::BOLD) {
+                        flags |= 1;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::ITALIC) {
+                        flags |= 2;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::DIM) {
+                        flags |= 4;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::UNDERLINED) {
+                        flags |= 8;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                        flags |= 16;
+                    }
+                    let style = (fg, bg, flags);
+                    let sym = cell.symbol();
+                    let ch = if sym.is_empty() { " " } else { sym };
+                    if cur_style == Some(style) {
+                        cur_text.push_str(ch);
+                    } else {
+                        if let Some((pfg, pbg, pflags)) = cur_style.take() {
+                            runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                            cur_text.clear();
+                        }
+                        cur_text.push_str(ch);
+                        cur_style = Some(style);
+                    }
+                }
+                if let Some((pfg, pbg, pflags)) = cur_style {
+                    runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                }
+                rows.push(serde_json::Value::Array(runs));
+            }
+            serde_json::to_string(&serde_json::json!({
+                "width": w,
+                "height": h,
+                "rows": rows,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "screen" {
             // Capture current visual state
             use crate::tui::visual_debug;

@@ -9,7 +9,7 @@ pub enum UpdateChannel {
     /// Only update from tagged GitHub Releases (default).
     #[default]
     Stable,
-    /// Opt in to published v1.0.0-preview.N prereleases.
+    /// Opt in to published prerelease builds (`selfdev-*` and `vX.Y.Z-preview.N`).
     Preview,
     /// Update from latest commit on main branch (bleeding edge).
     Main,
@@ -20,7 +20,7 @@ impl UpdateChannel {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "stable" | "release" => Some(Self::Stable),
-            "preview" => Some(Self::Preview),
+            "preview" | "prerelease" | "pre-release" => Some(Self::Preview),
             "main" | "nightly" | "edge" => Some(Self::Main),
             _ => None,
         }
@@ -79,5 +79,29 @@ impl CrossProviderFailoverMode {
             "countdown" | "auto" | "automatic" => Some(Self::Countdown),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateChannel;
+
+    #[test]
+    fn parse_accepts_prerelease_and_preview_aliases() {
+        assert_eq!(
+            UpdateChannel::parse("preview"),
+            Some(UpdateChannel::Preview)
+        );
+        assert_eq!(
+            UpdateChannel::parse("prerelease"),
+            Some(UpdateChannel::Preview)
+        );
+        assert_eq!(
+            UpdateChannel::parse("pre-release"),
+            Some(UpdateChannel::Preview)
+        );
+        assert_eq!(UpdateChannel::parse("stable"), Some(UpdateChannel::Stable));
+        assert_eq!(UpdateChannel::parse("main"), Some(UpdateChannel::Main));
+        assert_eq!(UpdateChannel::parse("unknown"), None);
     }
 }

@@ -1161,9 +1161,8 @@ pub async fn run_live_antigravity_native_smoke(
 
 /// Stage: streaming chat completion.
 ///
-/// The Antigravity runtime delivers `generateContent` as a single response that
-/// jcode re-emits as text deltas, so we assert the runtime produced streamed
-/// text and reached a clean end-of-message rather than requiring many deltas.
+/// The Antigravity runtime streams SSE responses from `streamGenerateContent`
+/// and emits live thinking/text deltas as chunks arrive.
 pub async fn run_live_antigravity_native_stream_smoke(
     model: &str,
 ) -> anyhow::Result<jcode_base::live_tests::LiveVerificationStage> {
@@ -1269,8 +1268,8 @@ pub async fn run_live_antigravity_native_tool_smoke(
 /// Stage: reasoning capability (observe-only).
 ///
 /// Delegates to the shared [`run_live_native_provider_reasoning_smoke`] so
-/// Antigravity records whether the resolved model streams reasoning text or
-/// hides it behind an opaque signal (Gemini-3 thought signatures are opaque).
+/// Antigravity records whether the resolved model streams reasoning thought
+/// summaries (`ThinkingDelta`) or hides reasoning behind an opaque signal.
 pub async fn run_live_antigravity_native_reasoning_smoke(
     model: &str,
 ) -> anyhow::Result<jcode_base::live_tests::LiveVerificationStage> {
@@ -1869,3 +1868,71 @@ pub async fn run_live_native_provider_tool_smoke(
 #[path = "live_provider_probes_tool_replay.rs"]
 mod tool_replay;
 use tool_replay::*;
+
+#[cfg(test)]
+mod live_gemini_thought_tests {
+    use super::*;
+    use jcode_provider_gemini_runtime::GeminiProvider;
+
+    #[tokio::test]
+    #[ignore = "requires live Antigravity OAuth credentials and network access"]
+    async fn live_antigravity_gemini_streams_thoughts() {
+        let model = std::env::var("JCODE_LIVE_ANTIGRAVITY_MODEL")
+            .unwrap_or_else(|_| "gemini-3-flash".to_string());
+        let stage = run_live_antigravity_native_reasoning_smoke(&model)
+            .await
+            .expect("live Antigravity reasoning smoke should succeed");
+        eprintln!(
+            "Antigravity live reasoning evidence: {}",
+            serde_json::to_string_pretty(&stage).unwrap()
+        );
+        let deltas = stage
+            .evidence
+            .get("thinking_delta_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let chars = stage
+            .evidence
+            .get("reasoning_text_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            deltas > 0 && chars > 0,
+            "expected streamed thought deltas from Antigravity {model}, got evidence: {:?}",
+            stage.evidence
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live Gemini OAuth credentials and network access"]
+    async fn live_gemini_code_assist_streams_thoughts() {
+        let provider = GeminiProvider::new();
+        let model = std::env::var("JCODE_LIVE_GEMINI_MODEL")
+            .unwrap_or_else(|_| "gemini-2.5-pro".to_string());
+        provider
+            .set_model(&model)
+            .expect("select live Gemini model");
+        let stage = run_live_native_provider_reasoning_smoke(&provider, &model, "Gemini")
+            .await
+            .expect("live Gemini reasoning smoke should succeed");
+        eprintln!(
+            "Gemini live reasoning evidence: {}",
+            serde_json::to_string_pretty(&stage).unwrap()
+        );
+        let deltas = stage
+            .evidence
+            .get("thinking_delta_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let chars = stage
+            .evidence
+            .get("reasoning_text_chars")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            deltas > 0 && chars > 0,
+            "expected streamed thought deltas from Gemini {model}, got evidence: {:?}",
+            stage.evidence
+        );
+    }
+}

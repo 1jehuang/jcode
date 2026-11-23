@@ -1,0 +1,63 @@
+{
+  "issue": [
+    [],
+    "The response rate is pretty awful right now.",
+    false,
+    false
+  ],
+  "proposal": [
+    [
+      "The response rate is pretty awful right now."
+    ],
+    "Yeah, we should get that fixed somehow.",
+    false,
+    true
+  ],
+  "details": [
+    [
+      "The response rate is pretty awful right now.",
+      "Yeah, we should get that fixed somehow."
+    ],
+    "Basically, the assistant hardly ever answers me.",
+    false,
+    null
+  ],
+  "imperative": [
+    [],
+    "If you're listening, say hello.",
+    false,
+    true
+  ],
+  "ambient": [
+    [
+      "The weather is nice."
+    ],
+    "Yeah, we should go for a walk.",
+    false,
+    false
+  ],
+  "reported": [
+    [
+      "She was quoting the movie."
+    ],
+    "If you're listening, say hello.",
+    false,
+    false
+  ],
+  "named_only": [
+    [
+      "The response rate is pretty awful right now."
+    ],
+    "Yeah, we should get that fixed somehow.",
+    true,
+    false
+  ],
+  "topic_change": [
+    [
+      "Can you fix the editor?"
+    ],
+    "I had a sandwich for lunch.",
+    false,
+    false
+  ]
+}

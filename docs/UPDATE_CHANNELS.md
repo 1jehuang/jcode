@@ -2,34 +2,59 @@
 
 Jcode uses the **stable** update channel by default. Existing `main` channel users keep their source-build update behavior.
 
-The installed binary must include preview-channel support. If `--channel` is not recognized, first update to a stable version that provides it, or install a preview release artifact manually. Older stable binaries only query the latest stable GitHub release and cannot discover previews themselves.
+## Switch to prereleases in one command
 
-To opt in to the v1 preview and immediately check for a preview update:
-
-```sh
-jcode update --channel preview
-```
-
-This saves `update_channel = "preview"` in the `[features]` section of your Jcode config. Later explicit and automatic checks follow that preference. Merely running a preview binary does not opt you in. Existing settings controlling automatic update checks and installation still apply.
-
-Preview discovery considers only published, non-draft GitHub prereleases named exactly `v1.0.0-preview.N`, where `N` is a positive integer without leading zeroes. It selects the highest preview number with an available asset for your platform and `SHA256SUMS`. Downloads must pass checksum verification. Other prereleases, incomplete uploads, and stable releases are not preview candidates. Preview checks do not downgrade an installed version.
-
-To leave the preview channel:
+From any machine or existing jcode version (including older stable installs), run:
 
 ```sh
-jcode update --channel stable
+curl -fsSL https://jcode.sh/install | bash -s -- --prerelease
 ```
 
-This persists the stable preference and explicitly permits installing the latest stable release even when its version is lower than the running preview. Normal automatic stable checks never downgrade. If a channel switch cannot download an update, the preference is still saved for the next check. `jcode update` without `--channel` does not change your preference.
+This single command:
+1. Installs the latest published prerelease build for your platform (currently Linux x86_64).
+2. Saves `update_channel = "preview"` in `[features]` inside `~/.jcode/config.toml` so future automatic updates stay on prereleases.
+3. Live-reloads any running jcode server and connected TUI sessions onto the new build without dropping sessions.
 
-You can also set the config directly:
+If your installed jcode binary already includes prerelease channel support, you can also switch directly from the CLI or inside a running TUI session:
+
+```sh
+# From your shell (persists channel + installs + live-reloads running server/sessions)
+jcode update --prerelease
+
+# Or inside an active jcode TUI session
+/update prerelease
+```
+
+(`--preview` and `--channel preview` / `--channel prerelease` are accepted aliases.)
+
+## How prerelease discovery works
+
+Prerelease discovery checks published, non-draft GitHub prereleases matching either:
+- `selfdev-<platform>-<40-hex-sha>` (e.g. `selfdev-linux-<commit>`)
+- `v<major>.<minor>.<patch>-preview.<N>` (positive integer `N` without leading zeroes)
+
+It selects the newest published prerelease with an asset for your platform and `SHA256SUMS`. Downloads must pass SHA-256 checksum verification. Drafts, incomplete uploads, and stable releases are never selected as prerelease candidates. Automatic checks never downgrade an installed build.
+
+## Return to stable
+
+```sh
+jcode update --stable
+```
+
+You can also run `/update stable` inside jcode, or `curl -fsSL https://jcode.sh/install | bash -s -- --stable`.
+
+This persists `update_channel = "stable"` and explicitly permits installing the latest stable release even when returning from a prerelease build, then live-reloads running sessions. Normal automatic stable checks never downgrade. `jcode update` without flags keeps your saved channel.
+
+## Config & environment overrides
+
+You can also set the channel directly in `~/.jcode/config.toml`:
 
 ```toml
 [features]
 update_channel = "preview" # stable (default), preview, or main
 ```
 
-`JCODE_UPDATE_CHANNEL` overrides the saved preference for normal checks. An explicit `jcode update --channel ...` takes priority for that invocation and saves the requested preference without persisting unrelated environment overrides.
+`JCODE_UPDATE_CHANNEL` overrides the saved preference for normal checks. An explicit `jcode update --prerelease` / `--stable` / `--channel ...` takes priority for that invocation and saves the requested preference without persisting unrelated environment overrides.
 
 ## Preview binary identity
 
@@ -41,4 +66,4 @@ JCODE_BUILD_SEMVER=1.0.0-preview.N
 JCODE_BUILD_GIT_TAG=v1.0.0-preview.N
 ```
 
-Continue providing the existing build git hash and date inputs as appropriate. The updater compares semantic version identity, including prerelease ordering, while ignoring SemVer build metadata (`+...`). This prevents repeatedly reinstalling the same preview and orders preview 10 after preview 9.
+Continue providing the existing build git hash and date inputs as appropriate. The updater compares commit hashes and publication timestamps for `selfdev-*` prereleases and semantic version identity (ignoring SemVer build metadata `+...`) for `vX.Y.Z-preview.N` prereleases.

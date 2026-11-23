@@ -252,6 +252,27 @@ pub fn load_anthropic_oauth_tokens() -> Option<ExternalOAuthTokens> {
     load_oauth_tokens_for_candidates(&["anthropic", "claude"])
 }
 
+pub fn source_has_anthropic_oauth(source: ExternalAuthSource) -> bool {
+    source_contains_oauth_provider(source, &["anthropic", "claude"]).unwrap_or(false)
+}
+
+pub fn source_api_key_envs(source: ExternalAuthSource) -> Vec<&'static str> {
+    let Ok(auth) = load_auth_map(source) else {
+        return Vec::new();
+    };
+    SUPPORTED_API_KEY_ENVS
+        .iter()
+        .copied()
+        .filter(|env_key| {
+            provider_keys_for_env(env_key).iter().any(|provider_key| {
+                auth.get(*provider_key)
+                    .and_then(|entry| extract_api_key(source, entry))
+                    .is_some_and(|key| !key.trim().is_empty())
+            })
+        })
+        .collect()
+}
+
 pub fn source_allowed(source: ExternalAuthSource) -> bool {
     let Ok(path) = source.path() else {
         return false;
@@ -337,9 +358,13 @@ fn source_has_supported_auth(source: ExternalAuthSource) -> bool {
 
 fn source_contains_supported_api_key(source: ExternalAuthSource) -> Result<bool> {
     let auth = load_auth_map(source)?;
-    Ok(auth
-        .values()
-        .any(|entry| extract_api_key(source, entry).is_some()))
+    Ok(SUPPORTED_API_KEY_ENVS.iter().any(|env_key| {
+        provider_keys_for_env(env_key).iter().any(|provider_key| {
+            auth.get(*provider_key)
+                .and_then(|entry| extract_api_key(source, entry))
+                .is_some_and(|key| !key.trim().is_empty())
+        })
+    }))
 }
 
 fn source_contains_oauth_provider(
@@ -603,6 +628,45 @@ fn hermes_expires_at_ms(object: &serde_json::Map<String, Value>) -> Option<i64> 
     }
     None
 }
+
+const SUPPORTED_API_KEY_ENVS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "CEREBRAS_API_KEY",
+    "BELVEDIR_API_KEY",
+    "XAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CONIFER_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "ZHIPU_API_KEY",
+    "ZAI_API_KEY",
+    "OPENCODE_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "HF_TOKEN",
+    "KIMI_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "NEBIUS_API_KEY",
+    "SCALEWAY_API_KEY",
+    "STACKIT_API_KEY",
+    "TOGETHER_API_KEY",
+    "DEEPINFRA_API_KEY",
+    "FIREWORKS_API_KEY",
+    "NOVITA_API_KEY",
+    "CHUTES_API_KEY",
+    "BASETEN_API_KEY",
+    "CORTECS_API_KEY",
+    "COMTEGRA_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "FIRMWARE_API_KEY",
+    "MOONSHOT_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "BAILIAN_CODING_PLAN_API_KEY",
+];
 
 fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
     match env_key {

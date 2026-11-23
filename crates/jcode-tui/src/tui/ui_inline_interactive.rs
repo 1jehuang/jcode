@@ -345,6 +345,14 @@ fn account_inline_interactive_state_label(entry: &crate::tui::PickerEntry) -> &'
     entry.account_state_label().unwrap_or("-")
 }
 
+fn picker_header_count_str(filtered_count: usize, total: usize) -> String {
+    if filtered_count == total {
+        format!(" ({})", total)
+    } else {
+        format!(" ({}/{})", filtered_count, total)
+    }
+}
+
 fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: usize) -> usize {
     let marker_width = 3usize;
     let is_preview = picker.preview;
@@ -380,9 +388,11 @@ fn picker_render_width(picker: &crate::tui::InlineInteractiveState, max_width: u
         return (marker_width + title_width + state_width).min(max_width);
     }
 
+    let count_str = picker_header_count_str(picker.filtered.len(), picker.entries.len());
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
-    let mut max_via_len = display_width(picker.tertiary_label());
+    let mut max_via_len =
+        display_width(picker.tertiary_label()) + display_width(count_str.as_str());
 
     for &fi in picker.filtered.iter().take(WIDTH_SCAN_LIMIT) {
         let entry = &picker.entries[fi];
@@ -619,8 +629,10 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
 
     let show_account_provider_badge =
         is_account_picker && account_picker_shows_provider_badge(picker);
+    let count_str = picker_header_count_str(filtered_count, total);
     let mut max_provider_len = display_width(picker.secondary_label(is_preview));
-    let mut max_via_len = display_width(picker.tertiary_label());
+    let mut max_via_len =
+        display_width(picker.tertiary_label()) + display_width(count_str.as_str());
     let mut max_model_len = display_width(picker.primary_label());
     let mut max_account_title_len = display_width("ACCOUNT");
     let mut max_account_state_len = display_width("STATE");
@@ -774,11 +786,6 @@ pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, are
     if !picker.filter.is_empty() {
         meta_parts.push_str(&format!("  \"{}\"", picker.filter));
     }
-    let count_str = if filtered_count == total {
-        format!(" ({})", total)
-    } else {
-        format!(" ({}/{})", filtered_count, total)
-    };
     meta_parts.push_str(&count_str);
     header_spans.push(Span::styled(meta_parts, Style::default().fg(dim_color())));
 

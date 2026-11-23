@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 jcode-base = { path = "../jcode-base", default-features = false }
+jcode-build-support = { path = "../jcode-build-support" }
 jcode-desktop-open = { path = "../jcode-desktop-open" }
 jcode-transport = { path = "../jcode-transport" }
 jcode-voice = { path = "../jcode-voice" }
