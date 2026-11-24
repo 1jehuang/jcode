@@ -411,7 +411,7 @@ pub(super) async fn dispatch_peer_message(
     swarm: LiveTurnSwarmContext,
 ) {
     let message = format!(
-        "{}\n\n<system-reminder>\nAnother agent on this machine sent you this message. Reply with the tool from the server named in source, using the sender's from_id, then continue.\n</system-reminder>",
+        "{}\n\n<system-reminder>\nAnother agent on this machine sent you this message. Follow its requested work and reply requirements. Do not reply solely to acknowledge receipt unless asked. If replying, use the tool from the server named in source, using the sender's from_id. Continue actionable work; otherwise remain idle.\n</system-reminder>",
         event.notification,
     );
     if emit_external_wake(&event.session_id, "peer_message", &message, &swarm.members).await {

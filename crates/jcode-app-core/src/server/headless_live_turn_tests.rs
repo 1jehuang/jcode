@@ -223,7 +223,12 @@ async fn resume_all_does_not_continue_empty_restored_worker() {
 #[tokio::test]
 async fn peer_message_queued_as_a_turn_ends_resumes_with_reply_routing() {
     use jcode_agent_runtime::SoftInterruptSource;
-    for busy in [false, true] {
+    for (busy, body) in [
+        (false, "Please check the build."),
+        (true, "Please check the build."),
+        (false, "Do nothing yet. No reply needed."),
+        (true, "Do nothing yet. No reply needed."),
+    ] {
         let (id, sessions, members, mut receiver) = fixture(true, "ready", true).await;
         let agent = sessions.read().await.get(&id).unwrap().clone();
         let queue = agent.lock().await.soft_interrupt_queue();
@@ -237,11 +242,12 @@ async fn peer_message_queued_as_a_turn_ends_resumes_with_reply_routing() {
             &swarm_tx,
         );
         let busy_guard = if busy { Some(agent.lock().await) } else { None };
-        let notification = "<channel source=\"claude-peers\" from_id=\"peer-123\">\nPlease check the build.\n</channel>";
+        let notification =
+            format!("<channel source=\"claude-peers\" from_id=\"peer-123\">\n{body}\n</channel>");
         super::super::background_tasks::dispatch_peer_message(
             &crate::bus::PeerMessageReceived {
                 session_id: id.clone(),
-                notification: notification.into(),
+                notification: notification.clone(),
             },
             &sessions,
             &queues,
@@ -290,7 +296,7 @@ async fn peer_message_queued_as_a_turn_ends_resumes_with_reply_routing() {
             .iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|block| match block {
-                crate::message::ContentBlock::Text { text, .. } if text.contains(notification) => {
+                crate::message::ContentBlock::Text { text, .. } if text.contains(&notification) => {
                     Some(text)
                 }
                 _ => None,
@@ -298,6 +304,8 @@ async fn peer_message_queued_as_a_turn_ends_resumes_with_reply_routing() {
             .collect();
         assert_eq!(deliveries.len(), 1, "peer message delivered once");
         assert!(deliveries[0].contains("using the sender's from_id"));
+        assert!(deliveries[0].contains("Do not reply solely to acknowledge receipt unless asked"));
+        assert!(deliveries[0].contains("If replying"));
         assert!(
             !deliveries[0].contains("peer-456"),
             "separate peers keep separate context entries"
