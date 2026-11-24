@@ -649,7 +649,8 @@ impl MultiProvider {
                 continue;
             }
 
-            let cached_unavailability = provider_unavailability_detail_for_account(key);
+            let cached_unavailability = provider_unavailability_detail_for_account(key)
+                .filter(|reason| models::should_skip_provider_request(reason));
             if let Some(reason) = cached_unavailability
                 .clone()
                 .or_else(|| self.provider_precheck_unavailable_reason(candidate))
