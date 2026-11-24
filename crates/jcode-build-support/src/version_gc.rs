@@ -221,6 +221,34 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Set a path's mtime through an open handle.
+    ///
+    /// MEASURED on this host: `File::set_modified` on a directory opened with
+    /// plain `.write(true)` returns PermissionDenied (os error 5).
+    /// `std::sys::fs::windows::remove_dir_all` shows why: opening a directory
+    /// needs FILE_FLAG_BACKUP_SEMANTICS, and changing its times needs
+    /// FILE_WRITE_ATTRIBUTES in dwDesiredAccess.
+    #[cfg(windows)]
+    fn set_mtime_on_handle(path: &Path, when: SystemTime) -> std::io::Result<()> {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?
+            .set_modified(when)
+    }
+
+    #[cfg(not(windows))]
+    fn set_mtime_on_handle(path: &Path, when: SystemTime) -> std::io::Result<()> {
+        let file = fs::OpenOptions::new().write(true).open(path)?;
+        file.set_modified(when)
+    }
+
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
     fn make_version(dir: &Path, name: &str, age: Duration) {
@@ -264,34 +292,6 @@ mod tests {
             None
         );
     }
-}
-
-/// Set a path's mtime through an open handle, on every platform we test on.
-///
-/// MEASURED on this host (`make_version` in the sibling `tests` module):
-/// `File::set_modified` on a directory opened with plain `.write(true)` returns
-/// PermissionDenied (os error 5). `std::sys::fs::windows::remove_dir_all`
-/// shows why: opening a directory needs FILE_FLAG_BACKUP_SEMANTICS, and
-/// changing its times needs FILE_WRITE_ATTRIBUTES in dwDesiredAccess.
-#[cfg(windows)]
-fn set_mtime_on_handle(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
-    use std::fs::OpenOptions;
-    use std::os::windows::fs::OpenOptionsExt;
-
-    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-    OpenOptions::new()
-        .access_mode(FILE_WRITE_ATTRIBUTES)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?
-        .set_modified(when)
-}
-
-#[cfg(not(windows))]
-fn set_mtime_on_handle(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
-    let file = fs::OpenOptions::new().write(true).open(path)?;
-    file.set_modified(when)
 }
 
 #[cfg(test)]
