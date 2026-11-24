@@ -22,6 +22,9 @@ pub(super) fn handle(app: &mut App, event: ServerEvent) -> bool {
 
     // External control publishes facts, not an acknowledgement of this client's pending request.
     if let Some(route) = route_selection {
+        app.model_catalog_after_history = true;
+        app.remote_available_service_tiers = None;
+        app.usage_reset.openai_quota_rejected = false;
         app.update_context_limit_for_model(&model, context_window);
         app.remote_provider_model = Some(model);
         if let Some(provider) = provider_name {
@@ -33,6 +36,9 @@ pub(super) fn handle(app: &mut App, event: ServerEvent) -> bool {
         app.remote_resolved_credential = resolved_credential;
         app.remote_provider_oauth_email = provider_oauth_email;
         app.remote_provider_oauth_account_label = provider_oauth_account_label;
+        if let Some(confirmed) = &mut app.remote_reasoning_effort_before_request {
+            *confirmed = reasoning_effort.clone();
+        }
         app.remote_reasoning_effort = reasoning_effort;
         app.invalidate_model_picker_cache();
         app.persist_remote_header_hint();

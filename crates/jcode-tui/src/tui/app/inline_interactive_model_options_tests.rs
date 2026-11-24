@@ -127,6 +127,9 @@ fn external_model_changed_preserves_queued_prompts_until_the_local_ack() {
         let mut app = crate::tui::app::tests::create_test_app();
         app.is_remote = true;
         app.remote_model_switch_in_flight = true;
+        app.remote_available_service_tiers = Some(Vec::new());
+        app.usage_reset.openai_quota_rejected = true;
+        app.remote_reasoning_effort_before_request = Some(Some("medium".into()));
         app.pending_automatic_failover_request_id = request;
         app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
             image_markers: Default::default(),
@@ -156,6 +159,13 @@ fn external_model_changed_preserves_queued_prompts_until_the_local_ack() {
         };
         app.handle_server_event(event(0, Some(route)), &mut remote);
         assert!(app.remote_model_switch_in_flight);
+        assert!(app.model_catalog_after_history);
+        assert!(app.remote_available_service_tiers.is_none());
+        assert!(!app.usage_reset.openai_quota_rejected);
+        assert_eq!(
+            app.remote_reasoning_effort_before_request,
+            Some(Some("high".into()))
+        );
         assert_eq!(app.pending_automatic_failover_request_id, request);
         assert_eq!(
             app.pending_prompt_after_model_switch
