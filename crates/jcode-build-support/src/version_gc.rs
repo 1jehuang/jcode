@@ -219,7 +219,7 @@ pub fn prune_old_versions_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::{self, File};
+    use std::fs;
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -227,9 +227,7 @@ mod tests {
         let version = dir.join(name);
         fs::create_dir_all(&version).unwrap();
         fs::write(version.join("jcode"), b"bin").unwrap();
-        File::open(&version)
-            .and_then(|file| file.set_modified(SystemTime::now() - age))
-            .unwrap();
+        set_mtime_on_handle(&version, SystemTime::now() - age).unwrap();
     }
 
     #[test]
@@ -268,10 +266,56 @@ mod tests {
     }
 }
 
+/// Set a path's mtime through an open handle, on every platform we test on.
+///
+/// MEASURED on this host (`make_version` in the sibling `tests` module):
+/// `File::set_modified` on a directory opened with plain `.write(true)` returns
+/// PermissionDenied (os error 5). `std::sys::fs::windows::remove_dir_all`
+/// shows why: opening a directory needs FILE_FLAG_BACKUP_SEMANTICS, and
+/// changing its times needs FILE_WRITE_ATTRIBUTES in dwDesiredAccess.
+#[cfg(windows)]
+fn set_mtime_on_handle(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .set_modified(when)
+}
+
+#[cfg(not(windows))]
+fn set_mtime_on_handle(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+    let file = fs::OpenOptions::new().write(true).open(path)?;
+    file.set_modified(when)
+}
+
 #[cfg(test)]
 mod stamp_marker_tests {
     use super::*;
     use std::fs;
+
+    /// Rewind a stamp file's mtime by a minute using only std.
+    ///
+    /// `FileTimes` applies to an OPEN file, not to a path, so this opens the
+    /// existing marker read/write, sets its times, and returns the instant it
+    /// wrote. A new dependency is not warranted for one test.
+    fn set_marker_into_the_past(marker: &Path) -> std::time::SystemTime {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(marker)
+            .expect("marker must exist before it can be rewound");
+        let past = std::time::SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("system clock supports subtraction");
+        file.set_modified(past)
+            .expect("marker mtime must be writable");
+        past
+    }
 
     #[test]
     fn mark_pruned_advances_the_marker_mtime() {
@@ -279,11 +323,15 @@ mod stamp_marker_tests {
         let marker = temp.path().join(PRUNE_MARKER);
 
         mark_pruned(temp.path());
-        let first = fs::metadata(&marker)
-            .and_then(|meta| meta.modified())
-            .expect("marker should exist after mark_pruned");
 
-        std::thread::sleep(Duration::from_millis(1100));
+        // MEASURED on this host: sleeping and then comparing is the flaky shape
+        // that already cost two upstream issues (#2231 stale baselines, #2256 a
+        // test that cannot pass). A filesystem with two-second timestamp steps
+        // (FAT) gives both writes the SAME mtime despite the 1.1s sleep, so the
+        // strict comparison fails while the helper actually works.
+        // Setting the marker well into the past removes the wait entirely and
+        // keeps the assertion: a correct touch_stamp must move it forward.
+        let past = set_marker_into_the_past(&marker);
 
         mark_pruned(temp.path());
         let second = fs::metadata(&marker)
@@ -291,7 +339,7 @@ mod stamp_marker_tests {
             .expect("marker should exist after second mark_pruned");
 
         assert!(
-            second > first,
+            second > past,
             "mark_pruned must advance the marker mtime, otherwise prune_due() \
              always reports due and the daily slot is never consumed"
         );
