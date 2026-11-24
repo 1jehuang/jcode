@@ -184,51 +184,6 @@ fn test_reactive_threshold_clamps_out_of_range_values() {
 }
 
 #[test]
-fn test_messages_for_api_folds_old_tool_results_but_not_history() {
-    let mut manager = CompactionManager::new();
-    manager.compaction_config.fold_tool_result_chars = 100;
-    let big = (0..40)
-        .map(|i| format!("row {i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut messages = vec![Message::tool_result_with_duration("old", &big, false, None)];
-    for i in 0..=RECENT_TURNS_TO_KEEP {
-        messages.push(make_text_message(Role::User, &format!("turn {i}")));
-    }
-    for _ in &messages {
-        manager.notify_message_added();
-    }
-    manager.set_human_turns(
-        messages
-            .iter()
-            .map(|m| {
-                m.role == Role::User && !matches!(m.content[0], ContentBlock::ToolResult { .. })
-            })
-            .collect(),
-    );
-
-    let view = manager.messages_for_api_with(&messages);
-    assert_eq!(view.len(), messages.len());
-    let folded = match &view[0].content[0] {
-        ContentBlock::ToolResult { content, .. } => content.clone(),
-        other => panic!("unexpected block {other:?}"),
-    };
-    assert!(folded.starts_with("[folded tool result: "), "{folded}");
-    assert!(folded.contains("row 0") && folded.contains("row 39"));
-    assert!(
-        matches!(&messages[0].content[0], ContentBlock::ToolResult { content, .. } if *content == big),
-        "stored history is never rewritten"
-    );
-
-    manager.compaction_config.fold_tool_result_chars = 0;
-    let view = manager.messages_for_api_with(&messages);
-    assert!(
-        matches!(&view[0].content[0], ContentBlock::ToolResult { content, .. } if *content == big),
-        "0 disables folding"
-    );
-}
-
-#[test]
 fn test_context_usage_prefers_observed_tokens() {
     let mut manager = CompactionManager::new().with_budget(1_000);
     let messages = vec![make_text_message(Role::User, "short message")];
@@ -1539,4 +1494,69 @@ fn pinned_root_prompt_is_byte_identical_once_compacted() {
     let pinned = super::pinned_root_prompt(&messages, 2);
     assert_eq!(pinned.len(), 1);
     assert!(matches!(&pinned[0], ContentBlock::Text { text, .. } if text == root));
+}
+
+/// `session_maple` shape: few human turns, many large tool results, policy
+/// reminders and background notices appended mid-turn, context growing every
+/// call. Every request view must extend the previous one byte-for-byte: an
+/// already-sent message is never rewritten until a hard compaction runs.
+#[test]
+fn test_request_view_prefix_is_immutable_while_context_grows() {
+    let mut manager = CompactionManager::new();
+    let big = (0..200)
+        .map(|i| format!("row {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut messages: Vec<Message> = Vec::new();
+    let mut previous: Option<Vec<Message>> = None;
+    let mut push = |manager: &mut CompactionManager, messages: &mut Vec<Message>, m: Message| {
+        messages.push(m);
+        manager.notify_message_added();
+    };
+    for turn in 0..11 {
+        push(
+            &mut manager,
+            &mut messages,
+            make_text_message(Role::User, &format!("human prompt {turn}")),
+        );
+        push(
+            &mut manager,
+            &mut messages,
+            make_text_message(
+                Role::User,
+                "<system-reminder>\n<harness_execution_policy>\nActive skills: x\n</harness_execution_policy>\n</system-reminder>",
+            ),
+        );
+        for call in 0..6 {
+            push(
+                &mut manager,
+                &mut messages,
+                make_text_message(Role::Assistant, &format!("call {turn}.{call}")),
+            );
+            push(
+                &mut manager,
+                &mut messages,
+                Message::tool_result_with_duration(&format!("t{turn}.{call}"), &big, false, None),
+            );
+            if call == 3 {
+                push(
+                    &mut manager,
+                    &mut messages,
+                    make_text_message(Role::User, "**Background task** `x` · `bash` · ✓ completed"),
+                );
+            }
+            let view = manager.messages_for_api_with(&messages);
+            assert_eq!(view.len(), messages.len());
+            if let Some(prev) = &previous {
+                for (i, (old, new)) in prev.iter().zip(view.iter()).enumerate() {
+                    assert_eq!(
+                        serde_json::to_string(old).unwrap(),
+                        serde_json::to_string(new).unwrap(),
+                        "earlier message #{i} was modified at turn {turn} call {call}"
+                    );
+                }
+            }
+            previous = Some(view);
+        }
+    }
 }

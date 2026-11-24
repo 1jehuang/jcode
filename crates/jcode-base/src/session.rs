@@ -89,21 +89,6 @@ fn is_visible_conversation_message(message: &StoredMessage) -> bool {
         && !is_scheduled_task_message(message)
 }
 
-/// Strict allowlist for a human-typed prompt: a visible user text message that
-/// is not a tool result and not an automatic continuation (`[auto] ...`, todo pokes).
-fn is_human_turn_message(message: &StoredMessage) -> bool {
-    message.role == Role::User
-        && is_visible_conversation_message(message)
-        && message.content.iter().all(|block| match block {
-            ContentBlock::Text { text, .. } => {
-                let text = text.trim_start();
-                !text.starts_with("[auto]") && !jcode_todo_policy::is_auto_poke_message(text)
-            }
-            ContentBlock::Image { .. } => true,
-            _ => false,
-        })
-}
-
 /// Recognize scheduler prompts persisted before they received an explicit
 /// system display role. This keeps old sessions from treating them as user
 /// prompts after resume.
@@ -1680,12 +1665,6 @@ request in this new forked session, using the inherited conversation only as con
         self.memory_profile_cache.replay_events_json_bytes += estimate_json_bytes(&event);
         self.replay_events.push(event);
         self.mark_replay_events_append_dirty();
-    }
-
-    /// Per-message flag, aligned with [`Self::provider_messages`]: true only for
-    /// human-typed prompts. Used to pin the tool-result fold boundary.
-    pub fn human_turn_mask(&self) -> Vec<bool> {
-        self.messages.iter().map(is_human_turn_message).collect()
     }
 
     pub fn provider_messages(&mut self) -> &[Message] {

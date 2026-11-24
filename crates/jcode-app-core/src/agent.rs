@@ -955,7 +955,6 @@ impl Agent {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {
-                        manager.set_human_turns(self.session.human_turn_mask());
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
                             let action =

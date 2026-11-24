@@ -36,8 +36,8 @@ pub use jcode_compaction_core::{
     Summary, TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    fold_old_tool_results, is_image_rejection_error, is_request_payload_too_large_error,
-    mean_embedding, message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
+    is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
+    message_char_count, reusable_cache_tokens_from_usage, safe_compaction_cutoff,
     semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
     summary_payload_char_count,
 };
@@ -198,10 +198,6 @@ pub struct CompactionManager {
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
 
-    /// Human-turn flags aligned with the caller's full message list; see
-    /// `Session::human_turn_mask`. Empty means no turn is known, so nothing folds.
-    human_turns: Vec<bool>,
-
     // ── Proactive mode state ───────────────────────────────────────────────
     /// Rolling window of observed token counts, one entry per turn snapshot.
     /// Used to compute EWMA growth rate for proactive compaction.
@@ -252,7 +248,6 @@ impl CompactionManager {
             last_compaction: None,
             mode,
             compaction_config: cfg,
-            human_turns: Vec::new(),
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
             emergency_baseline_tokens: None,
@@ -1412,11 +1407,6 @@ impl CompactionManager {
         self.last_compaction.take()
     }
 
-    /// Set which messages of the caller's full history are human-typed prompts.
-    pub fn set_human_turns(&mut self, human_turns: Vec<bool>) {
-        self.human_turns = human_turns;
-    }
-
     /// Get messages for API call (with summary if compacted).
     /// Takes the full message list from the caller.
     pub fn messages_for_api_with(&mut self, all_messages: &[Message]) -> Vec<Message> {
@@ -1425,7 +1415,7 @@ impl CompactionManager {
 
         let active = self.active_messages(all_messages);
 
-        let mut result = match &self.active_summary {
+        let result = match &self.active_summary {
             Some(summary) => {
                 let summary_block = summary
                     .openai_encrypted_content
@@ -1458,26 +1448,8 @@ impl CompactionManager {
             }
             None => active.to_vec(),
         };
-        // Map full-history flags into the view: an optional summary message,
-        // then the active slice starting at `compacted_count`.
-        let start = self.compacted_count.min(all_messages.len());
-        let offset = result.len() - (all_messages.len() - start);
-        let mut view_turns = vec![false; offset];
-        view_turns.extend(
-            (start..all_messages.len()).map(|i| self.human_turns.get(i).copied().unwrap_or(false)),
-        );
-        let folded = fold_old_tool_results(
-            &mut result,
-            &view_turns,
-            RECENT_TURNS_TO_KEEP,
-            self.compaction_config.fold_tool_result_chars,
-        );
-        if folded > 0 {
-            crate::logging::info(&format!(
-                "[compaction] folded {} old tool results in request view (>{} chars)",
-                folded, self.compaction_config.fold_tool_result_chars
-            ));
-        }
+        // Messages already sent stay byte-identical until a hard compaction
+        // moves `compacted_count`; never rewrite older entries per turn.
         result
     }
 

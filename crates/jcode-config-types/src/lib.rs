@@ -300,10 +300,9 @@ pub struct CompactionConfig {
     /// [reactive] Alternative token threshold, whichever is reached first.
     /// Zero disables the token alternative.
     pub reactive_threshold_tokens: usize,
-    /// Fold tool results older than the last `RECENT_TURNS_TO_KEEP` messages
-    /// into one-line snapshots in the request view when they exceed this many
-    /// chars. 0 disables. Stored history is never rewritten; the system prompt
-    /// and overlays are outside the fold by type.
+    /// Deprecated and ignored: per-turn folding of older tool results rewrote
+    /// already-sent history and invalidated the prompt cache. Kept so existing
+    /// config files still parse.
     pub fold_tool_result_chars: usize,
 
     /// [proactive] Number of turns to look ahead when projecting token growth
