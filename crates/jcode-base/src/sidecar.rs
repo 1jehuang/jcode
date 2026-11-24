@@ -347,10 +347,10 @@ impl Sidecar {
         }
     }
 
-    /// Complete via the live agent provider (`complete_simple`).
+    /// Complete via the live agent provider (`complete_simple_with_usage`).
     ///
     /// This is the universal path: it works for every provider jcode supports,
-    /// because `complete_simple` is a default method on the `Provider` trait that
+    /// because `complete_simple_with_usage` is a default method on `Provider` that
     /// collects the streamed `TextDelta`s into a single string. The provider was
     /// forked at construction time, so it carries the user's selected model.
     async fn complete_via_provider(&self, system: &str, user_message: &str) -> Result<String> {

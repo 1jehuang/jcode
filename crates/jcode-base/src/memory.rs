@@ -18,6 +18,7 @@ use crate::storage;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,6 +64,7 @@ pub use prompt_support::{
 const LEGACY_NOTE_CATEGORY: &str = "note";
 const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
 const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
+static TRANSCRIPT_EXTRACTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Producer of synthetic [`MemoryEntry`] values contributed by a higher layer.
 ///
@@ -969,6 +971,17 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
+        // Final and periodic triggers must share the successful extraction checkpoint.
+        let _extraction_guard = TRANSCRIPT_EXTRACTION_LOCK.lock().await;
+        let scope = serde_json::to_vec(&(session_id, &self.project_dir))?;
+        let checkpoint = storage::jcode_dir()?
+            .join("memory/extraction-checkpoints")
+            .join(format!("{:x}.json", Sha256::digest(scope)));
+        let transcript_hash = format!("{:x}", Sha256::digest(transcript.as_bytes()));
+        if storage::read_json::<String>(&checkpoint).ok().as_ref() == Some(&transcript_hash) {
+            return Ok(Vec::new());
+        }
+
         let sidecar = crate::session::Session::load_startup_stub(session_id)
             .map(|session| Sidecar::for_session(&session))
             .unwrap_or_else(|_| Sidecar::new());
@@ -992,6 +1005,7 @@ impl MemoryManager {
             ids.push(id);
         }
 
+        storage::write_json(&checkpoint, &transcript_hash)?;
         Ok(ids)
     }
 

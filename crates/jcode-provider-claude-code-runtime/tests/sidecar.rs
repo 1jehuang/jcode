@@ -111,4 +111,63 @@ async fn multiprovider_sidecar_uses_pinned_one_shot_account() {
             .to_string()
             .contains("Sidecar completion")
     );
+
+    let calls = || std::fs::read_to_string(&log).unwrap().lines().count();
+    let initial_calls = calls();
+    let project = root.join("project");
+    let manager = jcode_base::memory::MemoryManager::new().with_project_dir(&project);
+    let transcript = "User: keep the build instructions in memory.";
+    let (first, concurrent) = tokio::join!(
+        manager.extract_from_transcript(transcript, "extraction-session"),
+        manager.extract_from_transcript(transcript, "extraction-session"),
+    );
+    assert!(first.unwrap().is_empty());
+    assert!(concurrent.unwrap().is_empty());
+    assert_eq!(
+        calls(),
+        initial_calls + 1,
+        "identical concurrent extraction runs once"
+    );
+
+    let restored = jcode_base::memory::MemoryManager::new().with_project_dir(&project);
+    restored
+        .extract_from_transcript(transcript, "extraction-session")
+        .await
+        .unwrap();
+    assert_eq!(
+        calls(),
+        initial_calls + 1,
+        "successful checkpoint survives a new manager"
+    );
+    manager
+        .extract_from_transcript("User: new work", "extraction-session")
+        .await
+        .unwrap();
+    manager
+        .extract_from_transcript(transcript, "other-session")
+        .await
+        .unwrap();
+    jcode_base::memory::MemoryManager::new()
+        .with_project_dir(root.join("other-project"))
+        .extract_from_transcript(transcript, "extraction-session")
+        .await
+        .unwrap();
+    assert_eq!(
+        calls(),
+        initial_calls + 4,
+        "new history, session or project must extract"
+    );
+    for _ in 0..2 {
+        assert!(
+            manager
+                .extract_from_transcript("authfail", "failed-extraction")
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        calls(),
+        initial_calls + 6,
+        "failed extraction must remain retryable"
+    );
 }

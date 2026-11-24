@@ -137,6 +137,7 @@ pub(super) async fn cleanup_client_connection(
     client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     idle_reconnect_grace: Duration,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let server_reloading = crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE);
     let disposition = disconnect_disposition(disconnected_while_processing(
         client_is_processing,
         processing_task.as_ref(),
@@ -297,7 +298,7 @@ pub(super) async fn cleanup_client_connection(
                     }
 
                     let memory_enabled = agent.memory_enabled();
-                    let transcript = if memory_enabled {
+                    let transcript = if memory_enabled && !server_reloading {
                         Some(agent.build_transcript_for_extraction())
                     } else {
                         None
