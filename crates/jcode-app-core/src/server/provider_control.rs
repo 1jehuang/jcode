@@ -1666,7 +1666,6 @@ fn spawn_account_switch_refresh(
             provider: Some(provider_kind.to_string()),
             account_label,
         });
-
         match provider_kind {
             "anthropic" => {
                 crate::usage::invalidate_active_anthropic_usage();
