@@ -303,6 +303,7 @@ fn test_remote_failover_ignores_confirmation_before_request_is_sent() {
         let (mut app, mut connection) = remote_exact_failover_fixture();
         app.handle_server_event(
             crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
                 id: 0,
                 model: "claude-sonnet-4".into(),
                 provider_name: Some("Anthropic".into()),
@@ -408,6 +409,7 @@ fn test_remote_failover_resends_only_after_exact_confirmation() {
             app.remote_model_switch_in_flight = true;
             app.handle_server_event(
                 crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
                     id: 22,
                     model: if mismatch == "model" {
                         "wrong-model"
@@ -708,6 +710,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
             .push(("image/png".into(), "image-data".into()));
         app.handle_server_event(
             crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
                 id: 0,
                 model: "unrelated-model".into(),
                 provider_name: Some("Other".into()),
@@ -726,6 +729,7 @@ fn test_rejected_remote_automatic_route_retains_old_identity_and_drops_payload()
         assert_eq!(app.pending_automatic_failover_request_id, Some(22));
         app.handle_server_event(
             crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
                 id: 22,
                 model: "claude-sonnet-4".into(),
                 provider_name: None,
@@ -1007,6 +1011,7 @@ fn test_remote_usage_limit_failover_collapses_into_one_line_with_account() {
         app.remote_model_switch_in_flight = true;
         app.handle_server_event(
             crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
                 id: 22,
                 model: "gpt-5.4".into(),
                 provider_name: Some("OpenAI".into()),
@@ -1091,6 +1096,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
@@ -1141,6 +1147,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),

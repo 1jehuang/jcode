@@ -24,7 +24,13 @@ mod fingerprint;
 pub mod gemini;
 mod image_clamp;
 pub mod jcode;
+mod model_picker_routes;
+pub use model_picker_routes::extend_model_picker_routes;
+mod model_reasoning;
 pub mod models;
+pub use model_reasoning::{
+    model_route_reasoning_efforts, named_profile_reasoning_efforts, route_supports_reasoning_effort,
+};
 mod multi_provider;
 pub mod openai;
 pub mod openai_request;

@@ -1356,12 +1356,8 @@ pub struct App {
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
-    /// Monotonic counter bumped each time the server pushes a fresh remote model
-    /// catalog snapshot (`AvailableModelsUpdated`). The onboarding readiness
-    /// validation uses this to wait for the post-login catalog refresh to land
-    /// before capturing the model label, so it reports the freshly-selected
-    /// model (e.g. gpt-5.5 after an OpenAI login) instead of the stale pre-login
-    /// default.
+    remote_model_route: Option<crate::provider::RouteSelection>,
+    /// Remote catalog revision used to await the post-login model snapshot.
     remote_model_catalog_generation: u64,
     /// Server-resolved billing credential reported by a remote server: OAuth
     /// (subscription) vs API key (cost-based), or `None` when the active

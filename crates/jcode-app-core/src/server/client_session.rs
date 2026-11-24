@@ -1729,21 +1729,7 @@ pub(super) async fn handle_resume_session(
             let (model_changed, mcp_working_dir) = {
                 let guard = agent.lock().await;
                 (
-                    ServerEvent::ModelChanged {
-                        id,
-                        model: guard.provider_model(),
-                        provider_name: Some(guard.provider_name()),
-                        context_window: Some(guard.provider_context_window() as u64),
-                        error: None,
-                        resolved_credential: guard.active_resolved_credential(),
-                        provider_oauth_email: super::provider_oauth_email(
-                            guard.provider_handle().as_ref(),
-                        ),
-                        reasoning_effort: guard.provider_reasoning_effort(),
-                        provider_oauth_account_label: guard
-                            .provider_handle()
-                            .serving_oauth_account_label(),
-                    },
+                    super::provider_control::model_changed_snapshot(id, &guard),
                     guard.working_dir().map(PathBuf::from),
                 )
             };

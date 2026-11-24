@@ -842,6 +842,7 @@ impl Agent {
             || oauth_email_after_stream != *oauth_email_at_request_start
             || oauth_account_label_after_stream != *oauth_account_label_at_request_start)
             && let Err(error) = event_tx.send(ServerEvent::ModelChanged {
+                route_selection: None,
                 id: 0,
                 model: model_after_stream,
                 provider_name: Some(provider_after_stream),

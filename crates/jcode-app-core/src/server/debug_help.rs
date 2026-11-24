@@ -71,6 +71,7 @@ SERVER COMMANDS (server: prefix or no prefix):
   create_session:selfdev:<path> - Create headless self-dev session
   destroy_session:<id>     - Destroy a session
   set_model:<model>        - Switch model (may change provider)
+  set_model_choice:<json>  - Apply an exact native picker route and reasoning level
   set_provider:<name>      - Switch provider (claude/openai/openrouter/cursor/copilot/gemini/antigravity)
   trigger_extraction       - Force end-of-session memory extraction
   available_models         - List all available models
@@ -116,6 +117,7 @@ EVENTS COMMANDS (events: prefix):
 
 CLIENT COMMANDS (client: prefix):
   client:state             - Get TUI state
+  client:model-options     - Read native model/provider choices and their reasoning levels
   client:picker            - Get live inline picker state (filter/counts/visible rows)
   client:picker:<n>        - Get live inline picker state with n-row render window
   client:model-picker      - Materialize source-of-truth TUI model picker entries/routes

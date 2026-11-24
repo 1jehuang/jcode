@@ -1087,3 +1087,6 @@ fn provider_allowlist_keeps_only_exact_active_route_when_model_and_provider_over
         ]
     );
 }
+
+#[path = "inline_interactive_model_options_tests.rs"]
+mod model_options_tests;

@@ -831,6 +831,9 @@ pub enum ServerEvent {
     ModelChanged {
         id: u64,
         model: String,
+        /// Exact route for externally applied native picker choices.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_selection: Option<jcode_provider_core::RouteSelection>,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
         /// The server's resolved context window for the active route, in tokens.

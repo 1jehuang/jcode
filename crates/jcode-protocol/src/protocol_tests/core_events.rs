@@ -54,6 +54,7 @@ fn provider_oauth_account_label_defaults_and_roundtrips() -> Result<()> {
 #[test]
 fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
     let event = ServerEvent::ModelChanged {
+route_selection: None,
         id: 7,
         model: "auto/included".to_string(),
         provider_name: Some("OmniRouteV2".to_string()),
@@ -83,6 +84,7 @@ fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
 #[test]
 fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
     let event = ServerEvent::ModelChanged {
+route_selection: None,
         id: 3,
         model: "m".to_string(),
         provider_name: None,

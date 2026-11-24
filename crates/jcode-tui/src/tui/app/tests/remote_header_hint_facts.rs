@@ -258,6 +258,7 @@ fn resume_model_changed_over_provisional_facts_is_not_announced() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             context_window: Some(1_000_000),
             id: 0,
             model: "claude-opus-5-5".to_string(),
@@ -291,6 +292,7 @@ fn model_changed_after_facts_are_confirmed_is_announced() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             context_window: Some(200_000),
             id: 0,
             model: "claude-sonnet-4".to_string(),

@@ -28,7 +28,7 @@ pub(in crate::tui::app) fn register_remote_chatgpt_web_reasoning(routes: &[Model
     });
 }
 
-fn remote_metadata(model: &str) -> Option<ModelMetadata> {
+pub(in crate::tui::app) fn remote_metadata(model: &str) -> Option<ModelMetadata> {
     REMOTE_CHOICES.with(|cache| {
         let cache = cache.borrow();
         let (home, metadata) = cache.as_ref()?;

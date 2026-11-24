@@ -802,6 +802,7 @@ mod tests {
         ] {
             app.handle_server_event(
                 crate::protocol::ServerEvent::ModelChanged {
+                    route_selection: None,
                     id: 0,
                     model: model.into(),
                     provider_name: Some("OpenAI".into()),
