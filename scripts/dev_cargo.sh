@@ -26,6 +26,19 @@ case "$(pwd -P)" in
   *) exec cargo "$@" ;;
 esac
 
+# Refuse to build on a near-full disk: a 459 MiB-free host (2026-11-24) is
+# where builds fail mid-link and apps OOM. JCODE_MIN_FREE_GB=0 disables.
+min_free_gb="${JCODE_MIN_FREE_GB:-25}"
+if (( min_free_gb > 0 )); then
+  free_kb=$(df -Pk "$repo_root" | awk 'NR==2 {print $4}')
+  if (( free_kb < min_free_gb * 1024 * 1024 )); then
+    printf 'dev_cargo: refusing to build: %s GB free, need %s GB.\n' "$((free_kb / 1024 / 1024))" "$min_free_gb" >&2
+    printf 'dev_cargo: free space: scripts/clean_stale_target.sh --days 0  (removes target/*/incremental and stale deps)\n' >&2
+    printf 'dev_cargo: or: cargo clean --profile debug; override once with JCODE_MIN_FREE_GB=0\n' >&2
+    exit 1
+  fi
+fi
+
 # shellcheck source=scripts/remote_config.sh
 source "$repo_root/scripts/remote_config.sh"
 jcode_load_remote_config

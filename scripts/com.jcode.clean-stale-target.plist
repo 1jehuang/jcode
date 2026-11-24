@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Weekly stale Cargo artifact cleanup. Install:
+     sed "s|@REPO@|$PWD|g" scripts/com.jcode.clean-stale-target.plist > ~/Library/LaunchAgents/com.jcode.clean-stale-target.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jcode.clean-stale-target.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.jcode.clean-stale-target</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@REPO@/scripts/clean_stale_target.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardErrorPath</key><string>/tmp/jcode-clean-stale-target.log</string>
+  <key>StandardOutPath</key><string>/tmp/jcode-clean-stale-target.log</string>
+</dict>
+</plist>
