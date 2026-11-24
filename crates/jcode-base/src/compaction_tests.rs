@@ -1496,6 +1496,63 @@ fn pinned_root_prompt_is_byte_identical_once_compacted() {
     assert!(matches!(&pinned[0], ContentBlock::Text { text, .. } if text == root));
 }
 
+/// Real sessions open with harness reminders before the human task. A hard
+/// compaction near the ceiling must still carry the task verbatim, guardrails
+/// included, not a reminder and not a truncated copy.
+#[test]
+fn hard_compaction_pins_first_human_task_verbatim() {
+    let task = format!(
+        "Turn 1 task: fix X canonically.\nSCOPE: only crates/a.\nNEVER push without tests.\n{}",
+        "guardrail line\n".repeat(400)
+    );
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let mut messages = vec![
+        make_text_message(
+            Role::User,
+            "<system-reminder>\n# Session Context\n</system-reminder>",
+        ),
+        make_text_message(
+            Role::User,
+            "<system-reminder>\nNew MCP tools\n</system-reminder>",
+        ),
+        make_text_message(Role::User, &task),
+    ];
+    for i in 0..30 {
+        messages.push(make_text_message(Role::Assistant, &format!("work {i}")));
+        messages.push(make_text_message(
+            Role::User,
+            &format!("[auto] continue {i}"),
+        ));
+    }
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.update_observed_input_tokens(990);
+    let dropped = manager
+        .hard_compact_with(&messages)
+        .expect("should compact");
+    assert!(
+        dropped > 3,
+        "task message must be inside the compacted range"
+    );
+
+    let view = manager.messages_for_api_with(&messages);
+    let pinned: Vec<&str> = view[0]
+        .content
+        .iter()
+        .skip(1)
+        .filter_map(|b| match b {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pinned,
+        vec![task.as_str()],
+        "task pinned byte-for-byte, reminders excluded"
+    );
+}
+
 /// `session_maple` shape: few human turns, many large tool results, policy
 /// reminders and background notices appended mid-turn, context growing every
 /// call. Every request view must extend the previous one byte-for-byte: an

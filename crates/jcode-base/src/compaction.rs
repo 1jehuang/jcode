@@ -2006,6 +2006,9 @@ fn looks_like_refusal(text: &str) -> bool {
 /// Text blocks of the first user message, copied verbatim, when that message
 /// has been compacted away. Empty when it is still in the active window.
 fn pinned_root_prompt(all_messages: &[Message], compacted_count: usize) -> Vec<ContentBlock> {
+    // Sessions open with harness `<system-reminder>` messages; the task is the
+    // first user text that is not one.
+    let is_reminder = |b: &ContentBlock| matches!(b, ContentBlock::Text { text, .. } if text.trim_start().starts_with("<system-reminder>"));
     all_messages
         .iter()
         .take(compacted_count)
@@ -2013,12 +2016,12 @@ fn pinned_root_prompt(all_messages: &[Message], compacted_count: usize) -> Vec<C
             m.role == Role::User
                 && m.content
                     .iter()
-                    .any(|b| matches!(b, ContentBlock::Text { .. }))
+                    .any(|b| matches!(b, ContentBlock::Text { .. }) && !is_reminder(b))
         })
         .map(|m| {
             m.content
                 .iter()
-                .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                .filter(|b| matches!(b, ContentBlock::Text { .. }) && !is_reminder(b))
                 .cloned()
                 .collect()
         })
