@@ -198,6 +198,10 @@ pub struct CompactionManager {
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
 
+    /// Human-turn flags aligned with the caller's full message list; see
+    /// `Session::human_turn_mask`. Empty means no turn is known, so nothing folds.
+    human_turns: Vec<bool>,
+
     // ── Proactive mode state ───────────────────────────────────────────────
     /// Rolling window of observed token counts, one entry per turn snapshot.
     /// Used to compute EWMA growth rate for proactive compaction.
@@ -248,6 +252,7 @@ impl CompactionManager {
             last_compaction: None,
             mode,
             compaction_config: cfg,
+            human_turns: Vec::new(),
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
             emergency_baseline_tokens: None,
@@ -1407,6 +1412,11 @@ impl CompactionManager {
         self.last_compaction.take()
     }
 
+    /// Set which messages of the caller's full history are human-typed prompts.
+    pub fn set_human_turns(&mut self, human_turns: Vec<bool>) {
+        self.human_turns = human_turns;
+    }
+
     /// Get messages for API call (with summary if compacted).
     /// Takes the full message list from the caller.
     pub fn messages_for_api_with(&mut self, all_messages: &[Message]) -> Vec<Message> {
@@ -1448,8 +1458,17 @@ impl CompactionManager {
             }
             None => active.to_vec(),
         };
+        // Map full-history flags into the view: an optional summary message,
+        // then the active slice starting at `compacted_count`.
+        let start = self.compacted_count.min(all_messages.len());
+        let offset = result.len() - (all_messages.len() - start);
+        let mut view_turns = vec![false; offset];
+        view_turns.extend(
+            (start..all_messages.len()).map(|i| self.human_turns.get(i).copied().unwrap_or(false)),
+        );
         let folded = fold_old_tool_results(
             &mut result,
+            &view_turns,
             RECENT_TURNS_TO_KEEP,
             self.compaction_config.fold_tool_result_chars,
         );

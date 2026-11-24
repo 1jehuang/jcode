@@ -3296,3 +3296,56 @@ mod provider_identity;
 
 #[path = "memory_profile_tests.rs"]
 mod memory_profile;
+
+#[test]
+fn human_turn_mask_allows_only_human_typed_prompts() {
+    let mut session = Session::create(None, None);
+    let text = |t: &str| {
+        vec![ContentBlock::Text {
+            text: t.to_string(),
+            cache_control: None,
+        }]
+    };
+    session.add_message(Role::User, text("real prompt")); // human
+    session.add_message(
+        Role::User,
+        text("<system-reminder>\nNew MCP tools\n</system-reminder>"),
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        text("<system-reminder>\n<harness_execution_policy>\n</harness_execution_policy>\n</system-reminder>"),
+        Some(StoredDisplayRole::System),
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        text("**Background task** `x` · `bash` · ✓ completed"),
+        Some(StoredDisplayRole::BackgroundTask),
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        text("DM from cat: done"),
+        Some(StoredDisplayRole::System),
+    );
+    session.add_message(
+        Role::User,
+        text("[auto] Reload complete. Resuming your task."),
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "t".into(),
+            content: "out".into(),
+            is_error: None,
+        }],
+    );
+    session.add_message(Role::Assistant, text("answer"));
+    session.add_message(Role::User, text("second real prompt")); // human
+    assert_eq!(
+        session.human_turn_mask(),
+        vec![true, false, false, false, false, false, false, false, true]
+    );
+    assert_eq!(
+        session.human_turn_mask().len(),
+        session.provider_messages().len()
+    );
+}

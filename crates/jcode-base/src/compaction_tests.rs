@@ -198,6 +198,14 @@ fn test_messages_for_api_folds_old_tool_results_but_not_history() {
     for _ in &messages {
         manager.notify_message_added();
     }
+    manager.set_human_turns(
+        messages
+            .iter()
+            .map(|m| {
+                m.role == Role::User && !matches!(m.content[0], ContentBlock::ToolResult { .. })
+            })
+            .collect(),
+    );
 
     let view = manager.messages_for_api_with(&messages);
     assert_eq!(view.len(), messages.len());

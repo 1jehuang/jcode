@@ -842,6 +842,7 @@ const FOLD_LINE_CHARS: usize = 120;
 /// turns and stays cache-warm. Returns the number of folded blocks.
 pub fn fold_old_tool_results(
     messages: &mut [Message],
+    human_turns: &[bool],
     keep_recent: usize,
     max_chars: usize,
 ) -> usize {
@@ -863,22 +864,15 @@ pub fn fold_old_tool_results(
         })
         .collect();
 
-    // Pin the boundary to the start of a user turn. A boundary that slides one
+    // Pin the boundary to the start of a human turn. A boundary that slides one
     // message per call folds a result the provider cached verbatim on the
     // previous call, invalidating the whole prefix after it every turn
-    // (measured: 70k cache_write per call). Turn starts move only when the
-    // user speaks, so between those points the folded view is byte-stable.
-    let fold_end = messages[..messages.len() - keep_recent]
-        .iter()
-        .rposition(|msg| {
-            msg.role == Role::User
-                && msg.content.iter().all(|block| match block {
-                    ContentBlock::ToolResult { .. } => false,
-                    // Harness-appended policy reminders are not user turns.
-                    ContentBlock::Text { text, .. } => !text.starts_with("<system-reminder>"),
-                    _ => true,
-                })
-        })
+    // (measured: 70k cache_write per call). Strict allowlist: only indices the
+    // caller marks as human-typed prompts count. Reminders, background-task
+    // notifications, DMs and [auto] pokes are user-role too and must never move it.
+    let fold_end = (0..messages.len() - keep_recent)
+        .rev()
+        .find(|&i| human_turns.get(i).copied().unwrap_or(false))
         .unwrap_or(0);
     let mut folded = 0;
     for msg in &mut messages[..fold_end] {
@@ -1224,7 +1218,7 @@ mod fold_tests {
         msgs.push(user_turn("next")); // 5: fold boundary
         msgs.extend(tool_pair("recent", "ls", &big, false)); // 6,7
 
-        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        let folded = fold(&mut msgs, 2, 100);
         assert_eq!(folded, 1);
         let snap = result_text(&msgs[1]);
         assert!(snap.starts_with("[folded tool result: "), "{snap}");
@@ -1252,7 +1246,7 @@ mod fold_tests {
         msgs.push(user_turn("next"));
         msgs.extend(tool_pair("tail", "pwd", "/", false));
 
-        let folded = fold_old_tool_results(&mut msgs, 2, 100);
+        let folded = fold(&mut msgs, 2, 100);
         assert_eq!(folded, 1, "only the unprotected read folds");
         assert_eq!(result_text(&msgs[1]), big);
         assert_eq!(result_text(&msgs[3]), big);
@@ -1276,7 +1270,7 @@ mod fold_tests {
         for i in 0..6 {
             msgs.extend(tool_pair(&format!("c{i}"), "x", &big, false));
             let mut view = msgs.clone();
-            fold_old_tool_results(&mut view, keep, 100);
+            fold(&mut view, keep, 100);
             let now = result_text(&view[4]).starts_with("[folded tool result: ");
             if now != b_folded {
                 b_flips += 1;
@@ -1300,6 +1294,20 @@ mod fold_tests {
         );
     }
 
+    /// Human turns = user text messages (test stand-in for the session mask).
+    fn fold(msgs: &mut [Message], keep: usize, max: usize) -> usize {
+        let turns: Vec<bool> = msgs
+            .iter()
+            .map(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .all(|b| matches!(b, ContentBlock::Text { text, .. } if !text.starts_with("<system-reminder>")))
+            })
+            .collect();
+        fold_old_tool_results(msgs, &turns, keep, max)
+    }
+
     #[test]
     fn synthetic_reminder_does_not_move_fold_boundary() {
         let big = "x\n".repeat(500);
@@ -1315,7 +1323,7 @@ mod fold_tests {
         }
         let mut view = msgs.clone();
         // Boundary stays on "second": only "a" folds, "b" stays byte-identical.
-        assert_eq!(fold_old_tool_results(&mut view, 2, 100), 1);
+        assert_eq!(fold(&mut view, 2, 100), 1);
         assert_eq!(
             result_text(&view[5]),
             big,
@@ -1325,7 +1333,7 @@ mod fold_tests {
         msgs.push(user_turn("third"));
         msgs.extend(tool_pair("c", "pwd", "/", false));
         let mut view = msgs.clone();
-        assert_eq!(fold_old_tool_results(&mut view, 2, 100), 2);
+        assert_eq!(fold(&mut view, 2, 100), 2);
     }
 
     #[test]
@@ -1335,14 +1343,14 @@ mod fold_tests {
         a.push(user_turn("next"));
         a.extend(tool_pair("tail", "pwd", "/", false));
         let mut b = a.clone();
-        assert_eq!(fold_old_tool_results(&mut a, 2, 100), 1);
-        assert_eq!(fold_old_tool_results(&mut b, 2, 100), 1);
+        assert_eq!(fold(&mut a, 2, 100), 1);
+        assert_eq!(fold(&mut b, 2, 100), 1);
         assert_eq!(result_text(&a[1]), result_text(&b[1]));
         assert!(result_text(&a[1]).contains("error: boom"));
         let mut c: Vec<Message> = tool_pair("t", "x", &big, false).into();
         c.push(user_turn("next"));
         c.extend(tool_pair("tail", "pwd", "/", false));
-        assert_eq!(fold_old_tool_results(&mut c, 2, 0), 0);
+        assert_eq!(fold(&mut c, 2, 0), 0);
         assert_eq!(result_text(&c[1]), big);
     }
 }
