@@ -138,27 +138,6 @@ impl App {
                 // remote startup ticks are 1s apart, which held a ready
                 // transcript back 0.5-0.7s until server History landed anyway.
                 needs_redraw |= self.poll_pending_startup_transcript();
-                // Same rule as the local loop: animation cadence only for ticks
-                // the partial repaint can serve (issue #1905).
-                let idle_animation_cheap =
-                    status_spinner_renderer.idle_animation_only_available(&self);
-                let desired_redraw = if self.pending_startup_transcript.is_some() {
-                    // Nothing wakes the loop when the transcript thread
-                    // finishes, so poll briefly until it does (~tens of ms).
-                    STARTUP_TRANSCRIPT_POLL
-                } else if self.cloud_job.is_some() {
-                    Duration::from_millis(100)
-                } else {
-                    crate::tui::redraw_interval_with_policy_and_animation(
-                        &self,
-                        &crate::perf::tui_policy(),
-                        idle_animation_cheap,
-                    )
-                };
-                if desired_redraw != redraw_period {
-                    redraw_period = desired_redraw;
-                    redraw_interval = redraw_timer(redraw_period);
-                }
 
                 if needs_redraw {
                     // Throttle idle full-frame renders while the terminal is
@@ -190,7 +169,7 @@ impl App {
                         input_redraw = false;
                         // Idle animated screen: repaint only the animation rows
                         // when nothing else is due (see the local loop).
-                        if idle_animation_cheap
+                        if status_spinner_renderer.idle_animation_only_available(&self)
                             && status_spinner_renderer
                                 .draw_idle_animation_only(&self, &mut terminal)?
                         {
@@ -208,6 +187,30 @@ impl App {
                     }
                     // When unfocused and throttled, leave needs_redraw set so the
                     // pending update is coalesced into the next allowed frame.
+                }
+
+                // Same rule as the local loop: evaluate animation cadence after
+                // drawing (without transient chrome refresh deadlines) so due
+                // full frames keep animation cadence smooth while palette-open
+                // states drop off animation FPS (issue #1905).
+                let idle_animation_paces =
+                    status_spinner_renderer.idle_animation_cadence_available(&self);
+                let desired_redraw = if self.pending_startup_transcript.is_some() {
+                    // Nothing wakes the loop when the transcript thread
+                    // finishes, so poll briefly until it does (~tens of ms).
+                    STARTUP_TRANSCRIPT_POLL
+                } else if self.cloud_job.is_some() {
+                    Duration::from_millis(100)
+                } else {
+                    crate::tui::redraw_interval_with_policy_and_animation(
+                        &self,
+                        &crate::perf::tui_policy(),
+                        idle_animation_paces,
+                    )
+                };
+                if desired_redraw != redraw_period {
+                    redraw_period = desired_redraw;
+                    redraw_interval = redraw_timer(redraw_period);
                 }
 
                 refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);

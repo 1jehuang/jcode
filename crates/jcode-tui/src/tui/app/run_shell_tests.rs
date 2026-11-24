@@ -404,6 +404,168 @@ fn the_animation_only_path_refuses_to_run_while_the_command_palette_is_up() {
     );
 }
 
+struct CadenceTestMockProvider;
+
+#[async_trait::async_trait]
+impl crate::provider::Provider for CadenceTestMockProvider {
+    async fn complete(
+        &self,
+        _messages: &[crate::message::Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<crate::provider::EventStream> {
+        Err(anyhow::anyhow!("mock provider"))
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+        std::sync::Arc::new(Self)
+    }
+}
+
+struct IdleAnimationEnvGuard {
+    _env: std::sync::MutexGuard<'static, ()>,
+}
+
+impl IdleAnimationEnvGuard {
+    fn enable() -> Self {
+        let env = crate::storage::lock_test_env();
+        crate::env::set_var("JCODE_IDLE_ANIMATION", "1");
+        crate::config::invalidate_config_cache();
+        Self { _env: env }
+    }
+}
+
+impl Drop for IdleAnimationEnvGuard {
+    fn drop(&mut self) {
+        crate::env::remove_var("JCODE_IDLE_ANIMATION");
+        crate::config::invalidate_config_cache();
+    }
+}
+
+fn cadence_test_app() -> App {
+    crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
+    let provider: std::sync::Arc<dyn crate::provider::Provider> =
+        std::sync::Arc::new(CadenceTestMockProvider);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    // A non-conversational system notice keeps `onboarding_welcome_active()` false
+    // without starting a conversation, and a 5s-old interaction avoids both
+    // deep-idle dormancy (30s) and active-typing backoff (600ms).
+    app.display_messages = vec![DisplayMessage::system("ready".to_string())];
+    app.onboarding_preview_mode = false;
+    app.last_user_interaction = Some(Instant::now() - Duration::from_secs(5));
+    app.set_client_focused(true);
+    app
+}
+
+fn full_tier_cadence_policy() -> crate::perf::TuiPerfPolicy {
+    crate::perf::TuiPerfPolicy {
+        tier: crate::perf::PerformanceTier::Full,
+        enable_decorative_animations: true,
+        animation_fps: 60,
+        redraw_fps: 60,
+        ..crate::perf::tui_policy()
+    }
+}
+
+/// Regression test for the chrome-refresh pause: with a status notice visible,
+/// once the last full frame is older than 250ms, `idle_animation_only_available`
+/// legitimately refuses so `draw_full` refreshes the notice, but the cadence
+/// decision must stay at animation FPS instead of dropping to 250ms.
+#[test]
+fn chrome_refresh_deadline_does_not_drop_idle_animation_cadence() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = cadence_test_app();
+    app.set_status_notice("Swarm plan synced");
+    crate::tui::ui::record_idle_animation_area(Some(Rect::new(0, 3, 40, 10)));
+
+    let renderer = StatusSpinnerRenderer {
+        last_frame: Some(Buffer::empty(Rect::new(0, 0, 80, 24))),
+        last_theme: jcode_tui_style::theme_mode(),
+        last_full_frame_at: Some(Instant::now() - Duration::from_secs(1)),
+        ..Default::default()
+    };
+
+    assert!(
+        !renderer.idle_animation_only_available(&app),
+        "a due chrome refresh must still take draw_full"
+    );
+    assert!(
+        renderer.idle_animation_cadence_available(&app),
+        "a transient chrome full-frame deadline must not drop animation cadence"
+    );
+
+    let policy = full_tier_cadence_policy();
+    let interval = crate::tui::redraw_interval_with_policy_and_animation(
+        &app,
+        &policy,
+        renderer.idle_animation_cadence_available(&app),
+    );
+    assert!(
+        interval < crate::tui::REDRAW_IDLE,
+        "animation cadence should stay faster than REDRAW_IDLE during chrome refresh, got {interval:?}"
+    );
+}
+
+/// Regression test for #1905: when the slash command palette is open (even
+/// after typing pauses past the 600ms composing backoff), the cadence must stay
+/// off animation FPS; closing the palette immediately restores animation cadence.
+#[test]
+fn open_command_palette_drops_idle_animation_cadence() {
+    let _idle_animation = IdleAnimationEnvGuard::enable();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let mut app = cadence_test_app();
+    app.input = "/".to_string();
+    crate::tui::ui::record_idle_animation_area(Some(Rect::new(0, 3, 40, 10)));
+
+    let mut renderer = StatusSpinnerRenderer {
+        last_frame: Some(Buffer::empty(Rect::new(0, 0, 80, 24))),
+        last_theme: jcode_tui_style::theme_mode(),
+        last_full_frame_at: Some(Instant::now()),
+        last_full_frame_input: "/".to_string(),
+        ..Default::default()
+    };
+
+    let policy = full_tier_cadence_policy();
+    assert!(
+        !renderer.idle_animation_cadence_available(&app),
+        "open command palette must disable animation cadence"
+    );
+    let palette_interval = crate::tui::redraw_interval_with_policy_and_animation(
+        &app,
+        &policy,
+        renderer.idle_animation_cadence_available(&app),
+    );
+    assert!(
+        palette_interval >= crate::tui::REDRAW_IDLE,
+        "open command palette must stay at or slower than REDRAW_IDLE, got {palette_interval:?}"
+    );
+
+    // Closing the palette and syncing the drawn composer restores animation FPS.
+    app.input.clear();
+    renderer.last_full_frame_input.clear();
+    assert!(
+        renderer.idle_animation_cadence_available(&app),
+        "closing the command palette must restore animation cadence"
+    );
+    let resumed_interval = crate::tui::redraw_interval_with_policy_and_animation(
+        &app,
+        &policy,
+        renderer.idle_animation_cadence_available(&app),
+    );
+    assert!(
+        resumed_interval < crate::tui::REDRAW_IDLE,
+        "animation cadence should resume once the palette closes, got {resumed_interval:?}"
+    );
+}
+
 #[test]
 fn status_spinner_reset_targets_next_frame_boundary() {
     assert_duration_close(

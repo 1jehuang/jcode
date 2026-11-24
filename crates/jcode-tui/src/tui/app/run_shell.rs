@@ -446,11 +446,8 @@ impl StatusSpinnerRenderer {
         input != self.last_full_frame_input
     }
 
-    pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
-        if self.last_theme != jcode_tui_style::theme_mode() {
-            return false;
-        }
-        let blocked = idle_animation_fast_path_blocked_reason(&IdleAnimationFastPathInputs {
+    fn idle_animation_fast_path_inputs(&self, app: &App) -> IdleAnimationFastPathInputs {
+        IdleAnimationFastPathInputs {
             has_previous_frame: self.last_frame.is_some(),
             animation_active: crate::tui::idle_donut_active(app),
             has_animation_area: crate::tui::ui::last_idle_animation_area().is_some(),
@@ -460,7 +457,30 @@ impl StatusSpinnerRenderer {
             command_palette_visible: slash_command_palette_may_be_visible(&app.input, || {
                 !app.command_suggestions().is_empty()
             }),
-        });
+        }
+    }
+
+    /// Whether the decorative idle animation can be served cheaply on upcoming
+    /// ticks, so the redraw timer should run at animation cadence.
+    ///
+    /// Unlike [`Self::idle_animation_only_available`], this is side-effect-free
+    /// (does not increment `draw-stats` blocked tallies) and excludes transient
+    /// chrome full-frame deadlines (`chrome_full_frame_due`): a periodic chrome
+    /// refresh earns one full frame without dropping animation cadence to 250ms.
+    pub(super) fn idle_animation_cadence_available(&self, app: &App) -> bool {
+        if self.last_theme != jcode_tui_style::theme_mode() {
+            return false;
+        }
+        idle_animation_fast_path_blocked_reason(&self.idle_animation_fast_path_inputs(app))
+            .is_none()
+    }
+
+    pub(super) fn idle_animation_only_available(&self, app: &App) -> bool {
+        if self.last_theme != jcode_tui_style::theme_mode() {
+            return false;
+        }
+        let blocked =
+            idle_animation_fast_path_blocked_reason(&self.idle_animation_fast_path_inputs(app));
         if let Some(reason) = blocked {
             crate::tui::ui::note_idle_animation_fast_path_blocked(reason);
             return false;
@@ -778,32 +798,13 @@ impl App {
 
         loop {
             self.sync_sleep_guard();
-            // Only pace the loop at animation cadence for ticks the renderer can
-            // actually serve cheaply. The partial-repaint guards refuse while the
-            // palette is open or the composer changed; pacing animation FPS anyway
-            // turned every one of those wakes into a full frame (~200 KB/s of
-            // terminal output with the slash menu up). See issue #1905.
-            let idle_animation_cheap = status_spinner_renderer.idle_animation_only_available(&self);
-            let desired_redraw = if self.cloud_job.is_some() {
-                Duration::from_millis(100)
-            } else {
-                crate::tui::redraw_interval_with_policy_and_animation(
-                    &self,
-                    &crate::perf::tui_policy(),
-                    idle_animation_cheap,
-                )
-            };
-            if desired_redraw != redraw_period {
-                redraw_period = desired_redraw;
-                redraw_interval = redraw_timer(redraw_period);
-            }
 
             if needs_redraw {
                 // On an idle animated screen, repaint just the animation rows
                 // when nothing else is due. This is the single draw site, so
                 // gating here covers every redraw source (ticks, input, bus
                 // events), not just the animation tick.
-                if idle_animation_cheap
+                if status_spinner_renderer.idle_animation_only_available(&self)
                     && status_spinner_renderer.draw_idle_animation_only(&self, &mut terminal)?
                 {
                     needs_redraw = false;
@@ -821,9 +822,30 @@ impl App {
                 }
             }
 
-            // Rendering can start a cold preview load. The cadence above was
-            // computed before that receiver existed, so do not wait an entire
-            // idle/spinner tick before noticing the new asynchronous work.
+            // Only pace the loop at animation cadence when the partial-repaint
+            // fast path can serve upcoming ticks. Evaluate after drawing (and
+            // without transient chrome full-frame deadlines) so a due full
+            // frame refreshes the snapshot first instead of stalling the
+            // animation timer at 250ms, while palette-open states stop waking
+            // at animation FPS (~200 KB/s with the slash menu up). Issue #1905.
+            let idle_animation_paces =
+                status_spinner_renderer.idle_animation_cadence_available(&self);
+            let desired_redraw = if self.cloud_job.is_some() {
+                Duration::from_millis(100)
+            } else {
+                crate::tui::redraw_interval_with_policy_and_animation(
+                    &self,
+                    &crate::perf::tui_policy(),
+                    idle_animation_paces,
+                )
+            };
+            if desired_redraw != redraw_period {
+                redraw_period = desired_redraw;
+                redraw_interval = redraw_timer(redraw_period);
+            }
+
+            // Rendering can start a cold preview load while a cloud job is
+            // active; keep the faster preview cadence if needed.
             refresh_preview_redraw_timer(&self, &mut redraw_period, &mut redraw_interval);
 
             if self.should_quit {
