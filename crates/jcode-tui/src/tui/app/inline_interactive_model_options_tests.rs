@@ -114,3 +114,67 @@ fn model_options_export_hydrates_the_same_direct_routes_as_models() {
             && choice["available"] == true
     ));
 }
+
+#[test]
+fn external_model_changed_preserves_queued_prompts_until_the_local_ack() {
+    let _env = crate::storage::lock_test_env();
+    let _home = ConfigHomeGuard(std::env::var_os("JCODE_HOME"));
+    let dir = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::config::Config::invalidate_cache();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for request in [None, Some(22)] {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.is_remote = true;
+        app.remote_model_switch_in_flight = true;
+        app.pending_automatic_failover_request_id = request;
+        app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
+            raw_input: "queued prompt".into(),
+            expanded: "queued prompt".into(),
+            images: Vec::new(),
+        });
+        let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+        let route = crate::provider::RouteSelection::from_model_route(&model_route(
+            "external-model",
+            "OpenAI",
+            "openai-api-key",
+        ));
+        let event = |id, route_selection| crate::protocol::ServerEvent::ModelChanged {
+            id,
+            route_selection,
+            model: "external-model".into(),
+            provider_name: Some("OpenAI".into()),
+            error: None,
+            resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            provider_oauth_email: None,
+            provider_oauth_account_label: None,
+            reasoning_effort: Some("high".into()),
+            context_window: None,
+        };
+        app.handle_server_event(event(0, Some(route)), &mut remote);
+        assert!(app.remote_model_switch_in_flight);
+        assert_eq!(app.pending_automatic_failover_request_id, request);
+        assert_eq!(
+            app.pending_prompt_after_model_switch
+                .as_ref()
+                .unwrap()
+                .raw_input,
+            "queued prompt"
+        );
+        assert_eq!(app.remote_provider_model.as_deref(), Some("external-model"));
+        assert_eq!(
+            app.current_route_api_method().as_deref(),
+            Some("openai-api-key")
+        );
+        if request.is_none() {
+            app.handle_server_event(event(17, None), &mut remote);
+            assert!(
+                !app.remote_model_switch_in_flight,
+                "only the ordinary local acknowledgement releases the queued prompt"
+            );
+        }
+    }
+}

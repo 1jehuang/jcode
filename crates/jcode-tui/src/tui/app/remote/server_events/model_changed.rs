@@ -20,6 +20,26 @@ pub(super) fn handle(app: &mut App, event: ServerEvent) -> bool {
         return false;
     };
 
+    // External control publishes facts, not an acknowledgement of this client's pending request.
+    if let Some(route) = route_selection {
+        app.update_context_limit_for_model(&model, context_window);
+        app.remote_provider_model = Some(model);
+        if let Some(provider) = provider_name {
+            app.remote_provider_name = Some(provider);
+        }
+        app.session.route_api_method = Some(route.api_method.clone());
+        app.session.provider_key = Some(route.runtime_key.stable_id());
+        app.remote_model_route = Some(route);
+        app.remote_resolved_credential = resolved_credential;
+        app.remote_provider_oauth_email = provider_oauth_email;
+        app.remote_provider_oauth_account_label = provider_oauth_account_label;
+        app.remote_reasoning_effort = reasoning_effort;
+        app.invalidate_model_picker_cache();
+        app.persist_remote_header_hint();
+        crate::tui::ui::prepare::invalidate_header_prep_cache();
+        return true;
+    }
+
     // A resume/catalog acknowledgement can arrive before the staged
     // route request has even been sent. It cannot authorize a resend.
     if app.pending_automatic_failover_request_id.is_none()

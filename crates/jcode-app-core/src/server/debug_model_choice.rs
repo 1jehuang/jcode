@@ -83,11 +83,6 @@ pub(super) fn apply(
         &agent.available_models_display(),
         &mut routes,
     );
-    routes.extend(crate::provider::simplified_model_routes_for_picker(
-        &agent.provider_name(),
-        &agent.provider_model(),
-        agent.available_models_display(),
-    ));
     let offered = routes
         .into_iter()
         .filter(|route| route.available)

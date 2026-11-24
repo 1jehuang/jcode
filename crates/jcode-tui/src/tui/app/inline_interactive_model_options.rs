@@ -85,8 +85,10 @@ impl App {
         };
         let mut routes = if self.is_remote {
             self.remote_model_options.clone()
-        } else {
+        } else if crate::perf::tui_policy().simplified_model_picker {
             self.simplified_model_routes_for_picker(&current_model)
+        } else {
+            self.provider.model_routes()
         };
         if self.is_remote {
             self.extend_remote_routes_for_uncovered_models(&mut routes);
