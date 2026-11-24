@@ -2753,10 +2753,7 @@ fn handle_server_event_inner(
                 if account_switch_acknowledged {
                     app.pending_account_switch_target = None;
                 }
-                // Several cycles may be queued while the daemon is busy. An
-                // earlier acknowledgement updates confirmed state, but must
-                // not discard the newer target used to anchor the next cycle.
-                // Persist the daemon's label, never the optimistic target.
+                // Persist confirmed identity while keeping any newer queued target.
                 if resolved_credential == Some(jcode_provider_core::ResolvedCredential::Oauth) {
                     let method = match acknowledged_provider {
                         Some(jcode_provider_core::ActiveProvider::Claude) => Some("claude-oauth"),
@@ -2814,6 +2811,9 @@ fn handle_server_event_inner(
                         Some(label) => format!("Account → {}", label),
                         None => "Account updated".to_string(),
                     });
+                }
+                if account_actually_changed || account_switch_acknowledged {
+                    app.resume_after_confirmed_account_change(None);
                 }
             }
             // Same-model account acknowledgements change header identity too.

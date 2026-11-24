@@ -1616,8 +1616,7 @@ fn spawn_account_switch_refresh(
     agent: Arc<Mutex<Agent>>,
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
-    // Clear the selected login's failure before waiting for a busy agent. The
-    // global active account can change while the asynchronous refresh waits.
+    // Clear this login's failure before waiting; the global default can change.
     match provider_kind {
         "anthropic" => {
             crate::provider::clear_claude_provider_unavailability_for_account_label(
@@ -1656,9 +1655,13 @@ fn spawn_account_switch_refresh(
             provider
         };
         provider.invalidate_credentials().await;
-
         crate::provider::clear_all_provider_unavailability_for_account();
         crate::provider::clear_all_model_unavailability_for_account();
+        super::usage_limit_resume::resume_after_account_change(
+            &*agent.lock().await,
+            provider_kind,
+            account_label.as_deref(),
+        );
         crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
             provider: Some(provider_kind.to_string()),
             account_label,
@@ -1666,7 +1669,6 @@ fn spawn_account_switch_refresh(
 
         match provider_kind {
             "anthropic" => {
-                // Drop the previous login's usage snapshot before refetching.
                 crate::usage::invalidate_active_anthropic_usage();
                 tokio::spawn(async {
                     let _ = crate::usage::get().await;
@@ -1682,7 +1684,6 @@ fn spawn_account_switch_refresh(
 
         crate::bus::Bus::global().publish_models_updated();
         let event = available_models_updated_event(&agent).await;
-        // Account activation remains valid if its requesting client disconnected.
         if let Err(error) = client_event_tx.send(event) {
             crate::logging::debug(&format!(
                 "Account switch catalog notification was not delivered: {error}"

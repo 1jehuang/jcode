@@ -8,8 +8,8 @@
 //! to resume, and keeps at most one pending resume per session.
 //!
 //! Policy (shared with `jcode_provider_core::usage_limit_resume`):
-//! - Resume at the reported reset plus 5-30 s of jitter, never sooner. When
-//!   the error names several resets (multi-account), the earliest wins.
+//! - Resume at the reported reset plus 5-30 s of jitter, or when the account
+//!   changes. With several resets (multi-account), the earliest wins.
 //! - A reset in the past waits 60 s, an unknown reset waits 15 min. Never zero.
 //! - At most [`MAX_USAGE_LIMIT_RESUMES`] resumes per turn, then the turn fails.
 //! - A user message or cancellation request cancels its pending resume.
@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
 #[path = "usage_limit_resume_state.rs"]
@@ -208,7 +208,7 @@ pub(super) fn error_retry_after_secs(error: &anyhow::Error) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
-static PENDING: LazyLock<Mutex<HashMap<String, (u64, CancellationToken)>>> =
+static PENDING: LazyLock<Mutex<HashMap<String, (u64, CancellationToken, Arc<Notify>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A registered pending resume. Dropping it unregisters it (if it is still
@@ -217,6 +217,7 @@ pub(super) struct ResumeTicket {
     session_id: String,
     id: u64,
     token: CancellationToken,
+    resume_now: Arc<Notify>,
 }
 
 /// Register the pending resume for `session_id`, cancelling any earlier one,
@@ -225,11 +226,15 @@ pub(super) struct ResumeTicket {
 pub(super) fn register_pending_resume(session_id: &str) -> ResumeTicket {
     let id = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
     let token = CancellationToken::new();
+    let resume_now = Arc::new(Notify::new());
     let previous = PENDING
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(session_id.to_string(), (id, token.clone()));
-    if let Some((_, previous)) = previous {
+        .insert(
+            session_id.to_string(),
+            (id, token.clone(), resume_now.clone()),
+        );
+    if let Some((_, previous, _)) = previous {
         crate::logging::info(&format!(
             "Usage-limit resume for {session_id} replaced an earlier pending resume"
         ));
@@ -239,6 +244,7 @@ pub(super) fn register_pending_resume(session_id: &str) -> ResumeTicket {
         session_id: session_id.to_string(),
         id,
         token,
+        resume_now,
     }
 }
 
@@ -254,13 +260,18 @@ fn register_durable_resume(
     }
     let id = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
     let token = CancellationToken::new();
-    if let Some((_, previous)) = pending.insert(state.session_id.clone(), (id, token.clone())) {
+    let resume_now = Arc::new(Notify::new());
+    if let Some((_, previous, _)) = pending.insert(
+        state.session_id.clone(),
+        (id, token.clone(), resume_now.clone()),
+    ) {
         previous.cancel();
     }
     Ok(Some(ResumeTicket {
         session_id: state.session_id.clone(),
         id,
         token,
+        resume_now,
     }))
 }
 
@@ -303,7 +314,7 @@ pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
         }
     };
     match removed {
-        Some((_, token)) => {
+        Some((_, token, _)) => {
             crate::logging::info(&format!(
                 "Cancelled pending usage-limit resume for {session_id}: stopped or superseded"
             ));
@@ -311,6 +322,38 @@ pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
             true
         }
         None => durable_removed,
+    }
+}
+
+/// A confirmed account change can retry a waiting turn before the old reset.
+pub(super) fn resume_after_account_change(
+    agent: &Agent,
+    provider_kind: &str,
+    account_label: Option<&str>,
+) {
+    let Some(kind) = crate::provider::AccountProviderKind::from_key(provider_kind) else {
+        return;
+    };
+    if jcode_provider_core::parse_provider_hint(provider_kind)
+        != jcode_provider_core::parse_provider_hint(&agent.provider_name())
+    {
+        return;
+    }
+    let provider = agent.provider_handle();
+    let account = crate::session_accounts::account_info_with_pins(
+        provider.as_ref(),
+        agent.account_pins(),
+        kind,
+    );
+    if account_label.is_some_and(|label| account.label.as_deref() != Some(label)) {
+        return;
+    }
+    if let Some((_, _, resume_now)) = PENDING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(agent.session_id())
+    {
+        resume_now.notify_one();
     }
 }
 
@@ -339,7 +382,7 @@ impl ResumeTicket {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .get(&self.session_id)
-                .is_some_and(|(id, _)| *id == self.id)
+                .is_some_and(|(id, _, _)| *id == self.id)
     }
 
     async fn run_if_current<T>(
@@ -361,6 +404,7 @@ impl ResumeTicket {
     pub(super) async fn wait(&self, delay: Duration) -> bool {
         tokio::select! {
             _ = self.token.cancelled() => false,
+            _ = self.resume_now.notified() => !self.token.is_cancelled(),
             _ = tokio::time::sleep(delay) => !self.token.is_cancelled(),
         }
     }
@@ -373,7 +417,7 @@ impl Drop for ResumeTicket {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if pending
             .get(&self.session_id)
-            .is_some_and(|(id, _)| *id == self.id)
+            .is_some_and(|(id, _, _)| *id == self.id)
         {
             pending.remove(&self.session_id);
         }

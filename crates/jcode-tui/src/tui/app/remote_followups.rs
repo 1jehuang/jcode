@@ -21,6 +21,7 @@ pub(in super::super) async fn process_remote_followups(
         return;
     }
     if app.pending_provider_failover.is_some()
+        || !app.pending_account_requests.is_empty()
         || app.pending_automatic_failover_route.is_some()
         || app.pending_automatic_failover_request_id.is_some()
         || (app.pending_route_selection.is_some() && app.pending_fallback_resend.is_some())

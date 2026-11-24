@@ -26,7 +26,10 @@ fn held_on_rate_limit_app(hold: Duration) -> App {
 fn account_changed_notices(app: &App) -> usize {
     app.display_messages()
         .iter()
-        .filter(|m| m.content.contains("Account changed. Resending your message"))
+        .filter(|m| {
+            m.content
+                .contains("Account changed. Resending your message")
+        })
         .count()
 }
 
@@ -137,7 +140,10 @@ fn test_credentials_changed_does_not_shortcut_network_wait() {
         &mut remote,
     );
 
-    assert_eq!(app.rate_limit_reset, reset, "offline holds are not auth holds");
+    assert_eq!(
+        app.rate_limit_reset, reset,
+        "offline holds are not auth holds"
+    );
     assert_eq!(account_changed_notices(&app), 0);
 }
 
@@ -184,7 +190,9 @@ fn test_rate_limit_error_for_turn_started_before_account_change_retries_promptly
         &mut remote,
     );
 
-    let reset = app.rate_limit_reset.expect("turn must stay held for resend");
+    let reset = app
+        .rate_limit_reset
+        .expect("turn must stay held for resend");
     assert!(
         reset <= Instant::now() + Duration::from_secs(5),
         "limit from the previous account must not hold the turn for hours"
@@ -361,7 +369,10 @@ fn test_credentials_changed_for_another_label_does_not_resend_held_turn() {
         &mut remote,
     );
     let reset = app.rate_limit_reset.expect("hold kept");
-    assert!(reset > Instant::now(), "another label must not release the hold");
+    assert!(
+        reset > Instant::now(),
+        "another label must not release the hold"
+    );
     assert_eq!(account_changed_notices(&app), 0);
 
     // This window's own label changed: resend.
@@ -401,9 +412,7 @@ fn test_session_account_changed_updates_window_account_and_explains_moves() {
         },
         &mut remote,
     );
-    let account = app
-        .window_account("claude")
-        .expect("window account stored");
+    let account = app.window_account("claude").expect("window account stored");
     assert_eq!(account.label.as_deref(), Some("claude-fox"));
     assert!(account.pinned);
     let last = app.display_messages().last().unwrap().content.clone();
@@ -426,7 +435,166 @@ fn test_session_account_changed_updates_window_account_and_explains_moves() {
         &mut remote,
     );
     assert_eq!(app.display_messages().len(), before + 1);
-    let widget = app.info_widget_data().window_account.expect("widget account");
+    let widget = app
+        .info_widget_data()
+        .window_account
+        .expect("widget account");
     assert_eq!(widget.label, "claude-otter");
     assert!(widget.is_default && !widget.pinned);
+}
+
+#[test]
+fn test_confirmed_account_switch_resumes_held_turn_without_auth_broadcast() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for confirmation in ["session", "legacy", "model"] {
+        for provider in ["claude", "openai"] {
+            let mut app = held_on_rate_limit_app(Duration::from_secs(5 * 3600));
+            app.is_remote = true;
+            app.remote_provider_name = Some(provider.into());
+            app.remote_provider_model = Some("same-model".into());
+            app.remote_provider_oauth_account_label = Some("old-account".into());
+            app.set_window_account_from_info(&crate::protocol::SessionAccountInfo {
+                provider: provider.into(),
+                label: Some("old-account".into()),
+                pinned: true,
+                is_default: false,
+            });
+            app.rate_limit_pending_message
+                .as_mut()
+                .unwrap()
+                .retry_attempts = 2;
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            if confirmation == "model" {
+                let event = serde_json::from_value(serde_json::json!({
+                    "type": "model_changed", "id": 42, "model": "same-model",
+                    "provider_name": provider, "resolved_credential": "oauth",
+                    "provider_oauth_account_label": "new-account"
+                }))
+                .unwrap();
+                app.handle_server_event(event, &mut remote);
+            } else {
+                app.pending_account_requests.insert(
+                    42,
+                    super::window_account::PendingAccountRequest::UseInWindow {
+                        family: provider.into(),
+                        label: "new-account".into(),
+                    },
+                );
+                if confirmation == "session" {
+                    app.handle_server_event(
+                        crate::protocol::ServerEvent::SessionAccountChanged {
+                            provider: provider.into(),
+                            label: Some("new-account".into()),
+                            pinned: true,
+                            is_default: false,
+                            reason: None,
+                        },
+                        &mut remote,
+                    );
+                    assert!(
+                        app.rate_limit_reset.unwrap() > Instant::now(),
+                        "wait for credential refresh to finish before resending"
+                    );
+                }
+                app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+            }
+            assert!(
+                app.rate_limit_reset.unwrap() <= Instant::now(),
+                "{provider}/{confirmation}"
+            );
+            assert_eq!(account_changed_notices(&app), 1);
+            rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+            assert!(app.is_processing, "{provider}/{confirmation}");
+            let pending = app.rate_limit_pending_message.as_ref().unwrap();
+            assert_eq!(pending.content, "finish the refactor");
+            assert_eq!(
+                pending.retry_attempts, 0,
+                "new account gets its own retry budget"
+            );
+            assert!(app.rate_limit_reset.is_none());
+        }
+    }
+}
+
+#[test]
+fn test_failed_account_switch_keeps_usage_limit_hold() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(5 * 3600));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let deadline = app.rate_limit_reset;
+    app.pending_account_requests.insert(
+        42,
+        super::window_account::PendingAccountRequest::UseInWindow {
+            family: "claude".into(),
+            label: "missing".into(),
+        },
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 42,
+            message: "Account unavailable".into(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.rate_limit_reset, deadline);
+    assert_eq!(account_changed_notices(&app), 0);
+}
+
+#[test]
+fn test_account_switch_resumes_quota_error_without_reset_time() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = held_on_rate_limit_app(Duration::from_secs(5 * 3600));
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".into());
+        app.remote_provider_model = Some("gpt-5.5".into());
+        app.remote_model_options = vec![
+            openai_oauth_route("gpt-5.5"),
+            claude_oauth_route("claude-sonnet-4"),
+        ];
+        app.rate_limit_reset = None;
+        app.is_processing = true;
+        app.last_submitted_input = Some("finish the refactor".into());
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 42,
+                message: "usage_limit_reached: The usage limit has been reached".into(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        assert!(app.pending_fallback_offer.is_some());
+        assert!(!app.is_processing);
+        app.pending_account_requests.insert(
+            43,
+            super::window_account::PendingAccountRequest::UseInWindow {
+                family: "openai".into(),
+                label: "new-account".into(),
+            },
+        );
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 43 }, &mut remote);
+        assert_eq!(account_changed_notices(&app), 1);
+        assert!(app.pending_fallback_offer.is_none());
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(app.is_processing);
+        assert!(app.input.is_empty(), "the restored prompt was submitted");
+        assert_eq!(
+            app.rate_limit_pending_message.as_ref().unwrap().content,
+            "finish the refactor"
+        );
+        assert!(app.pending_fallback_resend.is_none());
+    });
 }
