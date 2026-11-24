@@ -972,6 +972,17 @@ pub struct RouteSelection {
 }
 
 impl RouteSelection {
+    /// Stable identity of a picker route, independent of changing catalog details.
+    pub fn picker_choice_id(&self) -> String {
+        serde_json::json!([
+            &self.model,
+            &self.runtime_key,
+            &self.api_method,
+            &self.provider_label,
+        ])
+        .to_string()
+    }
+
     pub fn from_model_route(route: &ModelRoute) -> Self {
         let api_method = route.api_method_kind();
         Self {

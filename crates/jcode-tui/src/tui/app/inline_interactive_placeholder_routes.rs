@@ -27,32 +27,3 @@ where
         .into_iter()
         .all(|method| is_placeholder_route_method(method.as_ref()))
 }
-
-/// Whether a picker route's runtime can apply a per-request reasoning effort.
-/// Effort rows are only rendered for these routes; other routes (Copilot,
-/// Bedrock, Antigravity CLI, remote-catalog placeholders, ...) get one plain
-/// row per model because a picked effort could not actually be applied.
-pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
-    use crate::provider::ModelRouteApiMethod as Method;
-    match Method::parse(api_method) {
-        Method::ClaudeOAuth
-        | Method::AnthropicApiKey
-        | Method::OpenAIOAuth
-        | Method::OpenAIApiKey
-        | Method::OpenRouter => true,
-        // Named profiles are checked against their configured capabilities in
-        // model_route_effort_levels, which opens a second-step level picker.
-        Method::OpenAiCompatible { .. } => false,
-        Method::JcodeSubscription
-        | Method::GrokBuild
-        | Method::ClaudeCode { .. }
-        | Method::Copilot
-        | Method::Cursor
-        | Method::Bedrock
-        | Method::CodeAssistOAuth
-        | Method::AntigravityHttps
-        | Method::RemoteCatalog
-        | Method::Current
-        | Method::Other(_) => false,
-    }
-}

@@ -147,7 +147,7 @@ pub(super) async fn handle_notify_auth_changed_process_wide(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-fn send_model_changed_result(
+pub(super) fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(
         String,
@@ -175,6 +175,7 @@ fn send_model_changed_result(
                 ],
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                route_selection: None,
                 id,
                 model: updated,
                 provider_name: Some(provider_name),
@@ -196,6 +197,7 @@ fn send_model_changed_result(
                 ],
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                route_selection: None,
                 id,
                 model: fallback_model,
                 provider_name: None,
@@ -219,6 +221,7 @@ fn apply_cycle_model(
     let models = agent.available_models_for_switching();
     if models.is_empty() {
         let _ = client_event_tx.send(ServerEvent::ModelChanged {
+            route_selection: None,
             id,
             model: agent.provider_model(),
             provider_name: None,

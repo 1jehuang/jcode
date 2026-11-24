@@ -1730,6 +1730,7 @@ pub(super) async fn handle_resume_session(
                 let guard = agent.lock().await;
                 (
                     ServerEvent::ModelChanged {
+                        route_selection: None,
                         id,
                         model: guard.provider_model(),
                         provider_name: Some(guard.provider_name()),

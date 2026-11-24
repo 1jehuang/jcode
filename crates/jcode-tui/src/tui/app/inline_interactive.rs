@@ -1,9 +1,13 @@
 #[path = "inline_interactive/cache_signature.rs"]
 mod cache_signature;
 use super::*;
+#[path = "inline_interactive_model_options.rs"]
+mod model_options;
 #[path = "inline_interactive_model_picker.rs"]
 mod model_picker;
 
+#[cfg(test)]
+use crate::provider::route_supports_reasoning_effort;
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, ResumeTarget, SessionPicker};
 use crate::tui::{
     AccountPickerAction, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -103,7 +107,6 @@ fn model_picker_favorites_path() -> Option<std::path::PathBuf> {
 
 #[path = "inline_interactive_placeholder_routes.rs"]
 mod placeholder_routes;
-use placeholder_routes::route_supports_reasoning_effort;
 
 /// Apply the `provider.model_picker_providers` allowlist (issue #460).
 ///
@@ -415,43 +418,21 @@ fn model_route_effort_levels_with_config(
     route: &PickerOption,
     config: &crate::config::Config,
 ) -> Vec<&'static str> {
-    if !crate::tui::is_ssh_remote()
-        && let Some(efforts) =
-            super::named_profile_reasoning_efforts(config, Some(&route.api_method), Some(model))
-    {
-        return efforts
-            .into_iter()
-            .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
-            .collect();
-    }
-    if route.api_method == "copilot" {
-        // Copilot's catalog says which levels each model accepts.
-        return jcode_provider_core::copilot_model_metadata(model)
-            .map(|metadata| {
-                metadata
-                    .reasoning_efforts
-                    .iter()
-                    .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
-                    .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
-                    .collect()
-            })
-            .unwrap_or_default();
-    }
-    if route.api_method == "chatgpt-web" {
-        // The ChatGPT account catalog's ladder (Instant ... Pro). Routes with
-        // one fixed level (minis) have no level step.
-        return super::chatgpt_web_reasoning_efforts(model)
-            .into_iter()
-            .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
-            .collect();
-    }
-    if !route_supports_reasoning_effort(&route.api_method) {
-        return Vec::new();
-    }
-    inferred_reasoning_efforts(Some(&route.api_method), Some(model))
-        .into_iter()
-        .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
-        .collect()
+    let defaults = crate::config::Config::default();
+    let config = if crate::tui::is_ssh_remote() {
+        &defaults
+    } else {
+        config
+    };
+    let metadata = (route.api_method == "chatgpt-web")
+        .then(|| super::remote_chatgpt_web_metadata(model))
+        .flatten();
+    crate::provider::model_route_reasoning_efforts(
+        model,
+        &route.api_method,
+        metadata.as_ref(),
+        config,
+    )
 }
 
 /// Short label for a reasoning level row.
@@ -1756,8 +1737,10 @@ impl App {
                 self.provider.model().to_string()
             },
             current_provider: if self.is_remote {
-                self.remote_provider_name
-                    .clone()
+                self.remote_model_route
+                    .as_ref()
+                    .map(|route| route.provider_label.clone())
+                    .or_else(|| self.remote_provider_name.clone())
                     .unwrap_or_else(|| "remote".to_string())
             } else {
                 self.provider.display_name()

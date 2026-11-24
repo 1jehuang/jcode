@@ -349,6 +349,8 @@ impl App {
             .to_string()
         } else if cmd == "picker" || cmd == "picker:state" {
             self.debug_picker_state_json(None)
+        } else if cmd == "model-options" {
+            self.debug_model_options_json()
         } else if cmd == "model-picker" || cmd == "model-picker:live" {
             self.debug_model_picker_live_json(None)
         } else if let Some(raw) = cmd.strip_prefix("model-picker:") {

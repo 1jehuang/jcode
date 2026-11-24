@@ -3,6 +3,11 @@
     allow(clippy::await_holding_lock, clippy::items_after_test_module)
 )]
 
+#[path = "debug_client_forward.rs"]
+mod client_forward;
+#[path = "debug_model_choice.rs"]
+mod model_choice;
+
 use super::debug_ambient::maybe_handle_ambient_command;
 use super::debug_command_exec::{
     DebugInterruptContext, execute_debug_command, resolve_debug_session,
@@ -498,55 +503,14 @@ pub(super) async fn handle_debug_client(
 
                 let result = match namespace {
                     "client" => {
-                        // Forward to TUI client
-                        let mut response_rx = client_debug_response_tx.subscribe();
-                        let mut attempts = 0usize;
-
-                        loop {
-                            let (client_id, tx) = match resolve_client_debug_sender(
-                                requested_session.as_deref(),
-                                &client_connections,
-                                &client_debug_state,
-                            )
-                            .await
-                            {
-                                Ok(target) => target,
-                                Err(err) => break Err(err),
-                            };
-
-                            if tx.send((id, cmd.to_string())).is_ok() {
-                                // Wait for response with timeout
-                                let timeout = tokio::time::Duration::from_secs(30);
-                                match tokio::time::timeout(timeout, async {
-                                    loop {
-                                        if let Ok((resp_id, output)) = response_rx.recv().await
-                                            && resp_id == id
-                                        {
-                                            return Ok(output);
-                                        }
-                                    }
-                                })
-                                .await
-                                {
-                                    Ok(result) => break result,
-                                    Err(_) => {
-                                        break Err(anyhow::anyhow!(
-                                            "Timeout waiting for client response"
-                                        ));
-                                    }
-                                }
-                            } else {
-                                let mut debug_state = client_debug_state.write().await;
-                                debug_state.unregister(&client_id);
-                                attempts += 1;
-                                if requested_session.is_some()
-                                    || debug_state.clients.is_empty()
-                                    || attempts > 8
-                                {
-                                    break Err(anyhow::anyhow!("No TUI client connected"));
-                                }
-                            }
-                        }
+                        client_forward::forward(
+                            requested_session.as_deref(),
+                            cmd,
+                            &client_connections,
+                            &client_debug_state,
+                            &client_debug_response_tx,
+                        )
+                        .await
                     }
                     "tester" => {
                         // Handle tester commands
@@ -665,6 +629,15 @@ pub(super) async fn handle_debug_client(
                                     Ok(swarm_debug_help_text())
                                 } else if cmd == "help" {
                                     Ok(debug_help_text())
+                                } else if let Some(choice) = cmd.strip_prefix("set_model_choice:") {
+                                    model_choice::handle(
+                                        choice,
+                                        requested_session.as_deref(),
+                                        &sessions,
+                                        &client_connections,
+                                        &swarm_members,
+                                    )
+                                    .await
                                 } else {
                                     match resolve_debug_session(
                                         &sessions,

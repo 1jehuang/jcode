@@ -2630,6 +2630,7 @@ fn handle_server_event_inner(
             provider_oauth_account_label,
             reasoning_effort,
             context_window,
+            route_selection,
             ..
         } => {
             // A resume/catalog acknowledgement can arrive before the staged
@@ -2774,6 +2775,11 @@ fn handle_server_event_inner(
                 }
                 // Always replace: a switch to a provider with no OAuth/API
                 // distinction must clear the previous route's credential too.
+                app.remote_model_route = route_selection;
+                if let Some(route) = &app.remote_model_route {
+                    app.session.route_api_method = Some(route.api_method.clone());
+                    app.session.provider_key = Some(route.runtime_key.stable_id());
+                }
                 app.remote_resolved_credential = resolved_credential;
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the

@@ -2461,6 +2461,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             context_window: None,
             id: 0,
             model: "claude-opus-5-5".to_string(),
@@ -2490,6 +2491,7 @@ fn model_changed_event(
     reasoning_effort: Option<&str>,
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
         context_window: None,
         id: 0,
         model: "gpt-5.6-terra".to_string(),
@@ -2556,6 +2558,7 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
     };
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+route_selection: None,
             id,
             model,
             provider_name,

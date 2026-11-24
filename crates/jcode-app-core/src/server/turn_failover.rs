@@ -135,6 +135,7 @@ pub(super) fn apply_failover_target(
         ],
     );
     let _ = event_tx.send(ServerEvent::ModelChanged {
+        route_selection: None,
         id: 0,
         model: agent.provider_model(),
         provider_name: Some(agent.provider_name()),

@@ -568,6 +568,11 @@ impl App {
     /// The api_method string of the route currently in use, used to exclude the
     /// failed route and to recognize same-model/different-method alternatives.
     pub(super) fn current_route_api_method(&self) -> Option<String> {
+        if self.is_remote
+            && let Some(route) = &self.remote_model_route
+        {
+            return Some(route.api_method.clone());
+        }
         // Session route metadata records a past selection, not necessarily the
         // credential now in use (e.g. after /accounts or a remote route switch).
         // Prefer the same authoritative credential that drives billing identity
