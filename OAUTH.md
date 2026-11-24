@@ -202,6 +202,11 @@ Limitations (first version):
   300k-token window by default. An instance's `launch_args` can override this
   with `--autocompact=500000` or `--autocompact=auto`. The CLI's
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` environment override still takes precedence.
+  The launch flag overrides saved Claude Code windows, including per-model and
+  managed settings. It requires Claude Code 2.1.221 or newer; update older CLIs
+  with `claude update` if startup reports an unknown `--autocompact` option.
+  Changing an instance's `launch_args` changes its launch identity and can start
+  a fresh native session rather than resume the current one.
 - Banked reset credits, history rewind/fork, Windows `.cmd` shims and Bedrock
   instances are not supported.
 

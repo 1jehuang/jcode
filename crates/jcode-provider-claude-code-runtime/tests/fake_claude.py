@@ -35,9 +35,15 @@ if log_path:
 if "-p" in argv:
     # One-shot mode (`complete_simple`): prompt on stdin, JSON result on stdout.
     prompt = sys.stdin.read().strip()
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                      "result": "oneshot:" + prompt}))
-    sys.exit(0)
+    response = {"type": "result", "subtype": "success", "is_error": False,
+                "result": "oneshot:" + prompt,
+                "usage": {"input_tokens": 11, "output_tokens": 7,
+                          "cache_read_input_tokens": 23, "cache_creation_input_tokens": 13},
+                "modelUsage": {"claude-haiku-4-5-20251001": {"inputTokens": 11}}}
+    if prompt == "authfail":
+        response.update(is_error=True, api_error_status=401, result="Invalid API key")
+    print(json.dumps(response))
+    sys.exit(3 if prompt == "exitfail" else 0)
 
 session_id = None
 resume = None

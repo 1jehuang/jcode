@@ -1100,6 +1100,49 @@ async fn complete_simple_uses_a_one_shot_child() {
 }
 
 #[tokio::test]
+async fn complete_simple_with_usage_uses_one_shot_and_preserves_failed_usage() {
+    let fake = Fake::new();
+    let provider = fake.provider();
+    let (text, usage) = provider
+        .complete_simple_with_usage("text", "be brief")
+        .await
+        .unwrap();
+    assert_eq!(text, "oneshot:text");
+    assert_eq!(usage.input_tokens, Some(11));
+    assert_eq!(usage.output_tokens, Some(7));
+    assert_eq!(usage.cache_read_input_tokens, Some(23));
+    assert_eq!(usage.cache_creation_input_tokens, Some(13));
+    assert_eq!(usage.requested_model, Some(provider.model()));
+    assert_eq!(
+        usage.resolved_model.as_deref(),
+        Some("claude-haiku-4-5-20251001")
+    );
+    for prompt in ["authfail", "exitfail"] {
+        let error = provider
+            .complete_simple_with_usage(prompt, "be brief")
+            .await
+            .unwrap_err();
+        let failure = error
+            .downcast_ref::<jcode_provider_core::SimpleCompletionError>()
+            .unwrap();
+        assert_eq!(failure.usage.input_tokens, Some(11));
+        assert_eq!(failure.usage.output_tokens, Some(7));
+        assert_eq!(failure.provider, "claude-code");
+        if prompt == "authfail" {
+            assert!(error.to_string().contains("auth login"));
+        }
+    }
+    let launches = fake.launches();
+    assert_eq!(launches.len(), 3);
+    for launch in launches {
+        let argv = launch["argv"].as_array().unwrap();
+        assert!(argv.contains(&json!("-p")));
+        assert!(argv.contains(&json!("--no-session-persistence")));
+        assert!(argv.windows(2).any(|w| w == [json!("--tools"), json!("")]));
+    }
+}
+
+#[tokio::test]
 async fn probe_reports_identity_without_a_prompt() {
     let fake = Fake::new();
     let provider = fake.provider();

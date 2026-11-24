@@ -34,8 +34,8 @@ use async_trait::async_trait;
 use jcode_message_types::{Message, ToolDefinition};
 use jcode_provider_core::{
     AccountPin, AccountPinSlot, AccountProviderKind, EventStream, ModelCatalogRefreshSummary,
-    ModelRoute, NativeToolResult, NativeToolResultSender, Provider,
-    summarize_model_catalog_refresh,
+    ModelRoute, NativeToolResult, NativeToolResultSender, Provider, SimpleCompletionError,
+    SimpleCompletionUsage, summarize_model_catalog_refresh,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -803,8 +803,19 @@ impl Provider for ClaudeCodeProvider {
     }
 
     async fn complete_simple(&self, prompt_text: &str, system: &str) -> Result<String> {
-        let instance = self.active_instance();
-        let model = settings::normalize_model_id(&self.model());
+        self.complete_simple_with_usage(prompt_text, system)
+            .await
+            .map(|(text, _)| text)
+    }
+
+    async fn complete_simple_with_usage(
+        &self,
+        prompt_text: &str,
+        system: &str,
+    ) -> Result<(String, SimpleCompletionUsage)> {
+        let instance = settings::with_account_token(self.active_instance()).await?;
+        let requested_model = self.model();
+        let model = settings::normalize_model_id(&requested_model);
         let mut command = tokio::process::Command::new(self.binary());
         command
             .args(settings::build_oneshot_argv(&model, system))
@@ -830,24 +841,67 @@ impl Provider for ClaudeCodeProvider {
                 String::from_utf8_lossy(&output.stderr).trim()
             )
         })?;
-        if value.get("is_error").and_then(Value::as_bool) == Some(true) {
-            let detail = value
-                .get("result")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error");
-            if value.get("api_error_status").and_then(Value::as_u64) == Some(401) {
+        let counters = &value["usage"];
+        let resolved_model = value
+            .get("modelUsage")
+            .and_then(Value::as_object)
+            .filter(|models| models.len() == 1)
+            .and_then(|models| models.keys().next())
+            .filter(|model| !model.trim().is_empty())
+            .cloned();
+        let usage = SimpleCompletionUsage {
+            requested_model: Some(requested_model.clone()),
+            resolved_model,
+            input_tokens: counters.get("input_tokens").and_then(Value::as_u64),
+            output_tokens: counters.get("output_tokens").and_then(Value::as_u64),
+            cache_read_input_tokens: counters
+                .get("cache_read_input_tokens")
+                .and_then(Value::as_u64),
+            cache_creation_input_tokens: counters
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64),
+        };
+        let result = (|| -> Result<String> {
+            if value.get("is_error").and_then(Value::as_bool) == Some(true) {
+                let detail = value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
+                if value.get("api_error_status").and_then(Value::as_u64) == Some(401) {
+                    bail!(
+                        "Claude Code could not authenticate. Run `{}` and try again.",
+                        self.login_hint(&instance)
+                    );
+                }
+                bail!("Claude Code error: {detail}");
+            }
+            if !output.status.success() {
                 bail!(
-                    "Claude Code could not authenticate. Run `{}` and try again.",
-                    self.login_hint(&instance)
+                    "Claude Code exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
                 );
             }
-            bail!("Claude Code error: {detail}");
+            if jcode_provider_core::is_guardrail_stop_reason(
+                value.get("stop_reason").and_then(Value::as_str),
+            ) {
+                bail!("Claude Code simple completion stopped by provider guardrail");
+            }
+            value
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("Claude Code returned no text result")
+        })();
+        match result {
+            Ok(text) => Ok((text, usage)),
+            Err(error) => {
+                Err(
+                    SimpleCompletionError::new(error, usage, PROVIDER_NAME.into(), requested_model)
+                        .into(),
+                )
+            }
         }
-        Ok(value
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
     }
 }
 

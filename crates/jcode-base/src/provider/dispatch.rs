@@ -1,6 +1,6 @@
 use super::*;
 
-const CLAUDE_CODE_UNAVAILABLE: &str = "Claude Code is not available. Install the Claude Code CLI (`claude`) or set [provider.claude_code].binary, then run `jcode login --provider claude-code`.";
+pub(super) const CLAUDE_CODE_UNAVAILABLE: &str = "Claude Code is not available. Install the Claude Code CLI (`claude`) or set [provider.claude_code].binary, then run `jcode login --provider claude-code`.";
 
 #[cfg(test)]
 #[path = "dispatch_estimation_tests.rs"]

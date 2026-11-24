@@ -1634,6 +1634,28 @@ impl Provider for MultiProvider {
         .await
     }
 
+    async fn complete_simple(&self, prompt: &str, system: &str) -> Result<String> {
+        self.complete_simple_with_usage(prompt, system)
+            .await
+            .map(|(text, _)| text)
+    }
+
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        // CLI side calls must use its one-shot path, without the native agent loop.
+        if self.active_provider() == ActiveProvider::ClaudeCode {
+            let provider = self
+                .claude_code_provider()
+                .ok_or_else(|| anyhow!(dispatch::CLAUDE_CODE_UNAVAILABLE))?;
+            self.bind_provider_session(provider.as_ref());
+            return provider.complete_simple_with_usage(prompt, system).await;
+        }
+        jcode_provider_core::collect_simple_completion(self, prompt, system).await
+    }
+
     /// Split system prompt completion - delegates to underlying provider for better caching
     async fn complete_split(
         &self,
