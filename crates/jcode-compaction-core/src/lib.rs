@@ -872,10 +872,12 @@ pub fn fold_old_tool_results(
         .iter()
         .rposition(|msg| {
             msg.role == Role::User
-                && msg
-                    .content
-                    .iter()
-                    .all(|block| !matches!(block, ContentBlock::ToolResult { .. }))
+                && msg.content.iter().all(|block| match block {
+                    ContentBlock::ToolResult { .. } => false,
+                    // Harness-appended policy reminders are not user turns.
+                    ContentBlock::Text { text, .. } => !text.starts_with("<system-reminder>"),
+                    _ => true,
+                })
         })
         .unwrap_or(0);
     let mut folded = 0;
@@ -1296,6 +1298,34 @@ mod fold_tests {
             b_folded,
             "previous turn folds once the open turn is `keep` deep"
         );
+    }
+
+    #[test]
+    fn synthetic_reminder_does_not_move_fold_boundary() {
+        let big = "x\n".repeat(500);
+        let mut msgs: Vec<Message> = vec![user_turn("first")];
+        msgs.extend(tool_pair("a", "ls", &big, false));
+        msgs.push(user_turn("second"));
+        msgs.extend(tool_pair("b", "ls", &big, false));
+        msgs.push(user_turn(
+            "<system-reminder>\n<harness_execution_policy>\nActive skills: x\n</harness_execution_policy>\n</system-reminder>",
+        ));
+        for i in 0..4 {
+            msgs.extend(tool_pair(&format!("t{i}"), "pwd", "/", false));
+        }
+        let mut view = msgs.clone();
+        // Boundary stays on "second": only "a" folds, "b" stays byte-identical.
+        assert_eq!(fold_old_tool_results(&mut view, 2, 100), 1);
+        assert_eq!(
+            result_text(&view[5]),
+            big,
+            "reminder must not advance boundary"
+        );
+        // A real user turn still advances it.
+        msgs.push(user_turn("third"));
+        msgs.extend(tool_pair("c", "pwd", "/", false));
+        let mut view = msgs.clone();
+        assert_eq!(fold_old_tool_results(&mut view, 2, 100), 2);
     }
 
     #[test]
