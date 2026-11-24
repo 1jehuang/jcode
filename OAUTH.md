@@ -198,7 +198,10 @@ Limitations (first version):
 - No interactive per-tool approval prompt in jcode yet. Use `permission_mode`
   and Claude Code's own permission rules.
 - No automatic same-provider failover between Claude Code instances yet.
-- jcode's `/compact` is not used; Claude Code compacts its own context.
+- jcode's `/compact` is not used; Claude Code compacts its own context at a
+  300k-token window by default. An instance's `launch_args` can override this
+  with `--autocompact=500000` or `--autocompact=auto`. The CLI's
+  `CLAUDE_CODE_AUTO_COMPACT_WINDOW` environment override still takes precedence.
 - Banked reset credits, history rewind/fork, Windows `.cmd` shims and Bedrock
   instances are not supported.
 

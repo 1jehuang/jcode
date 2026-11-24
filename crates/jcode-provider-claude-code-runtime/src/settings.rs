@@ -137,6 +137,15 @@ pub fn build_argv(spec: &SpawnSpec) -> Vec<String> {
     argv.push("--model".into());
     argv.push(spec.model.clone());
 
+    // Bound the CLI-owned transcript; its default grows to nearly 1M tokens.
+    if !spec
+        .launch_args
+        .iter()
+        .any(|arg| arg == "--autocompact" || arg.starts_with("--autocompact="))
+    {
+        argv.push("--autocompact=300000".into());
+    }
+
     if let Some(effort) = spec.effort.as_deref().and_then(map_effort) {
         argv.push("--effort".into());
         argv.push(effort.into());
@@ -441,6 +450,7 @@ mod tests {
                 "--setting-sources=user,project,local",
                 "--model",
                 "claude-opus-5-5",
+                "--autocompact=300000",
                 "--permission-mode",
                 "default",
                 "--session-id=abc",
@@ -458,6 +468,18 @@ mod tests {
         let argv = build_argv(&s);
         assert!(!argv.iter().any(|a| a == DENY_CLAUDE_PEERS_SETTINGS));
         assert_eq!(argv.iter().filter(|a| *a == "--settings").count(), 1);
+        assert!(argv.contains(&"--autocompact=300000".to_string()));
+    }
+
+    #[test]
+    fn explicit_autocompact_launch_args_override_the_default() {
+        for args in ["--autocompact 500000", "--autocompact=auto"] {
+            let mut s = spec(SessionStart::New("x".into()));
+            s.launch_args = parse_launch_args(args);
+            let argv = build_argv(&s);
+            assert!(!argv.contains(&"--autocompact=300000".to_string()));
+            assert!(argv.ends_with(&s.launch_args));
+        }
     }
 
     #[test]
@@ -491,6 +513,7 @@ mod tests {
         assert!(joined.contains("--effort xhigh"));
         assert!(joined.contains("--permission-mode acceptEdits"));
         assert!(argv.contains(&"--resume=sid-1".to_string()));
+        assert!(argv.contains(&"--autocompact=300000".to_string()));
         assert!(!joined.contains("--session-id"));
         let mcp = argv.iter().position(|a| a == "--mcp-config").unwrap();
         assert_eq!(argv[mcp + 1], JCODE_SDK_MCP_CONFIG);
