@@ -38,8 +38,21 @@ fn append_take_and_clear_round_trip() {
     assert_eq!(loaded[1].content, "world");
     assert_eq!(loaded[1].source, SoftInterruptSource::FileActivity);
 
+    append(
+        session_id,
+        SoftInterruptMessage {
+            content: "peer delivery".into(),
+            images: Vec::new(),
+            urgent: false,
+            source: SoftInterruptSource::PeerMessage,
+            client_id: None,
+        },
+    )
+    .expect("append peer message");
+
     let taken = take(session_id).expect("take interrupts");
-    assert_eq!(taken.len(), 2);
+    assert_eq!(taken.len(), 3);
+    assert_eq!(taken[2].source, SoftInterruptSource::PeerMessage);
     assert!(load(session_id).expect("reload after take").is_empty());
 
     append(

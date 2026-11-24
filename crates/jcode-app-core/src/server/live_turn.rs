@@ -564,10 +564,10 @@ pub(super) async fn run_live_turn_if_idle(
     .await
 }
 
-/// A background completion that lands after a turn's last soft-interrupt
+/// A background completion or peer message arriving after the last interrupt
 /// drain, while the turn still holds the agent, is queued, and nothing drains
 /// it until the user prompts. Once the turn has released the agent, start the
-/// follow-up turn that completion asked for.
+/// follow-up turn for that completion or peer message.
 ///
 /// Boxed with an explicit `Send` bound: it runs from the spawned turn it can
 /// start, so the compiler cannot infer `Send` through that cycle.
@@ -595,31 +595,30 @@ pub(super) fn run_stranded_background_completions(
             return;
         }
         let queue = agent.soft_interrupt_queue();
-        let stranded: Vec<_> = {
+        let stranded = {
             let Ok(mut pending) = queue.lock() else {
                 return;
             };
-            let (stranded, rest) = std::mem::take(&mut *pending)
-                .into_iter()
-                .partition(|message| message.source == SoftInterruptSource::BackgroundTask);
-            *pending = rest;
-            stranded
+            let Some(index) = pending.iter().position(|message| {
+                matches!(
+                    message.source,
+                    SoftInterruptSource::BackgroundTask | SoftInterruptSource::PeerMessage
+                )
+            }) else {
+                return;
+            };
+            // The new turn drains the rest at its next safe point, keeping
+            // each peer's envelope and display entry separate.
+            pending.remove(index)
         };
-        if stranded.is_empty() {
-            return;
-        }
-        let message = stranded
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let message = stranded.content.clone();
         let detail = Some(truncate_detail(&message, 120)).filter(|detail| !detail.is_empty());
         let started = spawn_tracked_live_turn(
             &session_id,
             agent,
             message,
             Some(
-                "A background task for this session just finished. Review the completion message and continue if useful."
+                "Queued context arrived as the previous turn finished. Review the message and continue if useful."
                     .to_string(),
             ),
             None,
@@ -629,7 +628,7 @@ pub(super) fn run_stranded_background_completions(
         .await;
         if !started && let Ok(mut pending) = queue.lock() {
             // Not runnable now: keep them queued, ahead of anything newer.
-            pending.splice(0..0, stranded);
+            pending.insert(0, stranded);
         }
     })
 }

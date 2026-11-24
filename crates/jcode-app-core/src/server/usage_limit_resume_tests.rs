@@ -132,7 +132,7 @@ impl Provider for UsageLimitedProvider {
     }
 
     fn name(&self) -> &str {
-        "test"
+        "Claude"
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -335,6 +335,79 @@ async fn scheduled_turn_hitting_a_far_usage_limit_waits_for_the_reset_and_resume
         .get(&fx.session_id)
         .and_then(|member| member.latest_completion_report.clone());
     assert!(report.is_some_and(|report| report.contains("resumed and finished")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn confirmed_account_change_resumes_server_owned_usage_limit_wait() {
+    let provider = UsageLimitedProvider::new(1, Some(Duration::from_secs(5 * 3600)));
+    let mut fx = Fixture::new(&provider).await;
+    fx.start_scheduled_turn().await;
+    assert!(matches!(
+        fx.next_terminal().await,
+        ServerEvent::Error {
+            server_resumes: true,
+            ..
+        }
+    ));
+    let start = tokio::time::Instant::now();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    // An account from another provider must not release this wait.
+    super::provider_control::handle_set_session_account_request(
+        41,
+        "openai".into(),
+        None,
+        &fx.agent,
+        &tx,
+        true,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if matches!(
+                rx.recv().await.expect("account reply"),
+                ServerEvent::Done { id: 41 }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("account switch confirmed");
+    assert_eq!(provider.calls(), 1);
+    usage_limit_resume::resume_after_account_change(
+        &*fx.agent.lock().await,
+        "anthropic",
+        Some("unrelated-account"),
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(
+        provider.calls(),
+        1,
+        "another account must keep this turn waiting"
+    );
+    // Unpinning selects the default account and refreshes credentials, just
+    // like choosing a named account. No client owns or resends this turn.
+    super::provider_control::handle_set_session_account_request(
+        42,
+        "claude".into(),
+        None,
+        &fx.agent,
+        &tx,
+        true,
+    )
+    .await;
+    assert!(matches!(
+        fx.next_terminal().await,
+        ServerEvent::Done { id: 0 }
+    ));
+    fx.wait_status("ready").await;
+    assert!(
+        start.elapsed() < Duration::from_secs(60),
+        "must not wait five hours"
+    );
+    assert_eq!(provider.calls(), 2);
+    assert_eq!(scheduled_messages(&*fx.agent.lock().await), 1);
+    assert!(!usage_limit_resume::has_pending_resume(&fx.session_id));
 }
 
 #[tokio::test(start_paused = true)]

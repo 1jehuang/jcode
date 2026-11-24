@@ -388,6 +388,9 @@ impl App {
         if let Some(label) = &label {
             self.set_status_notice(format!("Account: {label}"));
         }
+        if previous != label {
+            self.resume_after_confirmed_account_change(Some(&provider));
+        }
     }
 
     /// Local turn start: return to the preferred account once it reset, then
@@ -872,6 +875,7 @@ impl App {
                     default.as_deref(),
                 )));
                 self.set_status_notice(format!("Account: {label} (this window)"));
+                self.resume_after_confirmed_account_change(Some(&family));
             }
             PendingAccountRequest::SetDefault { family, label } => {
                 let window = self.window_account(&family);
@@ -892,6 +896,9 @@ impl App {
                     window.as_ref(),
                 )));
                 self.set_status_notice(format!("Default account: {label}"));
+                if !window.is_some_and(|info| info.pinned) {
+                    self.resume_after_confirmed_account_change(Some(&family));
+                }
             }
             PendingAccountRequest::Unpin { family } => {
                 if self.window_account(&family).is_none_or(|w| w.pinned) {
@@ -908,6 +915,7 @@ impl App {
                     family_display(&family)
                 )));
                 self.set_status_notice("Account: following default");
+                self.resume_after_confirmed_account_change(Some(&family));
             }
             PendingAccountRequest::Failover { enabled } => {
                 self.window_account_failover = enabled;

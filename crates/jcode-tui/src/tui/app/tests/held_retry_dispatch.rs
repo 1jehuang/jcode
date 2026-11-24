@@ -62,7 +62,7 @@ fn held_retry_message(attempts: u8, auto_retry: bool) -> PendingRemoteMessage {
 fn held_retry_waits_for_bootstrap_active_turn_and_route_confirmation() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
-    for blocker in ["history", "active turn", "route switch"] {
+    for blocker in ["history", "active turn", "route switch", "account switch"] {
         let mut app = create_test_app();
         app.is_remote = true;
         let mut connection = crate::tui::backend::RemoteConnection::dummy();
@@ -71,6 +71,15 @@ fn held_retry_waits_for_bootstrap_active_turn_and_route_confirmation() {
         }
         app.is_processing = blocker == "active turn";
         app.remote_model_switch_in_flight = blocker == "route switch";
+        if blocker == "account switch" {
+            app.pending_account_requests.insert(
+                42,
+                super::window_account::PendingAccountRequest::UseInWindow {
+                    family: "claude".into(),
+                    label: "new-account".into(),
+                },
+            );
+        }
         let deadline = Instant::now() - Duration::from_secs(1);
         app.rate_limit_reset = Some(deadline);
         app.rate_limit_pending_message = Some(held_retry_message(1, true));
@@ -87,6 +96,7 @@ fn held_retry_waits_for_bootstrap_active_turn_and_route_confirmation() {
         connection.mark_history_loaded();
         app.is_processing = false;
         app.remote_model_switch_in_flight = false;
+        app.pending_account_requests.clear();
         assert!(rt.block_on(remote::dispatch_due_remote_retry(&mut app, &mut connection)));
         assert!(app.is_processing, "retry dispatches once {blocker} clears");
         assert!(app.rate_limit_reset.is_none());

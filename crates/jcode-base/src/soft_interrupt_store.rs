@@ -20,6 +20,7 @@ enum PersistedSoftInterruptSource {
     User,
     System,
     BackgroundTask,
+    PeerMessage,
     FileActivity,
 }
 
@@ -29,6 +30,7 @@ impl From<SoftInterruptSource> for PersistedSoftInterruptSource {
             SoftInterruptSource::User => Self::User,
             SoftInterruptSource::System => Self::System,
             SoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            SoftInterruptSource::PeerMessage => Self::PeerMessage,
             SoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }
@@ -40,6 +42,7 @@ impl From<PersistedSoftInterruptSource> for SoftInterruptSource {
             PersistedSoftInterruptSource::User => Self::User,
             PersistedSoftInterruptSource::System => Self::System,
             PersistedSoftInterruptSource::BackgroundTask => Self::BackgroundTask,
+            PersistedSoftInterruptSource::PeerMessage => Self::PeerMessage,
             PersistedSoftInterruptSource::FileActivity => Self::FileActivity,
         }
     }

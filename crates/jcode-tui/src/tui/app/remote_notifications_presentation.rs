@@ -222,7 +222,9 @@ pub(in super::super) fn swarm_delivery_display_message(
     content: &str,
 ) -> Option<crate::tui::DisplayMessage> {
     let trimmed = content.trim();
-    let (title, body) = if trimmed.starts_with("Agent ") {
+    let (title, body) = if trimmed.starts_with("<channel ") {
+        return peer_delivery_display_message(trimmed);
+    } else if trimmed.starts_with("Agent ") {
         // Completion wakes use plain prose rather than the DM wire prefix.
         let notice = parse_completion_notice(trimmed)?;
         return Some(crate::tui::DisplayMessage::swarm(
@@ -261,4 +263,66 @@ pub(in super::super) fn swarm_delivery_display_message(
         title,
         jcode_tui_messages::collapse_long_swarm_content(body),
     ))
+}
+
+/// Keep channel routing metadata and reply instructions in the model's
+/// transcript; the user sees who sent the message and its body.
+fn peer_delivery_display_message(content: &str) -> Option<crate::tui::DisplayMessage> {
+    let (header, rest) = content.split_once('\n')?;
+    let header = header.strip_suffix('>')?;
+    let (body, trailer) = rest.rsplit_once("\n</channel>")?;
+    let trailer = trailer.trim();
+    if !trailer.is_empty()
+        && !(trailer.starts_with("<system-reminder>") && trailer.ends_with("</system-reminder>"))
+    {
+        return None;
+    }
+    let attribute = |name: &str| -> Option<&str> {
+        let (_, rest) = header.split_once(&format!(" {name}=\""))?;
+        Some(rest.split_once('"')?.0)
+    };
+    let source = attribute("source").filter(|source| !source.is_empty())?;
+    let sender = attribute("from_name")
+        .or_else(|| attribute("from_id"))
+        .filter(|sender| !sender.is_empty())
+        .unwrap_or(source)
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&");
+    Some(crate::tui::DisplayMessage::swarm(
+        format!("DM from {sender}"),
+        jcode_tui_messages::collapse_long_swarm_content(body),
+    ))
+}
+
+#[cfg(test)]
+mod peer_message_tests {
+    use super::peer_delivery_display_message;
+
+    #[test]
+    fn peer_sender_falls_back_to_id_then_server() {
+        for (attributes, title) in [
+            (" from_id=\"peer-123\"", "DM from peer-123"),
+            ("", "DM from claude-peers"),
+        ] {
+            let content =
+                format!("<channel source=\"claude-peers\"{attributes}>\nping\n</channel>");
+            let row = peer_delivery_display_message(&content).unwrap();
+            assert_eq!(row.title.as_deref(), Some(title));
+            assert_eq!(row.content, "ping");
+        }
+    }
+
+    #[test]
+    fn malformed_channel_envelopes_do_not_hide_text() {
+        for content in [
+            "<channel source=\"claude-peers\">\nping",
+            "<channel>\nping\n</channel>",
+            "<channel source=\"claude-peers\">\nping\n</channel>\nuser text after the envelope",
+        ] {
+            assert!(
+                peer_delivery_display_message(content).is_none(),
+                "{content}"
+            );
+        }
+    }
 }

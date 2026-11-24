@@ -300,10 +300,7 @@ impl App {
 
     /// Credentials changed (login, account switch, credential file edit).
     ///
-    /// A turn held on a rate/usage limit (or an overload/connection backoff)
-    /// is waiting for the previous account's reset time, which can be hours
-    /// away. Pull that hold forward so the next tick resends the turn on the
-    /// new credentials. Returns true when a hold was released.
+    /// Release a turn waiting for the previous account's reset or backoff.
     ///
     /// Idempotent: once released the hold is due now (or already resent), so
     /// repeated auth broadcasts neither add notices nor resend twice. Offline
@@ -343,7 +340,6 @@ impl App {
         true
     }
 
-    /// Provider the current (possibly held) turn runs on.
     fn held_turn_provider_name(&self) -> Option<String> {
         if let Some(name) = self.remote_provider_name.clone() {
             return Some(name);
@@ -354,9 +350,10 @@ impl App {
         Some(self.provider.name().to_string())
     }
 
-    /// Hold the pending turn for an immediate resend on the new account.
     pub(super) fn arm_account_change_resend(&mut self, at: Instant) {
         if let Some(pending) = self.rate_limit_pending_message.as_mut() {
+            pending.retry_attempts = 0;
+            pending.overload_attempts = 0;
             pending.retry_at = Some(at);
         }
         self.rate_limit_reset = Some(at);

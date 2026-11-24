@@ -538,8 +538,6 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw
 }
 
-/// Dispatch a held turn only after bootstrap and any competing turn settle.
-/// Keep its deadline armed while blocked, and re-arm on a failed socket write.
 pub(super) async fn dispatch_due_remote_retry(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -556,6 +554,8 @@ pub(super) async fn dispatch_due_remote_retry(
         Some("active_turn")
     } else if app.remote_model_switch_in_flight {
         Some("model_switch_unconfirmed")
+    } else if !app.pending_account_requests.is_empty() {
+        Some("account_switch_unconfirmed")
     } else if app.awaiting_remote_interrupt_ack() {
         Some("interrupt_ack_pending")
     } else {

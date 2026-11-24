@@ -221,6 +221,96 @@ async fn resume_all_does_not_continue_empty_restored_worker() {
 }
 
 #[tokio::test]
+async fn peer_message_queued_as_a_turn_ends_resumes_with_reply_routing() {
+    use jcode_agent_runtime::SoftInterruptSource;
+    for busy in [false, true] {
+        let (id, sessions, members, mut receiver) = fixture(true, "ready", true).await;
+        let agent = sessions.read().await.get(&id).unwrap().clone();
+        let queue = agent.lock().await.soft_interrupt_queue();
+        let queues = Arc::new(RwLock::new(HashMap::from([(id.clone(), queue.clone())])));
+        let (swarm_tx, _) = broadcast::channel(16);
+        let swarm = LiveTurnSwarmContext::new(
+            &members,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(VecDeque::new())),
+            &Arc::new(AtomicU64::new(0)),
+            &swarm_tx,
+        );
+        let busy_guard = if busy { Some(agent.lock().await) } else { None };
+        let notification = "<channel source=\"claude-peers\" from_id=\"peer-123\">\nPlease check the build.\n</channel>";
+        super::super::background_tasks::dispatch_peer_message(
+            &crate::bus::PeerMessageReceived {
+                session_id: id.clone(),
+                notification: notification.into(),
+            },
+            &sessions,
+            &queues,
+            swarm.clone(),
+        )
+        .await;
+        if busy {
+            super::super::background_tasks::dispatch_peer_message(
+                &crate::bus::PeerMessageReceived {
+                    session_id: id.clone(),
+                    notification: notification.replace("peer-123", "peer-456"),
+                },
+                &sessions,
+                &queues,
+                swarm.clone(),
+            )
+            .await;
+            let pending = queue.lock().unwrap();
+            assert_eq!(pending.len(), 2);
+            assert_eq!(pending[0].source, SoftInterruptSource::PeerMessage);
+            assert!(pending[0].content.contains("using the sender's from_id"));
+        }
+        drop(busy_guard);
+        // Simulate the turn's completion after its last interrupt drain.
+        run_stranded_background_completions(id.clone(), agent.clone(), swarm).await;
+        let receiver = receiver.as_mut().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = receiver.recv().await.expect("turn event");
+                let event = match event {
+                    ServerEvent::TurnEvent { event, .. } => *event,
+                    event => event,
+                };
+                match event {
+                    ServerEvent::Done { .. } => break,
+                    ServerEvent::Error { message, .. } => panic!("peer wake failed: {message}"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("peer message wakes the session without user input");
+        let agent = agent.lock().await;
+        let deliveries: Vec<_> = agent
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                crate::message::ContentBlock::Text { text, .. } if text.contains(notification) => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deliveries.len(), 1, "peer message delivered once");
+        assert!(deliveries[0].contains("using the sender's from_id"));
+        assert!(
+            !deliveries[0].contains("peer-456"),
+            "separate peers keep separate context entries"
+        );
+        if busy {
+            assert_eq!(agent.messages().iter().flat_map(|message| message.content.iter())
+                .filter(|block| matches!(block, crate::message::ContentBlock::Text { text, .. } if text.contains("peer-456"))).count(), 1);
+        }
+        assert!(queue.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn completion_queued_as_a_turn_ends_starts_the_follow_up_turn() {
     use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptSource};
     let (id, sessions, members, _receiver) = fixture(true, "ready", true).await;

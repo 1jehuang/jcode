@@ -15,6 +15,48 @@ use super::{App, DisplayMessage, ProcessingStatus};
 use std::time::{Duration, Instant};
 
 impl App {
+    /// Quota errors without a reset keep their failed turn in the fallback
+    /// offer. A confirmed account change can resend it on the selected account.
+    pub(super) fn resume_after_confirmed_account_change(
+        &mut self,
+        changed_provider: Option<&str>,
+    ) -> bool {
+        if self.release_rate_limit_hold_after_credentials_changed(changed_provider) {
+            return true;
+        }
+        if !self.is_remote
+            || self.is_processing
+            || matches!(self.status, ProcessingStatus::WaitingForNetwork { .. })
+            || self.rate_limit_pending_message.is_some()
+            || self.pending_fallback_resend.is_some()
+            || changed_provider.is_some_and(|changed| {
+                jcode_provider_core::parse_provider_hint(changed)
+                    != self
+                        .remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint)
+            })
+        {
+            return false;
+        }
+        let Some(mut payload) = self
+            .pending_fallback_offer
+            .as_mut()
+            .and_then(|offer| offer.remote_resend.take())
+        else {
+            return false;
+        };
+        self.pending_fallback_offer = None;
+        payload.retry_attempts = 0;
+        self.pending_fallback_resend = Some(payload);
+        self.consecutive_credential_failures = 0;
+        self.push_display_message(DisplayMessage::system(
+            Self::ACCOUNT_CHANGED_RESEND_NOTICE.to_string(),
+        ));
+        self.set_status_notice("Account changed; resending");
+        true
+    }
+
     /// Local mode: hold a turn that hit a subscription usage limit and run it
     /// again after the reset. Returns false when `error` is not a usage limit
     /// with a known reset, or this is a remote client (the remote error path
