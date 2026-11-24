@@ -219,6 +219,65 @@ fn injected_swarm_dm_adds_delivery_entry_after_its_notification_card() {
 }
 
 #[test]
+fn claude_peer_message_renders_body_without_channel_metadata_or_reply_instructions() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let body = "Review the parser changes. ".repeat(30) + "\n\nTests passed.";
+    let envelope = format!(
+        "<channel source=\"claude-peers\" from_cwd=\"/tmp/Jobzy &quot;work&quot;\" from_id=\"peer-123\" from_name=\"fox &amp; owl\">\n{body}\n</channel>"
+    );
+    for content in [
+        envelope.clone(),
+        format!(
+            "{envelope}\n\n<system-reminder>\nReply with the tool from the server named in source.\n</system-reminder>"
+        ),
+    ] {
+        handle_server_event(
+            &mut app,
+            soft_interrupt_injected(&content, Some("system")),
+            &mut remote,
+        );
+        let row = app.display_messages().last().unwrap();
+        assert_eq!(row.role, "swarm");
+        assert_eq!(row.title.as_deref(), Some("DM from fox & owl"));
+        let full_body =
+            crate::tui::app::remote_notifications::swarm_display_full_body(&row.content);
+        assert_eq!(full_body, body);
+        assert!(!row.content.contains("from_cwd"));
+        assert_no_long_rows(&app);
+        // Restored display snapshots pass through the same shared renderer.
+        app.replace_display_messages(vec![crate::tui::DisplayMessage::system(content)]);
+        assert_eq!(
+            app.display_messages()[0].title.as_deref(),
+            Some("DM from fox & owl")
+        );
+        assert_eq!(
+            crate::tui::app::remote_notifications::swarm_display_full_body(
+                &app.display_messages()[0].content
+            ),
+            body
+        );
+    }
+    let before = app.display_messages().len();
+    handle_server_event(
+        &mut app,
+        soft_interrupt_injected(
+            "<system-reminder>\nAnother agent on this machine sent you this message. Reply with the tool from the server named in source, using the sender's from_id, then continue.\n</system-reminder>",
+            Some("system"),
+        ),
+        &mut remote,
+    );
+    assert_eq!(
+        app.display_messages().len(),
+        before,
+        "legacy routing reminder is hidden after the peer row"
+    );
+}
+
+#[test]
 fn injected_system_reminder_never_shows_raw_tags() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

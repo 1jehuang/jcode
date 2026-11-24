@@ -410,38 +410,35 @@ pub(super) async fn dispatch_peer_message(
     soft_interrupt_queues: &SessionInterruptQueues,
     swarm: LiveTurnSwarmContext,
 ) {
-    if emit_external_wake(
-        &event.session_id,
-        "peer_message",
-        &event.notification,
-        &swarm.members,
-    )
-    .await
-    {
+    let message = format!(
+        "{}\n\n<system-reminder>\nAnother agent on this machine sent you this message. Reply with the tool from the server named in source, using the sender's from_id, then continue.\n</system-reminder>",
+        event.notification,
+    );
+    if emit_external_wake(&event.session_id, "peer_message", &message, &swarm.members).await {
         return;
     }
-    if !run_live_turn_if_idle(
+    if run_live_turn_if_idle(&event.session_id, &message, None, sessions, swarm.clone()).await {
+        return;
+    }
+    if !queue_soft_interrupt_for_session(
         &event.session_id,
-        &event.notification,
-        Some("Another agent on this machine sent you this message. Reply with the tool from the server named in source, using the sender's from_id, then continue.".to_string()),
+        message,
+        false,
+        SoftInterruptSource::PeerMessage,
+        soft_interrupt_queues,
         sessions,
-        swarm,
     )
     .await
-        && !queue_soft_interrupt_for_session(
-            &event.session_id,
-            event.notification.clone(),
-            false,
-            SoftInterruptSource::System,
-            soft_interrupt_queues,
-            sessions,
-        )
-        .await
     {
         crate::logging::warn(&format!(
             "Failed to deliver peer message to session {}",
             event.session_id
         ));
+        return;
+    }
+    let agent = sessions.read().await.get(&event.session_id).cloned();
+    if let Some(agent) = agent {
+        run_stranded_background_completions(event.session_id.clone(), agent, swarm).await;
     }
 }
 

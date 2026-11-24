@@ -31,7 +31,9 @@ fn frozen_snapshot_memory_profile(
 fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
     match source {
         SoftInterruptSource::User => None,
-        SoftInterruptSource::System => Some(StoredDisplayRole::System),
+        SoftInterruptSource::System | SoftInterruptSource::PeerMessage => {
+            Some(StoredDisplayRole::System)
+        }
         SoftInterruptSource::FileActivity => Some(StoredDisplayRole::FileActivity),
         SoftInterruptSource::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
     }
@@ -40,7 +42,9 @@ fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<St
 fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<String> {
     match source {
         SoftInterruptSource::User => None,
-        SoftInterruptSource::System => Some("system".to_string()),
+        SoftInterruptSource::System | SoftInterruptSource::PeerMessage => {
+            Some("system".to_string())
+        }
         SoftInterruptSource::BackgroundTask => Some("background_task".to_string()),
         SoftInterruptSource::FileActivity => Some("file_activity".to_string()),
     }
