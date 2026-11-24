@@ -340,6 +340,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn cached_account_snapshot_is_scoped_fresh_and_nonblocking() {
+        let _guard = crate::storage::lock_test_env();
         let label = "router-cache-only-test";
         let key = format!("label:{label}");
         let provider = MultiAccountProviderKind::Anthropic;
@@ -395,6 +396,7 @@ mod account_snapshot_tests {
 
     #[test]
     fn pool_prefers_fresh_quota_within_priority_tier() {
+        let _guard = crate::storage::lock_test_env();
         use crate::auth::account_pool::AccountPool;
         let unknown = "claude:quota-order-unknown".to_string();
         let healthy = "claude:quota-order-healthy".to_string();

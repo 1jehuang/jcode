@@ -36,6 +36,9 @@ fn parity(s: &Session) {
 }
 #[test]
 fn final_text_frozen_parity() {
+    // original() and optimized() each re-read config (reasoning_display); hold the
+    // env lock so a concurrent JCODE_HOME switch cannot change it between them.
+    let _env = crate::storage::lock_test_env();
     for (_, s) in cases() {
         parity(&s);
     }

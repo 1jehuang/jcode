@@ -378,7 +378,7 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
+        let open_lock = || unsafe {
             libc::openat(
                 dir.as_raw_fd(),
                 name.as_ptr(),
@@ -390,6 +390,16 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
                 0o600,
             )
         };
+        // macOS (APFS) can transiently fail concurrent openat(O_CREAT) of the
+        // same new name with ENOENT. Retry briefly, other errors stay fatal.
+        let mut fd = open_lock();
+        for _ in 0..100 {
+            if fd >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            fd = open_lock();
+        }
         ensure!(fd >= 0, "cannot lock private state");
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
