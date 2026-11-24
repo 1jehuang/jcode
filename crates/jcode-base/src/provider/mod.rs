@@ -24,6 +24,8 @@ mod fingerprint;
 pub mod gemini;
 mod image_clamp;
 pub mod jcode;
+mod model_picker_routes;
+pub use model_picker_routes::extend_model_picker_routes;
 mod model_reasoning;
 pub mod models;
 pub use model_reasoning::{

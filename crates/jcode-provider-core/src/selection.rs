@@ -902,3 +902,16 @@ mod tests {
         assert_eq!(strip_own_model_prefix("   ", "antigravity:"), "");
     }
 }
+
+impl crate::RouteSelection {
+    /// Stable identity of a picker route, independent of changing catalog details.
+    pub fn picker_choice_id(&self) -> String {
+        serde_json::json!([
+            &self.model,
+            &self.runtime_key,
+            &self.api_method,
+            &self.provider_label,
+        ])
+        .to_string()
+    }
+}

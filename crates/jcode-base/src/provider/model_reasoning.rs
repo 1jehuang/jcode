@@ -15,14 +15,13 @@ pub fn model_route_reasoning_efforts(
         let cached = jcode_provider_core::copilot_model_metadata(model);
         metadata
             .or(cached.as_ref())
-            .map(|metadata| {
+            .map_or_else(Vec::new, |metadata| {
                 metadata
                     .reasoning_efforts
                     .iter()
                     .filter_map(|level| jcode_provider_core::canonical_reasoning_effort(level))
                     .collect()
             })
-            .unwrap_or_default()
     } else if api_method == "chatgpt-web" {
         let values = metadata
             .map(|metadata| metadata.reasoning_efforts.clone())
@@ -76,7 +75,7 @@ pub fn named_profile_reasoning_efforts(
         return None;
     }
 
-    let model = model_name.unwrap_or_default().trim().to_ascii_lowercase();
+    let model = model_name.unwrap_or("").trim().to_ascii_lowercase();
     let model_config = profile
         .models
         .iter()

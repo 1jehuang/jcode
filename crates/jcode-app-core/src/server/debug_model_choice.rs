@@ -77,8 +77,18 @@ pub(super) fn apply(
     }) {
         bail!("Invalid reasoning level");
     }
-    let offered = agent
-        .model_routes()
+    let mut routes = agent.model_routes();
+    crate::provider::extend_model_picker_routes(
+        Some(&agent.provider_name()),
+        &agent.available_models_display(),
+        &mut routes,
+    );
+    routes.extend(crate::provider::simplified_model_routes_for_picker(
+        &agent.provider_name(),
+        &agent.provider_model(),
+        agent.available_models_display(),
+    ));
+    let offered = routes
         .into_iter()
         .filter(|route| route.available)
         .find(|route| {
@@ -194,7 +204,15 @@ mod tests {
                 .to_string()
         }
         fn model_routes(&self) -> Vec<ModelRoute> {
-            vec![route("openai-oauth"), route("openai-api-key")]
+            let mut placeholder = route("remote-catalog");
+            placeholder.model = "amazon.nova-pro-v1:0".into();
+            vec![route("openai-oauth"), route("openai-api-key"), placeholder]
+        }
+        fn available_models_display(&self) -> Vec<String> {
+            vec![
+                "gpt-future-catalog-2099".into(),
+                "amazon.nova-pro-v1:0".into(),
+            ]
         }
         fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
             self.0.lock().unwrap().0 = Some(selection.clone());
@@ -419,6 +437,34 @@ mod tests {
         assert_eq!(
             provider.0.lock().unwrap().0.as_ref().unwrap().api_method,
             "openai-api-key"
+        );
+        let old_bedrock = std::env::var_os("JCODE_BEDROCK_ENABLE");
+        crate::env::set_var("JCODE_BEDROCK_ENABLE", "1");
+        crate::auth::AuthStatus::invalidate_cache();
+        let native = crate::provider::remote_model_routes_fallback(
+            Some("test"),
+            &["amazon.nova-pro-v1:0".into()],
+        );
+        let selection = RouteSelection::from_model_route(
+            native
+                .iter()
+                .find(|route| route.api_method == "bedrock" && route.available)
+                .unwrap(),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = apply(
+            &mut *agent.lock().await,
+            &serde_json::json!({"selection": selection, "reasoning_effort": null}).to_string(),
+            &tx,
+        );
+        match old_bedrock {
+            Some(value) => crate::env::set_var("JCODE_BEDROCK_ENABLE", value),
+            None => crate::env::remove_var("JCODE_BEDROCK_ENABLE"),
+        }
+        crate::auth::AuthStatus::invalidate_cache();
+        assert!(
+            result.is_ok(),
+            "native fallback routes must be accepted: {result:?}"
         );
     }
 }

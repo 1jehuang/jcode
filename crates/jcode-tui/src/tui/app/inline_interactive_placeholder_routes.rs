@@ -16,14 +16,3 @@ pub(super) fn is_placeholder_route_method(method: &str) -> bool {
             | crate::provider::ModelRouteApiMethod::Current
     )
 }
-
-/// Whether every method in `methods` is a placeholder.
-pub(super) fn methods_are_placeholder_only<I>(methods: I) -> bool
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    methods
-        .into_iter()
-        .all(|method| is_placeholder_route_method(method.as_ref()))
-}
