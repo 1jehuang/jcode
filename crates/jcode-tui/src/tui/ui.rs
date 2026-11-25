@@ -25,8 +25,8 @@ use super::ui_diff::{
     diff_del_color, generate_diff_lines_from_tool_input, tint_span_with_diff_color,
 };
 use super::visual_debug::{
-    self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, MarginsCapture,
-    MessageCapture, RenderTimingCapture,
+    self, FrameCaptureBuilder, ImageRegionCapture, InfoWidgetCapture, MessageCapture,
+    RenderTimingCapture,
 };
 use super::{DisplayMessage, DisplayMessageRoleExt, ProcessingStatus, TuiState};
 use crate::message::ToolCall;
@@ -54,7 +54,7 @@ mod box_utils;
 #[path = "ui_changelog.rs"]
 mod changelog;
 #[path = "ui_debug_capture.rs"]
-mod debug_capture;
+pub(crate) mod debug_capture;
 #[path = "ui_diagram_pane.rs"]
 mod diagram_pane;
 #[path = "ui_file_diff.rs"]
@@ -3553,12 +3553,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let messages_draw = draw_start.elapsed();
 
     if let Some(ref mut capture) = debug_capture {
-        capture.layout.margins = Some(MarginsCapture {
-            left_widths: margins.left_widths.clone(),
-            right_widths: margins.right_widths.clone(),
-            centered: margins.centered,
-            content_start_row: margins.content_start_row,
-        });
+        capture.layout.margins = Some(debug_capture::capture_margins(&margins));
     }
     let chrome_start = Instant::now();
     if queued_height > 0 {

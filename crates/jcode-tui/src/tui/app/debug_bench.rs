@@ -1085,7 +1085,7 @@ impl App {
     /// scroll position one content line at a time, captures the resulting widget
     /// placements, and runs the shared stability analyzer.
     pub(in crate::tui::app) fn run_widget_stability(&mut self, raw: Option<&str>) -> String {
-        use crate::tui::info_widget_stability::{PlacedRect, intern_kind};
+        use crate::tui::info_widget_stability::PlacedRect;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1158,38 +1158,9 @@ impl App {
                 break;
             }
             scroll_tops_abs.push(crate::tui::ui::last_resolved_chat_scroll() as i64);
-            let latest = crate::tui::visual_debug::latest_frame();
-            let rows = latest
-                .as_ref()
-                .and_then(|frame| frame.layout.messages_area)
-                .map(|area| {
-                    let band = latest
-                        .as_ref()
-                        .and_then(|frame| frame.layout.margins.as_ref())
-                        .map_or(0, |margins| margins.content_start_row as u16);
-                    area.y.saturating_add(band)..area.y.saturating_add(area.height)
-                })
-                .unwrap_or(0..height);
+            let (rows, placed) =
+                crate::tui::ui::debug_capture::capture_widget_stability_frame(height);
             viewport_rows.push(rows);
-            let placed: Vec<PlacedRect> = match latest {
-                Some(frame) => frame
-                    .info_widgets
-                    .as_ref()
-                    .map(|info| {
-                        info.placements
-                            .iter()
-                            .map(|p| PlacedRect {
-                                kind: intern_kind(&p.kind),
-                                x: p.rect.x,
-                                y: p.rect.y,
-                                width: p.rect.width,
-                                height: p.rect.height,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
             if include_frames {
                 frame_payloads.push(serde_json::json!({
                     "scroll_top": scroll_top,

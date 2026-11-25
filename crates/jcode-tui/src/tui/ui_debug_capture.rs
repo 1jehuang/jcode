@@ -191,3 +191,55 @@ mod tests {
         assert!(widget_overlaps_content(&p, area, &margins));
     }
 }
+
+pub(crate) fn capture_widget_stability_frame(
+    height: u16,
+) -> (
+    std::ops::Range<u16>,
+    Vec<crate::tui::info_widget_stability::PlacedRect>,
+) {
+    use crate::tui::info_widget_stability::{PlacedRect, intern_kind};
+    let latest = crate::tui::visual_debug::latest_frame();
+    let rows = latest
+        .as_ref()
+        .and_then(|frame| frame.layout.messages_area)
+        .map(|area| {
+            let band = latest
+                .as_ref()
+                .and_then(|frame| frame.layout.margins.as_ref())
+                .map_or(0, |margins| margins.content_start_row as u16);
+            area.y.saturating_add(band)..area.y.saturating_add(area.height)
+        })
+        .unwrap_or(0..height);
+    let placed: Vec<PlacedRect> = match latest {
+        Some(frame) => frame
+            .info_widgets
+            .as_ref()
+            .map(|info| {
+                info.placements
+                    .iter()
+                    .map(|p| PlacedRect {
+                        kind: intern_kind(&p.kind),
+                        x: p.rect.x,
+                        y: p.rect.y,
+                        width: p.rect.width,
+                        height: p.rect.height,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    (rows, placed)
+}
+
+pub(super) fn capture_margins(
+    margins: &info_widget::Margins,
+) -> super::visual_debug::MarginsCapture {
+    super::visual_debug::MarginsCapture {
+        left_widths: margins.left_widths.clone(),
+        right_widths: margins.right_widths.clone(),
+        centered: margins.centered,
+        content_start_row: margins.content_start_row,
+    }
+}
