@@ -347,3 +347,35 @@ fn image_provenance_deferred_failure_keeps_collapsed_paste_content_recoverable()
             .any(|message| message.content.contains(text))
     );
 }
+
+#[test]
+fn image_provenance_cut_clears_full_draft_and_undo_restores_it() {
+    let mut app = create_test_app();
+    super::input::handle_text_paste(&mut app, "one\ntwo\nthree\nfour\nfive\nsix".into());
+    provenance_attach_image(&mut app);
+    let original = app.input.clone();
+    assert!(!super::input::cut_input_line_to_clipboard_with(
+        &mut app,
+        |_| false
+    ));
+    assert_eq!(app.input, original);
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(app.pasted_contents.len(), 1);
+    assert!(super::input::cut_input_line_to_clipboard_with(
+        &mut app,
+        |text| {
+            assert_eq!(text, original);
+            true
+        }
+    ));
+    assert!(app.input.is_empty());
+    assert!(app.pending_images.is_empty());
+    assert!(app.pasted_contents.is_empty());
+    app.undo_input_change();
+    assert_eq!(app.input, original);
+    assert_eq!(app.pending_images.len(), 1);
+    assert_eq!(
+        app.pasted_contents,
+        vec!["one\ntwo\nthree\nfour\nfive\nsix"]
+    );
+}

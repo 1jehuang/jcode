@@ -299,11 +299,7 @@ where
         return false;
     }
 
-    app.remember_input_undo_state();
-    app.input.clear();
-    app.cursor_pos = 0;
-    app.reset_tab_completion();
-    app.sync_model_picker_preview_from_input();
+    clear_input_for_escape(app);
     app.set_status_notice("✂ Cut input line");
     true
 }
@@ -1118,6 +1114,7 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
     }
     app.input.clear();
     app.pending_images.clear();
+    app.pasted_contents.clear();
     app.input_image_markers = Default::default();
     app.cursor_pos = 0;
     app.reset_tab_completion();
