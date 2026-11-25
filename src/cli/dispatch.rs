@@ -36,13 +36,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     if let Some(Command::Auth(AuthCommand::Import { json, .. })) = &args.command {
         return super::auth_import::run(&args.provider, *json);
     }
-    // Explicit MCP management is independent of provider profiles, sessions,
-    // and the daemon. In particular, list must remain offline and scriptable.
-    if matches!(args.command, Some(Command::Mcp { .. })) {
-        let Some(Command::Mcp { action }) = args.command else {
-            unreachable!("MCP command checked above");
-        };
-        return super::mcp::run(action).await;
+    // Explicit management commands do not bootstrap providers or a daemon.
+    match args.command {
+        Some(Command::Mcp { action }) => return super::mcp::run(action).await,
+        Some(Command::Plugin(plugin)) => return super::plugin::run(plugin),
+        _ => {}
     }
     // The standalone picker is the entire command, not a resume ID lookup.
     // In particular, cancelling it must not continue into provider/agent startup
@@ -102,6 +100,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Plugin(plugin)) => super::plugin::run(plugin)?,
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,
