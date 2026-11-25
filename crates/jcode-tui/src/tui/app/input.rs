@@ -529,8 +529,8 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     }
 
     let placeholder = paste_placeholder(&text);
-    app.pasted_contents.push(text);
     insert_input_text(app, &placeholder);
+    app.pasted_contents.push(text);
 }
 
 fn expand_matching_paste(app: &mut App, text: &str) -> bool {

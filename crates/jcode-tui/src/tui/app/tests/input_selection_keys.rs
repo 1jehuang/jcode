@@ -107,3 +107,79 @@ fn editable_composer_release_endpoint_stays_editable_after_copy_failure() {
     app.undo_input_change();
     assert_eq!(app.input, "select this draft");
 }
+
+#[test]
+fn selection_review_undo_replacement_paste_restores_the_original_payload() {
+    let original = "one\ntwo\nthree\nfour\nfive";
+    for replacement in ["a\nb\nc\nd\ne", "a\nb\nc\nd\ne\nf"] {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, original.into());
+        let label = app.input.clone();
+        app.set_input_selection(0, app.input.len());
+        super::input::handle_text_paste(&mut app, replacement.into());
+        assert_eq!(
+            super::input::expand_paste_placeholders(&app, &app.input),
+            replacement
+        );
+        app.undo_input_change();
+        assert_eq!(app.input, label);
+        assert_eq!(app.pasted_contents, vec![original]);
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(prepared.expanded, original);
+    }
+}
+
+#[test]
+fn selection_review_held_edge_ticks_extend_the_editable_range_and_highlight() {
+    let _render_lock = scroll_render_test_lock();
+    for upward in [false, true] {
+        let mut app = create_test_app();
+        app.input = (0..60)
+            .map(|n| format!("line {n:02} 界"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.cursor_pos = if upward { app.input.len() } else { 0 };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 24)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        let points = input_pane_screen_points(40, 24);
+        let (start, edge) = if upward {
+            (points.last().unwrap(), points.first().unwrap())
+        } else {
+            (points.first().unwrap(), points.last().unwrap())
+        };
+        let plain_bg = terminal.backend().buffer()[(start.0, start.1)].bg;
+        for (kind, point) in [
+            (MouseEventKind::Down(MouseButton::Left), start),
+            (MouseEventKind::Drag(MouseButton::Left), edge),
+        ] {
+            app.handle_mouse_event(MouseEvent {
+                kind,
+                column: point.0,
+                row: point.1,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        render_and_snap(&app, &mut terminal);
+        for _ in 0..4 {
+            assert!(app.progress_copy_selection_edge_autoscroll());
+            assert_eq!(
+                app.input_selection_text(),
+                app.current_copy_selection_text(),
+                "upward={upward}"
+            );
+            render_and_snap(&app, &mut terminal);
+            let endpoint = app.copy_selection_cursor.unwrap();
+            let cell = input_pane_screen_points(40, 24)
+                .into_iter()
+                .find(|(_, _, point)| point.abs_line == endpoint.abs_line && point.column == 1)
+                .unwrap();
+            assert_eq!(terminal.backend().buffer()[(cell.0, cell.1)].symbol(), "i");
+            assert_ne!(
+                terminal.backend().buffer()[(cell.0, cell.1)].bg,
+                plain_bg,
+                "held edge row must be highlighted: upward={upward}"
+            );
+        }
+    }
+}

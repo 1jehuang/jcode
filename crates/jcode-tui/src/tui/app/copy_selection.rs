@@ -531,6 +531,9 @@ impl App {
                 Self::line_width(pane, next).unwrap_or(0)
             };
             self.update_selection_with_point(point, true);
+            if self.input_selection().is_some() {
+                self.mirror_input_copy_selection(MouseEventKind::Drag(MouseButton::Left));
+            }
             return true;
         }
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
