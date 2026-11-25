@@ -640,8 +640,23 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     models
 }
 
-pub fn openai_compatible_profile_model_supports_chat(_profile_id: &str, _model: &str) -> bool {
-    true
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    let config = crate::config::config();
+    let profile = config.providers.get(profile_id).or_else(|| {
+        config
+            .providers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(profile_id))
+            .map(|(_, profile)| profile)
+    });
+    profile
+        .and_then(|profile| {
+            profile
+                .models
+                .iter()
+                .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))
+        })
+        .is_none_or(crate::provider::named_provider_model_supports_chat)
 }
 
 pub fn openai_compatible_profile_static_context_limits(
@@ -988,6 +1003,7 @@ pub fn apply_named_provider_profile_env_from_config(
     let static_models = profile
         .models
         .iter()
+        .filter(|model| crate::provider::named_provider_model_supports_chat(model))
         .map(|model| model.id.trim())
         .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();

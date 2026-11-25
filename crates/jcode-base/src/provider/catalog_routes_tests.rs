@@ -577,3 +577,63 @@ fn openrouter_alternative_routes_skip_models_absent_from_catalog() {
         "catalog-listed model keeps its OpenRouter fallback route"
     );
 }
+
+#[test]
+fn named_profile_chat_capabilities_filter_routes_and_default_fallback() {
+    use crate::config::{Config, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig};
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let mut profile = NamedProviderConfig {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        auth: NamedProviderAuth::None,
+        default_model: Some("future-worker-2099".into()),
+        models: vec![
+            NamedProviderModelConfig {
+                id: "future-worker-2099".into(),
+                supports_chat: Some(false),
+                ..Default::default()
+            },
+            NamedProviderModelConfig {
+                id: "future-photo-2099".into(),
+                input: vec!["image".into()],
+                ..Default::default()
+            },
+            NamedProviderModelConfig {
+                id: "future-chat-2099".into(),
+                input: vec!["text".into(), "image".into()],
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let mut cfg = Config::default();
+    cfg.providers.insert("Example".into(), profile.clone());
+    cfg.save().unwrap();
+    assert!(
+        !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+            "example",
+            "FUTURE-WORKER-2099"
+        )
+    );
+    assert!(
+        !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+            "Example",
+            "future-photo-2099"
+        )
+    );
+    assert!(
+        crate::provider_catalog::openai_compatible_profile_model_supports_chat(
+            "EXAMPLE",
+            "future-live-chat-2099"
+        )
+    );
+    let routes = named_provider_profile_routes("Example", &profile);
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].model, "future-chat-2099");
+    profile.models.pop();
+    assert!(named_provider_profile_routes("Example", &profile).is_empty());
+    profile.default_model = Some("future-live-chat-2099".into());
+    assert_eq!(
+        named_provider_profile_routes("Example", &profile)[0].model,
+        "future-live-chat-2099"
+    );
+}

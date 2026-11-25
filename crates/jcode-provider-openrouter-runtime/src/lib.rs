@@ -813,6 +813,7 @@ pub struct OpenRouterProvider {
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
     static_models: Vec<String>,
+    static_model_config: HashMap<String, jcode_base::config::NamedProviderModelConfig>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
     /// Missing entries mean unspecified and preserve the provider-level fallback.
@@ -970,6 +971,21 @@ impl OpenRouterProvider {
 
     fn model_reasoning_support(&self) -> Option<bool> {
         self.model_reasoning_config().and_then(|config| config.0)
+    }
+
+    fn model_config(&self, model: &str) -> Option<&jcode_base::config::NamedProviderModelConfig> {
+        self.profile_id.as_ref()?;
+        self.static_model_config.get(
+            &self
+                .strip_session_profile_prefix(model)
+                .trim()
+                .to_ascii_lowercase(),
+        )
+    }
+
+    fn model_supports_chat(&self, model: &str) -> bool {
+        self.model_config(model)
+            .is_none_or(jcode_base::provider::named_provider_model_supports_chat)
     }
 
     fn configured_effort_for_model(&self) -> Option<String> {
@@ -1449,6 +1465,12 @@ impl OpenRouterProvider {
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
             static_models,
+            static_model_config: profile
+                .models
+                .iter()
+                .filter(|model| !model.id.trim().is_empty())
+                .map(|model| (model.id.trim().to_ascii_lowercase(), model.clone()))
+                .collect(),
             static_context_limits,
             static_image_input_support,
             send_openrouter_headers: false,
@@ -1691,6 +1713,7 @@ impl OpenRouterProvider {
             max_tokens,
             extra_body,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
@@ -1748,6 +1771,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: None,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
@@ -1797,6 +1821,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
             static_models: Vec::new(),
+            static_model_config: HashMap::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
@@ -1834,17 +1859,13 @@ impl OpenRouterProvider {
     }
 
     pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
-        let Some(profile_id) = self.profile_id.as_deref() else {
+        if self.profile_id.is_none() {
             return models;
-        };
+        }
 
         models
             .into_iter()
-            .filter(|model| {
-                jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                    profile_id, model,
-                )
-            })
+            .filter(|model| self.model_supports_chat(model))
             .collect()
     }
 
@@ -2004,6 +2025,7 @@ impl OpenRouterProvider {
                 max_tokens: None,
                 extra_body: None,
                 static_models: Vec::new(),
+                static_model_config: HashMap::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
@@ -2860,3 +2882,7 @@ mod muse_native_tests;
 #[cfg(test)]
 #[path = "placeholder_default_tests.rs"]
 mod placeholder_default_tests;
+
+#[cfg(test)]
+#[path = "named_chat_tests.rs"]
+mod named_chat_tests;

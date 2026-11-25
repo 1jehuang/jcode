@@ -477,6 +477,9 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Explicitly exclude generation-only models from chat routes and requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_chat: Option<bool>,
     /// Explicitly enable or disable `/effort` for this model. When omitted,
     /// the provider-level setting and built-in model-family detection apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
