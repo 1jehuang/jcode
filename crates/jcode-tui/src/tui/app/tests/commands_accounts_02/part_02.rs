@@ -301,3 +301,155 @@ fn test_turn_error_does_not_clobber_new_input() {
     // We must not overwrite text the user already started.
     assert_eq!(app.input, "new prompt");
 }
+
+#[test]
+fn test_account_picker_includes_all_configured_credentials_even_excluded_and_manual() {
+    with_temp_jcode_home(|| {
+        let _env_guard = EnvRestoreGuard::capture([
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENROUTER_API_KEY",
+            "COPILOT_GITHUB_TOKEN",
+            "GROQ_API_KEY",
+        ]);
+        for key in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] {
+            crate::env::set_var(key, "picker-test-secret-api-key");
+        }
+        crate::env::set_var("COPILOT_GITHUB_TOKEN", "picker-test-secret-device-token");
+        crate::env::set_var("GROQ_API_KEY", "picker-test-secret-compatible-key");
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "work".into(),
+            access_token: "picker-test-secret-oauth-access".into(),
+            refresh_token: "picker-test-secret-oauth-refresh".into(),
+            id_token: None,
+            account_id: None,
+            expires_at: Some(chrono::Utc::now().timestamp_millis() + 3_600_000),
+            email: None,
+        })
+        .unwrap();
+        crate::auth::google::save_tokens(&crate::auth::google::GoogleTokens {
+            access_token: "picker-test-secret-google-access".into(),
+            refresh_token: "picker-test-secret-google-refresh".into(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            tier: crate::auth::google::GmailAccessTier::Full,
+            email: None,
+            services: vec![crate::auth::google::GoogleService::Gmail],
+            credentials: None,
+        })
+        .unwrap();
+        crate::auth::account_pool::AccountPool {
+            members: vec![],
+            excluded: vec![
+                "openai-api".into(),
+                "copilot".into(),
+                "google".into(),
+                "groq".into(),
+            ],
+            ..Default::default()
+        }
+        .save()
+        .unwrap();
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let mut app = create_test_app();
+        app.input = "/account".to_string();
+        app.submit_input();
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        for provider_id in [
+            "openai-api",
+            "anthropic-api",
+            "openrouter",
+            "copilot",
+            "google",
+            "groq",
+        ] {
+            let entry = picker
+                .entries
+                .iter()
+                .find(|entry| {
+                    matches!(
+                        entry.action,
+                        crate::tui::PickerAction::Login(provider) if provider.id == provider_id
+                    )
+                })
+                .unwrap_or_else(|| panic!("missing configured {provider_id}"));
+            assert_eq!(entry.options[0].api_method, "configured");
+        }
+        assert!(
+            !picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "account center")
+        );
+        assert!(!picker.entries.iter().any(|entry| matches!(entry.action,
+            crate::tui::PickerAction::Login(provider) if provider.id == "auto-import"
+        )));
+        assert!(!format!("{:?}", picker.entries).contains("picker-test-secret"));
+        let status = crate::auth::AuthStatus::check_fast();
+        for entry in &picker.entries {
+            if let crate::tui::PickerAction::Login(provider) = entry.action {
+                assert!(
+                    status.assessment_for_provider(provider).is_configured(),
+                    "unconfigured provider {} should not be offered",
+                    provider.id
+                );
+            }
+        }
+        let api_row = picker
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry.action,
+                    crate::tui::PickerAction::Login(provider) if provider.id == "openai-api"
+                )
+            })
+            .unwrap();
+        let new_row = picker
+            .entries
+            .iter()
+            .position(|entry| entry.name == "new Claude account")
+            .unwrap();
+        assert!(
+            api_row < new_row,
+            "credentials must precede management actions"
+        );
+
+        // A local shared-daemon client must retain its local credential
+        // inventory, even though it uses the same wire client as SSH.
+        app.is_remote = true;
+        for (name, credential, expected) in [
+            (
+                "OpenAI",
+                Some(jcode_provider_core::ResolvedCredential::ApiKey),
+                "openai-api",
+            ),
+            ("Groq", None, "groq"),
+        ] {
+            app.remote_provider_name = Some(name.into());
+            app.remote_resolved_credential = credential;
+            app.open_account_picker(None);
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            let selected = &picker.entries[picker.selected];
+            assert!(selected.is_current);
+            assert!(matches!(selected.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == expected
+            ));
+        }
+        app.is_remote = false;
+
+        for (scope, expected, unexpected) in [
+            ("claude", "anthropic-api", "openai-api"),
+            ("openai", "openai-api", "anthropic-api"),
+        ] {
+            app.open_account_picker(Some(scope));
+            let entries = &app.inline_interactive_state.as_ref().unwrap().entries;
+            assert!(entries.iter().any(|entry| matches!(entry.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == expected
+            )));
+            assert!(!entries.iter().any(|entry| matches!(entry.action,
+                crate::tui::PickerAction::Login(provider) if provider.id == unexpected
+            )));
+            assert!(!entries.iter().any(|entry| entry.name == "account center"));
+        }
+    });
+}

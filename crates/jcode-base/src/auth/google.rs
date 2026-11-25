@@ -1,7 +1,32 @@
+use super::AuthCredentialSource;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub mod setup;
+
+pub(super) fn credential_source() -> Option<(AuthCredentialSource, String)> {
+    let Ok(tokens_path) = tokens_path() else {
+        return None;
+    };
+    if !tokens_path.exists() {
+        return None;
+    }
+    if load_tokens().is_ok_and(|tokens| tokens.credentials.is_some()) {
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            tokens_path.display().to_string(),
+        ));
+    }
+    let Ok(credentials_path) = credentials_path() else {
+        return None;
+    };
+    credentials_path.exists().then(|| {
+        (
+            AuthCredentialSource::JcodeManagedFile,
+            format!("{} + {}", credentials_path.display(), tokens_path.display()),
+        )
+    })
+}
 
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -892,21 +917,21 @@ mod tests {
     #[test]
     fn transactional_google_login_source_reports_bound_and_legacy_credentials() {
         let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
-        assert!(crate::auth::google_source().is_none());
+        assert!(credential_source().is_none());
         let client = synthetic_client("source-project");
         let mut tokens = synthetic_tokens("source-project");
         tokens.credentials = Some(client.clone());
         save_tokens(&tokens).unwrap();
-        let (source, detail) = crate::auth::google_source().unwrap();
+        let (source, detail) = credential_source().unwrap();
         assert_eq!(source, crate::auth::AuthCredentialSource::JcodeManagedFile);
         assert_eq!(detail, tokens_path().unwrap().display().to_string());
         assert!(!credentials_path().unwrap().exists());
 
         tokens.credentials = None;
         save_tokens(&tokens).unwrap();
-        assert!(crate::auth::google_source().is_none());
+        assert!(credential_source().is_none());
         save_credentials(&client).unwrap();
-        let (source, detail) = crate::auth::google_source().unwrap();
+        let (source, detail) = credential_source().unwrap();
         assert_eq!(source, crate::auth::AuthCredentialSource::JcodeManagedFile);
         assert!(detail.contains(&credentials_path().unwrap().display().to_string()));
         assert!(detail.contains(&tokens_path().unwrap().display().to_string()));

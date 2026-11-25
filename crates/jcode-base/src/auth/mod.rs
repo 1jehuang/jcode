@@ -1251,7 +1251,7 @@ fn assessment_for_key(
             AuthValidationMethod::PresenceCheck,
         ),
         LoginProviderAuthStateKey::Google => {
-            let (source, detail) = summarize_sources(vec![google_source()]);
+            let (source, detail) = summarize_sources(vec![google::credential_source()]);
             (
                 source,
                 detail,
@@ -1450,26 +1450,6 @@ fn antigravity_source() -> Option<(AuthCredentialSource, String)> {
         (
             AuthCredentialSource::TrustedExternalFile,
             "trusted external auth import".to_string(),
-        )
-    })
-}
-
-fn google_source() -> Option<(AuthCredentialSource, String)> {
-    let tokens_path = crate::auth::google::tokens_path().ok()?;
-    if !tokens_path.exists() {
-        return None;
-    }
-    if crate::auth::google::load_tokens().is_ok_and(|tokens| tokens.credentials.is_some()) {
-        return Some((
-            AuthCredentialSource::JcodeManagedFile,
-            tokens_path.display().to_string(),
-        ));
-    }
-    let credentials_path = crate::auth::google::credentials_path().ok()?;
-    credentials_path.exists().then(|| {
-        (
-            AuthCredentialSource::JcodeManagedFile,
-            format!("{} + {}", credentials_path.display(), tokens_path.display()),
         )
     })
 }
