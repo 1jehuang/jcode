@@ -10,7 +10,7 @@ fn project_pinned_todo_card<R>(
     active_first: bool,
     project: impl FnOnce(&[Line<'static>]) -> R,
 ) -> R {
-    if width < 16 || !crate::config::config().display.pin_todos {
+    if width == 0 || !crate::config::config().display.pin_todos {
         return project(&[]);
     }
     let Some(payload) = payload else {
@@ -44,7 +44,8 @@ pub(super) fn pinned_todo_card_has_lines(
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
 ) -> bool {
-    project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
+    width >= 16
+        && project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
 }
 
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
@@ -62,16 +63,26 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
 
     PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
 
-    // Band budget: about a third of the viewport.
+    // Short viewports keep the unboxed band rather than losing their todos.
+    let framed = viewport_height >= 6;
+    let viewport_height = viewport_height.saturating_sub(if framed { 2 } else { 0 });
+    let card_width = width.saturating_sub(if framed { 4 } else { 0 });
+    // Band budget: about a third of the usable viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget.max(2);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let normal = project_pinned_todo_card(payload, diff_mode, width, false, |rows| {
+    let normal = project_pinned_todo_card(payload, diff_mode, card_width, false, |rows| {
         (expanded || rows.len() <= content_budget).then(|| rows.to_vec())
     });
     let has_more = normal.is_none();
     let mut card_lines = normal.unwrap_or_else(|| {
-        project_pinned_todo_card(payload, diff_mode, width, true, <[Line<'static>]>::to_vec)
+        project_pinned_todo_card(
+            payload,
+            diff_mode,
+            card_width,
+            true,
+            <[Line<'static>]>::to_vec,
+        )
     });
     if card_lines.is_empty() {
         return (Vec::new(), None);
@@ -87,37 +98,78 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             format!("  … +{} more (todo)", hidden),
             Style::default().fg(dim_color()),
         )));
+    } else if expanded {
+        // Expanded bands get a larger budget but stay bounded so a long plan
+        // cannot swallow the transcript. Overflow scrolls with the wheel.
+        let expanded_budget = ((viewport_height as usize) * 2 / 3).max(content_budget);
+        let window = expanded_budget.saturating_sub(1).max(1);
+        let total = card_lines.len();
+        let max_offset = total.saturating_sub(window);
+        let offset = pinned_todo_scroll().min(max_offset);
+        PINNED_TODO_LAST_MAX.store(max_offset, std::sync::atomic::Ordering::Relaxed);
+        more_line = Some(lines.len());
+        let label = if max_offset > 0 {
+            format!(
+                "  ▴ Collapse todos ({}-{} of {}, scroll)",
+                offset + 1,
+                (offset + window).min(total),
+                total
+            )
+        } else {
+            "  ▴ Collapse todos".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            label,
+            Style::default().fg(dim_color()),
+        )));
+        lines.extend(card_lines.into_iter().skip(offset).take(window));
     } else {
-        if expanded {
-            // Expanded bands get a larger budget but stay bounded so a long plan
-            // cannot swallow the transcript. Overflow scrolls with the wheel.
-            let expanded_budget = ((viewport_height as usize) * 2 / 3).max(content_budget);
-            let window = expanded_budget.saturating_sub(1).max(1);
-            let total = card_lines.len();
-            let max_offset = total.saturating_sub(window);
-            let offset = pinned_todo_scroll().min(max_offset);
-            PINNED_TODO_LAST_MAX.store(max_offset, std::sync::atomic::Ordering::Relaxed);
-            more_line = Some(lines.len());
-            let label = if max_offset > 0 {
-                format!(
-                    "  ▴ Collapse todos ({}-{} of {}, scroll)",
-                    offset + 1,
-                    (offset + window).min(total),
-                    total
-                )
-            } else {
-                "  ▴ Collapse todos".to_string()
-            };
-            lines.push(Line::from(Span::styled(
-                label,
-                Style::default().fg(dim_color()),
-            )));
-            lines.extend(card_lines.into_iter().skip(offset).take(window));
-            return (lines, more_line);
-        }
         lines.extend(card_lines);
     }
-    (lines, more_line)
+    if !framed {
+        return (lines, more_line);
+    }
+    let Some((done, total)) = payload.and_then(super::super::messages::todo_payload_counts) else {
+        return (lines, more_line);
+    };
+    // Keep the pinned border full-width even when the todo labels are short.
+    if let Some(first) = lines.first_mut() {
+        let padding = usize::from(card_width).saturating_sub(first.width());
+        first.spans.push(Span::raw(" ".repeat(padding)));
+    }
+    let boxed = render_rounded_box(
+        &format!("Todos {done}/{total}"),
+        lines,
+        usize::from(width),
+        Style::default().fg(super::super::messages::todo_border_color()),
+    );
+    (boxed, more_line.map(|row| row + 1))
+}
+
+pub(super) fn pinned_todo_more_rect(
+    app: &dyn TuiState,
+    text_area: Rect,
+    viewport: Rect,
+    preview_rows: u16,
+    row: usize,
+) -> Rect {
+    let inset = u16::from(
+        viewport.height >= 6
+            && app
+                .pinned_todos_payload()
+                .and_then(super::super::messages::todo_payload_counts)
+                .is_some(),
+    );
+    Rect {
+        x: text_area.x.saturating_add(inset),
+        y: viewport
+            .y
+            .saturating_add(preview_rows)
+            .saturating_add(row as u16),
+        width: text_area.width.saturating_sub(2 * inset),
+        height: 1,
+    }
+    .intersection(text_area)
 }
 
 pub(crate) fn compute_visible_margins(
@@ -289,13 +341,16 @@ mod pinned_todo_projection_tests {
                 ] {
                     let visible = pinned_todo_card_has_lines(payload, diff, width);
                     for expanded in [false, true] {
-                        let (lines, _) =
-                            pinned_todo_band_lines_for_payload(payload, expanded, diff, width, 3);
-                        assert_eq!(
-                            visible,
-                            !lines.is_empty(),
-                            "payload={payload:?}, width={width}, expanded={expanded}"
-                        );
+                        for height in [3, 6, 24] {
+                            let (lines, _) = pinned_todo_band_lines_for_payload(
+                                payload, expanded, diff, width, height,
+                            );
+                            assert_eq!(
+                                visible,
+                                !lines.is_empty(),
+                                "payload={payload:?}, width={width}, height={height}, expanded={expanded}"
+                            );
+                        }
                     }
                     if width < 16 || payload.is_none() || !crate::config::config().display.pin_todos
                     {

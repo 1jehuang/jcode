@@ -361,16 +361,14 @@ pub(super) fn draw_messages(
         width: text_render_area.width,
         height: pinned_todo_band_rows,
     }));
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
-        Rect {
-            x: text_render_area.x,
-            y: render_area
-                .y
-                .saturating_add(prompt_preview_lines)
-                .saturating_add(line as u16),
-            width: text_render_area.width,
-            height: 1,
-        }
+    set_pinned_todo_more_area(pinned_todo_more_line.map(|row| {
+        todo_margins::pinned_todo_more_rect(
+            app,
+            text_render_area,
+            render_area,
+            prompt_preview_lines,
+            row,
+        )
     }));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).

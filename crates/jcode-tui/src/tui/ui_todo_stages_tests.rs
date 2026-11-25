@@ -931,7 +931,8 @@ fn collapsed_overflow_prioritizes_live_lanes_without_reordering_full_plan() {
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
     };
-    let short = band(false, 15);
+    let short = band(false, 17);
+    let short = &short[1..short.len() - 1];
     assert!(
         short[0].contains("phase 1")
             && short[1].contains("compiler")

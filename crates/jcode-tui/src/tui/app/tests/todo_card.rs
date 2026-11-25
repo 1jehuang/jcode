@@ -740,8 +740,11 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
         text
     );
     assert!(
-        !first_rows.iter().any(|row| row.contains("────")),
-        "pinned todo band should not render a horizontal separator, got:\n{}",
+        !first_rows
+            .iter()
+            .filter(|row| !row.contains('╭') && !row.contains('╰'))
+            .any(|row| row.contains("────")),
+        "pinned todo band should not render a separator outside its border, got:\n{}",
         text
     );
 
@@ -1157,13 +1160,15 @@ fn expanded_pinned_todo_band_scrolls_when_taller_than_budget() {
         "expanded band is bounded: {}",
         lines.len()
     );
-    assert!(lines[0].to_string().contains("scroll"));
+    assert!(lines[1].to_string().contains("scroll"));
     crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
     assert!(crate::tui::ui::viewport::scroll_pinned_todos(3));
     let (scrolled, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
-    assert_ne!(lines[1].to_string(), scrolled[1].to_string());
+    assert_ne!(lines[2].to_string(), scrolled[2].to_string());
     crate::tui::ui::viewport::reset_pinned_todo_scroll();
 }
 
 #[path = "todo_card_additional_tests.rs"]
 mod additional_resumed_local_snapshot_keeps_polling_so_card_does_not_go_stale;
+
+include!("todo_card_borders.rs");

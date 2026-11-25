@@ -1,3 +1,7 @@
+#[path = "ui_messages/todo_payload_cache.rs"]
+mod todo_payload_cache;
+use todo_payload_cache::cached_todo_payload;
+
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
@@ -7,9 +11,6 @@ pub(crate) use tool_rendering::render_tool_message;
 
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
-#[cfg(test)]
-#[path = "ui_messages/todo_payload_cache_tests.rs"]
-mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -891,40 +892,6 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
-// Cache data only: time-sensitive blocker policy and width/style rendering
-// remain live on every draw. One bounded entry retains no transcript history.
-const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
-
-#[derive(Default)]
-struct TodoPayloadCache {
-    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
-}
-
-impl TodoPayloadCache {
-    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-        if let Some((source, parsed)) = &self.entry
-            && source == content
-        {
-            return parsed.clone();
-        }
-        let parsed = serde_json::from_str::<TodoCardPayload>(content)
-            .ok()
-            .map(std::sync::Arc::new);
-        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
-            .then(|| (content.to_owned(), parsed.clone()));
-        parsed
-    }
-}
-
-thread_local! {
-    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
-        std::cell::RefCell::new(TodoPayloadCache::default());
-}
-
-fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
-}
-
 impl TodoCardPayload {
     fn todos(&self) -> &[crate::todo::TodoItem] {
         match self {
@@ -1088,7 +1055,35 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true, false)
+    let Some((done, total)) = todo_payload_counts(&msg.content) else {
+        return render_system_message(msg, width, diff_mode);
+    };
+    let body = render_todos_message_with_cap(msg, width.saturating_sub(4), diff_mode, true, false);
+    let mut lines = render_rounded_box(
+        &format!("Todos {done}/{total}"),
+        body,
+        usize::from(width),
+        Style::default().fg(todo_border_color()),
+    );
+    if markdown::center_code_blocks() {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
+    let payload = cached_todo_payload(content)?;
+    let todos = payload.todos();
+    let done = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .count();
+    Some((done, todos.len()))
+}
+
+/// Shared border color for inline cards and the pinned band.
+pub(crate) fn todo_border_color() -> Color {
+    rgb(130, 115, 175)
 }
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
@@ -1220,10 +1215,8 @@ fn render_todos_message_with_cap(
     };
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    // Pinned todos are viewport chrome, not a centered transcript card. Using
-    // the code-block preference here makes short plans float in the middle of
-    // wide terminals, detached from the conversation's left edge.
-    let centered = cap_width && markdown::center_code_blocks();
+    // The enclosing card handles centering; its body stays left-aligned.
+    let centered = false;
     let meta_style = Style::default().fg(todo_meta_color());
     let card_width = match (centered, cap_width) {
         (true, true) => (width.saturating_sub(4) as usize).min(120),
