@@ -315,6 +315,11 @@ impl PluginManager {
         root: &InstalledPlugin,
     ) -> Result<()> {
         let base = self.base().join("cache");
+        let rank = |scope| match scope {
+            PluginScope::User => 0,
+            PluginScope::Project => 1,
+            PluginScope::Local => 2,
+        };
         let mut pending = vec![(root.name.clone(), root.marketplace.clone())];
         let mut seen = HashSet::new();
         while let Some((name, market)) = pending.pop() {
@@ -328,20 +333,20 @@ impl PluginManager {
             let record = registry
                 .installed
                 .iter_mut()
-                .find(|p| {
+                .filter(|p| {
                     self.applies(p)
-                        && p.scope == root.scope
-                        && p.project == root.project
+                        && rank(p.scope) <= rank(root.scope)
                         && p.name == name
                         && p.marketplace == market
                 })
+                .max_by_key(|p| rank(p.scope))
                 .with_context(|| {
                     format!(
-                        "dependency {name}@{market} is not installed in {} scope",
+                        "dependency {name}@{market} is not installed in a scope visible to {}",
                         root.scope
                     )
                 })?;
-            if record.automatically_disabled {
+            if record.automatically_disabled && record.scope == root.scope {
                 record.enabled = true;
                 record.automatically_disabled = false;
             }
@@ -359,7 +364,7 @@ impl PluginManager {
             registry
                 .installed
                 .iter()
-                .filter(|p| self.applies(p) && p.scope == root.scope)
+                .filter(|p| self.applies(p) && rank(p.scope) <= rank(root.scope))
                 .cloned()
                 .collect(),
         );

@@ -544,3 +544,66 @@ fn legacy_disabled_dependency_without_provenance_stays_explicit() {
     manager.enable("root", PluginScope::User).unwrap();
     assert_eq!(manager.enabled_roots().unwrap().len(), 2);
 }
+
+#[test]
+fn enabled_lower_scope_dependencies_allow_root_reactivation() {
+    let (temp, manager) = fixture();
+    let root = market(
+        temp.path(),
+        "fixture",
+        json!([
+            {"name":"root","source":"./root","dependencies":["leaf"]},
+            {"name":"leaf","source":"./leaf"}
+        ]),
+        &[],
+    );
+    manager.add_marketplace(root.to_str().unwrap()).unwrap();
+    manager.install("root", PluginScope::Project).unwrap();
+    manager.install("leaf", PluginScope::User).unwrap();
+    manager.uninstall("leaf", PluginScope::Project).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 2);
+    manager.disable("root", PluginScope::Project).unwrap();
+    manager.enable("root", PluginScope::Project).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 2);
+    assert!(manager.list().unwrap().iter().all(|p| p.enabled));
+}
+
+#[test]
+fn reactivation_never_auto_enables_a_lower_scope_dependency() {
+    for automatic in [false, true] {
+        let (temp, manager) = fixture();
+        let root = market(
+            temp.path(),
+            "fixture",
+            json!([
+                {"name":"root","source":"./root","dependencies":["leaf"]},
+                {"name":"inactive","source":"./inactive","defaultEnabled":false,"dependencies":["leaf"]},
+                {"name":"leaf","source":"./leaf"}
+            ]),
+            &[],
+        );
+        manager.add_marketplace(root.to_str().unwrap()).unwrap();
+        if automatic {
+            manager.install("inactive", PluginScope::User).unwrap();
+        } else {
+            manager.install("leaf", PluginScope::User).unwrap();
+        }
+        manager.install("root", PluginScope::Project).unwrap();
+        manager.uninstall("leaf", PluginScope::Project).unwrap();
+        if !automatic {
+            manager.disable("leaf", PluginScope::User).unwrap();
+        }
+        manager.disable("root", PluginScope::Project).unwrap();
+        let before = registry(&manager);
+        assert!(manager.enable("root", PluginScope::Project).is_err());
+        assert_eq!(registry(&manager), before);
+        let leaf = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.name == "leaf")
+            .unwrap();
+        assert!(!leaf.enabled);
+        assert_eq!(leaf.automatically_disabled, automatic);
+    }
+}

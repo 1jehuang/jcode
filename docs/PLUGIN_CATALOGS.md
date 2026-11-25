@@ -23,4 +23,6 @@ Dependencies use an array of names, `name@marketplace` identifiers or `{ "name":
 
 Installing or updating validates the dependency closure in the requested scope. Higher project/local masks still control runtime activation in that project, without blocking a user-wide installation elsewhere. A `defaultEnabled: false` root keeps newly acquired dependencies inactive. Enabling that root also enables its automatically disabled dependencies; explicitly disabled dependencies require a separate enable command. Registries without disable provenance conservatively preserve disabled records.
 
+Already enabled dependencies in lower visible scopes remain usable when re-enabling a root. Automatic enablement changes only records in the requested scope; disabled lower-scope dependencies need a separate explicit enable command.
+
 These commands manage catalog records and files. Plugin skill, command, hook, MCP and LSP activation is provided by separate integrations; this catalog layer does not run component code. It does not register external provider extensions.
