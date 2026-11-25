@@ -22,7 +22,7 @@ mod usage_recording;
 mod catalog;
 
 use jcode_base::auth;
-use jcode_base::auth::oauth;
+use jcode_base::auth::{claude_cli_completion::inherit_validation_refreshes, oauth};
 use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
 fn oauth_beta_headers(model: &str) -> &'static str {
     jcode_provider_core::anthropic_oauth_beta_headers(model)
@@ -1303,7 +1303,7 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
-        tokio::spawn(async move {
+        let stream = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1328,7 +1328,8 @@ impl Provider for AnthropicProvider {
                 retry_settings,
             )
             .await;
-        });
+        };
+        tokio::spawn(inherit_validation_refreshes(stream));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -1752,7 +1753,7 @@ impl Provider for AnthropicProvider {
         let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic
-        tokio::spawn(async move {
+        let stream = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1777,7 +1778,8 @@ impl Provider for AnthropicProvider {
                 retry_settings,
             )
             .await;
-        });
+        };
+        tokio::spawn(inherit_validation_refreshes(stream));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

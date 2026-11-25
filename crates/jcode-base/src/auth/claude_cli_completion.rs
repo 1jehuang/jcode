@@ -3,22 +3,41 @@ use super::claude;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 tokio::task_local! {
-    static VALIDATION_TOKENS: std::cell::RefCell<claude::ClaudeCredentials>;
+    static VALIDATION_TOKENS: Arc<Mutex<claude::ClaudeCredentials>>;
 }
 
-/// Follow only successful refresh commits in this validation task.
+/// Follow successful refresh commits in this validation and its owned request tasks.
 pub async fn with_validation_refreshes(
     credentials: claude::ClaudeCredentials,
     validation: impl std::future::Future<Output = Result<()>>,
 ) -> Result<claude::ClaudeCredentials> {
     VALIDATION_TOKENS
-        .scope(std::cell::RefCell::new(credentials), async {
+        .scope(Arc::new(Mutex::new(credentials)), async {
             validation.await?;
-            Ok(VALIDATION_TOKENS.with(|tokens| tokens.borrow().clone()))
+            VALIDATION_TOKENS.with(|tokens| {
+                tokens
+                    .lock()
+                    .map(|tokens| tokens.clone())
+                    .map_err(|_| anyhow::anyhow!("Claude validation refresh proof lock poisoned"))
+            })
         })
         .await
+}
+
+/// Capture before spawning; unrelated background tasks must not join the login proof.
+pub fn inherit_validation_refreshes<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let tokens = VALIDATION_TOKENS.try_with(Arc::clone);
+    async move {
+        match tokens {
+            Ok(tokens) => VALIDATION_TOKENS.scope(tokens, future).await,
+            Err(_) => future.await,
+        }
+    }
 }
 
 pub(in crate::auth) fn follow_validation_refresh(
@@ -29,7 +48,9 @@ pub(in crate::auth) fn follow_validation_refresh(
 ) -> bool {
     matches!(
         VALIDATION_TOKENS.try_with(|tokens| {
-            let mut tokens = tokens.borrow_mut();
+            let Ok(mut tokens) = tokens.lock() else {
+                return false;
+            };
             if previous_refresh.trim().is_empty() || tokens.refresh_token != previous_refresh {
                 return false;
             }
