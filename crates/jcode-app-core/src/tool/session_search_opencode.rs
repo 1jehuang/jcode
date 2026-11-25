@@ -42,10 +42,10 @@ pub(super) fn collect_opencode_external_sessions(
             Err(_) => report.parse_errors += 1,
         }
     }
-    let legacy_root = crate::storage::user_home_path(".local/share/opencode/storage/session")
-        .ok()
-        .filter(|root| root.exists());
-    if let Some(root) = legacy_root.as_deref() {
+    let legacy_root = crate::storage::user_home_path(".local/share/opencode/storage/session");
+    if let Ok(root) = legacy_root.as_deref()
+        && root.exists()
+    {
         found_store = true;
         let db_ids: std::collections::HashSet<String> =
             candidates.iter().map(|(_, id, _)| id.clone()).collect();
@@ -56,9 +56,9 @@ pub(super) fn collect_opencode_external_sessions(
         // not an mtime window (copied/restored files can have unrelated mtimes).
         let mut legacy_by_id: HashMap<String, (DateTime<Utc>, PathBuf)> = HashMap::new();
         for path in jcode_import_core::collect_files_recursive(root, "json") {
-            let Some(value) = std::fs::File::open(&path)
-                .ok()
-                .and_then(|file| serde_json::from_reader::<_, Value>(file).ok())
+            let Ok(value) = std::fs::File::open(&path)
+                .map_err(anyhow::Error::from)
+                .and_then(|file| serde_json::from_reader::<_, Value>(file).map_err(Into::into))
             else {
                 report.parse_errors += 1;
                 continue;
@@ -79,7 +79,7 @@ pub(super) fn collect_opencode_external_sessions(
                 .and_then(Value::as_i64)
                 .and_then(DateTime::<Utc>::from_timestamp_millis)
                 .or_else(|| jcode_import_core::file_modified_datetime(&path))
-                .unwrap_or_default();
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
             // Copies of one session consume one slot. Keep its newest stored
             // update, with the lexically first path breaking equal-time ties.
             let entry = legacy_by_id
