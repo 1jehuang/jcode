@@ -555,6 +555,7 @@ pub fn simulate_scroll_mode(
             centered: false,
             right_reliable,
             left_reliable: Vec::new(),
+            content_start_row: 0,
             scroll_top: scroll,
             content_start_row: 0,
             // Every simulated frame is mid-scroll.
