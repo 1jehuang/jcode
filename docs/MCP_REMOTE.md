@@ -86,6 +86,11 @@ tools or block management and calls to that peer.
 An empty live catalog also replaces obsolete cached schemas instead of
 advertising removed tools on the next startup.
 
+Tool catalogs follow `nextCursor` and publish only after the complete walk.
+Cursor cycles, duplicate names, later-page failures and catalog limits preserve
+the last good catalog. A walk permits up to 100 pages, 10,000 tools and 32 MiB of
+serialized results, within one configured request deadline for the whole walk.
+
 The entire remote handshake has a 30-second deadline, including credential
 refresh, initialization, legacy fallback, and tool listing. Individual tool
 requests also default to 30 seconds. `timeout_secs` can extend legitimately slow

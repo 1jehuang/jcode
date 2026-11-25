@@ -1,5 +1,9 @@
 //! MCP Client - handles communication with a single MCP server
 
+#[cfg(all(test, unix))]
+#[path = "client_pagination_tests.rs"]
+mod pagination_tests;
+
 use super::protocol::*;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -150,18 +154,62 @@ impl McpHandle {
             .clone()
     }
 
-    /// Refresh the list of available tools
+    /// Refresh the complete tool catalog, preserving the last good snapshot on failure.
     pub async fn refresh_tools(&self) -> Result<()> {
-        let response = self.request("tools/list", None).await?;
-
-        if let Some(result) = response.result {
-            let tools_result: ToolsListResult = serde_json::from_value(result)?;
-            *self
-                .tools
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools_result.tools;
-        }
-
+        const MAX_PAGES: usize = 100;
+        const MAX_TOOLS: usize = 10_000;
+        const MAX_CATALOG_BYTES: usize = 32 * 1024 * 1024;
+        let tools = tokio::time::timeout(self.request_timeout, async {
+            let mut tools = Vec::new();
+            let mut cursor: Option<String> = None;
+            let mut cursors = std::collections::HashSet::new();
+            let mut names = std::collections::HashSet::new();
+            let mut bytes = 0usize;
+            for _ in 0..MAX_PAGES {
+                let params = cursor
+                    .as_ref()
+                    .map(|cursor| serde_json::json!({"cursor":cursor}));
+                let result = self
+                    .request("tools/list", params)
+                    .await?
+                    .result
+                    .context("MCP tools/list response has no result")?;
+                bytes = bytes.saturating_add(crate::process_memory::estimate_json_bytes(&result));
+                anyhow::ensure!(
+                    bytes <= MAX_CATALOG_BYTES,
+                    "MCP tool catalog exceeds 32 MiB"
+                );
+                let page: ToolsListResult = serde_json::from_value(result)?;
+                anyhow::ensure!(
+                    tools.len().saturating_add(page.tools.len()) <= MAX_TOOLS,
+                    "MCP tool catalog exceeds 10000 tools"
+                );
+                for tool in page.tools {
+                    anyhow::ensure!(
+                        names.insert(tool.name.clone()),
+                        "MCP tools/list returned a duplicate tool name"
+                    );
+                    tools.push(tool);
+                }
+                match page.next_cursor {
+                    Some(next) => {
+                        anyhow::ensure!(
+                            cursors.insert(next.clone()),
+                            "MCP tools/list repeated a cursor"
+                        );
+                        cursor = Some(next);
+                    }
+                    None => return Ok::<_, anyhow::Error>(tools),
+                }
+            }
+            anyhow::bail!("MCP tool catalog exceeds 100 pages")
+        })
+        .await
+        .with_context(|| format!("MCP server '{}' catalog refresh timed out", self.name))??;
+        *self
+            .tools
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
         Ok(())
     }
 }
