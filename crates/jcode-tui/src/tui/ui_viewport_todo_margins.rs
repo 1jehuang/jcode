@@ -110,10 +110,13 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
         more_line = Some(lines.len());
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
-            Style::default().fg(dim_color()),
-        )));
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                format!("  … +{} more (todo)", hidden),
+                Style::default().fg(dim_color()),
+            )),
+            usize::from(card_width),
+        ));
     } else if expanded {
         // Expanded bands get a larger budget but stay bounded so a long plan
         // cannot swallow the transcript. Overflow scrolls with the wheel.
@@ -134,10 +137,10 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         } else {
             "  ▴ Collapse todos".to_string()
         };
-        lines.push(Line::from(Span::styled(
-            label,
-            Style::default().fg(dim_color()),
-        )));
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(label, Style::default().fg(dim_color()))),
+            usize::from(card_width),
+        ));
         lines.extend(card_lines.into_iter().skip(offset).take(window));
     } else {
         lines.extend(card_lines);
@@ -365,6 +368,10 @@ mod pinned_todo_projection_tests {
                         for height in [3, 6, 24] {
                             let (lines, _) = pinned_todo_band_lines_for_payload(
                                 payload, expanded, diff, width, height,
+                            );
+                            assert!(
+                                lines.iter().all(|line| line.width() <= usize::from(width)),
+                                "width={width}, height={height}, expanded={expanded}: {lines:?}"
                             );
                             assert_eq!(
                                 visible,
