@@ -189,6 +189,26 @@ pub fn list_sessions(path: &Path, limit: usize) -> Result<Vec<OpenCodeDbSession>
     Ok(rows)
 }
 
+/// Identify database-owned IDs before legacy copies consume a search slot.
+/// Includes archived and child sessions so a legacy copy cannot revive them.
+pub fn session_ids_present(
+    path: &Path,
+    session_ids: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    if session_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let db = open(path)?;
+    let placeholders = std::iter::repeat_n("?", session_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut statement = db.prepare(&format!(
+        "SELECT id FROM session WHERE id IN ({placeholders})"
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(session_ids), |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 pub fn load_session(path: &Path, session_id: &str) -> Result<Option<OpenCodeDbSession>> {
     let db = open(path)?;
     let sql = format!("SELECT {SESSION_COLUMNS} FROM session s WHERE s.id = ?1");

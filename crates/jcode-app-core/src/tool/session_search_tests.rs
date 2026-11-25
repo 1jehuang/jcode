@@ -6,7 +6,7 @@ use serde_json::json;
 use std::path::Path;
 use std::time::Instant;
 
-fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+pub(super) fn with_temp_home<T>(f: impl FnOnce(&Path) -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let previous_home = std::env::var("JCODE_HOME").ok();
@@ -42,7 +42,7 @@ fn save_test_session(id: &str, messages: Vec<(Role, Vec<ContentBlock>)>) -> Sess
     session
 }
 
-fn run_report(home: &Path, query: &str, options: &SearchOptions) -> SearchReport {
+pub(super) fn run_report(home: &Path, query: &str, options: &SearchOptions) -> SearchReport {
     search_sessions_blocking(
         &home.join("sessions"),
         &QueryProfile::new(query),
@@ -52,7 +52,7 @@ fn run_report(home: &Path, query: &str, options: &SearchOptions) -> SearchReport
     .expect("search succeeds")
 }
 
-fn run_search(home: &Path, query: &str, options: &SearchOptions) -> Vec<SearchResult> {
+pub(super) fn run_search(home: &Path, query: &str, options: &SearchOptions) -> Vec<SearchResult> {
     run_report(home, query, options).results
 }
 
