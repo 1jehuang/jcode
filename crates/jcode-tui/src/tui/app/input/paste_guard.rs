@@ -47,7 +47,7 @@ pub(crate) fn tiny_png_bytes_for_test() -> Vec<u8> {
 }
 
 /// True for file extensions drag-and-drop paste treats as images.
-fn has_image_extension(path: &std::path::Path) -> bool {
+pub(super) fn has_image_extension(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| {

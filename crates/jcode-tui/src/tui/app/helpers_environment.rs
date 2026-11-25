@@ -188,6 +188,14 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
 /// Returns `Some((media_type, base64_data))` if an image is available.
 /// Uses `wl-paste` on Wayland, `osascript` on macOS, falls back to `arboard::get_image()`.
 pub(in super::super) fn clipboard_image() -> Option<(String, String)> {
+    clipboard_image_impl(true)
+}
+
+pub(in super::super) fn clipboard_image_native() -> Option<(String, String)> {
+    clipboard_image_impl(false)
+}
+
+fn clipboard_image_impl(allow_html: bool) -> Option<(String, String)> {
     use base64::Engine;
 
     // Try wl-paste first (native Wayland - better image format support)
@@ -225,7 +233,8 @@ pub(in super::super) fn clipboard_image() -> Option<(String, String)> {
         }
 
         // Fallback: check text/html for <img> tags (Discord copies HTML with image URLs)
-        if types.lines().any(|t| t.trim() == "text/html")
+        if allow_html
+            && types.lines().any(|t| t.trim() == "text/html")
             && let Ok(html_output) = std::process::Command::new("wl-paste")
                 .args(["--type", "text/html"])
                 .output()
@@ -364,4 +373,45 @@ pub(super) fn gather_ambient_info_inner(ambient_enabled: bool) -> Option<Ambient
             .map(|item| format_countdown_until(item.scheduled_for)),
         budget_percent: None,
     })
+}
+
+/// Download an image from a URL and return (media_type, base64_data).
+/// Uses curl for simplicity (available on all platforms).
+pub(in super::super) fn download_image_url(url: &str) -> Option<(String, String)> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
+    use base64::Engine;
+
+    let output = match std::process::Command::new("curl")
+        .args(["-sL", "--max-time", "10", "--max-filesize", "10000000", url])
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard image download unavailable: {error}"));
+            return None;
+        }
+    };
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+
+    // Detect image type from magic bytes
+    let data = &output.stdout;
+    let media_type = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if data.starts_with(b"GIF8") {
+        "image/gif"
+    } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return None;
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+    Some((media_type.to_string(), b64))
 }
