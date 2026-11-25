@@ -1,9 +1,7 @@
 // Pins how `[image N]` placeholders in the input buffer interact with
 // slash-command parsing in submit_input (crates/jcode-tui/src/tui/app/input.rs).
 //
-// Placeholders are plain text: expand_paste_placeholders only expands
-// `[pasted N lines]` markers, never `[image N]`. Command routing therefore
-// sees the placeholder literally.
+// Legacy marker-looking text stays literal; freshly inserted markers carry ownership.
 
 fn attach_test_image(app: &mut App) {
     // Mirrors attach_image() in input.rs: push pending image, insert
@@ -61,41 +59,32 @@ fn local_image_submission_invalidates_cached_image_set() {
 #[test]
 fn test_image_attachment_deletion_reports_detach_and_keeps_other_image() {
     let mut app = create_test_app();
-    attach_test_image(&mut app);
-    attach_test_image(&mut app);
-    app.set_input_for_test("[image 2]");
-    app.sync_model_picker_preview_from_input();
+    provenance_attach_image(&mut app);
+    provenance_attach_image(&mut app);
+    app.cursor_pos = 0;
+    app.handle_key(KeyCode::Delete, KeyModifiers::NONE).unwrap();
     assert_eq!(
         app.status_notice(),
-        Some("Detached 1 image · 1 attached".to_string())
+        Some("Detached 1 image · 1 attached".into())
     );
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    assert!(crate::tui::TuiState::input_image_attached(&app, 2));
-    assert!(!crate::tui::TuiState::input_image_attached(&app, 0));
+    assert!(crate::tui::TuiState::input_image_attached(&app, 1));
+    assert!(!crate::tui::TuiState::input_image_attached(&app, 2));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
     assert_eq!(prepared.images.len(), 1);
-    assert_eq!(prepared.raw_input, "[image 2]");
+    assert_eq!(prepared.raw_input, "[image 1]");
 }
 
 #[test]
 fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
     let mut app = create_test_app();
-    attach_test_image(&mut app);
+    provenance_attach_image(&mut app);
     app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
         .unwrap();
     assert_eq!(
         app.status_notice(),
-        Some("Detached 1 image · 0 attached".to_string())
+        Some("Detached 1 image · 0 attached".into())
     );
     assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
-    // Submitting without the marker sends no image.
-    let mut detached = create_test_app();
-    attach_test_image(&mut detached);
-    detached.set_input_for_test("no marker");
-    detached.sync_model_picker_preview_from_input();
-    let prepared = crate::tui::app::input::take_prepared_input(&mut detached);
-    assert!(prepared.images.is_empty());
-    // Undoing the text restores the marker together with its payload.
     app.undo_input_change();
     assert_eq!(app.input(), "[image 1]");
     assert!(crate::tui::TuiState::input_image_attached(&app, 1));
@@ -106,7 +95,7 @@ fn test_image_attachment_backspace_detaches_payload_and_reports_status() {
 #[test]
 fn test_escape_then_undo_keeps_pasted_image_attached() {
     let mut app = create_test_app();
-    attach_test_image(&mut app);
+    provenance_attach_image(&mut app);
     app.handle_key(KeyCode::Esc, KeyModifiers::NONE).unwrap();
     assert_eq!(app.input(), "");
     assert!(!crate::tui::TuiState::input_image_attached(&app, 1));
@@ -115,7 +104,7 @@ fn test_escape_then_undo_keeps_pasted_image_attached() {
     assert!(crate::tui::TuiState::input_image_attached(&app, 1));
     let prepared = crate::tui::app::input::take_prepared_input(&mut app);
     assert_eq!(prepared.images.len(), 1);
-    assert!(app.detached_images.is_empty());
+    assert!(app.pending_images.is_empty());
 }
 
 #[test]
@@ -204,3 +193,5 @@ fn test_unknown_skill_with_image_placeholder_reports_error_and_keeps_image() {
     );
     assert_eq!(app.pending_images.len(), 1);
 }
+
+include!("input_image_provenance.rs");

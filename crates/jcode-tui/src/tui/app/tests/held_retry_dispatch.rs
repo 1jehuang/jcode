@@ -162,6 +162,9 @@ fn remote_disconnect_releases_unconfirmed_switch_and_restores_waiting_prompt() {
             app.input = new_draft.to_string();
             let image = ("image/png".to_string(), "aW1hZ2U=".to_string());
             app.pending_prompt_after_model_switch = Some(input::PreparedInput {
+                image_markers: Default::default(),
+                routing_input: None,
+                pasted_contents: Vec::new(),
                 raw_input: "use the selected model [image 1]".to_string(),
                 expanded: "expanded prompt for selected model".to_string(),
                 images: vec![image.clone()],

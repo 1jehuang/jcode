@@ -92,13 +92,6 @@ impl App {
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
                 if !pending.content.trim().is_empty() {
-                    for queued in &mut queued_messages {
-                        input::offset_image_markers(
-                            queued,
-                            self.queued_images.len(),
-                            pending.images.len(),
-                        );
-                    }
                     queued_messages.insert(0, pending.content.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
@@ -121,6 +114,8 @@ impl App {
                     "media_type": media_type,
                     "data": data,
                 })).collect::<Vec<_>>(),
+                "pasted_contents": if resume_prompt.is_some() { Vec::new() } else { self.pasted_contents.clone() },
+                "image_markers": if resume_prompt.is_some() { super::input_images::InputImageMarkers::default() } else { self.input_image_markers.clone() },
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
                 "queued_images": inflight_continuation.into_iter().flat_map(|p| p.images.iter()).chain(self.queued_images.iter()).collect::<Vec<_>>(),

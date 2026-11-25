@@ -88,6 +88,7 @@ mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod input_images;
 mod jarvis;
 mod jarvis_listen;
 mod jarvis_status;
@@ -1248,9 +1249,7 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
-    // Payloads of images whose `[image N]` marker left the composer, keyed by
-    // slot index, so restoring the marker (Ctrl+Z after Esc) reattaches them.
-    detached_images: std::collections::HashMap<usize, (String, String)>,
+    input_image_markers: input_images::InputImageMarkers,
     // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
     // older-history load was requested, loads requested since the toggle).
     prompt_history_backfill: (Option<usize>, u8),
@@ -1741,13 +1740,13 @@ pub struct App {
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
+    stashed_input: Option<input_images::InputUndoSnapshot>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press

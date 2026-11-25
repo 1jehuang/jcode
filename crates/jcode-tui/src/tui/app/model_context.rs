@@ -277,46 +277,9 @@ impl App {
             "held_payload",
         );
         let restored = payload.raw_input.unwrap_or(payload.content);
-        let image_indices: Vec<Option<usize>> = payload
-            .images
-            .into_iter()
-            .map(|image| {
-                if image.0.is_empty() || image.1.is_empty() {
-                    return None;
-                }
-                let index = self
-                    .pending_images
-                    .iter()
-                    .position(|existing| existing == &image)
-                    .unwrap_or_else(|| {
-                        self.pending_images.push(image);
-                        self.pending_images.len() - 1
-                    });
-                Some(index + 1)
-            })
-            .collect();
-        if self.input.is_empty() {
-            // The composer may already have attachment slots. Remap markers
-            // in the recovered prompt once, so swaps and collisions cannot
-            // associate its text with a different image.
-            static IMAGE_MARKER: std::sync::LazyLock<Result<regex::Regex, regex::Error>> =
-                std::sync::LazyLock::new(|| regex::Regex::new(r"\[image (\d+)\]"));
-            self.input = if let Ok(marker) = &*IMAGE_MARKER {
-                marker
-                    .replace_all(&restored, |captures: &regex::Captures<'_>| {
-                        captures[1]
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|number| number.checked_sub(1))
-                            .and_then(|index| image_indices.get(index).copied().flatten())
-                            .map(|index| format!("[image {index}]"))
-                            .unwrap_or_else(|| captures[0].to_string())
-                    })
-                    .into_owned()
-            } else {
-                restored.clone()
-            };
-            self.cursor_pos = self.input.len();
+        let into_empty_composer = self.input.is_empty();
+        if into_empty_composer {
+            self.input = restored;
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
             // request. Keep the held request recoverable in the transcript.
@@ -324,18 +287,15 @@ impl App {
                 "Failover request was not resent. Your draft text is preserved. Recover the previous request from here:\n\n{restored}"
             )));
         }
-        // Attachment synchronization intentionally drops payloads without a
-        // marker. Keep recovered images attached even for image-only prompts
-        // or when a newer draft was already present.
-        for index in image_indices.into_iter().flatten() {
-            let marker = format!("[image {index}]");
-            if !self.input.contains(&marker) {
-                if !self.input.is_empty() && !self.input.ends_with(char::is_whitespace) {
-                    self.input.push(' ');
-                }
-                self.input.push_str(&marker);
-                self.cursor_pos = self.input.len();
+        for image in payload.images {
+            if !image.0.is_empty() && !image.1.is_empty() && !self.pending_images.contains(&image) {
+                self.pending_images.push(image);
             }
+        }
+        self.ensure_input_image_markers();
+        if into_empty_composer {
+            // After any appended attachment markers.
+            self.cursor_pos = self.input.len();
         }
     }
 

@@ -1626,40 +1626,6 @@ impl App {
         self.command_suggestion_selected = 0;
     }
 
-    pub(super) fn remember_input_undo_state(&mut self) {
-        self.input_typing_undo = None;
-        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
-        if self.input_undo_stack.last() == Some(&snapshot) {
-            return;
-        }
-        if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
-            self.input_undo_stack.remove(0);
-        }
-        self.input_undo_stack.push(snapshot);
-    }
-
-    pub(super) fn clear_input_undo_history(&mut self) {
-        self.input_undo_stack.clear();
-        self.input_typing_undo = None;
-        self.history_draft = None;
-    }
-
-    pub(super) fn undo_input_change(&mut self) {
-        self.input_typing_undo = None;
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
-            // The composer now holds a restored draft, so the copy stashed by a
-            // history jump is stale: a later Down must not resurrect it.
-            self.history_draft = None;
-            self.input = input;
-            self.cursor_pos = cursor_pos.min(self.input.len());
-            self.reset_tab_completion();
-            self.sync_model_picker_preview_from_input();
-            self.set_status_notice("↶ Input restored");
-        } else {
-            self.set_status_notice("Nothing to undo");
-        }
-    }
-
     pub(super) fn command_accepts_args(cmd: &str) -> bool {
         matches!(
             cmd.trim(),

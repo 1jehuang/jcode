@@ -1,9 +1,8 @@
 #[path = "tui_lifecycle_keybindings.rs"]
 mod keybindings;
 #[path = "tui_lifecycle_reload_input.rs"]
-mod reload_input;
+pub(super) mod reload_input;
 
-use super::state_ui::RestoredReloadInput;
 #[path = "tui_lifecycle_remote_startup.rs"]
 mod remote_startup;
 
@@ -403,7 +402,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
-            detached_images: Default::default(),
+            input_image_markers: Default::default(),
             prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
@@ -927,7 +926,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
-            detached_images: Default::default(),
+            input_image_markers: Default::default(),
             prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,

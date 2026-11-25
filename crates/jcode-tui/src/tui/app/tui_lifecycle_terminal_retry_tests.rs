@@ -75,9 +75,10 @@ fn terminal_remote_retry_preserves_draft_and_deduplicates_images() {
     let _guard = rt.enter();
     let mut app = super::super::tests::create_test_app();
     let image = ("image/png".to_string(), "original-image".to_string());
-    app.input = "Keep my new draft [image 1]".to_string();
+    app.input = "Keep my new draft ".to_string();
+    app.cursor_pos = app.input.len();
+    super::super::input_images::attach_image(&mut app, image.0.clone(), image.1.clone());
     app.last_submitted_input = Some("Failed prompt".to_string());
-    app.pending_images.push(image.clone());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
         jarvis_voice: false,
         content: "Expanded failed prompt".to_string(),

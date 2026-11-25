@@ -21,7 +21,7 @@ use crossterm::event::{
 use ratatui::{DefaultTerminal, Terminal, backend::Backend};
 use std::time::{Duration, Instant};
 
-mod input_dispatch;
+pub(super) mod input_dispatch;
 mod key_handling;
 mod latency;
 mod queue_recovery;

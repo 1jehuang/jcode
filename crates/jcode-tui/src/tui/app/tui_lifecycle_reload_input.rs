@@ -1,5 +1,35 @@
 use super::*;
 
+pub(in crate::tui::app) struct RestoredReloadInput {
+    pub input: String,
+    pub cursor: usize,
+    pub pasted_contents: Vec<String>,
+    pub image_markers: super::input_images::InputImageMarkers,
+    pub pending_images: Vec<(String, String)>,
+    pub submit_on_restore: bool,
+    pub queued_messages: Vec<String>,
+    pub queued_images: Vec<(String, String)>,
+    pub queued_commands: Vec<String>,
+    pub hidden_queued_system_messages: Vec<String>,
+    pub startup_status_notice: Option<String>,
+    pub startup_display_message: Option<(String, String)>,
+    pub interleave_message: Option<String>,
+    pub pending_soft_interrupts: Vec<String>,
+    pub pending_soft_interrupt_resend: Option<Vec<String>>,
+    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
+    pub rate_limit_reset: Option<Instant>,
+    pub observe_mode_enabled: bool,
+    pub observe_page_markdown: String,
+    pub observe_page_updated_at_ms: u64,
+    pub split_view_enabled: bool,
+    pub todos_view_enabled: bool,
+    pub todo_confidence_spike_challenged: bool,
+    pub last_todo_ownership_fingerprint: Option<String>,
+    pub final_response_todo_fingerprint: Option<String>,
+    pub last_auto_poke_fingerprint: Option<String>,
+    pub auto_poke_attempts: u8,
+}
+
 impl App {
     /// A pending reload-recovery continuation must run as its own turn before
     /// user follow-ups queued ahead of the reload are sent.
@@ -12,8 +42,11 @@ impl App {
         restored: RestoredReloadInput,
     ) {
         self.input = restored.input;
-        self.cursor_pos = restored.cursor;
+        self.cursor_pos = super::input::floor_char_boundary(&self.input, restored.cursor);
         self.pending_images = restored.pending_images;
+        self.input_image_markers = restored.image_markers;
+        self.pasted_contents = restored.pasted_contents;
+        self.ensure_input_image_markers();
         self.submit_input_on_startup = restored.submit_on_restore
             && (!self.input.is_empty() || !self.pending_images.is_empty());
         crate::logging::info(&format!(
