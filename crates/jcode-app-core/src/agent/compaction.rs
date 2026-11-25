@@ -112,6 +112,9 @@ impl Agent {
     fn is_context_limit_error(error: &str) -> bool {
         let lower = error.to_lowercase();
         lower.contains("context length")
+            || lower.contains("context_length_exceeded")
+            || lower.contains("prompt_too_large")
+            || lower.contains("context is too large")
             || lower.contains("context window")
             || lower.contains("maximum context")
             || lower.contains("max context")
@@ -430,3 +433,7 @@ impl Agent {
         };
     }
 }
+
+#[cfg(test)]
+#[path = "compaction_context_limit_tests.rs"]
+mod context_limit_tests;
