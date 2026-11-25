@@ -29,7 +29,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         vec![persisted_message],
     )));
 
-    let new_registry = Registry::new(provider.clone()).await;
+    let mut new_registry = Registry::new(provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
         provider.clone(),
         new_registry.clone(),
@@ -118,7 +118,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
         "conn_new",
         &new_agent,
         &provider,
-        &new_registry,
+        &mut new_registry,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

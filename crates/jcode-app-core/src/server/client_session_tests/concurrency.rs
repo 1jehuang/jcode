@@ -40,6 +40,7 @@ async fn restore_for_concurrency_test(
     registry: &Registry,
     sessions: &crate::server::SessionAgents,
 ) -> Result<Arc<Mutex<Agent>>> {
+    let mut registry = registry.clone();
     let mut client_selfdev = false;
     let mut client_session_id = source_id.to_owned();
     let (stream, _peer) = crate::transport::stream_pair()?;
@@ -77,7 +78,7 @@ async fn restore_for_concurrency_test(
         "concurrency-test-connection",
         source,
         provider,
-        registry,
+        &mut registry,
         sessions,
         &Arc::new(RwLock::new(HashMap::new())),
         &Arc::new(RwLock::new(HashMap::new())),

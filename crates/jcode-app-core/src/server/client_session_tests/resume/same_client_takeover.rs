@@ -24,7 +24,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         Vec::new(),
     )));
 
-    let new_registry = Registry::new(provider.clone()).await;
+    let mut new_registry = Registry::new(provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
         provider.clone(),
         new_registry.clone(),
@@ -114,7 +114,7 @@ async fn handle_resume_session_allows_same_client_instance_takeover_without_loca
         "conn_new",
         &new_agent,
         &provider,
-        &new_registry,
+        &mut new_registry,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

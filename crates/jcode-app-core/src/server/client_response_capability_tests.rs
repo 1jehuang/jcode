@@ -412,6 +412,45 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
     .await;
     catalog(&mut creator_reader, &mut creator_writer, false).await;
     catalog(&mut viewer_reader, &mut viewer_writer, true).await;
+
+    // A later Subscribe must update this restored Agent's MCP registry.
+    let next_project = home._home.path().join("post-resume-project");
+    std::fs::create_dir_all(next_project.join(".jcode")).unwrap();
+    std::fs::write(
+        next_project.join(".jcode/mcp.json"),
+        r#"{"mcpServers":{"post-resume-marker":{"command":"must-not-run","disabled":true}}}"#,
+    )
+    .unwrap();
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"subscribe", "id":141, "working_dir":next_project,
+            "supports_user_response":false}),
+    )
+    .await;
+    let restored_agent = sessions.read().await.get(&disk_target.id).unwrap().clone();
+    let registry = restored_agent.lock().await.registry();
+    let output = registry
+        .execute(
+            "mcp",
+            json!({"action":"list"}),
+            crate::tool::ToolContext {
+                session_id: disk_target.id.clone(),
+                message_id: "post-resume".into(),
+                tool_call_id: "post-resume-mcp-list".into(),
+                working_dir: Some(next_project),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.output.contains("post-resume-marker"),
+        "{}",
+        output.output
+    );
     done(
         &mut viewer_reader,
         &mut viewer_writer,

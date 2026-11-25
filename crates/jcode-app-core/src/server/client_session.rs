@@ -1260,7 +1260,7 @@ pub(super) async fn handle_resume_session(
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    registry: &Registry,
+    registry: &mut Registry,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -1673,8 +1673,8 @@ pub(super) async fn handle_resume_session(
     // different session into that published Arc: doing so silently changes
     // every observer's runtime beneath its still-old session ID.
     let source_agent = agent;
-    let registry = Registry::new(Arc::clone(provider)).await;
-    let mut detached = Agent::new(provider.fork(), registry.clone());
+    let restored_registry = Registry::new(Arc::clone(provider)).await;
+    let mut detached = Agent::new(provider.fork(), restored_registry.clone());
     if let Ok(source) = source_agent.try_lock() {
         detached.set_debug(source.is_debug());
     }
@@ -1704,7 +1704,7 @@ pub(super) async fn handle_resume_session(
 
     if result.is_ok() && is_canary {
         *client_selfdev = true;
-        registry.register_selfdev_tools().await;
+        restored_registry.register_selfdev_tools().await;
     }
 
     let restored_ms = resume_start.elapsed().as_millis();
@@ -1746,6 +1746,7 @@ pub(super) async fn handle_resume_session(
             };
 
             resume_guard.publish(Arc::clone(agent)).await?;
+            *registry = restored_registry.clone();
             lap("sessions");
             crate::runtime_memory_log::emit_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1996,7 +1997,7 @@ pub(super) async fn handle_resume_session(
             let _ = client_event_tx.send(model_changed);
             // Resolve project-local MCP config against the restored session's
             // working dir captured before publication (issue #420).
-            registry
+            restored_registry
                 .register_mcp_tools_for_dir(
                     Some(client_event_tx.clone()),
                     Some(Arc::clone(mcp_pool)),

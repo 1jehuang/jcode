@@ -22,7 +22,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         Vec::new(),
     )));
 
-    let new_registry = Registry::new(provider.clone()).await;
+    let mut new_registry = Registry::new(provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
         provider.clone(),
         new_registry.clone(),
@@ -112,7 +112,7 @@ async fn handle_resume_session_allows_attach_from_different_client_instance() ->
         "conn_new",
         &new_agent,
         &provider,
-        &new_registry,
+        &mut new_registry,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,
