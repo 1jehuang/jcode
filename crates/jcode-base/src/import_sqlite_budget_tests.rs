@@ -2,6 +2,7 @@
 //! normalizer. No test opens an installed OpenCode database.
 use super::*;
 use crate::opencode_db::fixture::Fixture;
+use serde_json::json;
 
 struct HomeGuard(Option<std::ffi::OsString>);
 impl HomeGuard {
@@ -496,4 +497,72 @@ fn unreadable_opencode_db_does_not_block_other_stores() {
     // With no other match, the database error still surfaces.
     assert!(import_external_resume_id("ses_missing").is_err());
     assert!(import_opencode_session("ses_missing").is_err());
+}
+
+#[test]
+fn sqlite_history_read_failure_falls_back_and_is_preserved_when_no_copy_exists() {
+    let _guard = crate::storage::lock_test_env();
+    let id = "22222222-3333-4444-5555-666666666666";
+    for source in ["legacy", "cursor", "missing"] {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(temp.path());
+        let external = temp.path().join("external");
+        let db = crate::opencode_db::db_path().unwrap();
+        let f = Fixture::create(&db);
+        f.session(id, None, "Broken history", "/fixture", "p", "m", 1, None)
+            .message(id, "broken-message", "user", 1);
+        f.0.execute_batch("DROP TABLE part").unwrap();
+        drop(f);
+        assert!(crate::opencode_db::load_session(&db, id).unwrap().is_some());
+        assert!(format!("{:#}", import_opencode_db_session(&db, id).unwrap_err()).contains("part"));
+        if source == "legacy" {
+            let store = external.join(".local/share/opencode/storage");
+            for (relative, value) in [
+                (
+                    format!("session/global/{id}.json"),
+                    json!({"id":id,"title":"Readable legacy"}),
+                ),
+                (
+                    format!("message/{id}/message.json"),
+                    json!({"id":"legacy-message","role":"user"}),
+                ),
+                (
+                    "part/legacy-message/part.json".into(),
+                    json!({"type":"text","text":"legacy history survives"}),
+                ),
+            ] {
+                let path = store.join(relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, value.to_string()).unwrap();
+            }
+            assert_eq!(
+                import_external_resume_id(id).unwrap(),
+                Some(imported_opencode_session_id(id))
+            );
+            let session = import_opencode_session(id).unwrap();
+            assert!(
+                texts(&session)
+                    .iter()
+                    .any(|text| text.contains("legacy history survives"))
+            );
+        } else if source == "cursor" {
+            let path = external.join(format!(
+                ".cursor/projects/fallback/agent-transcripts/{id}/{id}.jsonl"
+            ));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"cursor history survives\"}]}}\n").unwrap();
+            assert_eq!(
+                import_external_resume_id(id).unwrap(),
+                Some(imported_cursor_session_id(id))
+            );
+        } else {
+            for error in [
+                import_external_resume_id(id).unwrap_err(),
+                import_opencode_session(id).unwrap_err(),
+            ] {
+                assert!(format!("{error:#}").contains("part"));
+            }
+            assert!(Session::load(&imported_opencode_session_id(id)).is_err());
+        }
+    }
 }

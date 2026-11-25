@@ -679,10 +679,9 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
 
     // An unreadable opencode.db must not hide a match in the other stores, so
     // its error is only returned when nothing else matched.
-    let opencode_db = opencode_db_with_session(resume_id);
-    if let Ok(Some(db)) = &opencode_db {
-        let session = import_opencode_db_session(db, resume_id)?;
-        return Ok(Some(session.id));
+    let opencode_db = import_existing_opencode_db_session(resume_id);
+    if let Ok(Some(session)) = &opencode_db {
+        return Ok(Some(session.id.clone()));
     }
 
     if let Ok(path) = find_opencode_session_file(resume_id) {
@@ -1276,7 +1275,7 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
 
 #[path = "import_opencode.rs"]
 mod opencode;
-use opencode::{find_opencode_session_file, opencode_db_with_session};
+use opencode::{find_opencode_session_file, import_existing_opencode_db_session};
 pub use opencode::{
     import_opencode_db_session, import_opencode_session, import_opencode_session_from_path,
 };

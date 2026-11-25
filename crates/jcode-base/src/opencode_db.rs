@@ -217,13 +217,11 @@ pub(crate) struct ImportMessages {
     pub model_id: Option<String>,
 }
 
-/// Scan text in bounded UTF-8 chunks, retaining only a provider-safe tail.
-/// SQLite still parses each JSON part, but neither a whole text part nor the
-/// full history is copied into Rust. Older turns are scanned for exact omission
-/// diagnostics and the original oldest-first metadata fallback.
-/// The 32 KiB blob chunks bound Rust payloads, not SQLite's internal JSON
-/// allocations or total database RSS. A partial UTF-8 scalar carries at most
-/// three bytes into the next chunk. Blob slicing also preserves embedded NULs.
+/// Retain only a provider-safe tail while borrowing each SQLite text payload.
+/// Each scan extracts JSON once; neither a whole part nor the full history is
+/// copied into Rust. Older turns are scanned for exact omission diagnostics and
+/// the original oldest-first metadata fallback. SQLite's internal JSON buffers
+/// and total database RSS are not bounded by the Rust retention budget.
 pub(crate) fn load_import_messages(
     path: &Path,
     session_id: &str,
@@ -249,7 +247,7 @@ pub(crate) fn load_import_messages(
          AND COALESCE(json_extract(data, '$.synthetic'), 0) = 0 ORDER BY id",
     )?;
     let mut chunk = db.prepare(
-        "SELECT substr(CAST(json_extract(data, '$.text') AS BLOB), ?2, 32768) \
+        "SELECT CAST(json_extract(data, '$.text') AS BLOB) \
          FROM part WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![session_id])?;
@@ -286,7 +284,6 @@ pub(crate) fn load_import_messages(
             let mut usable = false;
             scan_import_part(&mut chunk, &id, |s| {
                 usable |= !s.trim().is_empty();
-                !usable
             })?;
             if !usable {
                 continue;
@@ -302,7 +299,6 @@ pub(crate) fn load_import_messages(
             has_part = true;
             scan_import_part(&mut chunk, &id, |s| {
                 text.push(s);
-                true
             })?;
         }
         let Some(text) = text.finish() else {
@@ -327,28 +323,19 @@ pub(crate) fn load_import_messages(
 fn scan_import_part(
     stmt: &mut rusqlite::Statement<'_>,
     id: &str,
-    mut visit: impl FnMut(&str) -> bool,
+    mut visit: impl FnMut(&str),
 ) -> Result<()> {
-    let mut offset = 1i64;
-    let mut pending = Vec::new();
-    loop {
-        let bytes: Option<Vec<u8>> = stmt.query_row(params![id, offset], |row| row.get(0))?;
-        let Some(bytes) = bytes.filter(|s| !s.is_empty()) else {
-            anyhow::ensure!(pending.is_empty(), "Incomplete UTF-8 OpenCode text part");
-            break;
-        };
-        offset += bytes.len() as i64;
-        pending.extend_from_slice(&bytes);
-        let valid = match std::str::from_utf8(&pending) {
-            Ok(_) => pending.len(),
-            Err(error) if error.error_len().is_none() => error.valid_up_to(),
-            Err(error) => return Err(error.into()),
-        };
-        if !visit(std::str::from_utf8(&pending[..valid])?) {
-            break;
-        }
-        pending.drain(..valid);
-    }
+    stmt.query_row(params![id], |row| match row.get_ref(0)? {
+        rusqlite::types::ValueRef::Null => Ok(Ok(())),
+        rusqlite::types::ValueRef::Blob(bytes) => Ok(std::str::from_utf8(bytes).map(|text| {
+            visit(text);
+        })),
+        value => Err(rusqlite::Error::InvalidColumnType(
+            0,
+            "text".into(),
+            value.data_type(),
+        )),
+    })??;
     Ok(())
 }
 

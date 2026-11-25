@@ -312,3 +312,38 @@ fn opencode_db_live_snapshot() {
         with_text
     );
 }
+
+#[test]
+fn large_part_scan_uses_constant_sql_work_and_borrows_the_full_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture_path(&dir);
+    let db = fixture::Fixture::create(&path);
+    db.session("scale", None, "Scale", "/fixture", "p", "m", 1, None)
+        .message("scale", "message", "user", 1);
+    for (id, bytes) in [("small", 1024 * 1024), ("large", 4 * 1024 * 1024)] {
+        db.text("scale", "message", id, &"x".repeat(bytes));
+    }
+    let mut statement =
+        db.0.prepare("SELECT CAST(json_extract(data, '$.text') AS BLOB) FROM part WHERE id = ?1")
+            .unwrap();
+    let mut work = Vec::new();
+    for (id, expected) in [("small", 1024 * 1024), ("large", 4 * 1024 * 1024)] {
+        let before = statement.get_status(rusqlite::StatementStatus::VmStep);
+        let mut visits = 0;
+        scan_import_part(&mut statement, id, |text| {
+            visits += 1;
+            assert_eq!(text.len(), expected);
+            assert!(text.bytes().all(|byte| byte == b'x'));
+        })
+        .unwrap();
+        assert_eq!(
+            visits, 1,
+            "one extraction per scan, independent of part size"
+        );
+        work.push(statement.get_status(rusqlite::StatementStatus::VmStep) - before);
+    }
+    assert!(
+        work[1] <= work[0] + 10,
+        "SQL steps grew with payload: {work:?}"
+    );
+}

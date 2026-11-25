@@ -15,23 +15,27 @@ pub(super) fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn import_opencode_session(session_id: &str) -> Result<Session> {
-    let db = opencode_db_with_session(session_id);
-    if let Ok(Some(db)) = &db {
-        return import_opencode_db_session(db, session_id);
-    }
-    // A legacy session still imports when opencode.db is unreadable.
+    let db_error = match import_existing_opencode_db_session(session_id) {
+        Ok(Some(session)) => return Ok(session),
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+    // A legacy session still imports when any SQLite history read fails.
     match find_opencode_session_file(session_id) {
         Ok(path) => import_opencode_session_from_path(&path, Some(session_id)),
-        Err(not_found) => Err(db.err().unwrap_or(not_found)),
+        Err(not_found) => Err(db_error.unwrap_or(not_found)),
     }
 }
 
-/// The OpenCode database path, if it exists and contains `session_id`.
-pub(super) fn opencode_db_with_session(session_id: &str) -> Result<Option<PathBuf>> {
+/// Complete the SQLite read before deciding whether other stores are needed.
+pub(super) fn import_existing_opencode_db_session(session_id: &str) -> Result<Option<Session>> {
     let Some(db) = crate::opencode_db::existing_db_path() else {
         return Ok(None);
     };
-    Ok(crate::opencode_db::load_session(&db, session_id)?.map(|_| db))
+    match crate::opencode_db::load_session(&db, session_id)? {
+        Some(_) => import_opencode_db_session(&db, session_id).map(Some),
+        None => Ok(None),
+    }
 }
 
 /// Import one session from OpenCode's SQLite store (OpenCode 1.17+).
