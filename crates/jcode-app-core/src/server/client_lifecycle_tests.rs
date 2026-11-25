@@ -1521,10 +1521,10 @@ fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
 #[path = "client_lifecycle_socket_tests.rs"]
 mod socket_workflows;
 
-#[path = "client_lifecycle_tests/system_prompt.rs"]
-mod system_prompt;
 #[path = "client_lifecycle_tests/agent_task.rs"]
 mod agent_task;
+#[path = "client_lifecycle_tests/system_prompt.rs"]
+mod system_prompt;
 
 #[path = "client_lifecycle_tests/stream_coalescing.rs"]
 mod stream_coalescing;
