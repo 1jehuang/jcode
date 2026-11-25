@@ -6,9 +6,9 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 mod debug_events;
-mod sessions;
 #[path = "backend_screen.rs"]
 mod screen;
+mod sessions;
 mod ssh_sessions;
 
 pub use debug_events::{DebugEvent, DebugMessage};
