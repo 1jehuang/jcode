@@ -49,7 +49,11 @@ pub fn db_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(xdg).join("opencode").join(DB_FILE_NAME));
     }
-    crate::storage::user_home_path(format!(".local/share/opencode/{DB_FILE_NAME}")).ok()
+    let Ok(path) = crate::storage::user_home_path(format!(".local/share/opencode/{DB_FILE_NAME}"))
+    else {
+        return None;
+    };
+    Some(path)
 }
 
 /// The database path, only if the file exists.
