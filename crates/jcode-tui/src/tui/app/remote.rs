@@ -1939,12 +1939,10 @@ pub(super) fn handle_disconnected_key_event(app: &mut App, event: KeyEvent) -> R
 
 fn handle_disconnected_key_internal(
     app: &mut App,
-    code: KeyCode,
-    modifiers: KeyModifiers,
+    mut code: KeyCode,
+    mut modifiers: KeyModifiers,
     text_input: Option<String>,
 ) -> Result<()> {
-    let mut code = code;
-    let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
@@ -1969,8 +1967,9 @@ fn handle_disconnected_key_internal(
 
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
+            KeyCode::Char('d') if input::try_ctrl_d_forward_delete(app) => return Ok(()),
             KeyCode::Char('c') | KeyCode::Char('d') => {
-                app.handle_quit_request();
+                input::clear_draft_or_request_quit(app);
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {

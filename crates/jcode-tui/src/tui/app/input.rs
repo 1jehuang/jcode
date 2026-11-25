@@ -2756,6 +2756,16 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
     Ok(true)
 }
 
+pub(super) fn clear_draft_or_request_quit(app: &mut App) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        app.handle_quit_request();
+        return;
+    }
+    clear_input_for_escape(app);
+    app.quit_pending = Some(Instant::now());
+    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+}
+
 pub(super) fn handle_global_control_shortcuts(
     app: &mut App,
     code: KeyCode,
@@ -2779,27 +2789,8 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
-            } else if !app.input.is_empty() {
-                // First Ctrl+C: clear the input box
-                app.input.clear();
-                let detached = app
-                    .pending_images
-                    .iter()
-                    .filter(|(_, data)| !data.is_empty())
-                    .count();
-                app.pending_images.clear();
-                app.cursor_pos = 0;
-                if detached > 0 {
-                    app.set_status_notice(format!(
-                        "Input cleared · Detached {detached} image{} · 0 attached. Press Ctrl+C again to quit",
-                        if detached == 1 { "" } else { "s" }
-                    ));
-                } else {
-                    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
-                }
             } else {
-                // Second Ctrl+C (input already empty): proceed with quit
-                app.handle_quit_request();
+                clear_draft_or_request_quit(app);
             }
             true
         }
