@@ -452,7 +452,6 @@ pub struct CacheMissAttribution {
     pub reason: String,
 }
 
-
 impl UsageInfo {
     /// Return the highest usage percentage, treating a rejected request as exhausted.
     pub fn max_usage_pct(&self) -> u8 {
