@@ -840,6 +840,8 @@ pub struct OpenRouterProvider {
     /// OpenCode (Zen / Go) endpoints, which require it for routing (issue #1167).
     /// Each provider instance (and each `fork()`) gets a fresh UUID.
     conversation_id: String,
+    /// Bound by the agent so a6api cache routing survives session restoration.
+    cache_session_id: Mutex<Option<String>>,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
     /// Provider routing preferences
@@ -879,9 +881,13 @@ impl OpenRouterProvider {
             } else {
                 effort
             };
-            // Opted-in compatible endpoints may require explicit `none` to disable thinking.
-            // Preserve omission for built-in and heuristic provider contracts.
-            if effort == "none" && self.reasoning_effort_support != Some(true) {
+            // A model's explicit `none` capability also opts into disabling thinking on the wire.
+            if effort == "none"
+                && self.reasoning_effort_support != Some(true)
+                && !self.configured_reasoning_efforts().is_some_and(|efforts| {
+                    efforts.iter().any(|value| value.eq_ignore_ascii_case("none"))
+                })
+            {
                 return false;
             }
             request["reasoning_effort"] = serde_json::json!(effort);
@@ -1554,6 +1560,7 @@ impl OpenRouterProvider {
             static_image_input_support,
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
+            cache_session_id: Mutex::new(None),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -1802,6 +1809,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
             conversation_id: new_conversation_id(),
+            cache_session_id: Mutex::new(None),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
@@ -1863,6 +1871,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
+            cache_session_id: Mutex::new(None),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -1916,6 +1925,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
             conversation_id: new_conversation_id(),
+            cache_session_id: Mutex::new(None),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
@@ -2123,6 +2133,7 @@ impl OpenRouterProvider {
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
                 conversation_id: new_conversation_id(),
+                cache_session_id: Mutex::new(None),
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
