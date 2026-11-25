@@ -1,3 +1,5 @@
+use unicode_segmentation::UnicodeSegmentation;
+
 pub(super) fn line_display_width(text: &str) -> usize {
     if text.bytes().all(|b| (0x20..0x7f).contains(&b)) {
         return text.len();
@@ -26,14 +28,15 @@ pub(super) fn display_col_to_byte_offset(text: &str, display_col: usize) -> usiz
 /// selection, where the mouse can only reach the right half of a wide char.
 pub(super) fn display_col_to_byte_offset_inclusive(text: &str, display_col: usize) -> usize {
     let mut width = 0usize;
-    for (idx, ch) in text.char_indices() {
+    for (idx, grapheme) in text.grapheme_indices(true) {
         if width >= display_col {
             return idx;
         }
-        let next_width =
-            width.saturating_add(unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0));
+        let next_width = width.saturating_add(unicode_width::UnicodeWidthStr::width(grapheme));
         if next_width > display_col {
-            return idx + ch.len_utf8();
+            // Displayed characters can span several code points (for example,
+            // emoji plus skin-tone modifier); include the whole grapheme.
+            return idx + grapheme.len();
         }
         width = next_width;
     }
@@ -85,6 +88,9 @@ mod tests {
         assert_eq!(display_col_slice_copy("你好世界", 0, 8), "你好世界");
         assert_eq!(display_col_slice_copy("你好世界", 2, 5), "好世");
         assert_eq!(display_col_slice_copy("a🙂bc", 0, 2), "a🙂");
+        assert_eq!(display_col_slice_copy("a👍🏽b", 0, 2), "a👍🏽");
+        assert_eq!(display_col_slice_copy("a👍🏽b", 0, 3), "a👍🏽");
+        assert_eq!(display_col_slice_copy("a👍🏽b", 0, 4), "a👍🏽b");
         assert_eq!(display_col_slice_copy("abc", 0, 2), "ab");
         assert_eq!(display_col_slice_copy("你好", 1, 1), "");
     }
