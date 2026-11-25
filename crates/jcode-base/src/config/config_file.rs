@@ -155,7 +155,10 @@ impl Config {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        let mut cfg = Self::load_from_path(&path)?.unwrap_or_default();
+        let mut cfg = match Self::load_from_path(&path)? {
+            Some(config) => config,
+            None => Self::default(),
+        };
         #[cfg(test)]
         role_transaction_tests::loaded();
         match target {
