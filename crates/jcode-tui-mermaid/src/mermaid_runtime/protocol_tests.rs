@@ -71,6 +71,10 @@ fn infer_protocol_detects_kitty_family() {
         Some(ProtocolType::Kitty)
     );
     assert_eq!(
+        infer_protocol_from_env(Some("xterm-ghostty"), None, None, None),
+        Some(ProtocolType::Kitty)
+    );
+    assert_eq!(
         infer_protocol_from_env(None, Some("ghostty"), None, None),
         Some(ProtocolType::Kitty)
     );
@@ -130,10 +134,61 @@ fn explicit_wezterm_identity_avoids_incomplete_kitty_placeholders() {
 
 #[test]
 fn infer_protocol_misses_inside_masking_multiplexer() {
-    // Herdr/tmux advertise a bland TERM with no graphics hints.
+    // Herdr/tmux advertise a bland TERM with no graphics hints; Herdr is
+    // resolved after multiplexer detection so nested inner multiplexers
+    // (such as Zellij or Screen started inside Herdr) are respected first.
     assert_eq!(
-        infer_protocol_from_env(Some("xterm-256color"), None, None, None),
+        infer_protocol_from_env(Some("xterm-256color"), Some("herdr"), None, None),
         None
+    );
+}
+
+#[test]
+fn resolve_env_protocol_selects_kitty_inside_herdr_but_respects_nested_mux() {
+    // Direct Herdr pane uses libghostty (Kitty graphics) even when
+    // TERM=xterm-256color and outer terminal vars are stripped or leaked.
+    assert_eq!(
+        resolve_env_protocol(None, Multiplexer::Herdr),
+        Some(ProtocolType::Kitty)
+    );
+    assert_eq!(
+        resolve_env_protocol(Some(ProtocolType::Iterm2), Multiplexer::Herdr),
+        Some(ProtocolType::Kitty)
+    );
+    // When Zellij/tmux/screen runs inside Herdr, detect_multiplexer picks
+    // the inner multiplexer so resolve_env_protocol does not force U=1
+    // Kitty placements into an inner multiplexer that cannot render them.
+    let nested_zellij = detect_multiplexer(
+        Some("xterm-256color"),
+        None,
+        None,
+        Some("0.40.1"),
+        Some("1"),
+    );
+    assert_eq!(nested_zellij, Multiplexer::Zellij);
+    assert_eq!(resolve_env_protocol(None, nested_zellij), None);
+    let nested_screen = detect_multiplexer(
+        Some("screen.xterm-256color"),
+        None,
+        Some("1234.pts-0.host"),
+        None,
+        Some("1"),
+    );
+    assert_eq!(nested_screen, Multiplexer::Screen);
+    assert_eq!(resolve_env_protocol(None, nested_screen), None);
+    let nested_tmux = detect_multiplexer(
+        Some("tmux-256color"),
+        Some("/tmp/tmux-1000/default,1,0"),
+        None,
+        None,
+        Some("1"),
+    );
+    assert_eq!(nested_tmux, Multiplexer::Tmux);
+    assert_eq!(resolve_env_protocol(None, nested_tmux), None);
+    assert_eq!(resolve_env_protocol(None, Multiplexer::Tmux), None);
+    assert_eq!(
+        resolve_env_protocol(Some(ProtocolType::Iterm2), Multiplexer::None),
+        Some(ProtocolType::Iterm2)
     );
 }
 
@@ -150,6 +205,18 @@ fn detect_multiplexer_identifies_each() {
     assert_eq!(
         detect_multiplexer(
             Some("tmux-256color"),
+            Some("/tmp/tmux-1000/default,1,0"),
+            None,
+            None,
+            None
+        ),
+        Multiplexer::Tmux
+    );
+    // tmux sessions configured with default-terminal "screen-256color"
+    // must still be identified as Tmux when TMUX is set.
+    assert_eq!(
+        detect_multiplexer(
+            Some("screen-256color"),
             Some("/tmp/tmux-1000/default,1,0"),
             None,
             None,
