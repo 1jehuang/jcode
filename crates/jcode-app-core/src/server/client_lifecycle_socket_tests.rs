@@ -924,3 +924,6 @@ async fn sdk_socket_cancel_workflow(
         .unwrap()
         .unwrap();
 }
+
+#[path = "client_response_capability_tests.rs"]
+mod response_capability;

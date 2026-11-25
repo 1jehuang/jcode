@@ -44,6 +44,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         (
             "conn_existing".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn_existing".to_string(),
                 session_id: target_session_id.to_string(),
                 client_instance_id: None,
@@ -59,6 +60,7 @@ async fn handle_resume_session_allows_reconnect_takeover_with_local_history() ->
         (
             "conn_new".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn_new".to_string(),
                 session_id: temp_session_id.to_string(),
                 client_instance_id: None,

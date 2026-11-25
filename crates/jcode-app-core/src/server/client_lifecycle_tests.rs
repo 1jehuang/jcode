@@ -973,6 +973,7 @@ async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error()
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "connection".into(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "connection".into(),
                 session_id: "session_terminal_enqueue_gap".into(),
                 client_instance_id: None,

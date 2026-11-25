@@ -135,6 +135,7 @@ async fn comm_message_default_does_not_queue_soft_interrupt_for_connected_sessio
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "client-1".to_string(),
             session_id: target_id.clone(),
             client_instance_id: None,
@@ -297,6 +298,7 @@ async fn comm_message_with_wake_queues_soft_interrupt_for_busy_connected_session
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "client-1".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "client-1".to_string(),
             session_id: target_id.clone(),
             client_instance_id: None,

@@ -40,6 +40,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "conn_restore".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "conn_restore".to_string(),
             session_id: temp_session_id.to_string(),
             client_instance_id: None,

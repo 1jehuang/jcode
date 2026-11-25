@@ -209,6 +209,7 @@ impl Fixture {
 fn connection(name: &str, id: &str) -> ClientConnectionInfo {
     let (disconnect_tx, _) = mpsc::unbounded_channel();
     ClientConnectionInfo {
+        supports_user_response: false,
         client_id: name.into(),
         session_id: id.into(),
         client_instance_id: None,

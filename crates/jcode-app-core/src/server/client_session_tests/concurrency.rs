@@ -51,6 +51,7 @@ async fn restore_for_concurrency_test(
     let connections = Arc::new(RwLock::new(HashMap::from([(
         "concurrency-test-connection".to_owned(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "concurrency-test-connection".to_owned(),
             session_id: client_session_id.clone(),
             client_instance_id: None,

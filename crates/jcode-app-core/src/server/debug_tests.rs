@@ -328,6 +328,7 @@ mod transcript_routing_tests {
         last_seen: Instant,
     ) -> ClientConnectionInfo {
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: format!("conn-{session_id}"),
             session_id: session_id.to_string(),
             client_instance_id: None,

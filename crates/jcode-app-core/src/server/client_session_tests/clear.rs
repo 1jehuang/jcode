@@ -56,6 +56,7 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "conn_clear".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "conn_clear".to_string(),
             session_id: old_session_id.to_string(),
             client_instance_id: None,

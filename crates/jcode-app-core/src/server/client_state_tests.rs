@@ -418,6 +418,7 @@ async fn session_activity_snapshot_prefers_live_tool_name_for_target_session() {
         (
             "conn-idle".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn-idle".to_string(),
                 session_id: "other-session".to_string(),
                 client_instance_id: None,
@@ -433,6 +434,7 @@ async fn session_activity_snapshot_prefers_live_tool_name_for_target_session() {
         (
             "conn-target".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn-target".to_string(),
                 session_id: "target-session".to_string(),
                 client_instance_id: None,
