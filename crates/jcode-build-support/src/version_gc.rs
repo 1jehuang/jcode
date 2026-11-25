@@ -133,13 +133,16 @@ pub fn prune_old_versions() {
     }
     let mut protected = protected_versions();
     protected.extend(running_versions());
-    let _ = prune_old_versions_in(
+    if prune_old_versions_in(
         &dir.join("versions"),
         &protected,
         keep_recent,
         SystemTime::now(),
-    );
-    mark_pruned(&dir);
+    )
+    .is_ok()
+    {
+        mark_pruned(&dir);
+    }
 }
 
 /// True when the last completed pass is older than the interval. The marker
@@ -169,10 +172,9 @@ pub fn prune_old_versions_in(
     now: SystemTime,
 ) -> Result<VersionPruneReport> {
     let mut candidates: Vec<(SystemTime, String, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(versions_dir)?.flatten() {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
+    for entry in std::fs::read_dir(versions_dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
         if !kind.is_dir() {
             continue;
         }
@@ -204,11 +206,8 @@ pub fn prune_old_versions_in(
             report.kept.push(name);
             continue;
         }
-        if std::fs::remove_dir_all(&path).is_ok() {
-            report.removed.push(name);
-        } else {
-            report.kept.push(name);
-        }
+        std::fs::remove_dir_all(&path)?;
+        report.removed.push(name);
     }
     Ok(report)
 }
@@ -217,6 +216,27 @@ pub fn prune_old_versions_in(
 mod tests {
     use super::*;
     use std::fs::{self, File};
+
+    #[test]
+    fn daily_prune_retries_after_failed_pass() {
+        crate::tests::with_temp_jcode_home(|| {
+            let builds = builds_dir().unwrap();
+            fs::create_dir_all(&builds).unwrap();
+            let previous = std::env::var_os(KEEP_VERSIONS_ENV);
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+            prune_old_versions();
+            let failed_pass_was_not_stamped = !builds.join(PRUNE_MARKER).exists();
+            fs::create_dir(builds.join("versions")).unwrap();
+            prune_old_versions();
+            if let Some(previous) = previous {
+                jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous);
+            } else {
+                jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+            }
+            assert!(failed_pass_was_not_stamped);
+            assert!(builds.join(PRUNE_MARKER).exists());
+        });
+    }
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
