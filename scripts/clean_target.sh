@@ -105,7 +105,7 @@ path_is_contained() {
 
 # Epoch seconds `days` days ago (no GNU `date -d`).
 cutoff_epoch() {
-  echo $(( $(date +%s) - $1 * 86400 ))
+  echo $(( $(date +%s) - 10#$1 * 86400 ))
 }
 
 human() {

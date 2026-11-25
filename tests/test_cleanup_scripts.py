@@ -124,6 +124,17 @@ class CleanupScriptTests(unittest.TestCase):
         result = self.run_script("--apply", "--sweep", "invalid")
         self.assertEqual((result.returncode, old.exists()), (2, True))
 
+    def test_padded_sweep_days_are_decimal(self):
+        for days, removed in [("010", False), ("08", True)]:
+            with self.subTest(days=days):
+                old, newest = self.sessions(crate="crate-" + days)
+                stamp = time.time() - 9 * 86400
+                os.utime(old, (stamp, stamp))
+                stamp = time.time() - 86400
+                os.utime(newest, (stamp, stamp))
+                result = self.run_script("--apply", "--sweep-only", "--sweep", days)
+                self.assertEqual((result.returncode, not old.exists()), (0, removed), result.stderr)
+
     def test_cross_compile_symlink_is_not_followed(self):
         outside = self.stale(self.root / "outside")
         (outside / "sentinel").write_text("preserve")
