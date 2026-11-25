@@ -216,6 +216,10 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
+      - name: Run development Cargo portability regressions
+        shell: bash
+        run: python3 scripts/test_build_portability.py
+
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |
