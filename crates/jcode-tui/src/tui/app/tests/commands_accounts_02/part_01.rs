@@ -482,6 +482,7 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
             tier: crate::auth::google::GmailAccessTier::Full,
             email: None,
             services: vec![crate::auth::google::GoogleService::Gmail],
+            credentials: None,
         })
         .unwrap();
         crate::auth::account_pool::AccountPool {

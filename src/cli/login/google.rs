@@ -19,6 +19,7 @@ pub(super) async fn login_google_flow(
     access_tier: Option<GmailAccessTier>,
     requested_services: Option<Vec<GoogleService>>,
     force_setup: bool,
+    client_json: Option<&str>,
 ) -> Result<()> {
     eprintln!("╔══════════════════════════════════════════╗");
     eprintln!("║       Google Integration Setup           ║");
@@ -30,22 +31,30 @@ pub(super) async fn login_google_flow(
         None => prompt_google_services(existing.as_ref().map(|t| t.services.as_slice()))?,
     };
 
-    let have_creds = auth::google::load_credentials().ok();
-    match have_creds {
-        Some(creds) if !force_setup => eprintln!(
-            "✓ Google OAuth client found ({}...)\n",
-            &creds.client_id[..20.min(creds.client_id.len())]
-        ),
+    let staged = client_json
+        .map(|source| import_google_client_json(source, false))
+        .transpose()?;
+    let have_creds = staged.or_else(|| auth::google::load_credentials().ok());
+    let creds = match have_creds {
+        Some(creds) if !force_setup || client_json.is_some() => {
+            eprintln!(
+                "✓ Google OAuth client selected ({}...)\n",
+                &creds.client_id[..20.min(creds.client_id.len())]
+            );
+            creds
+        }
         _ => {
             if have_creds.is_some() {
-                eprintln!("Re-running setup. The existing OAuth client is replaced on import.\n");
+                eprintln!(
+                    "Re-running setup. The OAuth client is replaced only after login succeeds.\n"
+                );
             } else {
                 eprintln!("No Google OAuth client yet. jcode uses your own Google Cloud app,");
                 eprintln!("so your data goes straight from your machine to Google.\n");
             }
-            run_client_setup(&services, no_browser)?;
+            run_client_setup(&services, no_browser)?
         }
-    }
+    };
 
     let tier = choose_gmail_tier(&services, access_tier, existing.as_ref())?;
 
@@ -57,7 +66,9 @@ pub(super) async fn login_google_flow(
     eprintln!("own app: click Advanced, then Go to <app name>, then keep every box ticked.");
     eprintln!("\n── Logging in ──\n");
 
-    let tokens = match auth::google::login(&services, tier, no_browser).await {
+    let tokens = match auth::google::login_with_credentials(&creds, &services, tier, no_browser)
+        .await
+    {
         Ok(tokens) => tokens,
         Err(err) => {
             let text = format!("{err:#}");
@@ -161,7 +172,7 @@ fn pause(label: &str) -> Result<()> {
 
 /// Create (or reuse) a Google Cloud project, enable APIs, guide the OAuth
 /// client creation, and import the downloaded client JSON.
-fn run_client_setup(services: &[GoogleService], no_browser: bool) -> Result<()> {
+fn run_client_setup(services: &[GoogleService], no_browser: bool) -> Result<GoogleCredentials> {
     // A client JSON downloaded earlier can be imported right away.
     if let Some((path, parsed)) = setup::find_client_json(&setup::default_download_dirs(), None) {
         eprintln!("Found an OAuth client file: {}", path.display());
@@ -186,7 +197,7 @@ fn run_client_setup(services: &[GoogleService], no_browser: bool) -> Result<()> 
     }
 }
 
-fn guided_setup(services: &[GoogleService], no_browser: bool) -> Result<()> {
+fn guided_setup(services: &[GoogleService], no_browser: bool) -> Result<GoogleCredentials> {
     let project = prepare_project(services, no_browser)?;
     let project = project.as_deref();
 
@@ -328,7 +339,10 @@ fn open_page(url: &str, no_browser: bool) {
     eprintln!("  {} {url}", if opened { "Opened:" } else { "Open:" });
 }
 
-fn import_client(parsed: &setup::ClientJson, services: &[GoogleService]) -> Result<()> {
+fn import_client(
+    parsed: &setup::ClientJson,
+    services: &[GoogleService],
+) -> Result<GoogleCredentials> {
     if !parsed.desktop {
         eprintln!("  Warning: this is a \"Web application\" client. jcode needs a \"Desktop app\"");
         eprintln!("  client for its local sign-in redirect. Create one with type Desktop app.");
@@ -341,8 +355,7 @@ fn import_client(parsed: &setup::ClientJson, services: &[GoogleService]) -> Resu
             );
         }
     }
-    let path = setup::save_client_json(parsed)?;
-    eprintln!("  ✓ OAuth client saved to {}", path.display());
+    eprintln!("  ✓ OAuth client staged until login succeeds");
     if let Some(project) = &parsed.project_id {
         // The client JSON names its project: make sure the APIs are on there.
         eprintln!(
@@ -350,10 +363,10 @@ fn import_client(parsed: &setup::ClientJson, services: &[GoogleService]) -> Resu
             setup::enable_apis_url(services, Some(project))
         );
     }
-    Ok(())
+    Ok(parsed.credentials.clone())
 }
 
-fn import_from_path(services: &[GoogleService]) -> Result<()> {
+fn import_from_path(services: &[GoogleService]) -> Result<GoogleCredentials> {
     let raw = prompt("\nPath to the downloaded client JSON: ")?;
     let path = match raw.strip_prefix("~/") {
         Some(rest) => dirs::home_dir()
@@ -369,7 +382,7 @@ fn import_from_path(services: &[GoogleService]) -> Result<()> {
     import_client(&parsed, services)
 }
 
-fn paste_credentials() -> Result<()> {
+fn paste_credentials() -> Result<GoogleCredentials> {
     let client_id = prompt("\nClient ID (ends with .apps.googleusercontent.com): ")?;
     if client_id.is_empty() {
         anyhow::bail!("No client ID provided.");
@@ -380,15 +393,11 @@ fn paste_credentials() -> Result<()> {
     if client_secret.is_empty() {
         anyhow::bail!("No client secret provided.");
     }
-    auth::google::save_credentials(&GoogleCredentials {
+    eprintln!("✓ Credentials staged until login succeeds");
+    Ok(GoogleCredentials {
         client_id,
         client_secret,
-    })?;
-    eprintln!(
-        "✓ Credentials saved to {}",
-        auth::google::credentials_path()?.display()
-    );
-    Ok(())
+    })
 }
 
 pub(super) fn default_pending_google_services() -> Vec<GoogleService> {
@@ -398,9 +407,17 @@ pub(super) fn default_pending_google_services() -> Vec<GoogleService> {
 /// `--google-client-json <path|auto>`: import an OAuth client JSON without
 /// prompts, so an agent driving the console in a browser can hand the
 /// download to jcode. Desktop clients only.
-pub(super) fn import_google_client_json(source: &str, quiet: bool) -> Result<()> {
+pub(super) fn import_google_client_json(source: &str, quiet: bool) -> Result<GoogleCredentials> {
+    let parsed = read_google_client_json(source, &setup::default_download_dirs())?;
+    if !quiet {
+        eprintln!("✓ OAuth client staged until login succeeds");
+    }
+    Ok(parsed.credentials)
+}
+
+fn read_google_client_json(source: &str, download_dirs: &[PathBuf]) -> Result<setup::ClientJson> {
     let (path, parsed) = if source.eq_ignore_ascii_case("auto") {
-        setup::find_client_json(&setup::default_download_dirs(), None).ok_or_else(|| {
+        setup::find_client_json(download_dirs, None).ok_or_else(|| {
             anyhow::anyhow!(
                 "No valid client_secret*.json found in Downloads. Download the OAuth client JSON \
                  from Google Cloud Console (Clients > your Desktop client > Download JSON)."
@@ -425,15 +442,17 @@ pub(super) fn import_google_client_json(source: &str, quiet: bool) -> Result<()>
             setup::create_client_url(parsed.project_id.as_deref())
         );
     }
-    let saved = setup::save_client_json(&parsed)?;
-    if !quiet {
-        eprintln!(
-            "✓ Imported OAuth client from {} into {}",
-            path.display(),
-            saved.display()
-        );
+    Ok(parsed)
+}
+
+/// Choose the new-login client independently of any client bound to old tokens.
+pub(super) fn google_login_credentials(options: &LoginOptions) -> Result<GoogleCredentials> {
+    match options.google_client_json.as_deref() {
+        Some(source) => import_google_client_json(source, options.json),
+        None => auth::google::load_credentials().context(
+            "Google login requires an OAuth client. Use --google-client-json <path|auto> or run the interactive Google setup.",
+        ),
     }
-    Ok(())
 }
 
 /// Services to authorize when the caller did not pass `--google-services`:
@@ -446,6 +465,232 @@ pub(super) fn default_google_services(options: &LoginOptions) -> Vec<GoogleServi
         .map(auth::google::normalize_services)
         .filter(|services| !services.is_empty())
         .unwrap_or_else(default_pending_google_services)
+}
+
+#[cfg(test)]
+mod transactional_tests {
+    use super::*;
+
+    const CLIENT_JSON: &str = r#"{"installed":{"client_id":"synthetic-other-project.apps.googleusercontent.com","client_secret":"synthetic-other-secret","project_id":"synthetic-other-project","redirect_uris":["http://localhost"]}}"#;
+    const OLD_TOKENS: &str = r#"{"access_token":"synthetic-old-access","refresh_token":"synthetic-old-refresh","expires_at":4102444800000,"tier":"full","email":null}"#;
+
+    struct TestHome(Option<std::ffi::OsString>);
+
+    impl TestHome {
+        fn new(path: &Path) -> Self {
+            let previous = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    fn seed_old_login(home: &Path) -> (PathBuf, Vec<u8>, PathBuf, Vec<u8>) {
+        let client = home.join("google_credentials.json");
+        let tokens = home.join("google_oauth.json");
+        std::fs::write(
+            &client,
+            r#"{"client_id":"synthetic-old-project","client_secret":"synthetic-old-secret"}"#,
+        )
+        .unwrap();
+        std::fs::write(&tokens, OLD_TOKENS).unwrap();
+        let client_bytes = std::fs::read(&client).unwrap();
+        let token_bytes = std::fs::read(&tokens).unwrap();
+        (client, client_bytes, tokens, token_bytes)
+    }
+
+    #[test]
+    fn transactional_google_login_auto_discovery_only_stages_other_project() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let (client, old_client, tokens, old_tokens) = seed_old_login(temp.path());
+        let downloads = temp.path().join("Downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        std::fs::write(downloads.join("client_secret_other.json"), CLIENT_JSON).unwrap();
+        let staged = read_google_client_json("auto", &[downloads]).unwrap();
+        assert_eq!(
+            staged.project_id.as_deref(),
+            Some("synthetic-other-project")
+        );
+        assert_eq!(
+            staged.credentials.client_id,
+            "synthetic-other-project.apps.googleusercontent.com"
+        );
+        assert_eq!(std::fs::read(client).unwrap(), old_client);
+        assert_eq!(std::fs::read(tokens).unwrap(), old_tokens);
+    }
+
+    #[tokio::test]
+    async fn transactional_google_login_scriptable_failure_and_cancel_preserve_active_files() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = TestHome::new(temp.path());
+        let (client, old_client, tokens, old_tokens) = seed_old_login(temp.path());
+        let imported = temp.path().join("client_secret_other.json");
+        std::fs::write(&imported, CLIENT_JSON).unwrap();
+        let provider = crate::provider_catalog::resolve_login_provider("google").unwrap();
+        let begin = LoginOptions {
+            google_client_json: Some(imported.display().to_string()),
+            google_services: Some(vec![GoogleService::Gmail]),
+            print_auth_url: true,
+            flow_id: Some("synthetic-google-transaction".into()),
+            no_browser: true,
+            json: true,
+            ..LoginOptions::default()
+        };
+        run_login_provider(provider, None, begin.clone())
+            .await
+            .unwrap();
+        let pending = pending_login_path("google", begin.flow_id.as_deref()).unwrap();
+        let pending_bytes = std::fs::read(&pending).unwrap();
+        let PendingScriptableLogin::Google { credentials, .. } =
+            load_pending_login(&pending, "google").unwrap()
+        else {
+            panic!("expected Google pending flow");
+        };
+        assert_eq!(
+            credentials.unwrap().client_id,
+            "synthetic-other-project.apps.googleusercontent.com"
+        );
+        assert_eq!(std::fs::read(&client).unwrap(), old_client);
+        assert_eq!(std::fs::read(&tokens).unwrap(), old_tokens);
+
+        // State validation rejects this synthetic callback before any HTTP.
+        let complete = LoginOptions {
+            callback_url: Some("http://127.0.0.1/?code=synthetic&state=wrong-state".into()),
+            flow_id: begin.flow_id.clone(),
+            no_browser: true,
+            json: true,
+            ..LoginOptions::default()
+        };
+        let error = run_login_provider(provider, None, complete)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("state mismatch"));
+        assert_eq!(std::fs::read(&pending).unwrap(), pending_bytes);
+        assert_eq!(std::fs::read(&client).unwrap(), old_client);
+        assert_eq!(std::fs::read(&tokens).unwrap(), old_tokens);
+
+        let cancel = LoginOptions {
+            cancel: true,
+            flow_id: begin.flow_id,
+            json: true,
+            ..LoginOptions::default()
+        };
+        run_login_provider(provider, None, cancel).await.unwrap();
+        assert!(!pending.exists());
+        assert_eq!(std::fs::read(&client).unwrap(), old_client);
+        assert_eq!(std::fs::read(&tokens).unwrap(), old_tokens);
+    }
+
+    #[tokio::test]
+    async fn transactional_google_login_mock_callback_failure_then_success_commits_pair() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let _home = TestHome::new(temp.path());
+        let (client_path, old_client, token_path, _) = seed_old_login(temp.path());
+        let mut previous: auth::google::GoogleTokens = serde_json::from_str(OLD_TOKENS).unwrap();
+        previous.credentials = Some(GoogleCredentials {
+            client_id: "synthetic-bound-old-project".into(),
+            client_secret: "synthetic-bound-old-secret".into(),
+        });
+        auth::google::save_tokens(&previous).unwrap();
+        let old_tokens = std::fs::read(&token_path).unwrap();
+        let imported = temp.path().join("client_secret_other.json");
+        std::fs::write(&imported, CLIENT_JSON).unwrap();
+        let provider = crate::provider_catalog::resolve_login_provider("google").unwrap();
+        let begin = LoginOptions {
+            google_client_json: Some(imported.display().to_string()),
+            google_services: Some(vec![GoogleService::Gmail]),
+            print_auth_url: true,
+            flow_id: Some("synthetic-google-callback".into()),
+            no_browser: true,
+            json: true,
+            ..LoginOptions::default()
+        };
+        run_login_provider(provider, None, begin.clone())
+            .await
+            .unwrap();
+        let path = pending_login_path("google", begin.flow_id.as_deref()).unwrap();
+        let PendingScriptableLogin::Google {
+            state, credentials, ..
+        } = load_pending_login(&path, "google").unwrap()
+        else {
+            panic!("expected Google pending flow");
+        };
+        let selected = credentials.unwrap();
+        assert_eq!(
+            selected.client_id,
+            "synthetic-other-project.apps.googleusercontent.com"
+        );
+        assert_eq!(std::fs::read(&client_path).unwrap(), old_client);
+        assert_eq!(std::fs::read(&token_path).unwrap(), old_tokens);
+        let complete = LoginOptions {
+            flow_id: begin.flow_id,
+            json: true,
+            ..LoginOptions::default()
+        };
+        let callback = format!("http://127.0.0.1/?code=synthetic-code&state={state}");
+        let error = auth::google::with_test_token_exchange(
+            selected.clone(),
+            Err("synthetic endpoint failure".into()),
+            complete_scriptable_google_login(
+                "google",
+                &complete,
+                ProvidedAuthInput::CallbackUrl(callback.clone()),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("synthetic endpoint failure"));
+        assert!(path.exists());
+        assert_eq!(std::fs::read(&client_path).unwrap(), old_client);
+        assert_eq!(std::fs::read(&token_path).unwrap(), old_tokens);
+
+        let mut replacement: auth::google::GoogleTokens = serde_json::from_str(OLD_TOKENS).unwrap();
+        replacement.access_token = "synthetic-new-access".into();
+        replacement.refresh_token = "synthetic-new-refresh".into();
+        let result = auth::google::with_test_token_exchange(
+            selected.clone(),
+            Ok(replacement),
+            complete_scriptable_google_login(
+                "google",
+                &complete,
+                ProvidedAuthInput::CallbackUrl(callback),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, LoginFlowOutcome::Completed);
+        assert!(!path.exists());
+        let stored = auth::google::load_tokens().unwrap();
+        assert_eq!(stored.refresh_token, "synthetic-new-refresh");
+        assert_eq!(stored.credentials.as_ref(), Some(&selected));
+        assert_eq!(auth::google::load_credentials().unwrap(), selected);
+        assert_eq!(std::fs::read(&client_path).unwrap(), old_client);
+    }
+
+    #[test]
+    fn transactional_google_login_legacy_pending_client_defaults_to_none() {
+        let pending: PendingScriptableLogin = serde_json::from_str(
+            r#"{"provider":"google","verifier":"synthetic","state":"synthetic","redirect_uri":"http://127.0.0.1:8456","tier":"full"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            pending,
+            PendingScriptableLogin::Google {
+                credentials: None,
+                ..
+            }
+        ));
+    }
 }
 
 fn prompt_google_services(existing: Option<&[GoogleService]>) -> Result<Vec<GoogleService>> {
