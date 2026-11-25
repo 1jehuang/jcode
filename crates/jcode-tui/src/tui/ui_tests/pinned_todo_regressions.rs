@@ -124,16 +124,18 @@ fn justrust_status_is_below_todos_and_never_wraps() {
             }),
             ..Default::default()
         };
-        for width in [1, 8, 16, 40, 80, 160] {
-            let (lines, _) = viewport::pinned_todo_band_lines(&state, width, 24);
-            assert!(lines.iter().all(|line| line.width() <= width as usize));
-            if width >= 80 {
-                assert!(lines.last().unwrap().to_string().contains("justrust"));
-                assert!(
-                    lines[..lines.len() - 1]
-                        .iter()
-                        .any(|line| line.to_string().contains("Pinned regression task"))
-                );
+        for height in [3, 4, 6, 8, 24] {
+            for width in [1, 8, 16, 40, 80, 160] {
+                let (lines, _) = viewport::pinned_todo_band_lines(&state, width, height);
+                assert!(lines.iter().all(|line| line.width() <= width as usize));
+                if width >= 80 {
+                    assert!(lines.last().unwrap().to_string().contains("justrust"));
+                    assert!(
+                        lines[..lines.len() - 1]
+                            .iter()
+                            .any(|line| line.to_string().contains("Pinned regression task"))
+                    );
+                }
             }
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

@@ -488,12 +488,14 @@ pub(crate) fn pinned_todo_band_lines(
     width: u16,
     viewport_height: u16,
 ) -> (Vec<Line<'static>>, Option<usize>) {
+    // Preserve the minimum three-row unboxed band when a build row is present.
+    let build_rows = u16::from(viewport_height > 3 && app.justrust_status().is_some());
     let (mut lines, more) = pinned_todo_band_lines_for_payload(
         app.pinned_todos_payload(),
         app.pinned_todos_expanded(),
         app.diff_mode(),
         width,
-        viewport_height.saturating_sub(u16::from(app.justrust_status().is_some())),
+        viewport_height.saturating_sub(build_rows),
     );
     if width > 0
         && viewport_height >= 3
