@@ -102,6 +102,16 @@ impl BackgroundTaskManager {
         true
     }
 
+    /// Snapshot a held completion without ending its delivery hold.
+    pub fn held_completion(&self, task_id: &str) -> Option<TaskStatusFile> {
+        self.held_deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(task_id)
+            .cloned()
+            .flatten()
+    }
+
     /// End a [`Self::hold_delivery`]. A completion that would have woken the
     /// model went out without waking it during the hold; `deliver` publishes
     /// it to the model now, for a waiter that ends without returning it. A

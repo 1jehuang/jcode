@@ -173,6 +173,10 @@ fn status_label(status: &BackgroundTaskStatus) -> &'static str {
 struct DeliveryHold(Option<String>);
 
 impl DeliveryHold {
+    fn completion(&self) -> Option<background::TaskStatusFile> {
+        background::global().held_completion(self.0.as_deref()?)
+    }
+
     async fn release(mut self) -> Option<background::TaskStatusFile> {
         let task_id = self.0.as_deref()?;
         let status = background::global().release_delivery(task_id, false).await;
@@ -195,10 +199,10 @@ impl Drop for DeliveryHold {
 
 fn finish_wait_result(
     mut wait_result: Option<background::BackgroundTaskWaitResult>,
-    released: Option<background::TaskStatusFile>,
+    completion: Option<background::TaskStatusFile>,
 ) -> Option<background::BackgroundTaskWaitResult> {
-    if let Some(released) = released
-        && is_terminal(&released.status)
+    if let Some(completion) = completion
+        && is_terminal(&completion.status)
         && wait_result
             .as_ref()
             .is_none_or(|result| !is_terminal(&result.task.status))
@@ -208,12 +212,12 @@ fn finish_wait_result(
         // so this reply delivers it.
         let result = wait_result.get_or_insert(background::BackgroundTaskWaitResult {
             reason: background::BackgroundTaskWaitReason::Finished,
-            task: released.clone(),
+            task: completion.clone(),
             progress_event: None,
             event_record: None,
         });
         result.reason = background::BackgroundTaskWaitReason::Finished;
-        result.task = released;
+        result.task = completion;
     }
     wait_result
 }
@@ -881,7 +885,7 @@ impl Tool for BgTool {
                     )
                     .await;
                 drop(wait_guard);
-                let wait_result = finish_wait_result(wait_result, hold.release().await);
+                let wait_result = finish_wait_result(wait_result, hold.completion());
                 match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
@@ -946,7 +950,8 @@ impl Tool for BgTool {
                             });
                         }
 
-                        Ok(ToolOutput::new(output)
+                        let terminal = is_terminal(&task.status);
+                        let reply = ToolOutput::new(output)
                             .with_title(format!("bg wait {}", task_id))
                             .with_metadata(json!({
                                 "task_id": task.task_id,
@@ -962,7 +967,11 @@ impl Tool for BgTool {
                                 "progress_event": wait_result.progress_event,
                                 "event_record": wait_result.event_record,
                                 "output_preview": preview_meta,
-                            })))
+                            }));
+                        if terminal {
+                            drop(hold.release().await);
+                        }
+                        Ok(reply)
                     }
                     None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
                 }
