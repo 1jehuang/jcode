@@ -115,7 +115,7 @@ function New-IsolatedWindowsProfile([string]$Name) {
         Temp = $temp
         InstallDir = Join-Path $local 'jcode\bin'
         LauncherPath = Join-Path $local 'jcode\bin\jcode.exe'
-        BuildsDir = Join-Path $local 'jcode\builds'
+        BuildsDir = Join-Path $jcodeHome 'builds'
         SetupHintsPath = Join-Path $jcodeHome 'setup_hints.json'
         HotkeyDir = Join-Path $jcodeHome 'hotkey'
         StartupShortcutPath = Join-Path $appData 'Microsoft\Windows\Start Menu\Programs\Startup\jcode-hotkey.lnk'
@@ -271,6 +271,7 @@ try {
         Assert-Equal 'version-one' (Get-Content -LiteralPath $profile.LauncherPath -Raw) 'launcher should contain the local artifact contents'
         Assert-PathExists (Join-Path $profile.BuildsDir 'stable\jcode.exe') 'clean install should populate the stable build channel'
         Assert-PathExists (Join-Path $profile.BuildsDir 'versions\0.0.1-eval\jcode.exe') 'clean install should populate the immutable versioned build'
+        Assert-PathMissing (Join-Path $profile.LocalAppData 'jcode\builds') 'a custom JCODE_HOME should keep builds out of the default store'
         Assert-PathCount $script:mockUserPath $profile.InstallDir 1 'clean install should persist exactly one launcher PATH entry in the mocked user PATH'
         Assert-Equal 1 $script:pathWrites 'clean install should write mocked user PATH once'
         Assert-Equal 1 $script:pathBroadcasts 'clean install should broadcast exactly once for a PATH change'
@@ -421,6 +422,9 @@ try {
         $profile = New-IsolatedWindowsProfile 'uninstall-cleanup'
         New-Item -ItemType Directory -Path $profile.InstallDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Join-Path $profile.BuildsDir 'stable') -Force | Out-Null
+        $defaultBuildsDir = Join-Path $profile.LocalAppData 'jcode\builds'
+        New-Item -ItemType Directory -Path $defaultBuildsDir -Force | Out-Null
+        Set-Content -Path (Join-Path $defaultBuildsDir 'keep.txt') -Value 'another installation' -NoNewline
         New-Item -ItemType Directory -Path $profile.JcodeHome -Force | Out-Null
         New-Item -ItemType Directory -Path $profile.HotkeyDir -Force | Out-Null
         New-Item -ItemType Directory -Path (Split-Path -Parent $profile.StartupShortcutPath) -Force | Out-Null
@@ -443,6 +447,7 @@ try {
         Assert-PathMissing $oldLauncherPath 'uninstall should remove renamed live-upgrade launchers'
         Assert-PathMissing $profile.InstallDir 'uninstall should remove the empty launcher directory'
         Assert-PathMissing $profile.BuildsDir 'uninstall should remove installed build binaries'
+        Assert-PathExists (Join-Path $defaultBuildsDir 'keep.txt') 'uninstall with a custom JCODE_HOME should preserve the default build store'
         Assert-PathMissing $profile.StartupShortcutPath 'uninstall should remove the launch-hotkey Startup shortcut'
         Assert-PathMissing (Join-Path $profile.HotkeyDir 'jcode-hotkey.ps1') 'uninstall should remove legacy launch-hotkey artifacts'
         Assert-PathExists (Join-Path $profile.JcodeHome 'config.toml') 'uninstall without -Purge should keep user data'
