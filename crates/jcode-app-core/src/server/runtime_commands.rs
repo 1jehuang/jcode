@@ -36,15 +36,7 @@ pub(super) async fn background_cancel(
         .file_name()
         .and_then(|name| name.to_str())
         == Some(task_id.as_str());
-    // Read the status file raw: status() can settle a finished detached task
-    // and publish its completion, which must not happen for another session.
-    let owner = if plain_id {
-        tokio::fs::read(manager.status_path_for(task_id)).await.ok()
-    } else {
-        None
-    }
-    .and_then(|bytes| serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes).ok());
-    if owner.is_none_or(|status| status.session_id != session_id) {
+    if !plain_id || !manager.task_belongs_to_session(task_id, session_id).await {
         bail!("No background task {task_id} in this session");
     }
     let cancelled = manager.cancel(task_id).await?;

@@ -260,12 +260,7 @@ impl BackgroundTaskManager {
         !crate::platform::is_process_running(owner_pid)
     }
 
-    /// Finalize an orphaned non-detached `Running` status file as `Failed`.
-    ///
-    /// The owning process's task future died with the process (crash or
-    /// exec-based server reload), so without this the file reads `Running`
-    /// forever: `bg list`/`bg status` show a phantom task and `bg wait`
-    /// blocks until its timeout.
+    /// Finalize a dead server's non-detached task; never rewrite a live owner.
     async fn finalize_orphaned_status_if_needed(
         &self,
         mut status: TaskStatusFile,
@@ -320,15 +315,8 @@ impl BackgroundTaskManager {
     }
 
     /// Startup/reload sweep: mark orphaned non-detached `Running` status
-    /// files as `Failed` with a "server reloaded" note.
-    ///
-    /// Only owner-tagged files are considered, using the liveness rules of
-    /// [`Self::status_is_reconcilable_orphan`]. Files without owner metadata
-    /// (written by older builds, or by processes that legitimately still run
-    /// them) are left untouched: the task dir is shared machine-wide, so
-    /// without owner metadata there is no safe way to distinguish a phantom
-    /// from another live process's task. Returns how many files were
-    /// reconciled.
+    /// files as `Failed`, leaving live owners and legacy untagged files untouched.
+    /// Returns the number reconciled.
     pub async fn reconcile_orphaned_tasks(&self) -> usize {
         let mut reconciled = 0;
         let Ok(mut entries) = fs::read_dir(&self.output_dir).await else {
@@ -339,6 +327,7 @@ impl BackgroundTaskManager {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
+            let _status_guard = self.progress_updates.lock().await;
             let Some(status) = self.read_status_file(&path).await else {
                 continue;
             };
@@ -905,6 +894,7 @@ impl BackgroundTaskManager {
         };
 
         for path in pending {
+            let _status_guard = self.progress_updates.lock().await;
             let Some(status) = self.read_status_file(&path).await else {
                 continue;
             };
@@ -925,6 +915,7 @@ impl BackgroundTaskManager {
         // Read all status files from disk
         if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
+                let _status_guard = self.progress_updates.lock().await;
                 let path = entry.path();
                 if path.extension().map(|e| e == "json").unwrap_or(false)
                     && let Some(status) = self.read_status_file(&path).await
@@ -943,8 +934,17 @@ impl BackgroundTaskManager {
         results
     }
 
+    /// Read ownership without settling a task or publishing completion.
+    pub async fn task_belongs_to_session(&self, task_id: &str, session_id: &str) -> bool {
+        let _status_guard = self.progress_updates.lock().await;
+        self.read_status_file(&self.status_path_for(task_id))
+            .await
+            .is_some_and(|status| status.session_id == session_id)
+    }
+
     /// Get status of a specific task
     pub async fn status(&self, task_id: &str) -> Option<TaskStatusFile> {
+        let _status_guard = self.progress_updates.lock().await;
         let status_path = self.status_path_for(task_id);
         let status = self.read_status_file(&status_path).await?;
         let status = self
