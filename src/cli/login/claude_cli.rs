@@ -122,7 +122,7 @@ pub(super) fn ensure_claude_code_credentials_selected(
 pub(super) fn reuse_claude_code_file(
     source: auth::claude::ExternalClaudeAuthSource,
     path: &Path,
-) -> Result<bool> {
+) -> Result<Option<auth::claude::ClaudeCredentials>> {
     let already_trusted =
         crate::config::Config::external_auth_source_allowed_for_path(source.source_id(), path);
     if !already_trusted {
@@ -130,7 +130,7 @@ pub(super) fn reuse_claude_code_file(
     }
     let credentials = match auth::claude::load_claude_code_credentials() {
         Ok(credentials) if usable_claude_code_credentials(&credentials) => credentials,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
     if !already_trusted {
         auth::claude::trust_external_auth_source(source)?;
@@ -144,13 +144,15 @@ pub(super) fn reuse_claude_code_file(
         }
         return Err(err);
     }
-    Ok(true)
+    Ok(Some(credentials))
 }
 
-pub(super) fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
+pub(super) fn reuse_claude_code_native(
+    file_path: &Path,
+) -> Result<Option<auth::claude::ClaudeCredentials>> {
     let expected_selection = auth::claude::native_import_selection()?;
     if !auth::claude::native_credentials_present() {
-        return Ok(false);
+        return Ok(None);
     }
     let was_native_trusted = auth::claude::native_source_allowed();
     if !was_native_trusted {
@@ -160,16 +162,17 @@ pub(super) fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
     // exist but be locked, in which case the file source can still be tried.
     let credentials = match auth::claude::load_native_credentials() {
         Ok(credentials) if usable_claude_code_credentials(&credentials) => credentials,
-        _ => return Ok(false),
+        _ => return Ok(None),
     };
 
     reuse_claude_code_native_snapshot(
         file_path,
         was_native_trusted,
         &expected_selection,
-        credentials,
+        credentials.clone(),
         || {},
-    )
+    )?;
+    Ok(Some(credentials))
 }
 
 pub(super) fn configured_claude_file_is_unambiguous(
@@ -190,7 +193,7 @@ pub(super) fn configured_claude_file_is_unambiguous(
     Ok(())
 }
 
-pub(super) fn login_claude_code_flow() -> Result<()> {
+pub(super) fn login_claude_code_flow() -> Result<auth::claude_cli_completion::CompletedLogin> {
     let expected_selection = auth::claude::native_import_selection()?;
     let source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
     let file_path = source.path()?;
@@ -215,7 +218,8 @@ pub(super) fn login_claude_code_flow() -> Result<()> {
     // Jcode makes direct Anthropic requests, so a CLI login by itself is not a
     // Jcode login. Keep the existing external-source consent boundary intact.
     let file_exists_after_login = credential_file_modified(&file_path)?.is_some();
-    let mut reused = false;
+    let mut reused = None;
+    let mut native = false;
     if configured_file && file_exists_after_login {
         configured_claude_file_is_unambiguous(
             &file_path,
@@ -225,19 +229,27 @@ pub(super) fn login_claude_code_flow() -> Result<()> {
         )?;
         reused = reuse_claude_code_file(source, &file_path)?;
     }
-    if !reused {
+    if reused.is_none() {
         reused = reuse_claude_code_native(&file_path)?;
+        native = reused.is_some();
     }
-    if !reused && !configured_file && file_exists_after_login {
+    if reused.is_none() && !configured_file && file_exists_after_login {
         reused = reuse_claude_code_file(source, &file_path)?;
     }
     anyhow::ensure!(
-        reused,
+        reused.is_some(),
         "Claude Code signed in, but no reusable OAuth credentials were found. Check `claude auth status`, or use `jcode login --provider claude` for Jcode's OAuth flow."
     );
+    let credentials = reused.context("Claude Code did not produce a completed login")?;
+    let source = if native {
+        auth::claude_cli_completion::LoginSource::Native
+    } else {
+        auth::claude_cli_completion::LoginSource::File(file_path)
+    };
+    let completed = auth::claude_cli_completion::capture(&credentials, source)?;
     eprintln!("Claude Code login is now available to Jcode.");
     crate::telemetry::record_auth_success("claude", "claude_code_cli");
-    Ok(())
+    Ok(completed)
 }
 
 #[cfg(test)]

@@ -149,10 +149,13 @@ In `/login`, choose the Claude method before starting authentication. SSH client
 show instructions for the remote host. Sessions using explicit configuration or home directories show the exact command to run with the same environment, since a new
 terminal might select a different profile.
 
-When `/login` opens Claude Code sign-in in another terminal, Jcode waits for a
-changed, usable selected login and continues onboarding through its normal login
-completion handler. Return to Jcode and press Enter if the login was already
-current. `/cancel` stops waiting in the TUI; cancel the independent terminal
-command there to stop sign-in. Waiting expires after ten minutes. Default CLI
-selection respects `NO_BROWSER`, `JCODE_NO_BROWSER` and the shared headless/SSH
-browser policy; explicit `--claude-code` remains available on an interactive host.
+When `/login` opens Claude Code sign-in in another terminal, complete the displayed
+command so Jcode can identify that attempt's result and select its saved account.
+Background token refresh does not complete sign-in. A daemon-connected session
+also waits for the daemon to confirm the account before reporting success.
+Pressing Enter checks the same result; it cannot confirm an unfinished command.
+`/cancel` stops waiting and rejects late completion in the TUI; cancel the
+independent terminal command there to stop sign-in. Waiting expires after ten
+minutes. Default CLI selection respects `NO_BROWSER`, `JCODE_NO_BROWSER` and the
+shared headless/SSH browser policy; explicit `--claude-code` remains available on
+an interactive host.

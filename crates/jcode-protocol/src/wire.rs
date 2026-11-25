@@ -403,6 +403,8 @@ pub enum Request {
         /// Automatic retries must revalidate the server's current account pool.
         #[serde(default, skip_serializing_if = "is_false")]
         automatic_failover: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verification: Option<jcode_provider_core::AuthRouteVerification>,
     },
 
     /// Set or clear the session-scoped subagent model preference.

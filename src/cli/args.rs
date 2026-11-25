@@ -244,6 +244,8 @@ pub(crate) enum Command {
         /// Used by default for interactive Claude login when the CLI is installed.
         #[arg(long, conflicts_with_all = ["no_browser", "account", "oauth"])]
         claude_code: bool,
+        #[arg(long, hide = true, requires = "claude_code")]
+        claude_code_completion: Option<std::path::PathBuf>,
         /// Use Jcode's OAuth browser flow for Claude.
         #[arg(long)]
         oauth: bool,

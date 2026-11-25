@@ -22,6 +22,7 @@ fn login_no_browser_flag_parses() {
             device_code,
             region,
             claude_code,
+            claude_code_completion,
             oauth,
         }) => {
             assert!(region.is_none());
@@ -29,6 +30,7 @@ fn login_no_browser_flag_parses() {
             assert!(account.is_none());
             assert!(no_browser);
             assert!(!claude_code);
+            assert!(claude_code_completion.is_none());
             assert!(!oauth);
             assert!(!device_code);
             assert!(!print_auth_url);

@@ -218,6 +218,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
     // not be shadowed by the legacy `set_model` compatibility path.
     let request = Request::SetRoute {
         automatic_failover: false,
+        verification: None,
         id: 7,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -235,6 +236,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!(
@@ -251,6 +253,7 @@ fn test_structured_set_route_decodes_as_set_route_not_set_model() -> Result<()> 
 fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        verification: None,
         id: 8,
         selection: jcode_provider_core::RouteSelection {
             model: "gpt-5.5".to_string(),
@@ -270,6 +273,7 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Jcode SetRoute, got {decoded:?}"));
@@ -298,6 +302,7 @@ fn test_automatic_failover_set_route_marker_and_legacy_default() -> Result<()> {
         id: 19,
         selection,
         automatic_failover: true,
+        verification: None,
     };
     let mut wire = serde_json::to_value(&request)?;
     assert_eq!(wire["automatic_failover"], true);
@@ -326,6 +331,7 @@ fn test_automatic_failover_set_route_marker_and_legacy_default() -> Result<()> {
 fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        verification: None,
         id: 9,
         selection: jcode_provider_core::RouteSelection {
             model: "grok-build:grok-4.6".to_string(),
@@ -345,6 +351,7 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
         id,
         selection,
         automatic_failover,
+        ..
     } = decoded
     else {
         return Err(anyhow!("expected Grok Build SetRoute, got {decoded:?}"));
@@ -364,6 +371,7 @@ fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
 fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
     let request = Request::SetRoute {
         automatic_failover: false,
+        verification: None,
         id: 10,
         selection: jcode_provider_core::RouteSelection {
             model: "custom-model".to_string(),
@@ -764,7 +772,13 @@ fn context_cap_wire_roundtrip() -> Result<()> {
 #[test]
 fn subscribe_and_resume_client_name_is_optional_and_compatible() {
     let old: Request = serde_json::from_str(r#"{"type":"subscribe","id":1}"#).unwrap();
-    assert!(matches!(old, Request::Subscribe { client_name: None, .. }));
+    assert!(matches!(
+        old,
+        Request::Subscribe {
+            client_name: None,
+            ..
+        }
+    ));
     let new: Request =
         serde_json::from_str(r#"{"type":"subscribe","id":1,"client_name":"jcode-ios/1.0"}"#)
             .unwrap();
@@ -775,7 +789,59 @@ fn subscribe_and_resume_client_name_is_optional_and_compatible() {
         r#"{"type":"resume_session","id":2,"session_id":"s","client_name":"jcode-ios/1.0"}"#,
     )
     .unwrap();
-    assert!(matches!(resume, Request::ResumeSession { client_name: Some(_), .. }));
+    assert!(matches!(
+        resume,
+        Request::ResumeSession {
+            client_name: Some(_),
+            ..
+        }
+    ));
     let json = serde_json::to_string(&old).unwrap();
     assert!(!json.contains("client_name"));
+}
+
+#[test]
+fn claude_sign_in_route_preserves_attempt_and_explicit_proof_over_the_wire() -> Result<()> {
+    let request = Request::SetRoute {
+        id: 51,
+        automatic_failover: false,
+        selection: jcode_provider_core::RouteSelection {
+            model: "claude-future-model".into(),
+            runtime_key: jcode_provider_core::RuntimeKey::ClaudeOAuth,
+            api_method: "claude-oauth@chosen".into(),
+            provider_label: "Claude".into(),
+            detail: String::new(),
+        },
+        verification: Some(jcode_provider_core::AuthRouteVerification {
+            fingerprint: "opaque-grant-digest".into(),
+            completion_path: std::path::PathBuf::from("/private/attempt/result.json"),
+            attempt: "attempt-nonce".into(),
+            previous_provider: "Anthropic".into(),
+            previous_model: "claude-future-model".into(),
+            previous_serving_account_label: Some("previous".into()),
+            previous_credential: Some(jcode_provider_core::ResolvedCredential::Oauth),
+        }),
+    };
+    let wire = serde_json::to_string(&request)?;
+    let Request::SetRoute {
+        id: 51,
+        verification: Some(verification),
+        ..
+    } = decode_request(&wire)?
+    else {
+        anyhow::bail!("missing verification");
+    };
+    assert_eq!(verification.attempt, "attempt-nonce");
+    assert_eq!(
+        verification.previous_serving_account_label.as_deref(),
+        Some("previous")
+    );
+    for verified in [false, true] {
+        let event = ServerEvent::AuthRouteVerified { id: 51, verified };
+        let wire = serde_json::to_string(&event)?;
+        assert!(
+            matches!(serde_json::from_str::<ServerEvent>(&wire)?, ServerEvent::AuthRouteVerified { id: 51, verified: actual } if actual == verified)
+        );
+    }
+    Ok(())
 }

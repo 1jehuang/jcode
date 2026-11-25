@@ -29,6 +29,7 @@ use scriptable::*;
 pub struct LoginOptions {
     pub no_browser: bool,
     pub claude_code: bool,
+    pub claude_code_completion: Option<std::path::PathBuf>,
     pub print_auth_url: bool,
     pub callback_url: Option<String>,
     pub auth_code: Option<String>,
@@ -391,7 +392,25 @@ pub async fn run_login_provider(
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::Claude if options.claude_code => {
-                login_claude_code_flow().map(|_| LoginFlowOutcome::Completed)
+                let pending = options
+                    .claude_code_completion
+                    .as_deref()
+                    .map(auth::claude_cli_completion::claim)
+                    .transpose()?;
+                let result = login_claude_code_flow();
+                if let (Some(path), Some(attempt)) =
+                    (options.claude_code_completion.as_deref(), pending)
+                {
+                    auth::claude_cli_completion::finish(
+                        path,
+                        &attempt,
+                        match &result {
+                            Ok(completed) => Some(completed.clone()),
+                            Err(_) => None,
+                        },
+                    )?;
+                }
+                result.map(|_| LoginFlowOutcome::Completed)
             }
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await

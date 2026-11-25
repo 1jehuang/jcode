@@ -10,6 +10,7 @@ pub(crate) async fn run_login_command(
         account,
         no_browser,
         claude_code,
+        claude_code_completion,
         oauth,
         print_auth_url,
         callback_url,
@@ -34,6 +35,7 @@ pub(crate) async fn run_login_command(
     let mut options = LoginOptions {
         no_browser,
         claude_code,
+        claude_code_completion,
         print_auth_url,
         callback_url,
         auth_code,

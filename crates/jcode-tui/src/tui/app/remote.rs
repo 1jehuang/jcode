@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 mod input_dispatch;
 mod key_handling;
 mod latency;
+mod model_changed;
 mod queue_recovery;
 mod reconnect;
+mod route_selection;
 mod server_event_handlers;
 mod server_events;
 mod session_persistence;
@@ -697,34 +699,8 @@ async fn apply_terminal_event<B: Backend>(
                 && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             {
                 handle_remote_key_event(app, key, remote).await?;
-                if let Some(selection) = app.pending_route_selection.take() {
-                    app.cancel_pending_provider_failover("Provider auto-switch canceled");
-                    app.pending_model_switch = None;
-                    match remote.set_route_selection(selection.clone()).await {
-                        Ok(id) => {
-                            // Manual fallback offers use unrestricted SetRoute,
-                            // but need the same exact acknowledgement fence as
-                            // automatic failover before releasing their resend.
-                            if app.pending_fallback_resend.is_some() {
-                                app.pending_automatic_failover_route = Some(selection);
-                                app.pending_automatic_failover_request_id = Some(id);
-                                app.pending_automatic_failover_started = Some(Instant::now());
-                            }
-                            app.remote_model_switch_in_flight = true;
-                            forward_pending_reasoning_effort(app, remote).await;
-                        }
-                        Err(error) => {
-                            app.pending_reasoning_effort = None;
-                            if let Some(payload) = app.pending_fallback_resend.take() {
-                                app.restore_failover_payload(payload);
-                            }
-                            app.push_display_message(DisplayMessage::error(format!(
-                                "Failed to request model switch: {}",
-                                error
-                            )));
-                            app.set_status_notice("Model switch failed");
-                        }
-                    }
+                if app.pending_route_selection.is_some() {
+                    route_selection::send_pending_route(app, remote).await;
                 } else if let Some(spec) = app.pending_model_switch.take() {
                     app.cancel_pending_provider_failover("Provider auto-switch canceled");
                     match remote.set_model(&spec).await {
@@ -880,6 +856,10 @@ pub(super) async fn handle_bus_event(
             true
         }
         Ok(BusEvent::LoginCompleted(login)) => {
+            if login.provider.starts_with("claude_cli#") {
+                route_selection::handle_cli_login(app, remote, login).await;
+                return true;
+            }
             if crate::tui::is_ssh_remote() {
                 app.set_status_notice("Local login does not change SSH server credentials");
                 return true;

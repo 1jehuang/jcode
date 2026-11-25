@@ -26,8 +26,26 @@ impl App {
             ));
             return;
         }
-        self.track_claude_cli_login();
-        let command = "jcode login --provider claude --claude-code";
+        let flow = match self.track_claude_cli_login() {
+            Ok(flow) => flow,
+            Err(error) => {
+                self.push_display_message(DisplayMessage::error(format!(
+                    "Cannot start Claude Code login: {error}"
+                )));
+                return;
+            }
+        };
+        let args = vec![
+            "login".into(),
+            "--provider".into(),
+            "claude".into(),
+            "--claude-code".into(),
+            "--claude-code-completion".into(),
+            flow.path.to_string_lossy().into_owned(),
+        ];
+        let mut command_parts = vec!["jcode".into()];
+        command_parts.extend(args.iter().cloned());
+        let command = crate::terminal_launch::shell_command(&command_parts);
         // macOS terminal launchers start a fresh login shell rather than
         // inheriting this process's environment. Do not silently sign into a
         // different Claude profile or Jcode home.
@@ -53,16 +71,8 @@ impl App {
         } else {
             std::env::current_exe().and_then(|exe| {
                 let cwd = std::env::current_dir()?;
-                let invocation = crate::terminal_launch::TerminalCommand::new(
-                    exe,
-                    vec![
-                        "login".into(),
-                        "--provider".into(),
-                        "claude".into(),
-                        "--claude-code".into(),
-                    ],
-                )
-                .title("jcode · Claude Code login".to_string());
+                let invocation = crate::terminal_launch::TerminalCommand::new(exe, args.clone())
+                    .title("jcode · Claude Code login".to_string());
                 crate::terminal_launch::spawn_command_in_new_terminal(&invocation, &cwd)
                     .map_err(std::io::Error::other)
             })

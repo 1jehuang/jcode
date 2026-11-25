@@ -269,6 +269,27 @@ impl Agent {
         source: crate::provider::ProviderModelSelectionSource,
     ) -> Result<()> {
         self.provider.set_route_selection(selection)?;
+        self.record_route_selection(selection, source)
+    }
+
+    pub(crate) fn set_route_selection_verified(
+        &mut self,
+        selection: &crate::provider::RouteSelection,
+        fingerprint: &str,
+    ) -> Result<()> {
+        self.provider
+            .set_route_selection_verified(selection, fingerprint)?;
+        self.record_route_selection(
+            selection,
+            crate::provider::ProviderModelSelectionSource::Auth,
+        )
+    }
+
+    fn record_route_selection(
+        &mut self,
+        selection: &crate::provider::RouteSelection,
+        source: crate::provider::ProviderModelSelectionSource,
+    ) -> Result<()> {
         let resolved_model = self.provider.model();
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
@@ -374,10 +395,7 @@ impl Agent {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
                 self.session.reasoning_effort = current.clone();
-                crate::session_effort::record_session_effort(
-                    &self.session.id,
-                    current.as_deref(),
-                );
+                crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
             }

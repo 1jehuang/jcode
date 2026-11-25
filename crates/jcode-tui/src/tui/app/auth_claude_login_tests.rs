@@ -29,6 +29,7 @@ impl TestHome {
             guards.push((key, std::env::var_os(key)));
             crate::env::set_var(key, value);
         }
+        crate::env::remove_var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES");
         Self {
             guards,
             _sandbox: sandbox,
@@ -72,7 +73,8 @@ fn cli_default_enter_keeps_instance_environment_and_does_not_save_credentials() 
         Some(PendingLogin::ClaudeCli { .. })
     ));
     let help = &app.display_messages().last().unwrap().content;
-    assert!(help.contains("jcode login --provider claude --claude-code"));
+    assert!(help.contains("--claude-code"));
+    assert!(help.contains("--claude-code-completion"));
     assert!(help.contains("same environment"));
     assert!(!crate::auth::claude::jcode_path().unwrap().exists());
 }

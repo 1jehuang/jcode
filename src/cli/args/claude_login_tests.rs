@@ -48,3 +48,34 @@ pub(super) fn parse_login_args(argv: &[&str]) -> Result<Args, clap::Error> {
         .join()
         .expect("CLI parser fixture panicked")
 }
+
+#[test]
+fn claude_completion_receipt_requires_the_explicit_cli_method() {
+    let args = parse_login_args(&[
+        "jcode",
+        "login",
+        "--provider",
+        "claude",
+        "--claude-code",
+        "--claude-code-completion",
+        "/private/fixture/result.json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            claude_code: true,
+            claude_code_completion: Some(_),
+            ..
+        })
+    ));
+    assert!(
+        parse_login_args(&[
+            "jcode",
+            "login",
+            "--claude-code-completion",
+            "/private/fixture/result.json"
+        ])
+        .is_err()
+    );
+}

@@ -42,7 +42,7 @@ use super::provider_control::{
     handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
-    handle_set_route, handle_set_service_tier, handle_set_transport,
+    handle_set_route_verified, handle_set_service_tier, handle_set_transport,
     handle_switch_anthropic_account, handle_switch_openai_account,
     try_available_models_catalog_offloaded,
 };
@@ -1982,8 +1982,8 @@ pub(super) async fn handle_client(
                 handle_set_model(id, model, &agent, &client_event_tx).await;
             }
 
-            Request::SetRoute { id, selection, automatic_failover } => {
-                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
+            Request::SetRoute { id, selection, automatic_failover, verification } => {
+                handle_set_route_verified(id, selection, automatic_failover, verification, &agent, &client_event_tx).await;
             }
 
             Request::SetAgentModel { id, target, model, global } => {

@@ -9,6 +9,15 @@ pub(crate) enum PendingLogin {
     ClaudeMethodChoice,
     ClaudeCli {
         attempt: String,
+        flow: std::sync::Arc<crate::auth::claude_cli_completion::LoginFlow>,
+        activation: super::claude_cli_wait::Activation,
+        expected_override: Option<String>,
+        expected_route: (
+            String,
+            String,
+            Option<String>,
+            Option<jcode_provider_core::ResolvedCredential>,
+        ),
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     /// Waiting for user to paste Claude OAuth code for a specific stored account

@@ -28,8 +28,8 @@ pub use anthropic::{
     anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_strip_1m_suffix,
 };
 pub use auth_mode::{
-    AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
-    runtime_env_pinned_mode,
+    AuthMode, AuthRoute, AuthRouteVerification, DualAuthProvider, oauth_account_label,
+    pinned_mode_for, runtime_env_auth_route, runtime_env_pinned_mode,
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
@@ -245,6 +245,15 @@ pub trait Provider: Send + Sync {
     /// by [`RouteSelection::runtime_key`] instead of reparsing a lossy model string.
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
         self.set_model(&selection.routed_model_spec())
+    }
+
+    /// Atomically select a route only when its OAuth grant matches the sign-in result.
+    fn set_route_selection_verified(
+        &self,
+        _selection: &RouteSelection,
+        _fingerprint: &str,
+    ) -> Result<()> {
+        anyhow::bail!("This provider cannot verify a completed OAuth sign-in")
     }
 
     /// List available models for this provider.
@@ -1128,19 +1137,6 @@ pub enum ModelRouteApiMethod {
     Current,
     GrokBuild,
     Other(String),
-}
-
-/// Account-qualified OAuth method, preserving the case-sensitive saved label.
-pub fn oauth_account_label(method: &str) -> Option<&str> {
-    let (base, label) = method.trim().split_once('@')?;
-    if !matches!(base, "claude-oauth" | "openai-oauth")
-        || label.is_empty()
-        || label.contains([':', '@'])
-        || label.chars().any(char::is_control)
-    {
-        return None;
-    }
-    Some(label)
 }
 
 impl ModelRouteApiMethod {

@@ -1,3 +1,5 @@
+#[path = "auth_claude_cli_route.rs"]
+mod claude_cli_route;
 #[path = "auth_claude_cli_wait.rs"]
 mod claude_cli_wait;
 #[path = "auth_claude_login.rs"]
@@ -539,6 +541,9 @@ impl App {
     }
 
     fn begin_pending_login(&mut self, pending: PendingLogin) {
+        if let Some(previous) = self.pending_login.take() {
+            self.cancel_claude_cli_selection(&previous);
+        }
         if let Some((provider, method)) = pending.telemetry_context() {
             crate::telemetry::record_auth_started(&provider, &method);
         }
@@ -2024,9 +2029,7 @@ impl App {
                 self.pending_login = Some(pending);
                 return;
             }
-            if let PendingLogin::ClaudeCli { cancelled, .. } = &pending {
-                cancelled.store(true, std::sync::atomic::Ordering::Release);
-            }
+            self.cancel_claude_cli_selection(&pending);
             // Signal the Muse subscription background task (if any) and drop
             // its credential slot: no late progress, error, or approval event
             // is accepted afterwards, and nothing is ever persisted.

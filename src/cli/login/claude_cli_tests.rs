@@ -178,7 +178,7 @@ fn expired_claude_code_file_does_not_shadow_fresh_native_login() {
     )
     .unwrap();
 
-    assert!(reuse_claude_code_native(&file).unwrap());
+    assert!(reuse_claude_code_native(&file).unwrap().is_some());
     assert_eq!(
         auth::claude::load_credentials().unwrap().access_token,
         "native-token"
@@ -264,9 +264,11 @@ fn unusable_claude_code_file_falls_back_to_native_snapshot() {
     .unwrap();
 
     assert!(
-        !reuse_claude_code_file(auth::claude::ExternalClaudeAuthSource::ClaudeCode, &file).unwrap()
+        reuse_claude_code_file(auth::claude::ExternalClaudeAuthSource::ClaudeCode, &file)
+            .unwrap()
+            .is_none()
     );
-    assert!(reuse_claude_code_native(&file).unwrap());
+    assert!(reuse_claude_code_native(&file).unwrap().is_some());
     crate::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
     auth::claude::set_active_account_override(None);
     assert_eq!(
