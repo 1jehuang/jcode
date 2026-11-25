@@ -75,47 +75,9 @@ impl Agent {
     /// Build a transcript string for memory extraction
     /// This is a independent method so it can be called before spawning async tasks
     pub fn build_transcript_for_extraction(&self) -> String {
-        let mut transcript = String::new();
-        for msg in &self.session.messages {
-            let role = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-            transcript.push_str(&format!("**{}:**\n", role));
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text, .. } => {
-                        transcript.push_str(text);
-                        transcript.push('\n');
-                    }
-                    ContentBlock::ToolUse { name, .. } => {
-                        transcript.push_str(&format!("[Used tool: {}]\n", name));
-                    }
-                    ContentBlock::ToolResult { content, .. } => {
-                        let preview = if content.len() > 200 {
-                            format!("{}...", crate::util::truncate_str(content, 200))
-                        } else {
-                            content.clone()
-                        };
-                        transcript.push_str(&format!("[Result: {}]\n", preview));
-                    }
-                    ContentBlock::Reasoning { .. }
-                    | ContentBlock::ReasoningTrace { .. }
-                    | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. }
-                    | ContentBlock::ProviderNative { .. } => {}
-                    ContentBlock::Image { .. } => {
-                        transcript.push_str("[Image]\n");
-                    }
-                    ContentBlock::OpenAICompaction { .. } => {
-                        transcript.push_str("[OpenAI native compaction]\n");
-                    }
-                }
-            }
-            transcript.push('\n');
-        }
-        transcript
+        crate::memory_agent::build_transcript_for_extraction(
+            &self.session.messages_for_provider_uncached(),
+        )
     }
 
     pub fn last_assistant_text(&self) -> Option<String> {

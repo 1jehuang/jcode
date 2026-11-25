@@ -32,50 +32,7 @@ static MEMORY_AGENT_STATS: Mutex<MemoryAgentStats> = Mutex::new(MemoryAgentStats
 });
 
 pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> String {
-    let mut transcript = String::new();
-    for msg in messages {
-        let role = match msg.role {
-            crate::message::Role::User => "User",
-            crate::message::Role::Assistant => "Assistant",
-        };
-        transcript.push_str(&format!("**{}:**\n", role));
-        for block in &msg.content {
-            match block {
-                crate::message::ContentBlock::Text { text, .. } => {
-                    if text.trim_start().starts_with("<system-reminder>") {
-                        continue;
-                    }
-                    transcript.push_str(text);
-                    transcript.push('\n');
-                }
-                crate::message::ContentBlock::ToolUse { name, .. } => {
-                    transcript.push_str(&format!("[Used tool: {}]\n", name));
-                }
-                crate::message::ContentBlock::ToolResult { content, .. } => {
-                    let preview = if content.len() > 200 {
-                        format!("{}...", crate::util::truncate_str(content, 200))
-                    } else {
-                        content.clone()
-                    };
-                    transcript.push_str(&format!("[Result: {}]\n", preview));
-                }
-                crate::message::ContentBlock::Reasoning { .. }
-                | crate::message::ContentBlock::ReasoningTrace { .. }
-                | crate::message::ContentBlock::AnthropicThinking { .. }
-                | crate::message::ContentBlock::OpenAIReasoning { .. }
-                | crate::message::ContentBlock::ToolReference { .. }
-                | crate::message::ContentBlock::ProviderNative { .. } => {}
-                crate::message::ContentBlock::Image { .. } => {
-                    transcript.push_str("[Image]\n");
-                }
-                crate::message::ContentBlock::OpenAICompaction { .. } => {
-                    transcript.push_str("[OpenAI native compaction]\n");
-                }
-            }
-        }
-        transcript.push('\n');
-    }
-    transcript
+    memory::format_full_context_for_extraction(messages)
 }
 
 fn manager_for_working_dir(working_dir: Option<&str>) -> MemoryManager {

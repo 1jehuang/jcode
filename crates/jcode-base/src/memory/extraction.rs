@@ -1,11 +1,28 @@
 use super::*;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, Weak};
 
 #[cfg(test)]
 #[path = "extraction_tests.rs"]
 mod tests;
 
-static TRANSCRIPT_EXTRACTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+type ExtractionLocks = HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>;
+static EXTRACTION_LOCKS: LazyLock<Mutex<ExtractionLocks>> = LazyLock::new(Default::default);
+static EXTRACTION_WRITES: Mutex<()> = Mutex::new(());
+
+fn extraction_lock(checkpoint: &std::path::Path) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = EXTRACTION_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(checkpoint).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(checkpoint.into(), Arc::downgrade(&lock));
+    lock
+}
 
 impl MemoryManager {
     /// Extract memories from a session transcript using the configured sidecar.
@@ -19,12 +36,12 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
-        // Final and periodic triggers must share the successful extraction checkpoint.
-        let _extraction_guard = TRANSCRIPT_EXTRACTION_LOCK.lock().await;
         let scope = serde_json::to_vec(&(session_id, &self.project_dir))?;
         let checkpoint = storage::jcode_dir()?
             .join("memory/extraction-checkpoints")
             .join(format!("{:x}.json", Sha256::digest(scope)));
+        let lock = extraction_lock(&checkpoint);
+        let _extraction_guard = lock.lock().await;
         let transcript_hash = format!("{:x}", Sha256::digest(transcript.as_bytes()));
         match storage::read_json::<String>(&checkpoint) {
             Ok(previous) if previous == transcript_hash => return Ok(Vec::new()),
@@ -43,6 +60,10 @@ impl MemoryManager {
             .unwrap_or_else(|_| Sidecar::new());
         let extracted = sidecar.extract_memories(transcript).await?;
 
+        // Different checkpoints may share a project graph; serialize only its writes.
+        let _write_guard = EXTRACTION_WRITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut ids = Vec::new();
         for memory in extracted {
             let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);

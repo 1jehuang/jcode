@@ -50,14 +50,21 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
     }
 }
 
-fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> Option<String> {
+fn format_content_block_for_extraction(
+    block: &crate::message::ContentBlock,
+    full_text: bool,
+) -> Option<String> {
     match block {
         crate::message::ContentBlock::Text { text, .. } => {
             let trimmed = text.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || trimmed.starts_with("<system-reminder>") {
                 None
             } else {
-                Some(truncate_chars(trimmed, MEMORY_CONTEXT_MAX_BLOCK_CHARS))
+                Some(if full_text {
+                    trimmed.to_string()
+                } else {
+                    truncate_chars(trimmed, MEMORY_CONTEXT_MAX_BLOCK_CHARS)
+                })
             }
         }
         crate::message::ContentBlock::ToolUse { name, input, .. } => {
@@ -92,7 +99,7 @@ fn format_content_block_for_extraction(block: &crate::message::ContentBlock) -> 
 
 fn format_message_context_with(
     message: &crate::message::Message,
-    format_block: fn(&crate::message::ContentBlock) -> Option<String>,
+    format_block: impl Fn(&crate::message::ContentBlock) -> Option<String>,
 ) -> String {
     let role = match message.role {
         crate::message::Role::User => "User",
@@ -240,7 +247,9 @@ pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]
     let mut total_chars = 0usize;
 
     for message in messages.iter().rev().take(EXTRACTION_CONTEXT_MAX_MESSAGES) {
-        let chunk = format_message_context_with(message, format_content_block_for_extraction);
+        let chunk = format_message_context_with(message, |block| {
+            format_content_block_for_extraction(block, false)
+        });
         if chunk.is_empty() {
             continue;
         }
@@ -257,4 +266,21 @@ pub(crate) fn format_context_for_extraction(messages: &[crate::message::Message]
 
     chunks.reverse();
     chunks.join("\n").trim().to_string()
+}
+
+/// Final extraction keeps all messages and prose, using the periodic renderer's
+/// canonical roles and bounded tool previews so equal represented input deduplicates.
+pub(crate) fn format_full_context_for_extraction(messages: &[crate::message::Message]) -> String {
+    messages
+        .iter()
+        .map(|message| {
+            format_message_context_with(message, |block| {
+                format_content_block_for_extraction(block, true)
+            })
+        })
+        .filter(|chunk| !chunk.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }

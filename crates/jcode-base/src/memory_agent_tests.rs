@@ -221,3 +221,14 @@ async fn retained_recall_pipeline_uses_jev_http_without_embeddings_or_sidecar() 
     memory::clear_pending_memory(sid);
     memory::clear_injected_memories(sid);
 }
+
+#[test]
+fn final_extraction_keeps_prose_omitted_by_periodic_limits() {
+    let text = "x".repeat(25_000) + "LONG_MESSAGE_TAIL";
+    let messages = vec![crate::message::Message::user(&text)];
+    let periodic = memory::format_context_for_extraction(&messages);
+    let final_input = build_transcript_for_extraction(&messages);
+    assert!(!periodic.contains("LONG_MESSAGE_TAIL"));
+    assert!(final_input.contains("LONG_MESSAGE_TAIL"));
+    assert!(periodic.chars().count() <= 24_000);
+}
