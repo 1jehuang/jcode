@@ -151,10 +151,14 @@ async fn catalog(reader: &mut Reader, writer: &mut Writer, enabled: bool) {
     else {
         unreachable!()
     };
-    assert_eq!(
-        tools.iter().any(|tool| tool.name == "user_response"),
-        enabled
-    );
+    for name in ["user_response", "applet"] {
+        assert_eq!(
+            tools.iter().any(|tool| tool.name == name),
+            enabled,
+            "{name}"
+        );
+    }
+    assert!(tools.iter().any(|tool| tool.name == "mcp"));
 }
 
 async fn connection_count(
@@ -196,7 +200,7 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
     let global_is_processing = Arc::new(RwLock::new(false));
     let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
     let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
     let connect = || {
         let (server_stream, client_stream) = crate::transport::Stream::pair().unwrap();
         let task = tokio::spawn(handle_client(
@@ -370,13 +374,71 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
         .unwrap()
         .unwrap();
 
+    // Clearing a creator must not share its new registry with the source viewer.
+    let previous_ids: HashSet<_> = sessions.read().await.keys().cloned().collect();
+    let (creator_task, mut creator_reader, mut creator_writer) = connect();
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        subscribe(12, None, false),
+    )
+    .await;
+    let shared_source = sessions
+        .read()
+        .await
+        .keys()
+        .find(|id| !previous_ids.contains(*id))
+        .unwrap()
+        .clone();
+    let (viewer_task, mut viewer_reader, mut viewer_writer) = connect();
+    done(
+        &mut viewer_reader,
+        &mut viewer_writer,
+        subscribe(13, Some(&shared_source), true),
+    )
+    .await;
+    catalog(&mut creator_reader, &mut creator_writer, true).await;
+    catalog(&mut viewer_reader, &mut viewer_writer, true).await;
+
+    // Restoring a disk-only target must also leave the source registry private.
+    let mut disk_target =
+        crate::session::Session::create_with_id("capability-disk-target".into(), None, None);
+    disk_target.save().unwrap();
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"resume_session", "id":14, "session_id":disk_target.id}),
+    )
+    .await;
+    catalog(&mut creator_reader, &mut creator_writer, false).await;
+    catalog(&mut viewer_reader, &mut viewer_writer, true).await;
+    done(
+        &mut viewer_reader,
+        &mut viewer_writer,
+        json!({"type":"resume_session", "id":15, "session_id":disk_target.id}),
+    )
+    .await;
+    catalog(&mut creator_reader, &mut creator_writer, true).await;
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"clear", "id":16}),
+    )
+    .await;
+    catalog(&mut creator_reader, &mut creator_writer, false).await;
+    catalog(&mut viewer_reader, &mut viewer_writer, true).await;
+
     // Avoid idle unsaved-session grace timers in this isolated fixture.
     sessions.clear_for_test().await;
     drop(tui_reader);
     drop(tui_writer);
     drop(target_reader);
     drop(target_writer);
-    for task in [tui_task, target_task] {
+    drop(creator_reader);
+    drop(creator_writer);
+    drop(viewer_reader);
+    drop(viewer_writer);
+    for task in [tui_task, target_task, creator_task, viewer_task] {
         tokio::time::timeout(Duration::from_secs(10), task)
             .await
             .unwrap()

@@ -332,14 +332,13 @@ pub(super) async fn handle_client(
     };
     let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
-    let registry = Registry::new(provider.clone()).await;
+    let mut registry = Registry::new(provider.clone()).await;
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
     let mut model_catalog_retry = ModelCatalogRetry::default();
 
-    // Create a new session for this client
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
@@ -1345,7 +1344,8 @@ pub(super) async fn handle_client(
                         &client_connection_id,
                         &agent,
                         &provider,
-                        &registry,
+                        &mut registry,
+                        &mcp_pool,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,

@@ -126,7 +126,8 @@ pub(super) async fn handle_clear_session(
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    registry: &Registry,
+    registry: &mut Registry,
+    mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -174,14 +175,24 @@ pub(super) async fn handle_clear_session(
         )
     };
 
+    let new_registry = Registry::new(Arc::clone(provider)).await;
     let mut new_agent = Agent::new_with_initial_working_dir(
         Arc::clone(provider),
-        registry.clone(),
+        new_registry.clone(),
         working_dir.as_deref(),
     );
     let new_id = new_agent.session_id().to_string();
+    new_registry
+        .register_mcp_tools_for_dir(
+            Some(client_event_tx.clone()),
+            Some(Arc::clone(mcp_pool)),
+            Some(new_id.clone()),
+            working_dir.as_deref().map(PathBuf::from),
+        )
+        .await;
 
     if client_selfdev {
+        new_registry.register_selfdev_tools().await;
         new_agent.set_canary("self-dev");
     }
     if preserve_debug {
@@ -362,6 +373,7 @@ pub(super) async fn handle_clear_session(
             ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
         ],
     );
+    *registry = new_registry;
     drop(new_lease);
     drop(replacement_lease);
     new_agent
@@ -1661,6 +1673,7 @@ pub(super) async fn handle_resume_session(
     // different session into that published Arc: doing so silently changes
     // every observer's runtime beneath its still-old session ID.
     let source_agent = agent;
+    let registry = Registry::new(Arc::clone(provider)).await;
     let mut detached = Agent::new(provider.fork(), registry.clone());
     if let Ok(source) = source_agent.try_lock() {
         detached.set_debug(source.is_debug());
