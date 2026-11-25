@@ -179,6 +179,12 @@ pub(super) async fn refresh_and_commit_openai_tokens(
 }
 
 impl OpenAIProvider {
+    pub(super) async fn sync_credentials(&self) -> Result<()> {
+        sync(self.oauth_account_label().as_deref(), &self.credentials).await?;
+        self.reload_cached_reasoning_efforts();
+        Ok(())
+    }
+
     pub(crate) fn reload_credentials_now(&self) {
         match self.credentials.try_write() {
             Ok(mut cached) => {
@@ -197,19 +203,35 @@ impl OpenAIProvider {
                     let mode = Arc::clone(&self.credential_mode);
                     let label = Arc::clone(&self.oauth_account);
                     let browser_only = Arc::clone(&self.browser_only);
+                    let model = Arc::clone(&self.model);
+                    let efforts = Arc::clone(&self.model_reasoning_efforts);
+                    let tiers = Arc::clone(&self.model_service_tiers);
+                    let selected_effort = Arc::clone(&self.reasoning_effort);
                     handle.spawn(async move {
                         let mut cached = slot.write().await;
                         let mode = *mode.read().await;
                         let label = label.read().unwrap_or_else(|p| p.into_inner()).clone();
-                        let loaded = match (mode, label) {
+                        let loaded = match (mode, label.as_deref()) {
                             (
                                 OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth,
                                 Some(label),
-                            ) => jcode_base::auth::codex::load_credentials_for_account(&label),
+                            ) => jcode_base::auth::codex::load_credentials_for_account(label),
                             _ => load_credentials_for_mode(mode),
                         };
                         if let Ok(credentials) = loaded {
                             adopt_stored(&mut cached, credentials);
+                            let scope = if Self::is_chatgpt_mode(&cached) {
+                                label.unwrap_or_else(|| Self::catalog_scope_for(&cached))
+                            } else {
+                                Self::catalog_scope_for(&cached)
+                            };
+                            reload_capabilities(
+                                &scope,
+                                &model.read().await,
+                                &efforts,
+                                &tiers,
+                                &selected_effort,
+                            );
                             browser_only.store(false, AtomicOrdering::Release);
                         }
                     });
@@ -223,3 +245,61 @@ impl OpenAIProvider {
 #[cfg(test)]
 #[path = "openai_live_credentials_tests.rs"]
 pub(crate) mod tests;
+
+pub(super) fn available_efforts(
+    model: &str,
+    model_reasoning_efforts: &StdRwLock<HashMap<String, Vec<String>>>,
+) -> Vec<&'static str> {
+    let model = jcode_provider_core::model_id::canonical(model);
+    // Platform-API-only GPT Pro models never appear in the Codex catalog,
+    // so their ladders are pinned from live Responses API behavior:
+    // gpt-5-pro accepts only `high`; newer pro generations accept
+    // medium/high/xhigh.
+    if jcode_provider_core::is_openai_api_only_pro_model(&model) {
+        return if model.starts_with("gpt-5-pro") {
+            vec!["high", "swarm"]
+        } else {
+            vec!["medium", "high", "xhigh", "swarm"]
+        };
+    }
+    let advertised = model_reasoning_efforts
+        .read()
+        .map(|efforts| efforts.get(&model).cloned())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().get(&model).cloned());
+    if let Some(advertised) = advertised {
+        let mut efforts: Vec<&'static str> = advertised
+            .iter()
+            .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
+            .collect();
+        efforts.push("swarm");
+        return efforts;
+    }
+    jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
+}
+
+pub(super) fn revalidate_effort(
+    model: &str,
+    reasoning_effort: &StdRwLock<Option<String>>,
+    model_reasoning_efforts: &StdRwLock<HashMap<String, Vec<String>>>,
+) {
+    let current = reasoning_effort
+        .read()
+        .map(|effort| effort.clone())
+        .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+    let Some(current) = current else {
+        return;
+    };
+    if jcode_base::prompt::is_swarm_effort(&current)
+        || available_efforts(model, model_reasoning_efforts).contains(&current.as_str())
+    {
+        return;
+    }
+    jcode_base::logging::info(&format!(
+        "Clearing OpenAI reasoning effort '{}' because model '{}' does not advertise it",
+        current, model
+    ));
+    match reasoning_effort.write() {
+        Ok(mut effort) => *effort = None,
+        Err(poisoned) => *poisoned.into_inner() = None,
+    }
+}

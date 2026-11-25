@@ -387,3 +387,108 @@ async fn external_identity_hydration_keeps_its_rotated_refresh_generation() {
         "rotated-refresh"
     );
 }
+
+const CAPABILITY_MODEL: &str = "fixture-live-account-model";
+fn capability_accounts() -> (OpenAIProvider, String, String) {
+    let first = save("cap-first", "first-token", "first-workspace");
+    let second = save("cap-second", "second-token", "second-workspace");
+    for (scope, tier, effort) in [
+        (&first, "ultrafast", "xhigh"),
+        (&second, "priority", "medium"),
+    ] {
+        let mut catalog = jcode_base::provider::OpenAIModelCatalog::default();
+        catalog.available_models.push(CAPABILITY_MODEL.into());
+        catalog
+            .service_tiers
+            .insert(CAPABILITY_MODEL.into(), vec![tier.into()]);
+        catalog
+            .reasoning_efforts
+            .insert(CAPABILITY_MODEL.into(), vec![effort.into()]);
+        jcode_base::provider::persist_openai_model_catalog_for_scope(scope, &catalog);
+    }
+    codex::set_active_account(&first).unwrap();
+    let session = provider();
+    *session.model.try_write().unwrap() = CAPABILITY_MODEL.into();
+    session.reload_cached_reasoning_efforts();
+    session.set_service_tier("ultrafast").unwrap();
+    session.set_reasoning_effort("xhigh").unwrap();
+    (session, first, second)
+}
+fn assert_second_capabilities(session: &OpenAIProvider) {
+    assert_eq!(session.service_tier(), None);
+    assert_eq!(session.available_efforts(), vec!["medium", "swarm"]);
+    assert_eq!(session.reasoning_effort(), None);
+    assert!(!session.model_capabilities_need_refresh());
+    let request = session.response_request_for_model(CAPABILITY_MODEL, &[], &[], "", true);
+    assert!(request.get("service_tier").is_none());
+    assert!(
+        request
+            .get("reasoning")
+            .is_none_or(|r| r.get("effort").is_none())
+    );
+}
+#[tokio::test]
+async fn direct_account_sync_replaces_tier_and_effort_capabilities_before_request_setup() {
+    let _env = TestEnv::new();
+    let (session, _, second) = capability_accounts();
+    codex::set_active_account(&second).unwrap();
+    session.sync_credentials().await.unwrap();
+    assert_second_capabilities(&session);
+    let uncached = save("uncached", "uncached-token", "uncached-workspace");
+    codex::set_active_account(&uncached).unwrap();
+    session.sync_credentials().await.unwrap();
+    assert!(session.model_capabilities_need_refresh());
+    assert!(
+        !session
+            .model_service_tiers
+            .read()
+            .unwrap()
+            .contains_key(CAPABILITY_MODEL)
+    );
+}
+#[tokio::test]
+async fn deferred_account_reload_replaces_tier_and_effort_capabilities_before_publishing_login() {
+    let _env = TestEnv::new();
+    let (session, _, second) = capability_accounts();
+    let guard = session.credentials.read().await;
+    session.reload_credentials_now();
+    tokio::task::yield_now().await;
+    codex::set_active_account(&second).unwrap();
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while session.credentials.read().await.access_token != "second-token" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_second_capabilities(&session);
+}
+#[tokio::test]
+async fn capability_sync_keeps_explicit_account_and_platform_catalog_scopes() {
+    let _env = TestEnv::new();
+    let (session, first, second) = capability_accounts();
+    session.set_oauth_account(Some(&first)).unwrap();
+    codex::set_active_account(&second).unwrap();
+    session.sync_credentials().await.unwrap();
+    assert_eq!(session.service_tier().as_deref(), Some("ultrafast"));
+    assert_eq!(session.available_efforts(), vec!["xhigh", "swarm"]);
+    let _key = EnvGuard::set("OPENAI_API_KEY", "fixture-platform-capabilities");
+    let api = codex::load_api_key_credentials().unwrap();
+    let scope = OpenAIProvider::catalog_scope_for(&api);
+    let mut catalog = jcode_base::provider::OpenAIModelCatalog::default();
+    catalog.available_models.push(CAPABILITY_MODEL.into());
+    catalog
+        .service_tiers
+        .insert(CAPABILITY_MODEL.into(), vec!["priority".into()]);
+    catalog
+        .reasoning_efforts
+        .insert(CAPABILITY_MODEL.into(), vec!["medium".into()]);
+    jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
+    session
+        .set_credential_mode(OpenAICredentialMode::ApiKey)
+        .unwrap();
+    session.sync_credentials().await.unwrap();
+    assert_eq!(session.catalog_scope(), scope);
+    assert_second_capabilities(&session);
+}

@@ -690,6 +690,20 @@ fn spawn_persistent_ws_keepalive_with_interval(
 mod openai_credentials;
 use openai_credentials::CachedCredentials;
 
+fn reload_capabilities(
+    scope: &str,
+    model: &str,
+    efforts: &StdRwLock<HashMap<String, Vec<String>>>,
+    tiers: &StdRwLock<HashMap<String, Vec<String>>>,
+    selected_effort: &StdRwLock<Option<String>>,
+) {
+    *tiers.write().unwrap_or_else(|p| p.into_inner()) =
+        jcode_base::provider::cached_openai_service_tiers_for_scope(scope).unwrap_or_default();
+    *efforts.write().unwrap_or_else(|p| p.into_inner()) =
+        jcode_base::provider::cached_openai_reasoning_efforts_for_scope(scope).unwrap_or_default();
+    revalidate_effort(model, selected_effort, efforts);
+}
+
 pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CachedCredentials>>,
@@ -941,22 +955,14 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let tiers =
-            jcode_base::provider::cached_openai_service_tiers_for_scope(&self.catalog_scope())
-                .unwrap_or_default();
-        *self
-            .model_service_tiers
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = tiers;
+        reload_capabilities(
+            &self.catalog_scope(),
+            &self.model(),
+            &self.model_reasoning_efforts,
+            &self.model_service_tiers,
+            &self.reasoning_effort,
+        );
         self.warn_unsupported_service_tier();
-        let cached =
-            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
-                .unwrap_or_default();
-        match self.model_reasoning_efforts.write() {
-            Ok(mut efforts) => *efforts = cached,
-            Err(poisoned) => *poisoned.into_inner() = cached,
-        }
-        self.revalidate_reasoning_effort();
     }
 
     fn supports_service_tier(&self, model: &str, tier: &str) -> bool {
@@ -1131,28 +1137,11 @@ impl OpenAIProvider {
     }
 
     fn revalidate_reasoning_effort(&self) {
-        let current = self
-            .reasoning_effort
-            .read()
-            .map(|effort| effort.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        let Some(current) = current else {
-            return;
-        };
-        if jcode_base::prompt::is_swarm_effort(&current)
-            || self.available_efforts().contains(&current.as_str())
-        {
-            return;
-        }
-        jcode_base::logging::info(&format!(
-            "Clearing OpenAI reasoning effort '{}' because model '{}' does not advertise it",
-            current,
-            self.model()
-        ));
-        match self.reasoning_effort.write() {
-            Ok(mut effort) => *effort = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
-        }
+        openai_credentials::revalidate_effort(
+            &self.model(),
+            &self.reasoning_effort,
+            &self.model_reasoning_efforts,
+        );
     }
 
     /// Resolve swarm effort only at the wire boundary, preserving the stored mode.
