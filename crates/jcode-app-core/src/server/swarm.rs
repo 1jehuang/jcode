@@ -1795,8 +1795,11 @@ pub(super) async fn update_member_status_with_report_tldr(
                 // Display notifications alone never enter the owner's model
                 // context. Deliver reports through the reliable runtime bus,
                 // which wakes idle owners and queues reports for busy ones.
+                // This also covers the fallback coordinator when a worker has
+                // no explicit report_back_to_session_id: its completion must
+                // still wake the parent that is waiting on the swarm.
                 // Explicit stops are cancellation, not permission to restart.
-                if report_back_to_session_id.is_some() && status != "stopped" {
+                if status != "stopped" {
                     crate::bus::Bus::global().publish(crate::bus::BusEvent::SwarmWorkerReported(
                         crate::bus::SwarmWorkerReported {
                             session_id: recipient_session_id.clone(),
