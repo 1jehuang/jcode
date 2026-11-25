@@ -517,6 +517,48 @@ fn detects_request_payload_too_large_errors() {
     ));
 }
 
+#[test]
+fn provider_limit_errors_select_the_right_recovery() {
+    for (error, context, payload) in [
+        (
+            "HTTP 429: token limit exceeded for tokens per minute",
+            false,
+            false,
+        ),
+        ("Request too large for tokens per min (TPM)", false, false),
+        (
+            "HTTP 429: rate limit exceeded for this context window",
+            false,
+            false,
+        ),
+        ("upstream returned 413", false, true),
+        ("HTTP 400: image is too large", false, false),
+        (
+            "HTTP 413: request too large, body length limit exceeded",
+            false,
+            true,
+        ),
+        (
+            "HTTP 413: request too large: prompt is too long for context window",
+            true,
+            false,
+        ),
+        ("token limit exceeded", true, false),
+        ("CONTEXT_LENGTH_EXCEEDED", true, false),
+        ("prompt_too_large", true, false),
+        ("The chat context is too large.", true, false),
+        ("HTTP 413 request too large: prompt_too_large", true, false),
+        ("token limit exceeded by 413 tokens", true, false),
+    ] {
+        assert_eq!(is_context_limit_error(error), context, "{error}");
+        assert_eq!(
+            is_request_payload_too_large_error(error),
+            payload,
+            "{error}"
+        );
+    }
+}
+
 fn image_msg(data_len: usize) -> Message {
     Message {
         role: Role::User,

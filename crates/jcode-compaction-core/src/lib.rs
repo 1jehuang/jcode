@@ -734,6 +734,65 @@ pub fn strip_all_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlo
     stripped
 }
 
+fn has_explicit_context_marker(lower: &str) -> bool {
+    lower.contains("context length")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("prompt_too_large")
+        || lower.contains("context is too large")
+        || lower.contains("context window")
+        || lower.contains("maximum context")
+        || lower.contains("max context")
+        || lower.contains("prompt is too long")
+        || lower.contains("input is too long")
+}
+
+fn has_rate_limit_marker(lower: &str) -> bool {
+    [
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "tokens per min",
+        "tokens/min",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || has_http_status(lower, "429")
+}
+
+// Match a leading status or the HTTP/API error wrappers used by providers,
+// not incidental numbers such as "token limit exceeded by 413 tokens".
+fn has_http_status(lower: &str, code: &str) -> bool {
+    lower.match_indices(code).any(|(i, _)| {
+        let prefix = lower[..i].trim_end();
+        let suffix = &lower[i + code.len()..];
+        (prefix.is_empty()
+            || ["http", "api error", "api error (", "status", "status:"]
+                .iter()
+                .any(|p| prefix.ends_with(p)))
+            && !suffix.starts_with(|c: char| c.is_ascii_alphanumeric())
+    })
+}
+
+/// Whether token compaction is appropriate, rather than shrinking the serialized
+/// body or waiting for a provider rate limit to reset.
+pub fn is_context_limit_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if has_rate_limit_marker(&lower) {
+        return false;
+    }
+    if has_explicit_context_marker(&lower) {
+        return true;
+    }
+    if has_payload_size_marker(&lower) {
+        return false;
+    }
+    lower.contains("token limit")
+        || lower.contains("too many tokens")
+        || lower.contains("length limit")
+        || lower.contains("maximum tokens")
+        || (lower.contains("exceeded") && lower.contains("tokens"))
+}
+
 /// Whether a provider error indicates the *serialized request body* was too
 /// large (HTTP 413), as distinct from exceeding the model's token context
 /// window. Anthropic surfaces this as `request_too_large` / "Request exceeds the
@@ -743,13 +802,22 @@ pub fn strip_all_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlo
 /// byte-size recovery rather than ordinary context compaction.
 pub fn is_request_payload_too_large_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
+    !has_explicit_context_marker(&lower)
+        && !has_rate_limit_marker(&lower)
+        && has_payload_size_marker(&lower)
+}
+
+fn has_payload_size_marker(lower: &str) -> bool {
     lower.contains("request_too_large")
         || lower.contains("request too large")
         || lower.contains("payload too large")
         || lower.contains("request entity too large")
         || lower.contains("request exceeds the maximum size")
         || lower.contains("exceeds the maximum size")
-        || contains_independent_status_code(&lower, "413")
+        || has_http_status(lower, "413")
+        // Preserve status-only upstream errors without treating a count of 413
+        // tokens as the HTTP status in an otherwise ordinary token-limit error.
+        || (contains_independent_status_code(lower, "413") && !lower.contains("tokens"))
 }
 
 /// Whether `haystack` contains `code` as a standalone status code rather than as
