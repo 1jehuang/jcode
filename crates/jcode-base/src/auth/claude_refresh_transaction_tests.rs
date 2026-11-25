@@ -263,6 +263,28 @@ async fn claude_refresh_cas_all_generic_external_sources_observe_approval_and_to
     let _native = EnvGuard::set("CLAUDE_CODE_OAUTH_TOKEN", None);
     let config_dir = sandbox.root().join("unused-native-config");
     let _config = EnvGuard::set("CLAUDE_CONFIG_DIR", Some(config_dir.as_os_str()));
+    let competing_path = ExternalAuthSource::OpenCode.path().unwrap();
+    let add_competing_source = || {
+        std::fs::create_dir_all(competing_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &competing_path,
+            serde_json::json!({"anthropic":{"type":"oauth", "access":"competing-access",
+                "refresh":"competing-refresh", "expires":i64::MAX}})
+            .to_string(),
+        )
+        .unwrap();
+        Config::allow_external_auth_source_for_path(
+            ExternalAuthSource::OpenCode.source_id(),
+            &competing_path,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::auth::external::load_anthropic_oauth_tokens()
+                .unwrap()
+                .refresh_token,
+            "competing-refresh"
+        );
+    };
     for source in [
         ExternalAuthSource::Pi,
         ExternalAuthSource::OpenClaw,
@@ -288,7 +310,24 @@ async fn claude_refresh_cas_all_generic_external_sources_observe_approval_and_to
             source.path().unwrap()
         };
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        for change in ["revoke", "source-replaced", "label-claimed", "success"] {
+        for change in [
+            "revoke",
+            "source-replaced",
+            "label-claimed",
+            "success",
+            "shadowed-before",
+            "shadowed-during",
+            "shadowed-revoke",
+            "shadowed-replace",
+        ] {
+            if competing_path.exists() {
+                Config::revoke_external_auth_source_for_path(
+                    ExternalAuthSource::OpenCode.source_id(),
+                    &competing_path,
+                )
+                .unwrap();
+                std::fs::remove_file(&competing_path).unwrap();
+            }
             claude::save_auth_file(&JcodeAuthFile::default()).unwrap();
             std::fs::write(&path, body.to_string()).unwrap();
             Config::allow_external_auth_source_for_path(source.source_id(), &path).unwrap();
@@ -296,28 +335,43 @@ async fn claude_refresh_cas_all_generic_external_sources_observe_approval_and_to
                 claude::load_credentials().unwrap().refresh_token,
                 "external-refresh"
             );
+            if matches!(
+                change,
+                "shadowed-before" | "shadowed-revoke" | "shadowed-replace"
+            ) {
+                add_competing_source();
+            }
             let mut before = Vec::new();
+            let mut polled = false;
             let result = refresh_claude_tokens_with("external-refresh", "work", async {
+                polled = true;
+                if change == "shadowed-during" {
+                    add_competing_source();
+                }
                 match change {
-                    "revoke" => {
+                    "revoke" | "shadowed-revoke" => {
                         Config::revoke_external_auth_source_for_path(source.source_id(), &path)
                             .unwrap()
                     }
-                    "source-replaced" => std::fs::write(
+                    "source-replaced" | "shadowed-replace" => std::fs::write(
                         &path,
                         body.to_string()
                             .replace("external-refresh", "replacement-refresh"),
                     )
                     .unwrap(),
                     "label-claimed" => seed(),
-                    "success" => (),
+                    "success" | "shadowed-before" | "shadowed-during" => (),
                     _ => unreachable!(),
                 }
                 before = auth_bytes();
                 Ok(rotated())
             })
             .await;
-            if change == "success" {
+            assert!(
+                polled,
+                "{source:?} {change}: refresh was rejected before the request"
+            );
+            if matches!(change, "success" | "shadowed-before" | "shadowed-during") {
                 result.unwrap();
                 assert_eq!(
                     claude::load_auth_file().unwrap().anthropic_accounts[0].refresh,
