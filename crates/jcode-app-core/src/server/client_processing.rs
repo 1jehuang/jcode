@@ -220,7 +220,6 @@ mod delivered_replay_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Admit AgentTask without waiting on another turn, then use normal turn tracking.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_agent_task(
@@ -269,6 +268,7 @@ pub(super) async fn start_agent_task(
     !was_processing && *state.client_is_processing
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
