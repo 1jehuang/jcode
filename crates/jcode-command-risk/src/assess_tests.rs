@@ -723,3 +723,36 @@ fn issue_1753_inert_text_stays_safe() {
         assert!(level(command).runs_immediately(), "{command:?}");
     }
 }
+
+/// #932: `2>/dev/null` is redirect syntax, not two operands. The `2` is a file
+/// descriptor prefix and `/dev/null` is a write sink, so an `rm` that carries
+/// them must still be judged on its real targets alone.
+#[test]
+fn issue_932_fd_redirect_operands_are_not_delete_targets() {
+    for command in [
+        "rm -rf build 2>/dev/null",
+        "rm -rf build 2>>/dev/null",
+        "rm -rf build 2>&1",
+        "rm -rf build 1>/dev/null 2>&1",
+        "cd /tmp && rm -rf build 2>/dev/null; git clone url",
+    ] {
+        let assessment = assess(command, &ctx());
+        let targets: Vec<&str> = assessment
+            .findings
+            .iter()
+            .filter_map(|finding| finding.target.as_deref())
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["/home/u/proj/build"],
+            "{command}: {assessment:?}"
+        );
+        assert_eq!(assessment.level, RiskLevel::Low, "{command}");
+    }
+
+    // A numeric operand with no redirect in front of it is still a target.
+    assert_eq!(level("rm -rf 2"), RiskLevel::Low);
+    // `>&` names a file when it is not an fd duplication, and it is not a
+    // delete target. Only `build` is deleted here.
+    assert_eq!(level("rm -rf build >& build"), RiskLevel::Low);
+}
