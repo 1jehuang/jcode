@@ -5,7 +5,10 @@ impl App {
     pub(in crate::tui::app) fn dismiss_side_panel(&mut self) {
         self.side_panel_fullscreen = false;
         crate::tui::clear_side_panel_render_caches();
-        self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
+        // A repeated dismiss must not forget the page to bring back.
+        if let Some(id) = self.side_panel.focused_page_id.clone() {
+            self.last_side_panel_focus_id = Some(id);
+        }
         self.side_panel.focused_page_id = None;
         self.side_panel_user_hidden = true;
         self.side_panel_explicit_hidden = true;
@@ -93,5 +96,20 @@ impl App {
         self.set_status_notice(format!(
             "Side panel: no pages ({diagram_key} toggles diagrams)"
         ));
+    }
+}
+
+#[cfg(test)]
+mod repeated_dismiss_tests {
+    #[test]
+    fn repeated_dismiss_keeps_last_focused_page() {
+        let mut app = super::super::tests::create_test_app();
+        app.side_panel.focused_page_id = Some("retained-page".to_string());
+        app.dismiss_side_panel();
+        app.dismiss_side_panel();
+        assert_eq!(
+            app.last_side_panel_focus_id.as_deref(),
+            Some("retained-page")
+        );
     }
 }
