@@ -846,16 +846,6 @@ impl McpConfig {
         let mut merged = Self::default();
         let claude_mcp_enabled = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP").is_none();
 
-        // Load jcode's own global config (~/.jcode/mcp.json)
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let jcode_mcp = jcode_dir.join("mcp.json");
-            if jcode_mcp.exists() {
-                if let Ok(config) = Self::load_from_file(&jcode_mcp) {
-                    merged.merge_tracked(config, "~/.jcode/mcp.json");
-                }
-            }
-        }
-
         // Claude Code user/global config (~/.claude.json): top-level mcpServers
         // plus per-project entries for the project directory.
         if claude_mcp_enabled
@@ -890,6 +880,16 @@ impl McpConfig {
                     ));
                 }
                 merged.merge_tracked(config, "~/.claude/mcp.json");
+            }
+        }
+
+        // Explicit jcode settings override imported harness-specific commands.
+        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
+            let jcode_mcp = jcode_dir.join("mcp.json");
+            if jcode_mcp.exists() {
+                if let Ok(config) = Self::load_from_file(&jcode_mcp) {
+                    merged.merge_tracked(config, "~/.jcode/mcp.json");
+                }
             }
         }
 

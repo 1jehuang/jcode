@@ -723,6 +723,61 @@ fn claude_json_http_entry_does_not_displace_jcode_stdio_server() {
 }
 
 #[test]
+fn jcode_mcp_overrides_imported_claude_commands() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"servers":{"amq":{"command":"amq-mcp","args":["local","channel","jcode"],"shared":false}}}"#,
+    )
+    .unwrap();
+    let external = home.path().join("external");
+    std::fs::create_dir_all(external.join(".claude")).unwrap();
+    let claude_amq = serde_json::json!({
+        "mcpServers": {
+            "amq": {"command": "amq-mcp", "args": ["local", "channel", "claude"]},
+            "claude-only": {"command": "claude-only"}
+        }
+    });
+    std::fs::write(external.join(".claude.json"), claude_amq.to_string()).unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        for legacy in [false, true] {
+            if legacy {
+                std::fs::write(external.join(".claude/mcp.json"), claude_amq.to_string()).unwrap();
+            }
+            let config = McpConfig::load_for_dir(Some(project.path()));
+            assert_eq!(config.servers["amq"].args, ["local", "channel", "jcode"]);
+            assert!(!config.servers["amq"].shared);
+            assert_eq!(config.sources["amq"], "~/.jcode/mcp.json");
+            assert!(config.servers.contains_key("claude-only"));
+        }
+
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"amq":{"command":"project-amq"}}}"#,
+        )
+        .unwrap();
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert_eq!(config.servers["amq"].command, "project-amq");
+        assert_eq!(config.sources["amq"], ".mcp.json");
+        assert!(config.pending_approval.contains("amq"));
+        assert!(!config.servers["amq"].is_enabled());
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("jcode MCP precedence assertions");
+}
+
+#[test]
 fn claude_is_live_while_codex_is_a_one_time_snapshot() {
     let _guard = crate::storage::lock_test_env();
     let previous_home = std::env::var_os("JCODE_HOME");

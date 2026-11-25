@@ -62,10 +62,14 @@ are `locked by plugin`, since they are managed with Claude Code's `/plugin`.
 
 jcode reads servers from, in increasing precedence:
 
-1. `~/.jcode/mcp.json`
-2. `~/.claude.json` (`mcpServers`, and `projects["<path>"].mcpServers`)
-3. `~/.claude/mcp.json`
+1. `~/.claude.json` (`mcpServers`, and `projects["<path>"].mcpServers`)
+2. `~/.claude/mcp.json`
+3. `~/.jcode/mcp.json`
 4. The project's `.jcode/mcp.json`, `.mcp.json`, `.claude/mcp.json`
+
+Explicit jcode entries override same-named imported Claude servers, so
+harness-specific commands and settings such as `shared: false` stay intact.
+Servers defined only in Claude's configuration remain available.
 
 `${VAR}` and `${VAR:-default}` are expanded in commands, arguments,
 environment, URLs and headers. stdio, streamable HTTP and SSE are supported.
