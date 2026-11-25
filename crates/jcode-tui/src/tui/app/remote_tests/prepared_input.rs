@@ -109,3 +109,24 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
         "remote skill prompt should be visible as the submitted user turn"
     );
 }
+
+#[test]
+fn provenance_review_unconfirmed_model_switch_restores_owned_marker() {
+    use crate::tui::app::{input, remote::restore_unconfirmed_model_switch_prompts};
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let mut app = create_test_app();
+    crate::tui::app::input_images::attach_image(
+        &mut app,
+        "image/png".into(),
+        "fixture-image".into(),
+    );
+    input::insert_input_text(&mut app, "describe this");
+    let original = app.input.clone();
+    app.pending_prompt_after_model_switch = Some(input::take_prepared_input(&mut app));
+    restore_unconfirmed_model_switch_prompts(&mut app);
+    assert_eq!(app.input, original);
+    app.cursor_pos = 0;
+    app.handle_key(KeyCode::Delete, KeyModifiers::NONE).unwrap();
+    assert!(app.pending_images.is_empty());
+    assert_eq!(app.input, "describe this");
+}

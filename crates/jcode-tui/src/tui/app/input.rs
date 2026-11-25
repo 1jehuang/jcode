@@ -1239,60 +1239,7 @@ pub(super) fn run_queued_commands_local(app: &mut App) {
     }
 }
 
-pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
-    if !app.input.is_empty() {
-        return false;
-    }
-
-    let mut parts: Vec<String> = Vec::new();
-    let mut had_pending = false;
-
-    if !app.pending_soft_interrupts.is_empty() {
-        parts.extend(std::mem::take(&mut app.pending_soft_interrupts));
-        app.pending_soft_interrupt_requests.clear();
-        had_pending = true;
-    }
-    if let Some(msg) = app.interleave_message.take()
-        && !msg.is_empty()
-    {
-        app.pending_images.append(&mut app.interleave_images);
-        parts.push(msg);
-        had_pending = true;
-    }
-    if !app.queued_messages.is_empty() {
-        for text in std::mem::take(&mut app.queued_messages) {
-            parts.push(text);
-        }
-        app.pending_images.append(&mut app.queued_images);
-        if !app.has_queued_followups() {
-            app.pending_queued_dispatch = false;
-        }
-        had_pending = true;
-    }
-
-    if !parts.is_empty() {
-        app.input = parts.join("\n\n");
-        app.input_image_markers = Default::default();
-        app.ensure_input_image_markers();
-        app.cursor_pos = app.input.len();
-        let count = parts.len();
-        app.set_status_notice(format!(
-            "Retrieved {} pending message{} for editing",
-            count,
-            if count == 1 { "" } else { "s" }
-        ));
-    } else if let Some(command) = app.queued_commands.pop() {
-        // Commands are recalled one at a time (newest first): joining several
-        // would turn them into a single malformed command.
-        app.input = command;
-        app.cursor_pos = app.input.len();
-        app.sync_model_picker_preview_from_input();
-        app.set_status_notice("Retrieved queued command for editing");
-        return true;
-    }
-
-    had_pending
-}
+pub(super) use super::input_images::retrieve_pending_message_for_edit;
 
 pub(super) fn send_action(app: &App, alternate_shortcut: bool) -> SendAction {
     // Route through the submission guard rather than consuming this draft

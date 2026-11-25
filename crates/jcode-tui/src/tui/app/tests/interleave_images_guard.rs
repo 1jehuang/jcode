@@ -84,7 +84,8 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
         assert!(app.pending_images.is_empty());
         assert_eq!(connection.next_request_id_for_test(), next_id);
         assert!(input::retrieve_pending_message_for_edit(&mut app));
-        assert_eq!(app.input, format!("{expected} [image 1]"));
+        assert_eq!(app.input, format!("[image 1]{expected}"));
+        assert_eq!(app.input_without_owned_image_markers(), expected);
         assert_eq!(app.cursor_pos, app.input.len());
         assert_eq!(app.pending_images, vec![image]);
         assert!(app.queued_images.is_empty());
