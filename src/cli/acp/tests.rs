@@ -184,6 +184,26 @@ fn initialize_standard_omits_jcode_meta() {
 }
 
 #[test]
+fn initialize_advertises_terminal_login_auth_method() {
+    let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Standard);
+    let methods = result["authMethods"].as_array().expect("authMethods array");
+    assert_eq!(methods.len(), 1);
+    assert_eq!(methods[0]["id"], ACP_LOGIN_AUTH_METHOD_ID);
+    assert_eq!(methods[0]["type"], "terminal");
+    assert_eq!(methods[0]["args"], json!(["login"]));
+}
+
+#[test]
+fn authenticate_accepts_only_advertised_method() {
+    assert_eq!(
+        authenticate_result(&json!({"methodId": ACP_LOGIN_AUTH_METHOD_ID})).unwrap(),
+        json!({})
+    );
+    assert!(authenticate_result(&json!({"methodId": "oauth"})).is_err());
+    assert!(authenticate_result(&json!({})).is_err());
+}
+
+#[test]
 fn initialize_full_advertises_jcode_extension_meta() {
     let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Full);
     assert_eq!(

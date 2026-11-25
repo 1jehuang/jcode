@@ -12,6 +12,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
+/// Terminal auth method: the client runs `jcode login` (interactive provider
+/// picker) in a terminal. Credentials are read from disk, so `authenticate` is
+/// an acknowledgement only.
+const ACP_LOGIN_AUTH_METHOD_ID: &str = "jcode-login";
 
 const JSONRPC_PARSE_ERROR: i64 = -32700;
 const JSONRPC_INVALID_REQUEST: i64 = -32600;
@@ -456,6 +460,17 @@ impl AcpRuntime {
                 if let Some(id) = message.id {
                     self.write_result(id, initialize_result(&message.params, self.profile))
                         .await?;
+                }
+            }
+            "authenticate" => {
+                if let Some(id) = message.id {
+                    match authenticate_result(&message.params) {
+                        Ok(result) => self.write_result(id, result).await?,
+                        Err(err) => {
+                            self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                                .await?
+                        }
+                    }
                 }
             }
             "session/new" => self.handle_session_new(message).await?,
@@ -1833,8 +1848,22 @@ fn initialize_result(params: &Value, profile: AcpProfile) -> Value {
             "title": "Jcode",
             "version": jcode_build_meta::pkg_version(),
         },
-        "authMethods": [],
+        "authMethods": [{
+            "id": ACP_LOGIN_AUTH_METHOD_ID,
+            "name": "Log in",
+            "description": "Sign in to a model provider with `jcode login`",
+            "type": "terminal",
+            "args": ["login"],
+        }],
     })
+}
+
+fn authenticate_result(params: &Value) -> std::result::Result<Value, String> {
+    match params.get("methodId").and_then(Value::as_str) {
+        Some(ACP_LOGIN_AUTH_METHOD_ID) => Ok(json!({})),
+        Some(other) => Err(format!("Unknown authentication method: {other}")),
+        None => Err("authenticate requires a string methodId".to_string()),
+    }
 }
 
 #[path = "acp_parameter_validation.rs"]
