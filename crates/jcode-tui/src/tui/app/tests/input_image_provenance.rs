@@ -391,6 +391,10 @@ fn provenance_review_tab_completion_keeps_one_owned_image() {
             app.cursor_pos = prefix.len() + 3;
             if selected {
                 assert!(app.accept_selected_command_suggestion());
+                assert!(
+                    !app.handle_command_suggestion_key(KeyCode::Enter, KeyModifiers::NONE),
+                    "matching slash token must let Enter continue"
+                );
             } else {
                 app.handle_key(KeyCode::Tab, KeyModifiers::NONE).unwrap();
                 app.handle_key(KeyCode::Tab, KeyModifiers::NONE).unwrap();
