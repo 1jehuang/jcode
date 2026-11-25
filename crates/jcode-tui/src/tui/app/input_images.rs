@@ -40,7 +40,9 @@ pub(super) fn take_prepared_input(app: &mut App) -> super::input::PreparedInput 
 pub(super) fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
     app.ensure_input_image_markers();
-    app.remember_input_undo_state();
+    if !app.replace_input_selection_for_insert() {
+        app.remember_input_undo_state();
+    }
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
     let at = app.cursor_pos;
@@ -99,6 +101,7 @@ impl App {
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        self.clear_input_selection();
         self.input_typing_undo = None;
         if let Some(draft) = self.input_undo_stack.pop() {
             self.history_draft = None;
@@ -134,6 +137,7 @@ impl App {
     }
 
     pub(super) fn take_input_draft(&mut self) -> InputUndoSnapshot {
+        self.clear_input_selection();
         self.ensure_input_image_markers();
         (
             std::mem::take(&mut self.input),
@@ -145,6 +149,7 @@ impl App {
     }
 
     pub(super) fn restore_input_draft(&mut self, draft: InputUndoSnapshot) {
+        self.clear_input_selection();
         let (text, cursor, images, markers, pasted_contents) = draft;
         self.input = text;
         self.cursor_pos = super::input::floor_char_boundary(&self.input, cursor);

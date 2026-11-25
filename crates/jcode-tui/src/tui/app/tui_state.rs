@@ -2204,6 +2204,10 @@ impl crate::tui::TuiState for App {
         self.normalized_copy_selection()
     }
 
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        self.input_selection()
+    }
+
     fn input_drag_scroll_offset(&self) -> Option<usize> {
         self.copy_selection_dragging
             .then_some(self.input_selection_scroll)
@@ -2214,11 +2218,7 @@ impl crate::tui::TuiState for App {
         if !self.copy_selection_mode {
             return None;
         }
-
-        // Compute selection metrics without building the full selected string,
-        // which previously re-allocated the entire selection on every render
-        // frame and drag move (O(selection) per frame; a "select all" rebuilt
-        // the whole transcript text repeatedly).
+        // Compute metrics without rebuilding the selected text on every frame.
         let (selected_chars, selected_lines) = self
             .normalized_copy_selection()
             .and_then(crate::tui::ui::copy_selection_metrics)

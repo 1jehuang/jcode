@@ -622,6 +622,8 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -1146,6 +1148,8 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -1461,11 +1465,6 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
     }
 
     /// Mark that a server was just spawned - run_remote will retry initial connection

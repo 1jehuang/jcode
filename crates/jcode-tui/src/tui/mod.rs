@@ -1218,16 +1218,16 @@ pub trait TuiState {
     }
     /// Monotonic clock for viewport animations
     fn now_millis(&self) -> u64;
-    /// UI state for live copy badge highlighting / feedback
     // ---- Copy selection ----
     fn copy_badge_ui(&self) -> crate::tui::CopyBadgeUiState;
     /// Whether modal in-app copy selection mode is active.
     fn copy_selection_mode(&self) -> bool;
-    /// Current in-app copy selection range, if any.
     fn copy_selection_range(&self) -> Option<CopySelectionRange>;
-    /// Persistent status for in-app copy selection mode.
     fn copy_selection_status(&self) -> Option<CopySelectionStatus>;
-
+    /// Editable composer selection as byte offsets into input().
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        None
+    }
     /// The composer follows the selection endpoint only during a mouse drag.
     fn input_drag_scroll_offset(&self) -> Option<usize> {
         None

@@ -176,6 +176,10 @@ pub(super) async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app_mod::input_selection::handle_input_selection_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
     // show "you just pressed X → does Y". Placed after the overlay handlers so
     // overlay-local keys stay silent. Unknown chords are reported at the

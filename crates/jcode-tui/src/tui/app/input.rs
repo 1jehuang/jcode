@@ -524,7 +524,7 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
         insert_input_text(app, &text);
         return;
     }
-    if expand_matching_paste(app, &text) {
+    if app.input_selection().is_none() && expand_matching_paste(app, &text) {
         return;
     }
 
@@ -760,12 +760,16 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     app.follow_chat_bottom_for_typing();
 
     app.ensure_input_image_markers();
+    let replaced_selection = app.replace_input_selection_for_insert();
     let at_end = app.cursor_pos == app.input.len();
 
     // A habitual space typed after an auto-inserted picker separator would
     // only add noise. Swallow it so command + space + filter still produces
     // a single separator.
-    if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
+    if !replaced_selection
+        && text == " "
+        && at_end
+        && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
         app.input_typing_undo = None;
         return;
@@ -776,7 +780,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
         && app.input_typing_undo.is_some_and(|(last, end)| {
             end == app.cursor_pos && last.elapsed() < Duration::from_secs(1)
         });
-    if !same_burst {
+    if !same_burst && !replaced_selection {
         app.remember_input_undo_state();
     }
 

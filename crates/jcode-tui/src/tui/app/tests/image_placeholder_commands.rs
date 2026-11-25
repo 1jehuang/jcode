@@ -195,3 +195,6 @@ fn test_unknown_skill_with_image_placeholder_reports_error_and_keeps_image() {
 }
 
 include!("input_image_provenance.rs");
+include!("input_selection_keys.rs");
+include!("input_text_selection.rs");
+include!("input_image_selection.rs");

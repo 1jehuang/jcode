@@ -89,6 +89,7 @@ mod inline_interactive;
 mod input;
 mod input_help;
 mod input_images;
+mod input_selection;
 mod jarvis;
 mod jarvis_listen;
 mod jarvis_status;
@@ -1741,11 +1742,11 @@ pub struct App {
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<input_images::InputUndoSnapshot>,
-    // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     input_typing_undo: Option<(Instant, usize)>,
-    // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
+    input_selection_anchor: Option<input_selection::InputSelectionAnchor>,
+    input_selection_clicks: input_selection::ClickCounter,
+    // Draft displaced by explicit prompt-history recall.
     history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
