@@ -83,35 +83,38 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
             bail!("destination group record does not match staged group");
         }
     }
-    // Validate every account before touching any member. Credentials remain
-    // outside the archive and are installed by the private SSH channel.
-    let mut sessions = Vec::new();
-    for member in &group.members {
-        let mut sess: session::Session = read_json(
-            &directory
-                .join("members")
-                .join(&member.manifest.session_id)
-                .join("session.json"),
-        )?;
-        rebind_account_pins(&mut sess, &member.manifest.auth_pin_proofs)?;
-        if let Some(account) = &member.manifest.auth_account {
-            let credentials =
-                session_credentials(&sess)?.context("group member lost its OAuth route")?;
-            if credentials.provider() != account.provider || credentials.label() != account.label {
-                bail!("group member OAuth identity mismatch");
-            }
-        }
-        if let Some(lease) = storage::read_session_lease(&sess.id) {
-            if lease.epoch > member.manifest.epoch {
-                bail!("destination member has a newer migration epoch");
-            }
-            if lease.epoch == member.manifest.epoch && lease.is_here() && !record.exists() {
-                bail!("destination member is active without this group transaction");
-            }
-        }
-        sessions.push(sess);
-    }
     if !record.exists() {
+        // A committed retry preserves live sessions and their refreshed credentials.
+        // Validate every account before touching any member. Credentials remain
+        // outside the archive and are installed by the private SSH channel.
+        let mut sessions = Vec::new();
+        for member in &group.members {
+            let mut sess: session::Session = read_json(
+                &directory
+                    .join("members")
+                    .join(&member.manifest.session_id)
+                    .join("session.json"),
+            )?;
+            rebind_account_pins(&mut sess, &member.manifest.auth_pin_proofs)?;
+            if let Some(account) = &member.manifest.auth_account {
+                let credentials =
+                    session_credentials(&sess)?.context("group member lost its OAuth route")?;
+                if credentials.provider() != account.provider
+                    || credentials.label() != account.label
+                {
+                    bail!("group member OAuth identity mismatch");
+                }
+            }
+            if let Some(lease) = storage::read_session_lease(&sess.id) {
+                if lease.epoch > member.manifest.epoch {
+                    bail!("destination member has a newer migration epoch");
+                }
+                if lease.epoch == member.manifest.epoch && lease.is_here() && !record.exists() {
+                    bail!("destination member is active without this group transaction");
+                }
+            }
+            sessions.push(sess);
+        }
         daemon_command("reserve", &group.swarm)?;
         // Install all sessions under blocking leases. Only after transcripts,
         // todos and swarm topology are durable may any destination member run.

@@ -246,3 +246,73 @@ fn inventory_reports_only_omitted_sessions_in_same_repository() {
         vec![excluded]
     );
 }
+
+#[test]
+fn recorded_group_activation_retry_preserves_live_bindings_after_credentials_change() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (stage, mut group) = fixture();
+    for member in &mut group.members {
+        let file = stage
+            .path()
+            .join("members")
+            .join(&member.manifest.session_id)
+            .join("session.json");
+        let mut staged: session::Session = read_json(&file).unwrap();
+        staged.route_api_method = Some("claude-oauth@old-source-label".into());
+        staged.account_pins.insert(
+            "claude".into(),
+            jcode_provider_core::AccountPin {
+                label: "old-source-label".into(),
+                identity: None,
+                record_id: Some("foreign-source-record".into()),
+            },
+        );
+        storage::write_json(&file, &staged).unwrap();
+        member.session_sha256 = digest(&file).unwrap();
+        member.manifest.auth_account = Some(CloudAccount {
+            provider: TransferProvider::Claude,
+            label: "old-source-label".into(),
+        });
+        let mut live = staged;
+        live.title = Some("new work after activation".into());
+        live.route_api_method = Some("claude-api".into());
+        live.account_pins.get_mut("claude").unwrap().record_id =
+            Some("local-destination-record".into());
+        storage::write_json(&session::session_path(&live.id).unwrap(), &live).unwrap();
+        write_lease(&member_lease(member, None)).unwrap();
+    }
+    let directory = inbox_dir().unwrap().join("coordinator.4");
+    std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+    std::fs::rename(stage.path(), &directory).unwrap();
+    durable_json(&directory.join("group.json"), &group).unwrap();
+    let record = group_dir("coordinator").unwrap().join("received.json");
+    durable_json(&record, &group).unwrap();
+    activate("coordinator", 4).unwrap();
+    for member in &group.members {
+        let live = session::Session::load(&member.manifest.session_id).unwrap();
+        assert_eq!(live.title.as_deref(), Some("new work after activation"));
+        assert_eq!(live.route_api_method.as_deref(), Some("claude-api"));
+        assert_eq!(
+            live.account_pins["claude"].record_id.as_deref(),
+            Some("local-destination-record")
+        );
+        assert!(storage::read_session_lease(&live.id).unwrap().is_here());
+    }
+    let mut tampered = group.clone();
+    tampered.members[0].manifest.source_host = "changed source".into();
+    durable_json(&directory.join("group.json"), &tampered).unwrap();
+    assert!(
+        activate("coordinator", 4)
+            .unwrap_err()
+            .to_string()
+            .contains("record does not match")
+    );
+    durable_json(&directory.join("group.json"), &group).unwrap();
+    std::fs::remove_file(record).unwrap();
+    assert!(
+        activate("coordinator", 4)
+            .unwrap_err()
+            .to_string()
+            .contains("credential proof")
+    );
+}
