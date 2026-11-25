@@ -266,6 +266,10 @@ impl Provider for JcodeProvider {
         self.inner.context_window()
     }
 
+    fn input_token_limit(&self) -> usize {
+        self.inner.input_token_limit()
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         self.ensure_runtime_mode();
         let forked = Self::new();
