@@ -1,0 +1,28 @@
+name: LLM price drift
+
+on:
+  schedule:
+    # Weekly, Mondays at 07:41 UTC.
+    - cron: '41 7 * * 1'
+  pull_request:
+    paths:
+      - 'crates/jcode-provider-core/src/pricing.rs'
+      - 'crates/jcode-base/src/provider/pricing.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Hard-coded prices match official pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Mattbusel/llm-prices@v1
+        with:
+          paths: |
+            crates/jcode-provider-core/src/pricing.rs
+            crates/jcode-base/src/provider/pricing.rs
+          fail-on: drift
