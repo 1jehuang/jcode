@@ -85,8 +85,8 @@ impl App {
         }
         self.remote_reasoning_effort.clone().or_else(|| {
             let (provider, model) = self.remote_effort_identity();
-            let provider = provider.unwrap_or_default().to_ascii_lowercase();
-            let model = model.unwrap_or_default().to_ascii_lowercase();
+            let provider = provider.as_deref().unwrap_or("").to_ascii_lowercase();
+            let model = model.as_deref().unwrap_or("").to_ascii_lowercase();
             let cfg = &crate::config::config().provider;
             if provider.contains("antigravity") {
                 jcode_provider_core::split_antigravity_model_effort(&model)
