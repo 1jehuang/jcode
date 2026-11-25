@@ -355,14 +355,9 @@ impl ResponsesStream {
                     self.pending.push(StreamEvent::ThinkingEnd);
                     self.thinking = false;
                 }
-                let message = value
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .or_else(|| value.get("message").and_then(Value::as_str))
-                    .unwrap_or("OpenCode Go Responses API error");
+                let message = responses_error_message(&value, data);
                 self.pending.push(StreamEvent::Error {
-                    message: message.to_string(),
+                    message,
                     retry_after_secs: None,
                 });
                 self.ended = true;
@@ -428,6 +423,39 @@ impl ResponsesStream {
         }
         None
     }
+}
+
+/// Maximum raw-event characters appended to the neutral default error message.
+const ERROR_RAW_SNIPPET_CHARS: usize = 300;
+
+/// Extract a human-readable error from a Responses `response.failed` / `error` event.
+/// Lookup order: `error.message`, `response.error.{message,code}`, top-level `message`.
+fn responses_error_message(value: &Value, raw: &str) -> String {
+    if let Some(message) = value
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+    {
+        return message.to_string();
+    }
+    if let Some(error) = value
+        .get("response")
+        .and_then(|response| response.get("error"))
+    {
+        let message = error.get("message").and_then(Value::as_str);
+        let code = error.get("code").and_then(Value::as_str);
+        match (message, code) {
+            (Some(message), Some(code)) => return format!("{message} (code: {code})"),
+            (Some(message), None) => return message.to_string(),
+            (None, Some(code)) => return format!("Responses API error (code: {code})"),
+            (None, None) => {}
+        }
+    }
+    if let Some(message) = value.get("message").and_then(Value::as_str) {
+        return message.to_string();
+    }
+    let snippet: String = raw.chars().take(ERROR_RAW_SNIPPET_CHARS).collect();
+    format!("Responses API error: {snippet}")
 }
 
 /// Only display measured percentages. A missing/invalid window is unknown,
@@ -805,5 +833,62 @@ mod tests {
             events.last(),
             Some(StreamEvent::MessageEnd { .. })
         ));
+    }
+
+    fn collect_error_message(data: &str) -> String {
+        let payload = format!("data: {data}\n\n");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let events = runtime.block_on(async {
+            let mut stream =
+                ResponsesStream::new(futures::stream::iter(vec![Ok(Bytes::from(payload))]));
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.expect("response event"));
+            }
+            events
+        });
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                StreamEvent::Error {
+                    message,
+                    retry_after_secs: None,
+                } => Some(message),
+                _ => None,
+            })
+            .expect("error event")
+    }
+
+    #[test]
+    fn response_failed_reports_nested_response_error_message_and_code() {
+        let message = collect_error_message(
+            r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_error","message":"upstream exploded"}}}"#,
+        );
+        assert!(message.contains("upstream exploded"), "{message}");
+        assert!(message.contains("upstream_error"), "{message}");
+        assert_eq!(message, "upstream exploded (code: upstream_error)");
+    }
+
+    #[test]
+    fn top_level_error_event_keeps_error_message() {
+        let message = collect_error_message(
+            r#"{"type":"error","error":{"message":"bad request","code":"invalid"}}"#,
+        );
+        assert_eq!(message, "bad request");
+    }
+
+    #[test]
+    fn error_event_without_content_uses_neutral_default_with_raw_snippet() {
+        let message = collect_error_message(r#"{"type":"response.failed","foo":"bar"}"#);
+        assert!(message.starts_with("Responses API error"), "{message}");
+        assert!(!message.contains("OpenCode Go"), "{message}");
+        assert!(message.contains("\"foo\":\"bar\""), "{message}");
+
+        let long = format!(r#"{{"type":"error","blob":"{}"}}"#, "x".repeat(2000));
+        let message = collect_error_message(&long);
+        assert!(message.len() < 400, "{}", message.len());
     }
 }
