@@ -417,3 +417,119 @@ fn live_credentials_rejected_stale_refresh_can_use_a_new_login_but_not_stale_or_
     auth::claude::remove_account(&label).unwrap();
     assert!(replacement_after_refresh_failure(&Some(label), &source).is_err());
 }
+
+#[tokio::test]
+async fn live_credentials_401_after_own_persisted_refresh_does_not_reuse_rejected_bearer() {
+    let _env = TestEnv::new();
+    let label = save("work", "first");
+    let mut provider = offline_provider();
+    provider.set_model("claude-sonnet-4-6").unwrap();
+    let rotated = response("rotated");
+    auth::claude::update_account_tokens(
+        &label,
+        &rotated.access_token,
+        &rotated.refresh_token,
+        rotated.expires_at,
+    )
+    .unwrap();
+    let token = commit_claude_refresh(
+        &provider.credentials,
+        &None,
+        ("first".into(), "first-refresh".into()),
+        rotated,
+    )
+    .await
+    .unwrap();
+    // Force refresh must reach the coordinator, which this guard stops before HTTP.
+    auth::refresh_state::record_permanent_rejection(
+        "claude",
+        "rotated-refresh",
+        "synthetic rejection prevents live OAuth",
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    provider.direct_transport.oauth_api_url = Some(format!(
+        "http://{}/v1/messages",
+        listener.local_addr().unwrap()
+    ));
+    let server = tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let Ok(accepted) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await
+            else {
+                break;
+            };
+            let (mut stream, _) = accepted.unwrap();
+            seen.push(request_bearer(&mut stream).await);
+            send_response(
+                &mut stream,
+                401,
+                r#"{"error":{"type":"authentication_error","message":"invalid token"}}"#,
+            )
+            .await;
+        }
+        seen
+    });
+    let request = ApiRequest {
+        model: "claude-sonnet-4-6".into(),
+        max_tokens: 1,
+        system: None,
+        messages: vec![ApiMessage {
+            role: "user".into(),
+            content: vec![ApiContentBlock::Text {
+                text: "fixture".into(),
+                cache_control: None,
+            }],
+        }],
+        tools: None,
+        metadata: None,
+        thinking: None,
+        output_config: None,
+        temperature: None,
+        service_tier: None,
+        stream: true,
+    };
+    let (tx, mut rx) = mpsc::channel(100);
+    let task = tokio::spawn(run_stream_with_retries(
+        provider.client.clone(),
+        token,
+        true,
+        request,
+        tx,
+        provider.credentials.clone(),
+        None,
+        "claude-sonnet-4-6".into(),
+        provider.oauth_session_id.clone(),
+        provider.model.clone(),
+        provider.direct_transport.clone(),
+        reasoning_request::RetrySettings::from_provider(&provider),
+    ));
+    let run = async {
+        let mut errors = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let Err(error) = event {
+                errors.push(error.to_string());
+            }
+        }
+        task.await.unwrap();
+        let seen = server.await.unwrap();
+        assert_eq!(
+            seen,
+            ["Bearer rotated"],
+            "a rejected bearer must not be replayed as a successful forced refresh"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("Automatic Claude OAuth refresh failed"))
+        );
+        assert_eq!(
+            provider.credentials.read().await.as_ref().unwrap().source,
+            ("rotated".into(), "rotated-refresh".into())
+        );
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .unwrap();
+}

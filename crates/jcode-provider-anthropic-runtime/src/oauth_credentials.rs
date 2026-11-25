@@ -204,7 +204,11 @@ async fn commit_claude_refresh(
         access_token: refreshed.access_token.clone(),
         refresh_token: refreshed.refresh_token,
         expires_at: refreshed.expires_at,
-        source,
+        source: if persisted_refresh {
+            stored_source
+        } else {
+            source
+        },
     });
     Ok(refreshed.access_token)
 }
