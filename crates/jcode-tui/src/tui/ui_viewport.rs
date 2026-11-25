@@ -1383,6 +1383,10 @@ pub(crate) fn pinned_todo_scroll_area() -> Option<Rect> {
     if PINNED_TODO_MAX_SCROLL.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         return None;
     }
+    pinned_todo_band_area()
+}
+
+fn pinned_todo_band_area() -> Option<Rect> {
     PINNED_TODO_BAND_AREA.lock().ok().and_then(|area| *area)
 }
 

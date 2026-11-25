@@ -446,11 +446,7 @@ pub(super) fn publish_pinned_todo_geometry(
 /// The footer bounds the todo body before any appended live-status row.
 pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
     let more = pinned_todo_more_area()?;
-    let band = PINNED_TODO_BAND_AREA
-        .lock()
-        .ok()
-        .and_then(|area| *area)
-        .unwrap_or(more);
+    let band = pinned_todo_band_area().unwrap_or(more);
     let area = Rect {
         x: more.x,
         y: band.y,
