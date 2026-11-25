@@ -456,6 +456,7 @@ impl Agent {
             let provider_name = self.provider.name().to_string();
             let store_reasoning_content =
                 crate::provider::stores_reasoning_content_for_context(&provider_name);
+            let mut reasoning_blocks: Vec<(String, String)> = Vec::new();
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             // Whether a live reasoning region is currently streaming to the client.
@@ -664,7 +665,14 @@ impl Agent {
                             phase: crate::message::ConnectionPhase::Streaming.to_string(),
                         });
                     }
-                    StreamEvent::ThinkingEnd => {}
+                    StreamEvent::ThinkingEnd => {
+                        if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                            reasoning_blocks.push((
+                                std::mem::take(&mut reasoning_content),
+                                std::mem::take(&mut reasoning_signature),
+                            ));
+                        }
+                    }
                     StreamEvent::ThinkingSignatureDelta(signature) => {
                         if store_reasoning_content {
                             reasoning_signature.push_str(&signature);
@@ -1091,6 +1099,7 @@ impl Agent {
                         generated_image_contexts.clear();
                         reasoning_content.clear();
                         reasoning_signature.clear();
+                        reasoning_blocks.clear();
                         reasoning_open = false;
                         openai_reasoning_items.clear();
                         provider_native_items.clear();
@@ -1487,13 +1496,21 @@ impl Agent {
                     cache_control: None,
                 });
             }
-            crate::message::push_reasoning_blocks(
-                &mut content_blocks,
-                &provider_name,
-                &reasoning_content,
-                Some(&reasoning_signature),
-                store_reasoning_content,
-            );
+            if !reasoning_content.is_empty() || !reasoning_signature.is_empty() {
+                reasoning_blocks.push((
+                    std::mem::take(&mut reasoning_content),
+                    std::mem::take(&mut reasoning_signature),
+                ));
+            }
+            for (content, signature) in &reasoning_blocks {
+                crate::message::push_reasoning_blocks(
+                    &mut content_blocks,
+                    &provider_name,
+                    content,
+                    Some(signature),
+                    store_reasoning_content,
+                );
+            }
             if store_reasoning_content {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
@@ -1620,19 +1637,23 @@ impl Agent {
                         // Only when the provider actually finished the message
                         // (saw_message_end) and the user did not cancel, so
                         // interrupted turns never show a spurious notice.
+                        let had_reasoning = !reasoning_content.trim().is_empty()
+                            || reasoning_blocks.iter().any(|(c, _)| !c.trim().is_empty());
+                        let total_reasoning_chars = reasoning_content.len()
+                            + reasoning_blocks.iter().map(|(c, _)| c.len()).sum::<usize>();
                         if saw_message_end
                             && !self.is_graceful_shutdown()
                             && let Some(notice) = Self::provider_guardrail_notice(
                                 stop_reason.as_deref(),
                                 text_content.trim().is_empty(),
-                                !reasoning_content.trim().is_empty(),
+                                had_reasoning,
                             )
                         {
                             logging::warn(&format!(
                                 "{}: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
                                 Self::empty_turn_log_event(stop_reason.as_deref()),
                                 stop_reason,
-                                reasoning_content.len()
+                                total_reasoning_chars
                             ));
                             let _ = event_tx.send(ServerEvent::ProviderGuardrail {
                                 stop_reason: stop_reason.clone(),

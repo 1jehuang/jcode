@@ -20,3 +20,7 @@ captures/
 /*.avif
 /*.mp4
 /*.png
+
+# Local personal wiki
+jcode-wiki/
+

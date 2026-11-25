@@ -1083,6 +1083,185 @@ async fn run_turn_streaming_mpsc_emits_account_only_change_without_email() {
     assert_eq!(labels, vec![Some("personal".to_string())]);
 }
 
+struct MultiBlockThinkingProvider;
+
+#[async_trait]
+impl Provider for MultiBlockThinkingProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(16);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+            let _ = tx
+                .send(Ok(StreamEvent::ThinkingDelta(
+                    "thinking part 1".to_string(),
+                )))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::ThinkingSignatureDelta("sig_1".to_string())))
+                .await;
+            let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+
+            let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+            let _ = tx
+                .send(Ok(StreamEvent::ThinkingDelta(
+                    "thinking part 2".to_string(),
+                )))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::ThinkingSignatureDelta("sig_2".to_string())))
+                .await;
+            let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+
+            let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+            let _ = tx
+                .send(Ok(StreamEvent::ThinkingSignatureDelta(
+                    "sig_empty".to_string(),
+                )))
+                .await;
+            let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta("final answer".to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "Claude"
+    }
+
+    fn model(&self) -> String {
+        "claude-opus-4-8".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_preserves_separate_signed_thinking_blocks_on_claude_route() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(MultiBlockThinkingProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.unwrap();
+
+    let messages = agent.messages();
+    let assistant_msg = messages.last().expect("assistant message");
+    assert_eq!(assistant_msg.role, Role::Assistant);
+    let thinking_blocks: Vec<_> = assistant_msg
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::AnthropicThinking { thinking, signature } => {
+                Some((thinking.as_str(), signature.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        thinking_blocks,
+        vec![
+            ("thinking part 1", "sig_1"),
+            ("thinking part 2", "sig_2"),
+            ("", "sig_empty"),
+        ],
+        "separate signed thinking blocks must not be joined and empty signed blocks must be kept"
+    );
+}
+
+#[tokio::test]
+async fn run_turn_preserves_separate_signed_thinking_blocks_on_claude_route() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(MultiBlockThinkingProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    agent.run_turn(false).await.unwrap();
+
+    let messages = agent.messages();
+    let assistant_msg = messages.last().expect("assistant message");
+    assert_eq!(assistant_msg.role, Role::Assistant);
+    let thinking_blocks: Vec<_> = assistant_msg
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::AnthropicThinking { thinking, signature } => {
+                Some((thinking.as_str(), signature.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        thinking_blocks,
+        vec![
+            ("thinking part 1", "sig_1"),
+            ("thinking part 2", "sig_2"),
+            ("", "sig_empty"),
+        ],
+        "separate signed thinking blocks must not be joined and empty signed blocks must be kept in non-streaming turn"
+    );
+}
+
 #[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

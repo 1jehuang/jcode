@@ -12,6 +12,7 @@ pub(super) enum MacTerminalKind {
     WezTerm,
     Warp,
     Alacritty,
+    Kitty,
     Vscode,
     Unknown,
 }
@@ -25,6 +26,7 @@ impl MacTerminalKind {
             Self::WezTerm => "WezTerm",
             Self::Warp => "Warp",
             Self::Alacritty => "Alacritty",
+            Self::Kitty => "Kitty",
             Self::Vscode => "VS Code terminal",
             Self::Unknown => "your current terminal",
         }
@@ -38,6 +40,7 @@ impl MacTerminalKind {
             Self::WezTerm => "wezterm",
             Self::Warp => "warp",
             Self::Alacritty => "alacritty",
+            Self::Kitty => "kitty",
             Self::Vscode => "vscode",
             Self::Unknown => "terminal",
         }
@@ -51,6 +54,7 @@ impl MacTerminalKind {
             "wezterm" => Some(Self::WezTerm),
             "warp" => Some(Self::Warp),
             "alacritty" => Some(Self::Alacritty),
+            "kitty" => Some(Self::Kitty),
             "vscode" | "code" => Some(Self::Vscode),
             _ => None,
         }
@@ -61,6 +65,7 @@ impl MacTerminalKind {
             Self::Ghostty => Some(("Ghostty", "-e /bin/bash -lc")),
             Self::Alacritty => Some(("Alacritty", "-e /bin/bash -lc")),
             Self::WezTerm => Some(("WezTerm", "start --always-new-process -- /bin/bash -lc")),
+            Self::Kitty => Some(("kitty", "-e /bin/bash -lc")),
             Self::Iterm2 | Self::AppleTerminal | Self::Warp | Self::Vscode | Self::Unknown => None,
         }
     }
@@ -120,28 +125,45 @@ fn config_preferred_macos_terminal() -> Option<MacTerminalKind> {
 }
 
 fn detect_macos_terminal() -> MacTerminalKind {
-    let term_program = std::env::var("TERM_PROGRAM")
-        .unwrap_or_default()
-        .to_lowercase();
-    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
+    let has_ghostty =
+        std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() || std::env::var("GHOSTTY_BIN_DIR").is_ok();
+    let has_kitty = std::env::var("KITTY_WINDOW_ID").is_ok() || std::env::var("KITTY_PID").is_ok();
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let term = std::env::var("TERM").ok();
+    detect_macos_terminal_from_env(
+        term_program.as_deref(),
+        term.as_deref(),
+        has_ghostty,
+        has_kitty,
+    )
+}
 
-    if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
-        || std::env::var("GHOSTTY_BIN_DIR").is_ok()
-        || term_program == "ghostty"
-        || term.contains("ghostty")
-    {
+fn detect_macos_terminal_from_env(
+    term_program: Option<&str>,
+    term: Option<&str>,
+    has_ghostty_env: bool,
+    has_kitty_env: bool,
+) -> MacTerminalKind {
+    let term_program_lower = term_program.unwrap_or_default().to_ascii_lowercase();
+    let term_lower = term.unwrap_or_default().to_ascii_lowercase();
+
+    if has_ghostty_env || term_program_lower == "ghostty" || term_lower.contains("ghostty") {
         return MacTerminalKind::Ghostty;
     }
 
-    match term_program.as_str() {
+    if has_kitty_env || term_program_lower == "kitty" || term_lower.contains("kitty") {
+        return MacTerminalKind::Kitty;
+    }
+
+    match term_program_lower.as_str() {
         "iterm.app" => MacTerminalKind::Iterm2,
         "apple_terminal" => MacTerminalKind::AppleTerminal,
         "wezterm" => MacTerminalKind::WezTerm,
         "vscode" => MacTerminalKind::Vscode,
         _ => {
-            if term.contains("alacritty") {
+            if term_lower.contains("alacritty") {
                 MacTerminalKind::Alacritty
-            } else if term.contains("warp") {
+            } else if term_lower.contains("warp") {
                 MacTerminalKind::Warp
             } else {
                 MacTerminalKind::Unknown
@@ -231,7 +253,10 @@ pub(super) fn launch_command_for_macos_terminal(
         | MacTerminalKind::Warp
         | MacTerminalKind::Vscode
         | MacTerminalKind::Unknown => applescript_command_for_terminal("Terminal", shell_command),
-        MacTerminalKind::Ghostty | MacTerminalKind::WezTerm | MacTerminalKind::Alacritty => {
+        MacTerminalKind::Ghostty
+        | MacTerminalKind::WezTerm
+        | MacTerminalKind::Alacritty
+        | MacTerminalKind::Kitty => {
             unreachable!("open-command terminals should be handled above")
         }
     }
@@ -297,6 +322,7 @@ mod tests {
             ("wezterm", MacTerminalKind::WezTerm),
             ("warp", MacTerminalKind::Warp),
             ("alacritty", MacTerminalKind::Alacritty),
+            ("kitty", MacTerminalKind::Kitty),
             ("vscode", MacTerminalKind::Vscode),
             ("code", MacTerminalKind::Vscode),
             ("  Ghostty  ", MacTerminalKind::Ghostty),
@@ -329,6 +355,10 @@ mod tests {
                 "start --always-new-process -- /bin/bash -lc",
                 shell_command,
             )
+        );
+        assert_eq!(
+            launch_command_for_macos_terminal(MacTerminalKind::Kitty, shell_command),
+            open_command_for_terminal("kitty", "-e /bin/bash -lc", shell_command)
         );
     }
 
@@ -397,13 +427,14 @@ mod tests {
 
     #[test]
     fn open_command_terminals_pass_snippet_to_bash_not_login_shell() {
-        // Ghostty/Alacritty/WezTerm wrap via `open -na ... -e /bin/bash -lc`,
+        // Ghostty/Alacritty/WezTerm/Kitty wrap via `open -na ... -e /bin/bash -lc`,
         // so the bash-specific snippet never reaches the login shell.
         let shell_command = super::paused_jcode_shell_command("/usr/local/bin/jcode");
         for terminal in [
             MacTerminalKind::Ghostty,
             MacTerminalKind::Alacritty,
             MacTerminalKind::WezTerm,
+            MacTerminalKind::Kitty,
         ] {
             let launcher = launch_command_for_macos_terminal(terminal, &shell_command);
             assert!(
@@ -411,5 +442,28 @@ mod tests {
                 "{terminal:?} launcher must run under bash: {launcher}"
             );
         }
+    }
+
+    #[test]
+    fn detect_macos_terminal_identifies_kitty() {
+        use super::detect_macos_terminal_from_env;
+
+        // Detection via KITTY_WINDOW_ID or KITTY_PID env
+        assert_eq!(
+            detect_macos_terminal_from_env(None, None, false, true),
+            MacTerminalKind::Kitty
+        );
+
+        // Detection via TERM_PROGRAM=kitty
+        assert_eq!(
+            detect_macos_terminal_from_env(Some("kitty"), Some("xterm-256color"), false, false),
+            MacTerminalKind::Kitty
+        );
+
+        // Detection via TERM=xterm-kitty
+        assert_eq!(
+            detect_macos_terminal_from_env(None, Some("xterm-kitty"), false, false),
+            MacTerminalKind::Kitty
+        );
     }
 }
