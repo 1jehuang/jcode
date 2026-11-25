@@ -105,3 +105,19 @@ fn borrows_when_nothing_to_strip() {
         std::borrow::Cow::Borrowed(_)
     ));
 }
+
+#[test]
+fn c1_osc_and_string_terminators_do_not_leak_into_pasted_input() {
+    use crate::tui::app::tests::create_test_app;
+    for (text, expected) in [
+        ("é\u{9d}hello\u{9c}界", "éhello界"),
+        ("\u{9d}11;rgb:3030/3434/4646\u{9c}", ""),
+        ("a\u{9c}b\u{9d}c", "abc"),
+    ] {
+        let mut app = create_test_app();
+        app.set_input_for_test("draft ");
+        app.handle_paste(text.to_string());
+        assert_eq!(app.input(), format!("draft {expected}"));
+        assert_eq!(app.cursor_pos, app.input.len());
+    }
+}
