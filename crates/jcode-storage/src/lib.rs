@@ -160,13 +160,40 @@ fn ensure_private_runtime_dir(path: &Path) {
     }
 }
 
-pub fn jcode_dir() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return Ok(PathBuf::from(path));
+/// Resolve the base state directory for the invoked program.
+///
+/// Precedence:
+/// - `kcode` binary: `KCODE_HOME`, else `JCODE_HOME`, else default `~/.jcode`.
+/// - `jcode`/other binaries: `JCODE_HOME`, else default `~/.jcode`.
+///   `KCODE_HOME` is ignored for non-`kcode` binaries to prevent identity leaks
+///   (a jcode-named binary must not be steered into kcode's state directory).
+pub fn resolve_state_dir(
+    program: &str,
+    kcode_home: Option<&str>,
+    jcode_home: Option<&str>,
+) -> PathBuf {
+    if program == "kcode" {
+        if let Some(path) = kcode_home.filter(|s| !s.is_empty()) {
+            return PathBuf::from(path);
+        }
+        if let Some(path) = jcode_home.filter(|s| !s.is_empty()) {
+            return PathBuf::from(path);
+        }
+    } else if let Some(path) = jcode_home.filter(|s| !s.is_empty()) {
+        return PathBuf::from(path);
     }
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
-    Ok(home.join(".jcode"))
+    dirs::home_dir()
+        .map(|home| home.join(".jcode"))
+        .unwrap_or_else(|| PathBuf::from(".jcode"))
+}
+
+pub fn jcode_dir() -> Result<PathBuf> {
+    Ok(resolve_state_dir(
+        jcode_core::invoked_program_name(),
+        std::env::var("KCODE_HOME").ok().as_deref(),
+        std::env::var("JCODE_HOME").ok().as_deref(),
+    ))
 }
 
 /// Whether `JCODE_HOME` redirects this process away from the user's real
@@ -818,5 +845,31 @@ mod env_file_tests {
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod state_dir_tests {
+    use super::resolve_state_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn jcode_ignores_kcode_home_when_both_set() {
+        let resolved = resolve_state_dir(
+            "jcode",
+            Some("/tmp/kcode-home"),
+            Some("/tmp/jcode-home"),
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/jcode-home"));
+    }
+
+    #[test]
+    fn kcode_uses_kcode_home_when_set() {
+        let resolved = resolve_state_dir(
+            "kcode",
+            Some("/tmp/kcode-home"),
+            Some("/tmp/jcode-home"),
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/kcode-home"));
     }
 }
