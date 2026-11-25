@@ -179,7 +179,7 @@ fn test_disconnected_key_handler_runs_model_picker_locally() {
         .as_ref()
         .expect("model picker should open");
     assert!(!picker.entries.is_empty());
-    let selected = &picker.entries[picker.selected];
+    let selected = picker.selected_entry().expect("selected current model");
     assert_eq!(selected.name, "gpt-5.3-codex");
     assert!(selected.is_current, "current model should be preselected");
 }
