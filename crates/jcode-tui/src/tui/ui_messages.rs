@@ -893,6 +893,10 @@ fn todo_confidence_color() -> Color {
 }
 
 impl TodoCardPayload {
+    fn parse(content: &str) -> Option<Self> {
+        serde_json::from_str(content).ok()
+    }
+
     fn todos(&self) -> &[crate::todo::TodoItem] {
         match self {
             Self::Current { todos, .. } | Self::Legacy(todos) => todos,

@@ -16,9 +16,7 @@ impl TodoPayloadCache {
         {
             return parsed.clone();
         }
-        let parsed = serde_json::from_str::<TodoCardPayload>(content)
-            .ok()
-            .map(std::sync::Arc::new);
+        let parsed = TodoCardPayload::parse(content).map(std::sync::Arc::new);
         self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
             .then(|| (content.to_owned(), parsed.clone()));
         parsed
