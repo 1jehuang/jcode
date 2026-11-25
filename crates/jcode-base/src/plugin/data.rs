@@ -1,10 +1,11 @@
 //! Persistent runtime data, separate from versioned plugin code.
 //!
 //! The Jcode home is a deliberate host mapping, not a claim about Claude's
-//! configuration base. Ordinary qualified IDs use Claude's PWt encoding.
+//! configuration base. Short qualified IDs use Claude's PWt encoding.
 //! A private ownership marker rejects its otherwise ambiguous encodings.
 use super::PluginRoot;
 use anyhow::{Context, Result, ensure};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -22,12 +23,19 @@ fn identity(plugin: &PluginRoot) -> Result<String> {
 }
 
 fn encoded_id(id: &str) -> String {
-    id.encode_utf16()
+    let encoded: String = id
+        .encode_utf16()
         .map(|c| match u8::try_from(c) {
             Ok(c) if c.is_ascii_alphanumeric() || b"-_".contains(&c) => c as char,
             _ => '-',
         })
-        .collect()
+        .collect();
+    if encoded.len() <= 255 {
+        encoded
+    } else {
+        // Dots cannot occur in the legacy encoding, keeping this namespace separate.
+        format!("sha256.{}", hex::encode(Sha256::digest(id.as_bytes())))
+    }
 }
 
 fn path_under(home: &Path, plugin: &PluginRoot) -> Result<PathBuf> {
@@ -344,5 +352,80 @@ mod tests {
         }
         let extension = temp.path().join("plugins/data");
         assert!(!extension.exists());
+    }
+    #[test]
+    fn maximum_catalog_identities_prepare_bounded_data_paths() {
+        let (_temp, manager, market) = crate::plugin::tests::fixture();
+        let name = "n".repeat(128);
+        let marketplace = "m".repeat(128);
+        fs::write(
+            market.join(".claude-plugin/marketplace.json"),
+            serde_json::json!({
+                "name":marketplace, "plugins":[{"name":name,"source":"./demo"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            market.join("demo/.claude-plugin/plugin.json"),
+            serde_json::json!({
+                "name":name, "version":"1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        manager.add_marketplace(market.to_str().unwrap()).unwrap();
+        manager
+            .install(&format!("{name}@{marketplace}"), PluginScope::User)
+            .unwrap();
+        let mut plugin = manager.enabled_roots().unwrap().remove(0);
+        let path = prepare_under(&manager.user_root, &plugin).unwrap();
+        assert!(path.file_name().unwrap().to_str().unwrap().len() <= 255);
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("sha256.")
+        );
+        assert_eq!(
+            fs::read_to_string(path.join(OWNER)).unwrap(),
+            format!("{name}@{marketplace}")
+        );
+        assert_eq!(prepare_under(&manager.user_root, &plugin).unwrap(), path);
+        plugin.marketplace = "m".repeat(126);
+        let legacy = format!("{}-{}", plugin.name, plugin.marketplace);
+        assert_eq!(legacy.len(), 255);
+        let boundary = prepare_under(&manager.user_root, &plugin).unwrap();
+        assert_eq!(boundary.file_name().unwrap().to_str().unwrap(), legacy);
+    }
+
+    #[test]
+    fn long_legacy_encoding_collisions_keep_independent_qualified_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = plugin(
+            temp.path(),
+            &"a".repeat(127),
+            &format!("-{}", "b".repeat(127)),
+        );
+        let b = plugin(
+            temp.path(),
+            &format!("{}-", "a".repeat(127)),
+            &"b".repeat(127),
+        );
+        let a_id = identity(&a).unwrap();
+        let b_id = identity(&b).unwrap();
+        assert_eq!(a_id.replace('@', "-"), b_id.replace('@', "-"));
+        assert_eq!(a_id.len(), 256);
+        let a_path = prepare_under(temp.path(), &a).unwrap();
+        fs::write(a_path.join("state"), "only A").unwrap();
+        let b_path = prepare_under(temp.path(), &b).unwrap();
+        assert_ne!(a_path, b_path);
+        assert!(!b_path.join("state").exists());
+        assert_eq!(fs::read_to_string(a_path.join(OWNER)).unwrap(), a_id);
+        assert_eq!(fs::read_to_string(b_path.join(OWNER)).unwrap(), b_id);
+        fs::write(a_path.join(OWNER), &b_id).unwrap();
+        assert!(prepare_under(temp.path(), &a).is_err());
+        assert_eq!(fs::read_to_string(a_path.join("state")).unwrap(), "only A");
     }
 }
