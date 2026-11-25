@@ -71,9 +71,7 @@ use jcode_message_types::{
     ContentBlock, Message, Role, StreamEvent, ToolDefinition, messages_with_dynamic_system_context,
 };
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 /// Stream of events from a provider.
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;

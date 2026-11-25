@@ -409,11 +409,15 @@ impl OpenRouterStream {
                 }
                 if let Some(status) = ["status", "status_code", "code"].iter().find_map(|field| {
                     let value = error.get(field)?;
-                    value
-                        .as_u64()
-                        .and_then(|value| u16::try_from(value).ok())
-                        .or_else(|| value.as_str()?.parse::<u16>().ok())
-                        .filter(|status| (100..600).contains(status))
+                    let status = if let Some(value) = value.as_u64() {
+                        value
+                    } else {
+                        let Ok(value) = value.as_str()?.parse::<u64>() else {
+                            return None;
+                        };
+                        value
+                    };
+                    (100..600).contains(&status).then_some(status)
                 }) {
                     message = format!("HTTP {status}: {message}");
                 }

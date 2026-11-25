@@ -824,6 +824,27 @@ fn stream_error_retains_status_type_code_and_bounded_retry_hint() {
             Some(401),
             None,
         ),
+        (
+            serde_json::json!({"status":u64::MAX,"status_code":"429"}),
+            Some(429),
+            None,
+        ),
+        (
+            serde_json::json!({"status":"18446744073709551616","status_code":503}),
+            Some(503),
+            None,
+        ),
+        (
+            serde_json::json!({"status":99,"status_code":"600","code":100}),
+            Some(100),
+            None,
+        ),
+        (serde_json::json!({"status":599}), Some(599), None),
+        (
+            serde_json::json!({"status":"-1","status_code":"invalid","code":600}),
+            None,
+            None,
+        ),
         (serde_json::json!("Rate limit exceeded"), None, None),
         (
             serde_json::json!({"message":"bad request","type":[],"code":9999,"retry_after_seconds":"3"}),
