@@ -1470,6 +1470,6 @@ impl RemoteConnection {
 #[path = "backend/event_state.rs"]
 mod event_state;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "backend_tests.rs"]
 mod tests;

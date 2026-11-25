@@ -1,4 +1,4 @@
-#[path = "key_handling/rewind.rs"]
+﻿#[path = "key_handling/rewind.rs"]
 mod rewind;
 mod update;
 use rewind::*;
@@ -603,7 +603,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 "Subagent model pinned to {} for this session.",
                 rest
             )));
-            app.set_status_notice(format!("Subagent model → {}", rest));
+            app.set_status_notice(format!("Subagent model â†’ {}", rest));
             return Ok(());
         }
 
@@ -672,7 +672,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             app.push_display_message(DisplayMessage::system(format!(
                 "Effort: {}\nAvailable: {}\nUse /effort <level> or {} to change.",
                 label,
-                list.join(" · "),
+                list.join(" Â· "),
                 crate::tui::keybind::effort_switch_keys_label()
             )));
             return Ok(());
@@ -818,7 +818,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             app.push_display_message(DisplayMessage::system(format!(
                 "Transport: {}\nAvailable: {}\nUse /transport <mode> to change.",
                 current,
-                list.join(" · ")
+                list.join(" Â· ")
             )));
             return Ok(());
         }
@@ -1307,12 +1307,12 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             let name = app.session.display_name().to_string();
             let msg = if let Some(ref lbl) = app.session.save_label {
                 format!(
-                    "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
+                    "ðŸ“Œ Session {} saved as \"{}\". It will appear at the top of /resume.",
                     name, lbl,
                 )
             } else {
                 format!(
-                    "📌 Session {} saved. It will appear at the top of /resume.",
+                    "ðŸ“Œ Session {} saved. It will appear at the top of /resume.",
                     name,
                 )
             };
@@ -1681,13 +1681,13 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         remote.cancel_with_reason("slash_improve_resume").await?;
                         app.set_status_notice("Interrupting for /improve resume...");
                         app.push_display_message(DisplayMessage::system(format!(
-                            "♻️ Interrupting and resuming {}...",
+                            "â™»ï¸ Interrupting and resuming {}...",
                             mode.status_label()
                         )));
                         app.queued_messages.push(prompt);
                     } else {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "♻️ Resuming {}...",
+                            "â™»ï¸ Resuming {}...",
                             mode.status_label()
                         )));
                         let _ = begin_remote_send(app, remote, prompt, vec![], true, None, true, 0)
@@ -1837,13 +1837,13 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                         remote.cancel_with_reason("slash_refactor_resume").await?;
                         app.set_status_notice("Interrupting for /refactor resume...");
                         app.push_display_message(DisplayMessage::system(format!(
-                            "♻️ Interrupting and resuming {}...",
+                            "â™»ï¸ Interrupting and resuming {}...",
                             mode.status_label()
                         )));
                         app.queued_messages.push(prompt);
                     } else {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "♻️ Resuming {}...",
+                            "â™»ï¸ Resuming {}...",
                             mode.status_label()
                         )));
                         let _ = begin_remote_send(app, remote, prompt, vec![], true, None, true, 0)

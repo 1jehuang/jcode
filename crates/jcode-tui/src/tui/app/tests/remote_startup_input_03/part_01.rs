@@ -307,9 +307,11 @@ fn test_handle_paste_multi_line() {
 
     app.handle_paste("line 1\nline 2\nline 3".to_string());
 
-    // Small paste (< 5 lines) is inlined directly
-    assert_eq!(app.input(), "line 1\nline 2\nline 3");
-    assert!(app.pasted_contents.is_empty());
+    // Any multi-line paste collapses into a numbered block.
+    assert_eq!(app.input(), "[Paste #1 - 3 lines]");
+    assert_eq!(app.pasted_contents, vec!["line 1\nline 2\nline 3"]);
+    let expanded = crate::tui::app::input::expand_paste_placeholders(&app, &app.input);
+    assert_eq!(expanded, "line 1\nline 2\nline 3");
 }
 
 #[test]
@@ -318,8 +320,8 @@ fn test_handle_paste_large() {
 
     app.handle_paste("a\nb\nc\nd\ne".to_string());
 
-    // Large paste (5+ lines) uses placeholder
-    assert_eq!(app.input(), "[pasted 5 lines]");
+    // Large paste uses a numbered placeholder
+    assert_eq!(app.input(), "[Paste #1 - 5 lines]");
     assert_eq!(app.pasted_contents.len(), 1);
 }
 
@@ -345,7 +347,7 @@ fn test_paste_again_with_different_text_still_collapses() {
     app.handle_paste("a\nb\nc\nd\ne".to_string());
     app.handle_paste("f\ng\nh\ni\nj".to_string());
 
-    assert_eq!(app.input(), "[pasted 5 lines][pasted 5 lines]");
+    assert_eq!(app.input(), "[Paste #1 - 5 lines][Paste #2 - 5 lines]");
     assert_eq!(app.pasted_contents.len(), 2);
 }
 
@@ -361,7 +363,7 @@ fn test_paste_again_expands_matching_placeholder_not_newer_same_sized_paste() {
     app.handle_paste(second.clone());
     app.handle_paste(first.clone());
 
-    assert_eq!(app.input(), format!("{first} [pasted 5 lines]"));
+    assert_eq!(app.input(), format!("{first} [Paste #1 - 5 lines]"));
     assert_eq!(app.cursor_pos, first.len());
     let visible_input = app.input().to_string();
     assert_eq!(
@@ -376,11 +378,11 @@ fn test_paste_again_expands_only_most_recent_identical_placeholder() {
     let mut app = create_test_app();
     let big = "a\nb\nc\nd\ne".to_string();
 
-    app.set_input_for_test("[pasted 5 lines] [pasted 5 lines]");
+    app.set_input_for_test("[Paste #1 - 5 lines] [Paste #2 - 5 lines]");
     app.pasted_contents = vec![big.clone(), big.clone()];
     app.handle_paste(big.clone());
 
-    assert_eq!(app.input(), format!("[pasted 5 lines] {big}"));
+    assert_eq!(app.input(), format!("[Paste #1 - 5 lines] {big}"));
     assert_eq!(app.pasted_contents, vec![big]);
 }
 
@@ -396,7 +398,7 @@ fn test_paste_again_does_not_expand_an_edited_placeholder() {
 
     assert_eq!(
         app.input(),
-        "[pasted 5 lines[pasted 5 lines]",
+        "[Paste #1 - 5 lines[Paste #2 - 5 lines]",
         "an edited placeholder must not be mistaken for the original"
     );
     assert_eq!(app.pasted_contents.len(), 2);
@@ -421,7 +423,7 @@ fn test_paste_expansion_on_submit() {
         .unwrap();
 
     // Input shows placeholder
-    assert_eq!(app.input(), "A: [pasted 5 lines] B");
+    assert_eq!(app.input(), "A: [Paste #1 - 5 lines] B");
 
     // Submit expands placeholder
     app.submit_input();
@@ -453,18 +455,16 @@ fn test_paste_expansion_on_submit() {
 fn test_multiple_pastes() {
     let mut app = create_test_app();
 
-    // Small pastes are inlined
+    // Single-line pastes are inlined; multi-line pastes collapse.
     app.handle_paste("first".to_string());
     app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
         .unwrap();
     app.handle_paste("second\nline".to_string());
 
-    // Both small pastes inlined directly
-    assert_eq!(app.input(), "first second\nline");
-    assert!(app.pasted_contents.is_empty());
+    assert_eq!(app.input(), "first [Paste #1 - 2 lines]");
+    assert_eq!(app.pasted_contents, vec!["second\nline"]);
 
     app.submit_input();
-    // Display and model both get the same content (no expansion needed)
     assert_eq!(app.display_messages()[0].content, "first second\nline");
     let provider_messages = app.materialized_provider_messages();
     let user_message = provider_messages
