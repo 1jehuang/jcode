@@ -10,6 +10,10 @@ use crate::google_calendar::{
 
 const DEFAULT_EVENT_MINUTES: i64 = 30;
 
+#[cfg(test)]
+#[path = "calendar_pagination_tests.rs"]
+mod pagination_tests;
+
 pub struct CalendarTool {
     client: CalendarClient,
 }
@@ -305,7 +309,7 @@ impl Tool for CalendarTool {
                 "time_max": { "type": "string", "description": "List end. Default 7 days later." },
                 "query": { "type": "string", "description": "Search text for list." },
                 "text": { "type": "string", "description": "For quick_add." },
-                "max_results": { "type": "integer" },
+                "max_results": { "type": "integer", "description": "List page size (1-250, default 25). All matching pages are returned." },
                 "confirmed": {
                     "type": "boolean",
                     "description": "Confirm delete or emailing guests."
