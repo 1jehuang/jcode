@@ -701,7 +701,7 @@ fn reload_capabilities(
         jcode_base::provider::cached_openai_service_tiers_for_scope(scope).unwrap_or_default();
     *efforts.write().unwrap_or_else(|p| p.into_inner()) =
         jcode_base::provider::cached_openai_reasoning_efforts_for_scope(scope).unwrap_or_default();
-    revalidate_effort(model, selected_effort, efforts);
+    openai_credentials::revalidate_effort(model, selected_effort, efforts);
 }
 
 pub struct OpenAIProvider {
