@@ -391,7 +391,7 @@ check "install.ps1 broadcasts WM_SETTINGCHANGE to HWND_BROADCAST" \
 # installer call sites and the POSIX/Windows-emulation marker outcomes.
 printf '%s' "$sh_text" | grep -q 'publish-build' &&
   printf '%s' "$ps1_text" | grep -q 'publish-build' &&
-  [ "$(cat "$work/localappdata/jcode/builds/stable-version" 2>/dev/null)" = "1.2.3" ]
+  [ "$(cat "$home_w/.jcode/builds/stable-version" 2>/dev/null)" = "1.2.3" ]
 check "both installers maintain the stable/versions build channels" \
   "publish-build delegation and stable-version marker" "publication contract or marker missing" "$?"
 
