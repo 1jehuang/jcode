@@ -218,7 +218,9 @@ jobs:
 
       - name: Run development Cargo portability regressions
         shell: bash
-        run: python3 scripts/test_build_portability.py
+        run: |
+          python3 scripts/test_build_portability.py
+          python3 scripts/test_dev_cargo_cwd.py
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
