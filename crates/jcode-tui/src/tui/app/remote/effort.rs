@@ -42,7 +42,7 @@ impl App {
         if state
             .requested
             .as_ref()
-            .is_some_and(|(pending, _)| id.is_none_or(|id| *pending <= id))
+            .is_some_and(|(pending, _)| id.is_some_and(|id| *pending <= id))
         {
             state.requested = None;
             self.suppress_next_reasoning_effort_message = false;
@@ -116,21 +116,24 @@ pub(super) fn handle_effort_changed(
     error: Option<String>,
 ) -> bool {
     let state = &mut app.remote_effort_state;
-    if id <= state.confirmed_id {
-        return false;
-    }
-    let latest = state.requested.as_ref().map(|(id, _)| *id);
-    if error.is_some() && latest.is_some_and(|latest| id != latest) {
-        return false;
-    }
-    if latest.is_some_and(|latest| id >= latest) {
-        state.requested = None;
-        if error.is_some() {
-            app.suppress_next_reasoning_effort_message = false;
+    // ID zero is a server-initiated change, not a request acknowledgement.
+    if id != 0 {
+        if id <= state.confirmed_id {
+            return false;
         }
-    }
-    if error.is_none() {
-        state.confirmed_id = id;
+        let latest = state.requested.as_ref().map(|(id, _)| *id);
+        if error.is_some() && latest.is_some_and(|latest| id != latest) {
+            return false;
+        }
+        if latest.is_some_and(|latest| id >= latest) {
+            state.requested = None;
+            if error.is_some() {
+                app.suppress_next_reasoning_effort_message = false;
+            }
+        }
+        if error.is_none() {
+            state.confirmed_id = id;
+        }
     }
     app.invalidate_model_picker_cache();
     if let Some(err) = error {
