@@ -890,6 +890,29 @@ mod tests {
     }
 
     #[test]
+    fn transactional_google_login_source_reports_bound_and_legacy_credentials() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        assert!(crate::auth::google_source().is_none());
+        let client = synthetic_client("source-project");
+        let mut tokens = synthetic_tokens("source-project");
+        tokens.credentials = Some(client.clone());
+        save_tokens(&tokens).unwrap();
+        let (source, detail) = crate::auth::google_source().unwrap();
+        assert_eq!(source, crate::auth::AuthCredentialSource::JcodeManagedFile);
+        assert_eq!(detail, tokens_path().unwrap().display().to_string());
+        assert!(!credentials_path().unwrap().exists());
+
+        tokens.credentials = None;
+        save_tokens(&tokens).unwrap();
+        assert!(crate::auth::google_source().is_none());
+        save_credentials(&client).unwrap();
+        let (source, detail) = crate::auth::google_source().unwrap();
+        assert_eq!(source, crate::auth::AuthCredentialSource::JcodeManagedFile);
+        assert!(detail.contains(&credentials_path().unwrap().display().to_string()));
+        assert!(detail.contains(&tokens_path().unwrap().display().to_string()));
+    }
+
+    #[test]
     fn legacy_token_file_defaults_to_gmail_only() {
         let json =
             r#"{"access_token":"a","refresh_token":"r","expires_at":0,"tier":"full","email":null}"#;

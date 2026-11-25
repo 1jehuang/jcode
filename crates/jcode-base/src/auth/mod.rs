@@ -1455,18 +1455,23 @@ fn antigravity_source() -> Option<(AuthCredentialSource, String)> {
 }
 
 fn google_source() -> Option<(AuthCredentialSource, String)> {
-    if let (Ok(tokens_path), Ok(credentials_path)) = (
-        crate::auth::google::tokens_path(),
-        crate::auth::google::credentials_path(),
-    ) && tokens_path.exists()
-        && credentials_path.exists()
-    {
+    let tokens_path = crate::auth::google::tokens_path().ok()?;
+    if !tokens_path.exists() {
+        return None;
+    }
+    if crate::auth::google::load_tokens().is_ok_and(|tokens| tokens.credentials.is_some()) {
         return Some((
             AuthCredentialSource::JcodeManagedFile,
-            format!("{} + {}", credentials_path.display(), tokens_path.display()),
+            tokens_path.display().to_string(),
         ));
     }
-    None
+    let credentials_path = crate::auth::google::credentials_path().ok()?;
+    credentials_path.exists().then(|| {
+        (
+            AuthCredentialSource::JcodeManagedFile,
+            format!("{} + {}", credentials_path.display(), tokens_path.display()),
+        )
+    })
 }
 
 fn cursor_source() -> Option<(AuthCredentialSource, String)> {
