@@ -484,7 +484,8 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let _provider_env = ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
+    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME", "JCODE_GLOBAL_HOME"]);
+    crate::env::remove_var("JCODE_GLOBAL_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited

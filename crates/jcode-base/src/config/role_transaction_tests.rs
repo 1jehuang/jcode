@@ -129,15 +129,19 @@ fn distinct_process_role_updates_preserve_both_roles() {
 struct TestHome {
     directory: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
+    previous_global: Option<std::ffi::OsString>,
 }
 impl TestHome {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("JCODE_HOME");
+        let previous_global = std::env::var_os("JCODE_GLOBAL_HOME");
         crate::env::set_var("JCODE_HOME", directory.path());
+        crate::env::remove_var("JCODE_GLOBAL_HOME");
         Self {
             directory,
             previous,
+            previous_global,
         }
     }
     fn path(&self) -> std::path::PathBuf {
@@ -150,8 +154,30 @@ impl Drop for TestHome {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+        match &self.previous_global {
+            Some(value) => crate::env::set_var("JCODE_GLOBAL_HOME", value),
+            None => crate::env::remove_var("JCODE_GLOBAL_HOME"),
+        }
         Config::invalidate_cache();
     }
+}
+
+#[test]
+fn role_test_home_preserves_inherited_global_config() {
+    let _guard = crate::storage::lock_test_env();
+    let caller = TestHome::new();
+    let original = "[autoreview]\nmodel = 'caller'\n";
+    std::fs::write(caller.path(), original).unwrap();
+    crate::env::set_var("JCODE_GLOBAL_HOME", caller.directory.path());
+    {
+        let _isolated = TestHome::new();
+        Config::set_agent_model_default("review", Some("isolated")).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(caller.path()).unwrap(), original);
+    assert_eq!(
+        std::env::var_os("JCODE_GLOBAL_HOME").as_deref(),
+        Some(caller.directory.path().as_os_str())
+    );
 }
 
 #[test]

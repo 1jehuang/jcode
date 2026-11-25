@@ -204,9 +204,10 @@ impl Config {
             return;
         };
         let path = PathBuf::from(global_home).join("config.toml");
-        let Ok(Some(global)) = Self::load_from_path(&path) else {
+        let Ok(global) = Self::load_from_path(&path) else {
             return;
         };
+        let global = global.unwrap_or_default();
         config.agents.swarm_model = global.agents.swarm_model;
         config.agents.memory_model = global.agents.memory_model;
         config.autoreview.model = global.autoreview.model;
@@ -1053,5 +1054,9 @@ reasoning_effort = "max"
                 .as_deref(),
             Some("updated")
         );
+        std::fs::remove_file(global.path().join("config.toml")).unwrap();
+        assert!(Config::load().agents.swarm_model.is_none());
+        assert!(Config::load_strict().unwrap().agents.swarm_model.is_none());
+        assert!(Config::load().display.centered);
     }
 }
