@@ -13,6 +13,10 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "bg_delivery_tests.rs"]
+mod delivery_tests;
+
 fn default_watch_notify() -> bool {
     true
 }
@@ -164,6 +168,54 @@ fn status_label(status: &BackgroundTaskStatus) -> &'static str {
         BackgroundTaskStatus::Superseded => "superseded",
         BackgroundTaskStatus::Failed => "failed",
     }
+}
+
+struct DeliveryHold(Option<String>);
+
+impl DeliveryHold {
+    async fn release(mut self) -> Option<background::TaskStatusFile> {
+        let task_id = self.0.as_deref()?;
+        let status = background::global().release_delivery(task_id, false).await;
+        self.0.take();
+        status
+    }
+}
+
+impl Drop for DeliveryHold {
+    fn drop(&mut self) {
+        if let Some(task_id) = self.0.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                background::global().release_delivery(&task_id, true).await;
+            });
+        }
+    }
+}
+
+fn finish_wait_result(
+    mut wait_result: Option<background::BackgroundTaskWaitResult>,
+    released: Option<background::TaskStatusFile>,
+) -> Option<background::BackgroundTaskWaitResult> {
+    if let Some(released) = released
+        && is_terminal(&released.status)
+        && wait_result
+            .as_ref()
+            .is_none_or(|result| !is_terminal(&result.task.status))
+    {
+        // It finished after the wait returned (or the wait lost
+        // it): its completion went out without waking the model,
+        // so this reply delivers it.
+        let result = wait_result.get_or_insert(background::BackgroundTaskWaitResult {
+            reason: background::BackgroundTaskWaitReason::Finished,
+            task: released.clone(),
+            progress_event: None,
+            event_record: None,
+        });
+        result.reason = background::BackgroundTaskWaitReason::Finished;
+        result.task = released;
+    }
+    wait_result
 }
 
 fn is_terminal(status: &BackgroundTaskStatus) -> bool {
@@ -815,6 +867,10 @@ impl Tool for BgTool {
                     .unwrap_or_else(|| "Waiting for background task".to_string());
                 let wait_guard =
                     blocking.then(|| crate::wait_registry::register(&ctx.session_id, &wait_reason));
+                let hold = DeliveryHold(
+                    (blocking && manager.hold_delivery(&task_id, &ctx.session_id).await)
+                        .then(|| task_id.clone()),
+                );
                 let wait_result = manager
                     .wait(
                         &task_id,
@@ -825,6 +881,7 @@ impl Tool for BgTool {
                     )
                     .await;
                 drop(wait_guard);
+                let wait_result = finish_wait_result(wait_result, hold.release().await);
                 match wait_result {
                     Some(wait_result) => {
                         let task = wait_result.task;
