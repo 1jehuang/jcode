@@ -1,5 +1,18 @@
 use super::*;
 
+fn python_available() -> bool {
+    let available = std::process::Command::new("python3")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!("SKIP: python3 unavailable for plugin LSP fixture");
+    }
+    available
+}
+
 struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 impl Drop for Restore {
     fn drop(&mut self) {
@@ -15,6 +28,9 @@ impl Drop for Restore {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn plugin_lsp_data_is_pure_until_spawn_and_persists_across_cache_update() {
+    if !python_available() {
+        return;
+    }
     let _guard = crate::storage::lock_test_env();
     let _restore = Restore(
         ["JCODE_HOME", "CLAUDE_PLUGIN_DATA"]
@@ -278,6 +294,9 @@ fn broken_plugin_does_not_block_good_and_namespace_collisions_are_explicit() {
 
 #[tokio::test]
 async fn malformed_or_oversized_frames_fail_without_unbounded_allocation() {
+    if !python_available() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     for wire in [
         "Content-Length: 9000000\r\n\r\n",
@@ -300,6 +319,9 @@ async fn malformed_or_oversized_frames_fail_without_unbounded_allocation() {
 
 #[tokio::test]
 async fn stdio_initialize_queries_notifications_error_and_shutdown() {
+    if !python_available() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let config: ServerConfig = serde_json::from_value(json!({"command":"python3","args":["-u","-c",include_str!("lsp_fixture.py")],"extensionToLanguage":{".rs":"rust"}})).unwrap();
     let server = PluginServer {
@@ -345,6 +367,9 @@ async fn stdio_initialize_queries_notifications_error_and_shutdown() {
 
 #[tokio::test]
 async fn full_query_operations_use_current_file_and_one_based_positions() {
+    if !python_available() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let file = root.join("fixture.rs");
@@ -410,6 +435,9 @@ async fn full_query_operations_use_current_file_and_one_based_positions() {
 #[cfg(unix)]
 #[tokio::test]
 async fn cancelled_request_terminates_server_descendants() {
+    if !python_available() {
+        return;
+    }
     struct Cleanup(Vec<u32>);
     impl Drop for Cleanup {
         fn drop(&mut self) {
@@ -465,6 +493,9 @@ time.sleep(120)
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn installed_plugin_runs_through_registry_and_respects_project_disablement() {
+    if !python_available() {
+        return;
+    }
     use jcode_base::plugin::{PluginManager, PluginScope};
     let _guard = crate::storage::lock_test_env();
     let _restore = Restore(vec![("JCODE_HOME", std::env::var_os("JCODE_HOME"))]);
@@ -586,6 +617,9 @@ fn invalid_sibling_server_does_not_block_matching_plugin_server() {
 
 #[tokio::test]
 async fn transport_retains_only_opened_document_diagnostics() {
+    if !python_available() {
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let config: ServerConfig = serde_json::from_value(json!({
         "command":"python3","args":["-u","-c",include_str!("lsp_fixture.py")],
