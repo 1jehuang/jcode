@@ -506,8 +506,7 @@ async fn public_dispatch_honors_enabled_scope_and_recursion_guard() {
     );
 }
 
-#[path = "plugin_hooks_tests_fixture.rs"]
-mod fixture;
+use super::test_fixture as fixture;
 
 #[tokio::test]
 async fn hook_output_capture_is_bounded_for_both_streams() {
@@ -591,4 +590,64 @@ async fn truncated_gate_output_never_allows_an_unapplied_rewrite() {
         gate_commands(hooks, &event, "{}").await.decision,
         GateDecision::Block { .. }
     ));
+}
+
+#[tokio::test]
+async fn prepared_dispatch_reads_definitions_once_but_refreshes_enabled_state() {
+    use crate::plugin::PluginScope;
+    use fixture::{Fixture, write};
+    let f = Fixture::new();
+    let installed = f
+        .manager
+        .install("registry-fixture", PluginScope::Project)
+        .unwrap();
+    let file = installed.root.join("hooks/hooks.json");
+    let document = |reason| {
+        json!({"hooks":{"PreToolUse":[{"hooks":[{
+            "type":"command", "command":format!("echo {reason} >&2; exit 2")
+        }]}]}})
+        .to_string()
+    };
+    write(&file, &document("first"));
+    let cwd = f.project.to_str();
+    let prepared = super::super::prepare_hooks("pre_tool", cwd).unwrap();
+    // Dispatch must not parse the file again; the next preparation sees edits.
+    write(&file, &document("second"));
+    assert_eq!(
+        prepared
+            .run_pre_tool_gate("test", cwd, "bash", "{}")
+            .await
+            .decision,
+        GateDecision::Block {
+            reason: "first".into()
+        }
+    );
+    let prepared = super::super::prepare_hooks("pre_tool", cwd).unwrap();
+    assert_eq!(
+        prepared
+            .run_pre_tool_gate("test", cwd, "bash", "{}")
+            .await
+            .decision,
+        GateDecision::Block {
+            reason: "second".into()
+        }
+    );
+    let prepared = super::super::prepare_hooks("pre_tool", cwd).unwrap();
+    f.manager
+        .disable("registry-fixture", PluginScope::Project)
+        .unwrap();
+    assert_eq!(
+        prepared
+            .run_pre_tool_gate("test", cwd, "bash", "{}")
+            .await
+            .decision,
+        GateDecision::Allow
+    );
+    assert!(super::super::prepare_hooks("pre_tool", cwd).is_none());
+    f.manager
+        .enable("registry-fixture", PluginScope::Project)
+        .unwrap();
+    assert!(super::super::prepare_hooks("pre_tool", cwd).is_some());
+    std::fs::write(installed.root.join(".claude-plugin/plugin.json"), "corrupt").unwrap();
+    assert!(super::super::prepare_hooks("pre_tool", cwd).is_none());
 }

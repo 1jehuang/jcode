@@ -317,8 +317,14 @@ context uses the same bounded JSON fields as native hooks.
 Each command receives JSON on stdin, including `hook_event_name`, `session_id`,
 `cwd` and, for tool events, `tool_name` and `tool_input`. Post-tool observers also
 receive the complete textual `tool_response`; the native environment prefix
-remains truncated as before. Both native and Claude tool names can match the
-regular expression. An `args` array launches a program directly with literal
+remains truncated as before. Plugin observers share two workers and a queue of
+16 events. A full queue drops the newest event with a warning. An event whose
+retained payload, commands and client environment exceed 1 MiB is also dropped
+with a warning, without truncating JSON. Pre-tool gates run synchronously and
+are unaffected by observer saturation. Definitions are discovered once per
+dispatch; current enabled roots are checked again before each command starts.
+Both native and Claude tool names can match the regular expression. An `args`
+array launches a program directly with literal
 arguments; without it, `command` runs through the platform shell.
 
 `CLAUDE_PLUGIN_ROOT` names cached code. `CLAUDE_PLUGIN_DATA` names the plugin's

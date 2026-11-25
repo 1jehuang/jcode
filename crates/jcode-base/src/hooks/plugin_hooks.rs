@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
-struct CommandHook {
+pub(super) struct CommandHook {
     event: String,
     command: String,
     args: Option<Vec<String>>,
@@ -235,23 +235,21 @@ fn load_plugin(plugin: &crate::plugin::PluginRoot) -> (Vec<CommandHook>, Vec<Str
     (hooks, diagnostics)
 }
 
-pub(super) fn configured(event: &str, cwd: &str) -> bool {
-    let name = match event {
-        "session_start" => "session_start",
-        "session_end" => "session_end",
-        "pre_tool" => "pre_tool",
-        "post_tool" => "post_tool",
-        _ => return false,
-    };
-    !commands(&HookEvent::new(name).cwd(cwd)).is_empty()
+#[cfg(test)]
+fn configured(event: &str, cwd: &str) -> bool {
+    !commands_for_dir(event, Some(cwd)).is_empty()
 }
 
-fn commands(event: &HookEvent) -> Vec<CommandHook> {
-    if super::hooks_suppressed() || !supported(event.event) {
+pub(super) fn commands(event: &HookEvent) -> Vec<CommandHook> {
+    commands_for_dir(event.event, event.cwd.as_deref())
+}
+
+pub(super) fn commands_for_dir(event: &str, cwd: Option<&str>) -> Vec<CommandHook> {
+    if super::hooks_suppressed() || !supported(event) {
         return Vec::new();
     }
     // Never guess the daemon's cwd for a project-scoped event.
-    let Some(cwd) = event.cwd.as_deref() else {
+    let Some(cwd) = cwd else {
         return Vec::new();
     };
     let mut commands = Vec::new();
@@ -263,10 +261,30 @@ fn commands(event: &HookEvent) -> Vec<CommandHook> {
         commands.extend(
             hooks
                 .into_iter()
-                .filter(|h| Some(h.event.as_str()) == claude_event(event.event)),
+                .filter(|h| Some(h.event.as_str()) == claude_event(event)),
         );
     }
     commands
+}
+
+fn enabled(hook: &CommandHook, event: &HookEvent) -> bool {
+    if super::hooks_suppressed() {
+        return false;
+    }
+    let Some(plugin) = &hook.plugin else {
+        return true;
+    };
+    let Some(cwd) = event.cwd.as_deref() else {
+        return false;
+    };
+    crate::plugin::enabled_plugins_for_dir(Path::new(cwd))
+        .iter()
+        .any(|root| {
+            root.name == plugin.name
+                && root.marketplace == plugin.marketplace
+                && root.scope == plugin.scope
+                && root.root == plugin.root
+        })
 }
 
 fn payload(event: &HookEvent, input: Option<&str>) -> Value {
@@ -325,6 +343,9 @@ async fn execute(
     event: &HookEvent,
     input: Option<&str>,
 ) -> Option<super::sync_runner::RunOutput> {
+    if !enabled(hook, event) {
+        return None;
+    }
     let tool = event
         .fields
         .iter()
@@ -407,11 +428,11 @@ async fn execute(
     }
 }
 
-pub(super) async fn gate(event: &HookEvent, input: &str) -> GateOutcome {
-    gate_commands(commands(event), event, input).await
-}
-
-async fn gate_commands(hooks: Vec<CommandHook>, event: &HookEvent, input: &str) -> GateOutcome {
+pub(super) async fn gate_commands(
+    hooks: Vec<CommandHook>,
+    event: &HookEvent,
+    input: &str,
+) -> GateOutcome {
     let mut current = input.to_owned();
     let mut outcome = GateOutcome::allow();
     for hook in hooks {
@@ -488,44 +509,16 @@ async fn gate_commands(hooks: Vec<CommandHook>, event: &HookEvent, input: &str) 
     outcome
 }
 
-pub(super) fn observe(event: &HookEvent) {
-    // Claude's PostToolUse excludes failed tools; jcode's native observer does not.
-    if event.event == "post_tool"
-        && event
-            .fields
-            .iter()
-            .any(|(key, value)| *key == "STATUS" && value != "ok")
-    {
-        return;
-    }
-    let hooks = commands(event);
-    if hooks.is_empty() {
-        return;
-    }
-    let event = event.clone();
-    let mut terminal_env = Vec::new();
-    if let Ok(env) = super::CLIENT_TERMINAL_ENV.try_with(Clone::clone) {
-        terminal_env = env;
-    }
-    // A bounded runner also works for session teardown outside a Tokio runtime.
-    std::thread::spawn(move || {
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime.block_on(super::with_client_terminal_env(terminal_env, async {
-                for hook in hooks {
-                    if let Some(output) = execute(&hook, &event, None).await
-                        && (!output.status.success() || !output.stdout.is_empty()) {
-                            crate::logging::warn(&format!("Plugin {} observer output cannot gate or inject context; output ignored", hook.event));
-                        }
-                }
-            })),
-            Err(error) => crate::logging::warn(&format!("Plugin hook runtime: {error}")),
-        }
-    });
+mod observers;
+
+pub(super) fn observe(event: &HookEvent, hooks: Vec<CommandHook>) {
+    observers::observe(event, hooks);
 }
 
 #[cfg(all(test, unix))]
 #[path = "plugin_hooks_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "plugin_hooks_tests_fixture.rs"]
+mod test_fixture;

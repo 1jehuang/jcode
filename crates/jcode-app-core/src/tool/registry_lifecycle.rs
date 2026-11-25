@@ -121,13 +121,13 @@ impl Registry {
         result: &Result<ToolOutput>,
         latency_ms: u64,
     ) {
-        if !crate::hooks::hook_configured_for_dir(
+        let Some(hooks) = crate::hooks::prepare_hooks(
             "post_tool",
             ctx.working_dir.as_ref().and_then(|p| p.to_str()),
-        ) {
+        ) else {
             return;
-        }
-        crate::hooks::dispatch_observer(Self::post_tool_event(
+        };
+        hooks.dispatch_observer(Self::post_tool_event(
             "post_tool",
             resolved_name,
             input,
