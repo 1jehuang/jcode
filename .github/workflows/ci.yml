@@ -17,9 +17,6 @@ concurrency:
 
 env:
   JCODE_CI: "1"
-  # CI builds without the local parallel-frontend rustc wrapper from
-  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
-  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
@@ -184,6 +181,8 @@ jobs:
     # pinning it here makes every step use this job's installed stable toolchain.
     env:
       RUSTUP_TOOLCHAIN: stable
+      # This job runs only on Ubuntu/macOS, where the POSIX wrapper is safe.
+      RUSTC_WRAPPER: ${{ github.workspace }}/scripts/rustc-parallel-frontend
     strategy:
       fail-fast: false
       matrix:

@@ -23,6 +23,25 @@ installed, use `justrust check` and `justrust test`. The shell does not install
 justrust or configure its hosted service. The Nix-provided Cargo also works for
 contributors without justrust. Leave the shell with `exit`.
 
+## Building from source
+
+Plain `cargo build` works on Linux, macOS, and Windows. Jcode does not set a
+global `build.rustc-wrapper` because `scripts/rustc-parallel-frontend` is a
+POSIX shell script and cannot run under native Windows Cargo.
+
+On Linux and macOS, `scripts/dev_cargo.sh` opts into the parallel rustc
+front-end automatically for local `dev`, `selfdev`, and `test` builds, and Unix
+CI sets `RUSTC_WRAPPER=$GITHUB_WORKSPACE/scripts/rustc-parallel-frontend`.
+To opt in from a Unix shell with plain Cargo:
+
+```sh
+RUSTC_WRAPPER="$PWD/scripts/rustc-parallel-frontend" cargo build
+```
+
+Set `JCODE_PARALLEL_FRONTEND=0` to keep the wrapper but pass all rustc calls
+through unchanged. `JCODE_FRONTEND_THREADS=<n>` overrides the thread count.
+Do not set this wrapper on Windows.
+
 `flake.lock` pins nixpkgs, including the Rust toolchain and native libraries.
 `Cargo.lock` still pins Rust crates. The shell does not replace your rustup
 installation or make builds hermetic: it retains your environment and may use
