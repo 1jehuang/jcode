@@ -995,3 +995,54 @@ fn mcp_source_logs_explain_provenance_without_config_values() {
     assert!(!imported.contains("TOKEN"));
     assert!(!imported.contains("inline-secret"));
 }
+
+#[test]
+fn jcode_mcp_overrides_imported_claude_commands() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"servers":{"amq":{"command":"amq-mcp","args":["local","channel","jcode"],"shared":false}}}"#,
+    )
+    .unwrap();
+    let external = home.path().join("external");
+    std::fs::create_dir_all(external.join(".claude")).unwrap();
+    let claude_amq = serde_json::json!({
+        "mcpServers": {
+            "amq": {"command": "amq-mcp", "args": ["local", "channel", "claude"]},
+            "claude-only": {"command": "claude-only"}
+        }
+    });
+    std::fs::write(external.join(".claude.json"), claude_amq.to_string()).unwrap();
+
+    let result = std::panic::catch_unwind(|| {
+        for legacy in [false, true] {
+            if legacy {
+                std::fs::write(external.join(".claude/mcp.json"), claude_amq.to_string()).unwrap();
+            }
+            let config = McpConfig::load_for_dir(Some(project.path()));
+            assert_eq!(config.servers["amq"].args, ["local", "channel", "jcode"]);
+            assert!(!config.servers["amq"].shared);
+            assert!(config.servers.contains_key("claude-only"));
+        }
+
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"amq":{"command":"project-amq"}}}"#,
+        )
+        .unwrap();
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert_eq!(config.servers["amq"].command, "project-amq");
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("jcode MCP precedence assertions");
+}
