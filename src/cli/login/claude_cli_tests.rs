@@ -407,13 +407,13 @@ impl Drop for PromptAnswer {
 }
 
 #[cfg(unix)]
-#[test]
-fn fake_cli_sign_in_imports_a_validated_native_snapshot_only_after_approval() {
+#[tokio::test]
+async fn fake_cli_sign_in_imports_a_validated_native_snapshot_only_after_approval() {
     let home = TestHome::new();
     let mut env = FakeCliEnv::new(home._sandbox.root(), false);
     env.set("CLAUDE_CODE_OAUTH_TOKEN",r#"{"claudeAiOauth":{"accessToken":"fake-native-access","refreshToken":"fake-native-refresh","expiresAt":4102444800000}}"#);
     let _answer = PromptAnswer::set(true);
-    login_claude_code_flow().unwrap();
+    login_claude_code_flow(async { Ok(()) }).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(home._sandbox.root().join("invocation")).unwrap(),
         "auth login"
@@ -425,13 +425,14 @@ fn fake_cli_sign_in_imports_a_validated_native_snapshot_only_after_approval() {
 }
 
 #[cfg(unix)]
-#[test]
-fn fake_cli_file_sign_in_declined_approval_does_not_save_jcode_trust_or_accounts() {
+#[tokio::test]
+async fn fake_cli_file_sign_in_declined_approval_does_not_save_jcode_trust_or_accounts() {
     let home = TestHome::new();
     let _env = FakeCliEnv::new(home._sandbox.root(), true);
     let _answer = PromptAnswer::set(false);
     assert!(
-        login_claude_code_flow()
+        login_claude_code_flow(async { panic!("unapproved login must not validate") })
+            .await
             .unwrap_err()
             .to_string()
             .contains("not granted")
@@ -444,6 +445,97 @@ fn fake_cli_file_sign_in_declined_approval_does_not_save_jcode_trust_or_accounts
         )
     );
     assert!(auth::claude::list_accounts().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fake_cli_completion_captures_tokens_after_validation_refresh() {
+    let home = TestHome::new();
+    let mut env = FakeCliEnv::new(home._sandbox.root(), false);
+    env.set("CLAUDE_CODE_OAUTH_TOKEN",r#"{"claudeAiOauth":{"accessToken":"fake-native-access","refreshToken":"fake-native-refresh","expiresAt":4102444800000}}"#);
+    let _answer = PromptAnswer::set(true);
+    let flow = auth::claude_cli_completion::LoginFlow::new().unwrap();
+    let attempt = auth::claude_cli_completion::claim(&flow.path).unwrap();
+    let completed = login_claude_code_flow(async {
+        assert!(flow.result().unwrap().is_none());
+        let account = auth::claude::list_accounts().unwrap().remove(0);
+        // Model a one-time native import without a live environment override.
+        env.set("CLAUDE_CODE_OAUTH_TOKEN", "");
+        auth::claude::update_account_tokens(
+            &account.label,
+            "validation-refreshed-access",
+            "validation-refreshed-refresh",
+            account.expires,
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let final_credentials = auth::claude::load_credentials().unwrap();
+    assert_eq!(
+        final_credentials.access_token,
+        "validation-refreshed-access"
+    );
+    assert_eq!(
+        completed.fingerprint,
+        auth::claude_cli_completion::fingerprint(&final_credentials)
+    );
+    auth::claude_cli_completion::finish(&flow.path, &attempt, Some(completed.clone())).unwrap();
+    auth::claude_cli_completion::with_verified_receipt(
+        &flow.path,
+        &attempt,
+        &completed.fingerprint,
+        || Ok(()),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fake_cli_completion_validation_failure_never_reports_success() {
+    let home = TestHome::new();
+    let mut env = FakeCliEnv::new(home._sandbox.root(), false);
+    env.set("CLAUDE_CODE_OAUTH_TOKEN",r#"{"claudeAiOauth":{"accessToken":"fake-native-access","refreshToken":"fake-native-refresh","expiresAt":4102444800000}}"#);
+    let _answer = PromptAnswer::set(true);
+    let flow = auth::claude_cli_completion::LoginFlow::new().unwrap();
+    let attempt = auth::claude_cli_completion::claim(&flow.path).unwrap();
+    let result = login_claude_code_flow(async {
+        assert!(flow.result().unwrap().is_none());
+        anyhow::bail!("synthetic validation failure")
+    })
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("synthetic validation failure")
+    );
+    auth::claude_cli_completion::finish(&flow.path, &attempt, None).unwrap();
+    assert!(matches!(flow.result().unwrap(), Some(None)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fake_cli_completion_preserves_account_choice_during_validation() {
+    let home = TestHome::new();
+    let mut env = FakeCliEnv::new(home._sandbox.root(), false);
+    env.set("CLAUDE_CODE_OAUTH_TOKEN",r#"{"claudeAiOauth":{"accessToken":"fake-native-access","refreshToken":"fake-native-refresh","expiresAt":4102444800000}}"#);
+    let _answer = PromptAnswer::set(true);
+    let result = login_claude_code_flow(async {
+        auth::claude::set_active_account_override(Some("later-manual-choice".into()));
+        Ok(())
+    })
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("selection changed during validation")
+    );
+    assert_eq!(
+        auth::claude::get_active_account_override().as_deref(),
+        Some("later-manual-choice")
+    );
 }
 
 #[test]

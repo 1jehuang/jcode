@@ -193,7 +193,9 @@ pub(super) fn configured_claude_file_is_unambiguous(
     Ok(())
 }
 
-pub(super) fn login_claude_code_flow() -> Result<auth::claude_cli_completion::CompletedLogin> {
+pub(super) async fn login_claude_code_flow(
+    validation: impl std::future::Future<Output = Result<()>>,
+) -> Result<auth::claude_cli_completion::CompletedLogin> {
     let expected_selection = auth::claude::native_import_selection()?;
     let source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
     let file_path = source.path()?;
@@ -245,6 +247,24 @@ pub(super) fn login_claude_code_flow() -> Result<auth::claude_cli_completion::Co
         auth::claude_cli_completion::LoginSource::Native
     } else {
         auth::claude_cli_completion::LoginSource::File(file_path)
+    };
+    let acquired = auth::claude_cli_completion::capture(&credentials, source.clone())?;
+    let selection = (
+        auth::claude::get_active_account_override(),
+        auth::claude::load_auth_file()?.active_anthropic_account,
+    );
+    validation.await?;
+    anyhow::ensure!(
+        (
+            auth::claude::get_active_account_override(),
+            auth::claude::load_auth_file()?.active_anthropic_account,
+        ) == selection,
+        "The saved Claude account selection changed during validation. Retry to use this login."
+    );
+    // Follow this attempt's saved account through refresh, never a new source.
+    let credentials = match acquired.saved_account {
+        Some(label) => auth::claude::load_credentials_for_account(&label)?,
+        None => credentials,
     };
     let completed = auth::claude_cli_completion::capture(&credentials, source)?;
     eprintln!("Claude Code login is now available to Jcode.");

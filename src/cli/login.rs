@@ -397,7 +397,15 @@ pub async fn run_login_provider(
                     .as_deref()
                     .map(auth::claude_cli_completion::claim)
                     .transpose()?;
-                let result = login_claude_code_flow();
+                let result = login_claude_code_flow(async {
+                    auth::AuthStatus::invalidate_cache();
+                    if options.no_validate {
+                        Ok(())
+                    } else {
+                        super::commands::run_post_login_validation(provider).await
+                    }
+                })
+                .await;
                 if let (Some(path), Some(attempt)) =
                     (options.claude_code_completion.as_deref(), pending)
                 {
@@ -515,7 +523,10 @@ pub async fn run_login_provider(
     }
     // Scriptable callers require exactly one JSON object on stdout. The human
     // validation report belongs only to interactive login, including failures.
-    let validation = if options.json {
+    let validation = if options.claude_code {
+        // Claude Code validation precedes capture of its completion receipt.
+        Ok(())
+    } else if options.json {
         super::auth_test::run_post_login_validation_quiet(provider).await
     } else {
         super::commands::run_post_login_validation(provider).await
