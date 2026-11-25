@@ -14,6 +14,7 @@ pub(in crate::tui::app) struct RestoredReloadInput {
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
     pub interleave_message: Option<String>,
+    pub interleave_images: Vec<(String, String)>,
     pub pending_soft_interrupts: Vec<String>,
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
@@ -47,6 +48,11 @@ impl App {
         self.input_image_markers = restored.image_markers;
         self.pasted_contents = restored.pasted_contents;
         self.ensure_input_image_markers();
+        if restored.submit_on_restore && !self.pending_images.is_empty() {
+            let prompt = self.input_without_owned_image_markers();
+            self.input.clear();
+            self.restore_recalled_prompt_text(prompt);
+        }
         self.submit_input_on_startup = restored.submit_on_restore
             && (!self.input.is_empty() || !self.pending_images.is_empty());
         crate::logging::info(&format!(
@@ -84,11 +90,17 @@ impl App {
         self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
 
         let mut queued_messages = restored.queued_messages;
+        let mut queued_images = if queued_messages.is_empty() {
+            Vec::new()
+        } else {
+            restored.queued_images
+        };
         let mut recovered_followups = Vec::new();
         if let Some(interleave_message) = restored.interleave_message
-            && !interleave_message.trim().is_empty()
+            && (!interleave_message.trim().is_empty() || !restored.interleave_images.is_empty())
         {
             recovered_followups.push(interleave_message);
+            queued_images.splice(0..0, restored.interleave_images);
         }
         let recovered_interrupts = restored
             .pending_soft_interrupt_resend
@@ -108,7 +120,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
-        self.queued_images = restored.queued_images;
+        self.queued_images = queued_images;
         self.queued_commands = restored.queued_commands;
         if self.has_queued_followups() {
             if self.is_remote {

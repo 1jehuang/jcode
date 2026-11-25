@@ -1229,6 +1229,15 @@ impl App {
     /// "token refresh needed" / auth error). Only restores when the input box is
     /// empty, so we never clobber text the user has already started typing.
     pub(super) fn restore_failed_input_to_box(&mut self) {
+        if let Some(pending) = self.rate_limit_pending_message.as_ref()
+            && !pending.images.is_empty()
+        {
+            let text = pending.content.clone();
+            let images = pending.images.clone();
+            self.last_submitted_input = None;
+            self.restore_rejected_image_prompt(text, images);
+            return;
+        }
         let Some(prompt) = self.last_submitted_input.take() else {
             return;
         };

@@ -426,8 +426,7 @@ impl App {
             let interleave_message = value
                 .get("interleave_message")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty());
+                .map(|s| s.to_string());
             let pending_soft_interrupts = value
                 .get("pending_soft_interrupts")
                 .and_then(|v| v.as_array())
@@ -549,17 +548,8 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
-                queued_images: match value.get("queued_images") {
-                    None => Vec::new(),
-                    Some(images) => {
-                        serde_json::from_value(images.clone()).unwrap_or_else(|error| {
-                            crate::logging::warn(&format!(
-                                "Cannot restore queued image list: {error}"
-                            ));
-                            Vec::new()
-                        })
-                    }
-                },
+                queued_images: reload_input::restored_images(&value, "queued_images"),
+                interleave_images: reload_input::restored_images(&value, "interleave_images"),
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
@@ -612,6 +602,7 @@ impl App {
             startup_status_notice: None,
             startup_display_message: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,

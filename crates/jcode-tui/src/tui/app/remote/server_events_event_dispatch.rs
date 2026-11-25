@@ -155,7 +155,10 @@ pub(in crate::tui::app) fn handle_server_event(
                     return redraw;
                 }
                 if let ServerEvent::Error { message, .. } = &event {
-                    let recovered = recover_rejected_queued_continuation(app);
+                    let recovered = recover_rejected_queued_continuation(
+                        app,
+                        message == "Already processing a message",
+                    );
                     if !recovered {
                         app.restore_failed_input_to_box();
                     }

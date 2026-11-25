@@ -18,7 +18,9 @@ impl App {
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
             pending.is_system
                 && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
         });
         if self.input.is_empty()
             && self.pending_images.is_empty()
@@ -91,7 +93,7 @@ impl App {
             let mut queued_messages = self.queued_messages.clone();
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
+                if !pending.content.trim().is_empty() || !pending.images.is_empty() {
                     queued_messages.insert(0, pending.content.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
@@ -107,6 +109,11 @@ impl App {
                 .iter()
                 .map(|(_, content)| content.clone())
                 .collect::<Vec<_>>();
+            let queued_images = if self.queued_messages.is_empty() {
+                &[][..]
+            } else {
+                self.queued_images.as_slice()
+            };
             let data = serde_json::json!({
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
@@ -118,10 +125,11 @@ impl App {
                 "image_markers": if resume_prompt.is_some() { super::input_images::InputImageMarkers::default() } else { self.input_image_markers.clone() },
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
-                "queued_images": inflight_continuation.into_iter().flat_map(|p| p.images.iter()).chain(self.queued_images.iter()).collect::<Vec<_>>(),
+                "queued_images": inflight_continuation.into_iter().flat_map(|p| p.images.iter()).chain(queued_images.iter()).collect::<Vec<_>>(),
                 "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
+                "interleave_images": self.interleave_images,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
                 "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
                 "rate_limit_pending_message": rate_limit_pending_message,
@@ -139,5 +147,18 @@ impl App {
             });
             let _ = std::fs::write(&path, data.to_string());
         }
+    }
+}
+
+pub(super) fn restored_images(value: &serde_json::Value, key: &str) -> Vec<(String, String)> {
+    match value.get(key) {
+        None => Vec::new(),
+        Some(images) => match serde_json::from_value(images.clone()) {
+            Ok(images) => images,
+            Err(error) => {
+                crate::logging::warn(&format!("Cannot restore {key} image list: {error}"));
+                Vec::new()
+            }
+        },
     }
 }

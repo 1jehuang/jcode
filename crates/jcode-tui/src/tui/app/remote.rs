@@ -394,6 +394,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        let mut images = std::mem::take(&mut app.queued_images);
+        if messages.is_empty() {
+            images.clear();
+        }
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
         if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
@@ -418,7 +422,6 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         if messages.is_empty() && reminder.is_none() {
             return true;
         }
-        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send(
             app,
             remote,
@@ -442,9 +445,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             if let Some(reminder) = reminder {
                 app.hidden_queued_system_messages.insert(0, reminder);
             }
-            if !combined.is_empty() {
-                app.queued_messages.insert(0, combined);
-                app.queued_images = images;
+            if !combined.is_empty() || !images.is_empty() {
+                queue_recovery::prepend_queued_payload(app, combined, images);
             }
         }
         needs_redraw = true;

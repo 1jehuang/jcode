@@ -1157,7 +1157,7 @@ fn handle_server_event_inner(
             // queue and re-adopt the running-turn state so the queue
             // dispatches once the real turn completes.
             if message == "Already processing a message"
-                && recover_rejected_queued_continuation(app)
+                && recover_rejected_queued_continuation(app, true)
             {
                 remote.clear_pending();
                 app.current_message_id = None;

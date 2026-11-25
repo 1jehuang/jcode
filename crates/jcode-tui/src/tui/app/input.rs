@@ -1284,7 +1284,8 @@ impl App {
     pub(super) fn has_pending_user_followup(&self) -> bool {
         self.interleave_message
             .as_deref()
-            .is_some_and(|message| !message.trim().is_empty())
+            .is_some_and(|message| !message.trim().is_empty() || !self.interleave_images.is_empty())
+            || (!self.queued_messages.is_empty() && !self.queued_images.is_empty())
             || self
                 .pending_soft_interrupts
                 .iter()
@@ -2881,12 +2882,11 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 let mut followups = std::mem::take(&mut app.pending_soft_interrupts);
                 app.pending_soft_interrupt_requests.clear();
                 if let Some(interleave) = app.interleave_message.take()
-                    && !interleave.trim().is_empty()
+                    && (!interleave.trim().is_empty() || !app.interleave_images.is_empty())
                 {
                     followups.push(interleave);
-                    // Queued follow-ups are text-only, so carry staged images
-                    // back to the composer instead of dropping them silently.
-                    app.pending_images.append(&mut app.interleave_images);
+                    app.queued_images
+                        .splice(0..0, std::mem::take(&mut app.interleave_images));
                 }
                 app.interleave_images.clear();
                 followups.append(&mut app.queued_messages);
@@ -3903,6 +3903,56 @@ impl App {
         self.pending_turn = true;
     }
 
+    pub(super) fn prepare_queued_local_turn(&mut self) -> (bool, bool) {
+        // Combine all currently queued messages into one, treating [SYSTEM: ...]
+        // startup continuations as system reminders rather than user turns.
+        let queued_messages = std::mem::take(&mut self.queued_messages);
+        let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
+        let (messages, reminder, display_system_messages) =
+            super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        let combined = messages.join("\n\n");
+        let has_combined =
+            !combined.is_empty() || (!messages.is_empty() && !self.queued_images.is_empty());
+        let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        if !messages.is_empty() && !preserve_visible_turn {
+            self.automatic_failover_targets.clear();
+            self.automatic_failover_stopped = false;
+        }
+
+        self.commit_pending_streaming_assistant_message();
+
+        for msg in display_system_messages {
+            self.push_display_message(DisplayMessage::system(msg));
+        }
+
+        for msg in &messages {
+            if !super::commands::is_poke_message(msg) {
+                self.push_display_message(DisplayMessage::user(msg.clone()));
+            }
+        }
+
+        let turn_reminder = merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+        let turn_reminder =
+            merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
+
+        if has_combined {
+            let combined = crate::prompt::with_swarm_user_message_reminder(
+                &combined,
+                self.provider.reasoning_effort().as_deref(),
+            );
+            let message =
+                Message::user_with_images(&combined, std::mem::take(&mut self.queued_images));
+            self.session
+                .add_message(Role::User, message.content.to_vec());
+            self.add_provider_message(message);
+        } else {
+            self.queued_images.clear();
+        }
+        self.append_turn_system_reminder(turn_reminder);
+        self.session_save_pending = true;
+        (has_combined, preserve_visible_turn)
+    }
+
     /// Process all queued messages (combined into a single request)
     /// Loops until queue is empty (in case more messages are queued during processing)
     pub(super) async fn process_queued_messages(
@@ -3915,50 +3965,7 @@ impl App {
                 || !self.hidden_queued_system_messages.is_empty()
                 || self.has_pending_cloud_recovery())
         {
-            // Combine all currently queued messages into one, treating [SYSTEM: ...]
-            // startup continuations as system reminders rather than user turns.
-            let queued_messages = std::mem::take(&mut self.queued_messages);
-            let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
-            let (messages, reminder, display_system_messages) =
-                super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-            let combined = messages.join("\n\n");
-            let has_combined = !combined.is_empty();
-            let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
-            if !messages.is_empty() && !preserve_visible_turn {
-                self.automatic_failover_targets.clear();
-                self.automatic_failover_stopped = false;
-            }
-
-            self.commit_pending_streaming_assistant_message();
-
-            for msg in display_system_messages {
-                self.push_display_message(DisplayMessage::system(msg));
-            }
-
-            for msg in &messages {
-                if !super::commands::is_poke_message(msg) {
-                    self.push_display_message(DisplayMessage::user(msg.clone()));
-                }
-            }
-
-            let turn_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
-            let turn_reminder =
-                merge_turn_reminders(turn_reminder, self.take_cloud_recovery_reminder());
-
-            if has_combined {
-                let combined = crate::prompt::with_swarm_user_message_reminder(
-                    &combined,
-                    self.provider.reasoning_effort().as_deref(),
-                );
-                let message =
-                    Message::user_with_images(&combined, std::mem::take(&mut self.queued_images));
-                self.session
-                    .add_message(Role::User, message.content.to_vec());
-                self.add_provider_message(message);
-            }
-            self.append_turn_system_reminder(turn_reminder);
-            self.session_save_pending = true;
+            let (has_combined, preserve_visible_turn) = self.prepare_queued_local_turn();
             self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.thought_line_inserted = false;

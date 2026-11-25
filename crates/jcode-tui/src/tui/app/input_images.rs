@@ -90,6 +90,41 @@ pub(super) type InputUndoSnapshot = (
 );
 
 impl App {
+    pub(super) fn restore_recalled_prompt_text(&mut self, text: String) {
+        self.input_image_markers = Default::default();
+        // Leading owned markers retain prompt routing for shell/slash-looking text.
+        self.ensure_input_image_markers();
+        let at = self.input.len();
+        self.input.push_str(&text);
+        self.input_images_inserted(at, text.len(), None);
+        self.cursor_pos = self.input.len();
+    }
+
+    /// Retain rejected attachments without merging them into a newer draft.
+    pub(super) fn restore_rejected_image_prompt(
+        &mut self,
+        text: String,
+        images: Vec<(String, String)>,
+    ) {
+        let newer = self.take_input_draft();
+        self.pending_images = images;
+        self.restore_recalled_prompt_text(text);
+        let rejected = self.take_input_draft();
+        if newer.0.is_empty() && newer.2.is_empty() {
+            self.restore_input_draft(rejected);
+            self.set_status_notice("Prompt restored to input after error");
+        } else {
+            if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
+                self.input_undo_stack.remove(0);
+            }
+            self.input_undo_stack.push(rejected);
+            self.restore_input_draft(newer);
+            self.set_status_notice("Rejected attachment prompt saved · Ctrl+Z to restore");
+        }
+        self.reset_tab_completion();
+        self.sync_model_picker_preview_from_input();
+    }
+
     pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
         self.input_image_markers = Default::default();
         std::mem::take(&mut self.pending_images)
@@ -416,15 +451,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     }
 
     if !parts.is_empty() {
-        app.input_image_markers = Default::default();
-        // These were queued as prompts. Leading owned markers keep recalled
-        // shell/slash-looking text from becoming an executable command.
-        app.ensure_input_image_markers();
-        let at = app.input.len();
-        let text = parts.join("\n\n");
-        app.input.push_str(&text);
-        app.input_images_inserted(at, text.len(), None);
-        app.cursor_pos = app.input.len();
+        app.restore_recalled_prompt_text(parts.join("\n\n"));
         let count = parts.len();
         app.set_status_notice(format!(
             "Retrieved {} pending message{} for editing",
