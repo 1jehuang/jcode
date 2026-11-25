@@ -1200,15 +1200,19 @@ fn handle_server_event_inner(
                 crate::auth::refresh_state::error_is_permanent_rejection(&message);
             let is_definitive_exhaustion =
                 jcode_provider_core::is_definitive_usage_exhaustion(&message);
-            let reset_duration =
-                if is_failover_prompt || is_permanent_refresh_rejection || is_definitive_exhaustion
-                {
-                    None
-                } else {
-                    retry_after_secs
-                        .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
-                        .or_else(|| parse_rate_limit_error(&message))
-                };
+            let reset_duration = if is_failover_prompt || is_permanent_refresh_rejection {
+                None
+            } else if let Some(reset) =
+                app_mod::parse_quota_window_reset(&message, chrono::Utc::now())
+            {
+                Some(reset)
+            } else if is_definitive_exhaustion {
+                None
+            } else {
+                retry_after_secs
+                    .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
+                    .or_else(|| parse_rate_limit_error(&message))
+            };
             // A stale reset or a limit that never clears must not resend the
             // same turn forever. Rate-limit holds share the per-turn retry
             // budget, which begin_remote_send carries across resends.

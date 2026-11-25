@@ -37,6 +37,7 @@ include!("tests/remote_events_reload_04.rs");
 include!("tests/idle_soft_interrupt_cancel.rs");
 include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
+include!("tests/quota_window_reset.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
 include!("tests/scroll_copy_01/part_01.rs");
