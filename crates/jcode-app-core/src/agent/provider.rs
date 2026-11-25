@@ -172,6 +172,10 @@ impl Agent {
         self.registry.clone()
     }
 
+    pub(crate) fn registry_weak(&self) -> crate::tool::WeakRegistry {
+        self.registry.downgrade()
+    }
+
     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
         self.registry.compaction().read().await.mode()
     }

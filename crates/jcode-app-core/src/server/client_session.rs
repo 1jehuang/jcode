@@ -1234,16 +1234,17 @@ async fn claim_live_target_agent(
     _source_agent: &Arc<Mutex<Agent>>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-) -> Option<Arc<Mutex<Agent>>> {
+) -> Option<(Arc<Mutex<Agent>>, Registry)> {
     let mut connections = client_connections.write().await;
     let sessions_guard = sessions.read().await;
     let target = sessions_guard.get(session_id).cloned()?;
+    let registry = sessions.tool_registry(session_id)?;
     let info = connections.get_mut(client_connection_id)?;
     crate::session::clear_window_closed(session_id);
     info.session_id = session_id.to_string();
     info.client_instance_id = client_instance_id.map(str::to_string);
     info.last_seen = Instant::now();
-    Some(target)
+    Some((target, registry))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1326,7 +1327,9 @@ pub(super) async fn handle_resume_session(
     )
     .await;
 
-    if let Some(live_target_agent) = live_target_agent.as_ref() {
+    if let Some((live_target_agent, target_registry)) = live_target_agent {
+        let live_target_agent = &live_target_agent;
+        *registry = target_registry;
         drop(resume_guard);
         let old_session_id = client_session_id.clone();
 

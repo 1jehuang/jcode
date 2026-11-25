@@ -778,15 +778,18 @@ async fn sdk_socket_cancel_workflow(
     other_session.save().unwrap();
     assert!(crate::session::session_exists("sdk_other_session"));
     let other_registry = Registry::new(provider_template.clone()).await;
-    sessions.write_for_test().await.insert(
-        "sdk_other_session".into(),
-        Arc::new(Mutex::new(Agent::new_with_session(
-            provider_template.clone(),
-            other_registry,
-            other_session,
-            None,
-        ))),
-    );
+    sessions
+        .register_new(
+            "sdk_other_session".into(),
+            Arc::new(Mutex::new(Agent::new_with_session(
+                provider_template.clone(),
+                other_registry,
+                other_session,
+                None,
+            ))),
+        )
+        .await
+        .unwrap();
     if identity_capability && terminal_race {
         // Exercise actual dispatch, not just the history handlers. A subsequent
         // Subscribe is authoritative and clears an earlier opt-in for legacy clients.

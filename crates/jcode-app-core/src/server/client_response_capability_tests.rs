@@ -161,6 +161,35 @@ async fn catalog(reader: &mut Reader, writer: &mut Writer, enabled: bool) {
     assert!(tools.iter().any(|tool| tool.name == "mcp"));
 }
 
+fn write_mcp_config(project: &std::path::Path, marker: &str) {
+    std::fs::create_dir_all(project.join(".jcode")).unwrap();
+    std::fs::write(
+        project.join(".jcode/mcp.json"),
+        json!({"mcpServers":{marker:{"command":"must-not-run","disabled":true}}}).to_string(),
+    )
+    .unwrap();
+}
+
+async fn mcp_servers(registry: &Registry, session_id: &str, directory: &std::path::Path) -> String {
+    registry
+        .execute(
+            "mcp",
+            json!({"action":"list"}),
+            crate::tool::ToolContext {
+                session_id: session_id.into(),
+                message_id: "registry-isolation".into(),
+                tool_call_id: "mcp-list".into(),
+                working_dir: Some(directory.to_owned()),
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            },
+        )
+        .await
+        .unwrap()
+        .output
+}
+
 async fn connection_count(
     connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
     expected: usize,
@@ -415,12 +444,7 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
 
     // A later Subscribe must update this restored Agent's MCP registry.
     let next_project = home._home.path().join("post-resume-project");
-    std::fs::create_dir_all(next_project.join(".jcode")).unwrap();
-    std::fs::write(
-        next_project.join(".jcode/mcp.json"),
-        r#"{"mcpServers":{"post-resume-marker":{"command":"must-not-run","disabled":true}}}"#,
-    )
-    .unwrap();
+    write_mcp_config(&next_project, "post-resume-marker");
     done(
         &mut creator_reader,
         &mut creator_writer,
@@ -430,34 +454,100 @@ async fn user_response_multiclient_subscribe_resume_and_disconnect() {
     .await;
     let restored_agent = sessions.read().await.get(&disk_target.id).unwrap().clone();
     let registry = restored_agent.lock().await.registry();
-    let output = registry
-        .execute(
-            "mcp",
-            json!({"action":"list"}),
-            crate::tool::ToolContext {
-                session_id: disk_target.id.clone(),
-                message_id: "post-resume".into(),
-                tool_call_id: "post-resume-mcp-list".into(),
-                working_dir: Some(next_project),
-                stdin_request_tx: None,
-                graceful_shutdown_signal: None,
-                execution_mode: crate::tool::ToolExecutionMode::Direct,
-            },
-        )
-        .await
-        .unwrap();
     assert!(
-        output.output.contains("post-resume-marker"),
-        "{}",
-        output.output
+        mcp_servers(&registry, &disk_target.id, &next_project)
+            .await
+            .contains("post-resume-marker")
     );
     done(
         &mut viewer_reader,
         &mut viewer_writer,
-        json!({"type":"resume_session", "id":15, "session_id":disk_target.id}),
+        json!({"type":"subscribe", "id":15, "target_session_id":disk_target.id,
+            "working_dir":next_project, "supports_user_response":true}),
     )
     .await;
     catalog(&mut creator_reader, &mut creator_writer, true).await;
+
+    // Target-aware attachment must rebind even while the selected Agent is busy.
+    let live_project = home._home.path().join("live-project-b");
+    write_mcp_config(&live_project, "live-project-marker");
+    let live_agent = sessions.read().await.get(&target).unwrap().clone();
+    let busy = live_agent.lock().await;
+    let live_registry = busy.registry();
+    let mut snapshot = busy.session_for_split().clone();
+    snapshot.save_prepared().unwrap();
+    send(
+        &mut creator_writer,
+        json!({"type":"subscribe", "id":151,
+        "target_session_id":target, "working_dir":live_project,
+        "supports_user_response":false}),
+    )
+    .await;
+    until(&mut creator_reader, |event| {
+        matches!(event, ServerEvent::Done { id: 151 })
+    })
+    .await;
+    send(&mut creator_writer, json!({"type":"ping", "id":152})).await;
+    until(&mut creator_reader, |event| {
+        matches!(event, ServerEvent::Pong { id: 152, .. })
+    })
+    .await;
+    let source_tools = mcp_servers(&registry, &disk_target.id, &next_project).await;
+    assert!(
+        source_tools.contains("post-resume-marker"),
+        "{source_tools}"
+    );
+    assert!(
+        !source_tools.contains("live-project-marker"),
+        "{source_tools}"
+    );
+    assert!(
+        mcp_servers(&live_registry, &target, &live_project)
+            .await
+            .contains("live-project-marker")
+    );
+    drop(busy);
+
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"subscribe", "id":153,
+        "target_session_id":disk_target.id, "working_dir":next_project,
+        "supports_user_response":false}),
+    )
+    .await;
+    // Explicit Resume uses this connection's cwd, but must mutate only B's map.
+    write_mcp_config(&next_project, "explicit-resume-marker");
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"resume_session", "id":154, "session_id":target}),
+    )
+    .await;
+    let source_tools = mcp_servers(&registry, &disk_target.id, &next_project).await;
+    assert!(
+        source_tools.contains("post-resume-marker"),
+        "{source_tools}"
+    );
+    assert!(
+        !source_tools.contains("explicit-resume-marker"),
+        "{source_tools}"
+    );
+    assert!(
+        mcp_servers(&live_registry, &target, &next_project)
+            .await
+            .contains("explicit-resume-marker")
+    );
+    done(
+        &mut creator_reader,
+        &mut creator_writer,
+        json!({"type":"subscribe", "id":155,
+        "target_session_id":disk_target.id, "working_dir":next_project,
+        "supports_user_response":false}),
+    )
+    .await;
+    catalog(&mut creator_reader, &mut creator_writer, true).await;
+
     done(
         &mut creator_reader,
         &mut creator_writer,

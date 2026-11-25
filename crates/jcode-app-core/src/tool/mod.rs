@@ -417,7 +417,7 @@ impl Registry {
         }
     }
 
-    fn downgrade(&self) -> WeakRegistry {
+    pub(crate) fn downgrade(&self) -> WeakRegistry {
         WeakRegistry {
             tools: Arc::downgrade(&self.tools),
             mcp_policy: Arc::clone(&self.mcp_policy),
