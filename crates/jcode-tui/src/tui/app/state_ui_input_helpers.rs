@@ -1408,14 +1408,14 @@ impl App {
         let Some((cmd, _)) = suggestions.get(self.command_suggestion_selected).cloned() else {
             return false;
         };
-        if cmd == self.input.trim() {
+        let (start, end) =
+            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
+                .unwrap_or((0, self.input.len()));
+        if cmd == self.input[start..end].trim() {
             return false;
         }
 
         self.remember_input_undo_state();
-        let (start, end) =
-            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
-                .unwrap_or((0, self.input.len()));
         self.replace_input_range(start, end, &cmd);
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
