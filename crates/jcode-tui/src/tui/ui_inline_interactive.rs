@@ -68,6 +68,7 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
 fn route_provider_display(provider: &str, api_method: &str) -> String {
     if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
         && provider != "auto"
+        && crate::provider::normalize_model_route_provider_label(provider) != "azureopenai"
         && !provider.contains("OpenRouter")
     {
         format!("OpenRouter/{}", provider)
