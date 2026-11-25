@@ -149,6 +149,7 @@ pub(crate) fn run_migrate(
                 mcp_servers: configured_mcp_servers(),
                 auth_account,
                 auth_accounts: accounts.clone(),
+                auth_pin_proofs: account_pin_proofs(sess)?,
             },
             session_sha256: String::new(),
             todos_sha256: None,

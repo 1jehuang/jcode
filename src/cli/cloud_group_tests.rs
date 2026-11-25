@@ -43,6 +43,7 @@ fn fixture() -> (tempfile::TempDir, Group) {
                 mcp_servers: vec![],
                 auth_account: None,
                 auth_accounts: vec![],
+                auth_pin_proofs: vec![],
             },
             session_sha256: digest(&member_dir.join("session.json")).unwrap(),
             todos_sha256: Some(digest(&member_dir.join("todos.json")).unwrap()),

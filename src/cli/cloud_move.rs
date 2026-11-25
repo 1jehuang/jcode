@@ -34,8 +34,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::auth::router_transfer;
+#[path = "cloud_account_pins.rs"]
+mod cloud_pins;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
+use cloud_pins::{account_pin_proofs, rebind_account_pins, session_credentials};
 
 mod transport;
 pub(crate) use transport::Target;
@@ -123,6 +126,9 @@ pub(crate) struct MoveManifest {
     /// All transferred identities, without credential values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth_accounts: Vec<CloudAccount>,
+    /// Secret-free proof for rebinding source-local account IDs after credential import.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    auth_pin_proofs: Vec<CloudAuthBaseline>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,9 +137,9 @@ pub(crate) struct CloudAccount {
     label: String,
 }
 
-/// Only a hash of high-entropy credentials is retained locally, never another
-/// token copy. It proves that the local login did not change while away.
-#[derive(Serialize, Deserialize)]
+/// Hash of high-entropy credentials, never another token copy. Local return
+/// baselines detect changed logins; handoff manifests prove destination pin bindings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CloudAuthBaseline {
     account: CloudAccount,
     fingerprint: String,
@@ -208,38 +214,6 @@ impl CloudAccount {
         };
         format!("{method}@{}", self.label)
     }
-}
-
-/// Never infer OAuth from a bare provider name: it may actually use an API key.
-fn oauth_selection(sess: &session::Session) -> Result<Option<(TransferProvider, Option<&str>)>> {
-    let route = sess.route_api_method.as_deref().or_else(|| {
-        sess.model
-            .as_deref()
-            .and_then(|model| model.split_once(':').map(|(route, _)| route))
-    });
-    let Some(route) = route else { return Ok(None) };
-    let method = route.split('@').next().unwrap_or(route);
-    let provider = match method {
-        "openai-oauth" => TransferProvider::OpenAi,
-        "claude-oauth" => TransferProvider::Claude,
-        _ => return Ok(None),
-    };
-    let label = crate::provider::oauth_account_label(route);
-    if route.contains('@') && label.is_none() {
-        bail!("session has an invalid saved OAuth account route");
-    }
-    Ok(Some((provider, label)))
-}
-
-fn session_credentials(sess: &session::Session) -> Result<Option<CloudCredentialTransfer>> {
-    let Some((provider, label)) = oauth_selection(sess)? else {
-        return Ok(None);
-    };
-    Ok(Some(transfer::export_cloud_account_at(
-        &storage::jcode_dir()?,
-        provider,
-        label,
-    )?))
 }
 
 /// Router credential sources (API-key env files, non-pool OAuth stores and the
@@ -512,6 +486,7 @@ pub(crate) fn run_move(
                 mcp_servers: configured_mcp_servers(),
                 auth_account: auth_account.clone(),
                 auth_accounts: auth_accounts.clone(),
+                auth_pin_proofs: account_pin_proofs(&sess)?,
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
@@ -946,6 +921,8 @@ pub(crate) fn run_return(
         }
     }
 
+    let mut sess: session::Session = read_json(&stage.join("session.json"))?;
+    rebind_account_pins(&mut sess, &manifest.auth_pin_proofs)?;
     // ---- code: fetch cloud snapshot as refs, then 3-way merge -----------
     let merge = match (&manifest.repo, lease.repo_root.as_deref()) {
         (Some(remote_repo), Some(root)) => {
@@ -964,7 +941,6 @@ pub(crate) fn run_return(
 
     // ---- conversation: install the cloud transcript ----------------------
     step("session", "installing the cloud transcript locally");
-    let mut sess: session::Session = read_json(&stage.join("session.json"))?;
     sess.migration_epoch = epoch;
     let merge_note = match &merge {
         MergeOutcome::Conflicts { files, .. } => format!(
@@ -1187,7 +1163,8 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
         bail!("no staged move for {session_id} at epoch {epoch}");
     }
     let manifest: MoveManifest = read_json(&dir.join("manifest.json"))?;
-    let sess: session::Session = read_json(&dir.join("session.json"))?;
+    let mut sess: session::Session = read_json(&dir.join("session.json"))?;
+    rebind_account_pins(&mut sess, &manifest.auth_pin_proofs)?;
     if sess.migration_epoch != epoch {
         bail!("staged transcript epoch mismatch");
     }
@@ -1332,6 +1309,7 @@ fn export_return_archive(
                     provider: credentials.provider(),
                     label: credentials.label().to_string(),
                 }),
+            auth_pin_proofs: account_pin_proofs(&sess)?,
             auth_accounts: match transferred_accounts_path(session_id)? {
                 path if path.exists() => read_json(&path)?,
                 _ => Vec::new(),

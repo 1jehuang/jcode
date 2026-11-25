@@ -128,6 +128,42 @@ pub fn load_openai(pin: &AccountPin) -> Result<(codex::CodexCredentials, String)
     Ok((codex::load_credentials_for_account(&label)?, label))
 }
 
+/// Export the account named by a strong pin while keeping resolution and export atomic.
+pub fn export_cloud_pin(
+    provider: super::transfer::TransferProvider,
+    pin: &AccountPin,
+) -> Result<super::transfer::CloudCredentialTransfer> {
+    use super::transfer::{TransferProvider, export_cloud_account_at};
+    let home = crate::storage::jcode_dir()?;
+    let _lock = super::account_store::lock_store(&home, provider.store_name())?;
+    let label = match provider {
+        TransferProvider::Claude => resolve_claude(pin)?,
+        TransferProvider::OpenAi => resolve_openai(pin)?,
+    };
+    Ok(export_cloud_account_at(&home, provider, Some(&label))?)
+}
+
+/// Rebind a foreign pin only to the credential proven by the private handoff.
+pub fn rebind_cloud_pin(
+    provider: super::transfer::TransferProvider,
+    label: &str,
+    expected_fingerprint: &str,
+) -> Result<AccountPin> {
+    use super::transfer::{TransferProvider, export_cloud_account_at};
+    use sha2::{Digest, Sha256};
+    let home = crate::storage::jcode_dir()?;
+    let _lock = super::account_store::lock_store(&home, provider.store_name())?;
+    let payload = export_cloud_account_at(&home, provider, Some(label))?;
+    anyhow::ensure!(
+        format!("{:x}", Sha256::digest(payload.as_bytes())) == expected_fingerprint,
+        "Transferred OAuth credential changed; retry the handoff before starting the session"
+    );
+    match provider {
+        TransferProvider::Claude => claude_pin(label),
+        TransferProvider::OpenAi => openai_pin(label),
+    }
+}
+
 #[cfg(test)]
 #[path = "account_pin_identity_tests.rs"]
 pub(crate) mod tests;

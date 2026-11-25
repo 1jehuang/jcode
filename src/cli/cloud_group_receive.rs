@@ -85,13 +85,15 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
     }
     // Validate every account before touching any member. Credentials remain
     // outside the archive and are installed by the private SSH channel.
+    let mut sessions = Vec::new();
     for member in &group.members {
-        let sess: session::Session = read_json(
+        let mut sess: session::Session = read_json(
             &directory
                 .join("members")
                 .join(&member.manifest.session_id)
                 .join("session.json"),
         )?;
+        rebind_account_pins(&mut sess, &member.manifest.auth_pin_proofs)?;
         if let Some(account) = &member.manifest.auth_account {
             let credentials =
                 session_credentials(&sess)?.context("group member lost its OAuth route")?;
@@ -107,6 +109,7 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 bail!("destination member is active without this group transaction");
             }
         }
+        sessions.push(sess);
     }
     if !record.exists() {
         daemon_command("reserve", &group.swarm)?;
@@ -118,16 +121,15 @@ pub(super) fn activate(coordinator: &str, epoch: u64) -> Result<()> {
                 Some("group-activation-pending".into()),
             ))?;
         }
-        for member in &group.members {
+        for (member, sess) in group.members.iter().zip(&sessions) {
             let stage = directory.join("members").join(&member.manifest.session_id);
-            let sess: session::Session = read_json(&stage.join("session.json"))?;
             if member.todos_sha256.is_none() {
                 let path = todo_file(&sess.id)?;
                 if path.exists() {
                     std::fs::remove_file(path)?;
                 }
             }
-            install_session(&sess, &stage)?;
+            install_session(sess, &stage)?;
             storage::write_json_secret(
                 &transferred_accounts_path(&sess.id)?,
                 &member.manifest.auth_accounts,

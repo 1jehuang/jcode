@@ -46,7 +46,7 @@ impl TransferProvider {
         }
     }
 
-    fn store_name(self) -> &'static str {
+    pub(super) fn store_name(self) -> &'static str {
         match self {
             Self::OpenAi => "openai-auth.json",
             Self::Claude => "auth.json",
