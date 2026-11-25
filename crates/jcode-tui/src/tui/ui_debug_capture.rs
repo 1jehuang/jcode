@@ -211,23 +211,21 @@ pub(crate) fn capture_widget_stability_frame(
             area.y.saturating_add(band)..area.y.saturating_add(area.height)
         })
         .unwrap_or(0..height);
-    let placed: Vec<PlacedRect> = match latest {
-        Some(frame) => frame
-            .info_widgets
-            .as_ref()
-            .map(|info| {
-                info.placements
-                    .iter()
-                    .map(|p| PlacedRect {
-                        kind: intern_kind(&p.kind),
-                        x: p.rect.x,
-                        y: p.rect.y,
-                        width: p.rect.width,
-                        height: p.rect.height,
-                    })
-                    .collect()
+    let placed: Vec<PlacedRect> = match latest
+        .as_ref()
+        .and_then(|frame| frame.info_widgets.as_ref())
+    {
+        Some(info) => info
+            .placements
+            .iter()
+            .map(|p| PlacedRect {
+                kind: intern_kind(&p.kind),
+                x: p.rect.x,
+                y: p.rect.y,
+                width: p.rect.width,
+                height: p.rect.height,
             })
-            .unwrap_or_default(),
+            .collect(),
         None => Vec::new(),
     };
     (rows, placed)
