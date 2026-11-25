@@ -46,14 +46,7 @@ pub(super) fn reuse_claude_code_native_snapshot(
         &auth::claude::native_import_selection()? == expected_selection,
         "The saved Claude account selection changed during login. Retry to use this native login."
     );
-    anyhow::ensure!(
-        !was_native_trusted || auth::claude::native_source_allowed(),
-        "Native Claude credential approval was revoked during login. Review external auth settings before retrying."
-    );
-    let native_newly_trusted = !auth::claude::native_source_allowed();
-    if native_newly_trusted {
-        auth::claude::trust_native_source()?;
-    }
+    let native_newly_trusted = retain_native_approval(was_native_trusted, || {})?;
     if !credentials.refresh_token.trim().is_empty() {
         let imported =
             auth::claude::activate_native_credentials_if_unchanged(credentials, expected_selection);
@@ -70,4 +63,25 @@ pub(super) fn reuse_claude_code_native_snapshot(
         }
     }
     Ok(true)
+}
+
+pub(super) fn retain_native_approval(
+    was_native_trusted: bool,
+    after_check: impl FnOnce(),
+) -> Result<bool> {
+    anyhow::ensure!(
+        !was_native_trusted || auth::claude::native_source_allowed(),
+        "Native Claude credential approval was revoked during login. Review external auth settings before retrying."
+    );
+    after_check();
+    // Reuse of earlier approval never writes trust, even if it is revoked now.
+    let newly_trusted = !was_native_trusted;
+    if newly_trusted {
+        auth::claude::trust_native_source()?;
+    }
+    anyhow::ensure!(
+        auth::claude::native_source_allowed(),
+        "Native Claude credential approval was revoked during login"
+    );
+    Ok(newly_trusted)
 }

@@ -1,3 +1,5 @@
+#[path = "auth_claude_cli_wait.rs"]
+mod claude_cli_wait;
 #[path = "auth_claude_login.rs"]
 mod claude_login;
 #[path = "auth_subscription_status.rs"]
@@ -2022,6 +2024,9 @@ impl App {
                 self.pending_login = Some(pending);
                 return;
             }
+            if let PendingLogin::ClaudeCli { cancelled, .. } = &pending {
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            }
             // Signal the Muse subscription background task (if any) and drop
             // its credential slot: no late progress, error, or approval event
             // is accepted afterwards, and nothing is ever persisted.
@@ -2072,7 +2077,7 @@ impl App {
                 PendingLogin::ApiKeyProfile {
                     api_key_optional: true,
                     ..
-                }
+                } | PendingLogin::ClaudeCli { .. }
             )
         {
             let help = match &pending {
@@ -2124,6 +2129,14 @@ impl App {
                     self.pending_login = Some(PendingLogin::ClaudeMethodChoice);
                 }
             },
+            pending @ PendingLogin::ClaudeCli { .. } => {
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("done") {
+                    self.handle_claude_cli_input(pending);
+                } else {
+                    self.pending_login = Some(pending);
+                    self.set_status_notice("Complete sign-in in the terminal, then press Enter here; /cancel stops waiting");
+                }
+            }
             PendingLogin::Exchanging { provider } => {
                 self.set_status_notice("Login only: exchanging credentials, input not sent to AI");
                 self.pending_login = Some(PendingLogin::Exchanging { provider });
@@ -3412,7 +3425,10 @@ impl App {
             .and_then(|s| s.split_whitespace().next())
     }
 
-    pub(super) fn handle_login_completed(&mut self, login: LoginCompleted) {
+    pub(super) fn handle_login_completed(&mut self, mut login: LoginCompleted) {
+        if !self.accept_claude_cli_completion(&mut login) {
+            return;
+        }
         if login.provider == "copilot_code" {
             if jcode_tui_messages::parse_collapsible_swarm_content(&login.message).is_some() {
                 self.upsert_login_progress_card(

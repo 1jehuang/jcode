@@ -481,3 +481,18 @@ fn native_stage_snapshot_preserves_account_choice_changed_during_acquisition() {
     assert_eq!(std::fs::read(path).unwrap(), before);
     assert!(!auth::claude::native_source_allowed());
 }
+
+#[test]
+fn native_prior_approval_revoked_between_check_and_grant_is_not_restored() {
+    let _guard = crate::storage::lock_test_env();
+    let _fixture = NativeStageFixture::new(true);
+    let error = super::native_reuse::retain_native_approval(true, || {
+        crate::config::Config::revoke_external_auth_source(
+            auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+        )
+        .unwrap();
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("revoked during login"));
+    assert!(!auth::claude::native_source_allowed());
+}

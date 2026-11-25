@@ -26,6 +26,7 @@ impl App {
             ));
             return;
         }
+        self.track_claude_cli_login();
         let command = "jcode login --provider claude --claude-code";
         // macOS terminal launchers start a fresh login shell rather than
         // inheriting this process's environment. Do not silently sign into a
@@ -40,7 +41,7 @@ impl App {
         .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
         {
             self.push_display_message(DisplayMessage::system(format!(
-                "This Jcode session uses an explicit home or configuration directory. Open a terminal with the same environment settings, then run:\n\n  {command}\n\nA new terminal here may lose those settings and sign into the wrong profile."
+                "This Jcode session uses an explicit home or configuration directory. Open a terminal with the same environment settings, then run:\n\n  {command}\n\nReturn here after sign-in and press Enter; /cancel stops waiting. A new terminal here may lose those settings and sign into the wrong profile."
             )));
             self.set_status_notice(
                 "Claude Code CLI login: run on Jcode host with same environment",
@@ -68,14 +69,14 @@ impl App {
         };
         match opened {
             Ok(true) => self.push_display_message(DisplayMessage::system(
-                "Opened Claude Code login in a new terminal. Complete sign-in and approve credential reuse there; Jcode will refresh its provider status when that command finishes."
+                "Opened Claude Code login in a new terminal. Complete sign-in and approve credential reuse there; return here after it finishes and press Enter if Jcode has not advanced automatically. /cancel stops waiting."
                     .to_string(),
             )),
             Ok(false) => self.push_display_message(DisplayMessage::system(format!(
-                "No new terminal was available. Run this on the Jcode host to sign in:\n\n  {command}"
+                "No new terminal was available. Run this on the Jcode host to sign in, then return here and press Enter (/cancel stops waiting):\n\n  {command}"
             ))),
             Err(error) => self.push_display_message(DisplayMessage::error(format!(
-                "Could not open a terminal ({error}). Run this on the Jcode host:\n\n  {command}"
+                "Could not open a terminal ({error}). Run this on the Jcode host, then return here and press Enter (/cancel stops waiting):\n\n  {command}"
             ))),
         }
         self.set_status_notice("Claude Code CLI login: complete in terminal");

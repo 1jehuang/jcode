@@ -3,9 +3,11 @@ use super::*;
 struct TestHome {
     guards: Vec<(&'static str, Option<std::ffi::OsString>)>,
     _sandbox: crate::auth::test_sandbox::AuthTestSandbox,
+    active_override: Option<String>,
 }
 impl TestHome {
     fn new() -> Self {
+        let active_override = crate::auth::claude::get_active_account_override();
         let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         let mut guards = Vec::new();
         for (key, value) in [
@@ -30,11 +32,13 @@ impl TestHome {
         Self {
             guards,
             _sandbox: sandbox,
+            active_override,
         }
     }
 }
 impl Drop for TestHome {
     fn drop(&mut self) {
+        crate::auth::claude::set_active_account_override(self.active_override.take());
         for (key, value) in self.guards.drain(..) {
             match value {
                 Some(v) => crate::env::set_var(key, v),
@@ -48,6 +52,11 @@ impl Drop for TestHome {
 fn cli_default_enter_keeps_instance_environment_and_does_not_save_credentials() {
     let _env = TestHome::new();
     let mut app = crate::tui::app::tests::create_test_app();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _runtime = runtime.enter();
     app.start_claude_login();
     assert!(matches!(
         app.pending_login,
@@ -58,7 +67,10 @@ fn cli_default_enter_keeps_instance_environment_and_does_not_save_credentials() 
     assert!(prompt.contains("Enter for 2"));
     app.pending_login = None;
     app.handle_login_input(PendingLogin::ClaudeMethodChoice, String::new());
-    assert!(app.pending_login.is_none());
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ClaudeCli { .. })
+    ));
     let help = &app.display_messages().last().unwrap().content;
     assert!(help.contains("jcode login --provider claude --claude-code"));
     assert!(help.contains("same environment"));
@@ -113,3 +125,6 @@ fn cli_login_on_an_ssh_connection_stays_on_the_remote_host() {
     assert!(help.contains("--claude-code"));
     assert!(!crate::auth::claude::jcode_path().unwrap().exists());
 }
+
+#[path = "auth_claude_cli_wait_tests.rs"]
+mod completion;

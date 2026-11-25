@@ -7,6 +7,10 @@ pub(crate) enum PendingLogin {
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
     ClaudeMethodChoice,
+    ClaudeCli {
+        attempt: String,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    },
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
@@ -105,6 +109,7 @@ impl PendingLogin {
         match self {
             Self::Exchanging { provider } => Some((provider.clone(), "oauth".to_string())),
             Self::Remote | Self::ClaudeMethodChoice => None,
+            Self::ClaudeCli { .. } => Some(("claude".into(), "claude_code_cli".into())),
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),

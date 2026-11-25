@@ -58,6 +58,7 @@ pub(crate) async fn run_login_command(
             &options,
             oauth,
             crate::external_auth::can_prompt_for_external_auth(),
+            auth::browser_suppressed(options.no_browser),
         )?;
     run_login(&login_choice, account.as_deref(), options).await?;
     Ok(())
@@ -69,8 +70,10 @@ fn prefer_cli_login(
     options: &LoginOptions,
     oauth: bool,
     interactive: bool,
+    browserless: bool,
 ) -> Result<bool> {
     Ok(!oauth
+        && !browserless
         && matches!(choice, ProviderChoice::Claude)
         && account.is_none()
         && !options.no_browser
@@ -98,14 +101,30 @@ mod tests {
         let _restore = Restore(std::env::var_os("JCODE_CLAUDE_LOGIN_METHOD"));
         crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "cli");
         let options = LoginOptions::default();
-        assert!(prefer_cli_login(&ProviderChoice::Claude, None, &options, false, true).unwrap());
-        assert!(!prefer_cli_login(&ProviderChoice::Openai, None, &options, false, true).unwrap());
         assert!(
-            !prefer_cli_login(&ProviderChoice::Claude, Some("work"), &options, false, true)
+            prefer_cli_login(&ProviderChoice::Claude, None, &options, false, true, false).unwrap()
+        );
+        assert!(
+            !prefer_cli_login(&ProviderChoice::Openai, None, &options, false, true, false).unwrap()
+        );
+        assert!(
+            !prefer_cli_login(
+                &ProviderChoice::Claude,
+                Some("work"),
+                &options,
+                false,
+                true,
+                false
+            )
+            .unwrap()
+        );
+        assert!(
+            !prefer_cli_login(&ProviderChoice::Claude, None, &options, true, true, false).unwrap()
+        );
+        assert!(
+            !prefer_cli_login(&ProviderChoice::Claude, None, &options, false, false, false)
                 .unwrap()
         );
-        assert!(!prefer_cli_login(&ProviderChoice::Claude, None, &options, true, true).unwrap());
-        assert!(!prefer_cli_login(&ProviderChoice::Claude, None, &options, false, false).unwrap());
         for options in [
             LoginOptions {
                 no_browser: true,
@@ -145,7 +164,8 @@ mod tests {
             },
         ] {
             assert!(
-                !prefer_cli_login(&ProviderChoice::Claude, None, &options, false, true).unwrap()
+                !prefer_cli_login(&ProviderChoice::Claude, None, &options, false, true, false)
+                    .unwrap()
             );
         }
         crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "oauth");
@@ -155,9 +175,35 @@ mod tests {
                 None,
                 &LoginOptions::default(),
                 false,
-                true
+                true,
+                false
             )
             .unwrap()
+        );
+        crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "cli");
+        for key in ["NO_BROWSER", "JCODE_NO_BROWSER"] {
+            let previous = std::env::var_os(key);
+            crate::env::set_var(key, "1");
+            let browserless = auth::browser_suppressed(false);
+            match previous {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+            assert!(browserless);
+            assert!(
+                !prefer_cli_login(
+                    &ProviderChoice::Claude,
+                    None,
+                    &options,
+                    false,
+                    true,
+                    browserless
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            !prefer_cli_login(&ProviderChoice::Claude, None, &options, false, true, true).unwrap()
         );
     }
 }
