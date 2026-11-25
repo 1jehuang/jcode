@@ -885,7 +885,9 @@ impl OpenRouterProvider {
             if effort == "none"
                 && self.reasoning_effort_support != Some(true)
                 && !self.configured_reasoning_efforts().is_some_and(|efforts| {
-                    efforts.iter().any(|value| value.eq_ignore_ascii_case("none"))
+                    efforts
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case("none"))
                 })
             {
                 return false;
