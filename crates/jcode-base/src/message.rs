@@ -340,7 +340,9 @@ pub fn push_reasoning_blocks(
     // Whether the replay block we stored already contains the readable text.
     let mut readable_replay_stored = false;
     if store_replay_context {
-        if provider_name.eq_ignore_ascii_case("anthropic") {
+        if provider_name.eq_ignore_ascii_case("anthropic")
+            || provider_name.eq_ignore_ascii_case("claude")
+        {
             if let Some(signature) = reasoning_signature.filter(|s| !s.is_empty()) {
                 blocks.push(ContentBlock::AnthropicThinking {
                     thinking: reasoning_content.to_string(),

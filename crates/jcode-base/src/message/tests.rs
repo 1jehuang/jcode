@@ -923,6 +923,30 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
 }
 
 #[test]
+fn push_reasoning_blocks_claude_route_signed_replay() {
+    let mut blocks = Vec::new();
+    push_reasoning_blocks(
+        &mut blocks,
+        "Claude",
+        "signed thought",
+        Some("sig"),
+        true,
+    );
+    assert_eq!(blocks.len(), 1);
+    match &blocks[0] {
+        ContentBlock::AnthropicThinking {
+            thinking,
+            signature,
+        } => {
+            assert_eq!(thinking, "signed thought");
+            assert_eq!(signature, "sig");
+        }
+        other => panic!("expected AnthropicThinking, got {other:?}"),
+    }
+    assert!(crate::provider::stores_reasoning_content_for_context("Claude"));
+}
+
+#[test]
 fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
     let mut blocks = Vec::new();
     // Replay requested but no signature: cannot replay, must still keep history.
