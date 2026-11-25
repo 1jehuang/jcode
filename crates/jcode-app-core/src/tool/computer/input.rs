@@ -240,12 +240,12 @@ fn chord_event_plan(flags: CGEventFlags, code: u16, baseline: CGEventFlags) -> V
     plan
 }
 
-static KEY_CHORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static KEY_EVENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn run_chord_transaction<T>(inject: impl FnOnce() -> Result<T>) -> Result<T> {
-    // Concurrent chords must not adopt each other's transient modifiers as
-    // their baseline. This does not lock out physical keyboard activity.
-    let _guard = KEY_CHORD_LOCK
+fn run_key_transaction<T>(inject: impl FnOnce() -> Result<T>) -> Result<T> {
+    // Synthetic chords and holds share modifier state. Serialize both so a
+    // chord cannot restore a modifier another call just released.
+    let _guard = KEY_EVENT_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("keyboard chord lock poisoned by interrupted injection"))?;
     inject()
@@ -267,7 +267,7 @@ fn prepare_and_post_chord<E>(
 
 pub fn key_chord(chord: &str) -> Result<()> {
     let (flags, code) = parse_chord(chord)?;
-    run_chord_transaction(|| {
+    run_key_transaction(|| {
         let src = source()?;
         let baseline = CGEvent::new(src.clone())
             .map_err(|_| anyhow::anyhow!("failed to read keyboard modifier state"))?
@@ -342,31 +342,33 @@ fn modifier_keycode(chord: &str) -> Option<u16> {
 /// Supports modifier-only holds (e.g. "shift") via a FlagsChanged event.
 pub fn key_hold(chord: &str, down_state: bool) -> Result<()> {
     let (flags, keycode) = parse_chord_opt(chord)?;
-    let src = source()?;
-    match keycode {
-        Some(code) => {
-            let evt = CGEvent::new_keyboard_event(src, code, down_state)
-                .map_err(|_| anyhow::anyhow!("failed to create key event"))?;
-            evt.set_flags(flags);
-            post(evt);
+    run_key_transaction(|| {
+        let src = source()?;
+        match keycode {
+            Some(code) => {
+                let evt = CGEvent::new_keyboard_event(src, code, down_state)
+                    .map_err(|_| anyhow::anyhow!("failed to create key event"))?;
+                evt.set_flags(flags);
+                post(evt);
+            }
+            None => {
+                // Modifier-only: emit a FlagsChanged event carrying the modifier
+                // keycode, with the flags set while held and cleared on release.
+                let code = modifier_keycode(chord)
+                    .with_context(|| format!("unsupported modifier-only hold '{chord}'"))?;
+                let evt = CGEvent::new_keyboard_event(src, code, down_state)
+                    .map_err(|_| anyhow::anyhow!("failed to create modifier event"))?;
+                evt.set_type(CGEventType::FlagsChanged);
+                evt.set_flags(if down_state {
+                    flags
+                } else {
+                    CGEventFlags::CGEventFlagNull
+                });
+                post(evt);
+            }
         }
-        None => {
-            // Modifier-only: emit a FlagsChanged event carrying the modifier
-            // keycode, with the flags set while held and cleared on release.
-            let code = modifier_keycode(chord)
-                .with_context(|| format!("unsupported modifier-only hold '{chord}'"))?;
-            let evt = CGEvent::new_keyboard_event(src, code, down_state)
-                .map_err(|_| anyhow::anyhow!("failed to create modifier event"))?;
-            evt.set_type(CGEventType::FlagsChanged);
-            evt.set_flags(if down_state {
-                flags
-            } else {
-                CGEventFlags::CGEventFlagNull
-            });
-            post(evt);
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -526,7 +528,7 @@ mod tests {
                 std::thread::spawn(move || {
                     start.wait();
                     for _ in 0..32 {
-                        run_chord_transaction(|| {
+                        run_key_transaction(|| {
                             let before = fake_flags.load(Ordering::SeqCst);
                             assert_eq!(before, baseline.bits());
                             let plan = plan(chord, CGEventFlags::from_bits_truncate(before));
@@ -551,6 +553,47 @@ mod tests {
             worker.join().unwrap();
         }
         assert_eq!(fake_flags.load(Ordering::SeqCst), baseline.bits());
+    }
+
+    #[test]
+    fn chord_snapshot_cannot_restore_a_concurrently_released_modifier() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, mpsc};
+
+        let control = CGEventFlags::CGEventFlagControl;
+        let flags = Arc::new(AtomicU64::new(control.bits()));
+        let (snapshot_tx, snapshot_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let chord_flags = Arc::clone(&flags);
+        let chord = std::thread::spawn(move || {
+            run_key_transaction(|| {
+                let baseline = CGEventFlags::from_bits_truncate(chord_flags.load(Ordering::SeqCst));
+                snapshot_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                for event in plan("cmd+k", baseline) {
+                    chord_flags.store(event.flags.bits(), Ordering::SeqCst);
+                }
+                Ok(())
+            })
+            .unwrap();
+        });
+        snapshot_rx.recv().unwrap();
+        let hold_flags = Arc::clone(&flags);
+        let release = std::thread::spawn(move || {
+            release_tx.send(()).unwrap();
+            // key_hold uses this same transaction around its FlagsChanged event.
+            run_key_transaction(|| {
+                hold_flags.store(CGEventFlags::CGEventFlagNull.bits(), Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        });
+        chord.join().unwrap();
+        release.join().unwrap();
+        assert_eq!(
+            flags.load(Ordering::SeqCst),
+            CGEventFlags::CGEventFlagNull.bits()
+        );
     }
 
     #[test]
