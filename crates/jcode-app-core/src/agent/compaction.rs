@@ -1,6 +1,50 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "compaction_input_budget_tests.rs"]
+mod input_budget_tests;
+
 impl Agent {
+    pub(super) fn seed_compaction_from_session(&mut self) {
+        logging::info(&format!(
+            "seed_compaction_from_session: session has {} messages",
+            self.session.messages.len()
+        ));
+        let compaction = self.registry.compaction();
+        let mut manager = match compaction.try_write() {
+            Ok(manager) => manager,
+            Err(_) => {
+                logging::warn(
+                    "seed_compaction_from_session: compaction lock unavailable, skipping restore",
+                );
+                return;
+            }
+        };
+        manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
+        let budget = self.provider.input_token_limit();
+        manager.set_budget_for_provider(budget, self.provider.name());
+        if let Some(state) = self.session.compaction.as_ref() {
+            manager.restore_persisted_stored_state_with(state, &self.session.messages);
+        } else {
+            manager.seed_restored_stored_messages_with(&self.session.messages);
+        }
+        let sanitized_state = if manager.discard_oversized_openai_native_compaction() {
+            Some(manager.persisted_state())
+        } else {
+            None
+        };
+        logging::info(&format!(
+            "seed_compaction_from_session: seeded compaction with {} messages",
+            self.session.messages.len()
+        ));
+        drop(manager);
+        if let Some(state) = sanitized_state {
+            self.session.compaction = state.map(Arc::new);
+            self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
+        }
+    }
+
     /// Flush an idle session before optional process replacement. Never abandon
     /// a pending compaction or lose a completed summary that has not been polled.
     pub(crate) fn checkpoint_idle_runtime_upgrade(&mut self) -> Result<()> {
@@ -153,7 +197,7 @@ impl Agent {
             return false;
         }
 
-        let context_limit = self.provider.context_window() as u64;
+        let context_limit = self.provider.input_token_limit() as u64;
         let compaction = self.registry.compaction();
 
         let (dropped, usage_pct) = match compaction.try_write() {
@@ -312,7 +356,8 @@ impl Agent {
             let provider_messages = self.session.messages_for_provider();
             manager.reset();
             manager.set_context_cap_override(self.session.context_cap);
-            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
+            manager
+                .set_budget_for_provider(self.provider.input_token_limit(), self.provider.name());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
