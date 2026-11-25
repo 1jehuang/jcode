@@ -173,6 +173,90 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     FailoverDecision::None
 }
 
+fn is_request_metadata(line: &str) -> bool {
+    ["endpoint:", "model:", "auth:"]
+        .iter()
+        .any(|prefix| line.trim_start().starts_with(prefix))
+}
+
+/// Parse a formatted status, a relayed HTTP status, or a leading status code.
+/// Request metadata and codes embedded in identifiers or longer numbers are ignored.
+pub fn parse_http_status_message(message: &str) -> Option<u16> {
+    let lower = message.to_ascii_lowercase();
+    for line in lower.lines().filter(|line| !is_request_metadata(line)) {
+        let line = line.trim_start();
+        let tail = ["status:", "http ", "anthropic api error ("]
+            .iter()
+            .find_map(|marker| {
+                line.match_indices(marker).find_map(|(idx, _)| {
+                    let boundary = idx == 0
+                        || !line.as_bytes()[idx - 1].is_ascii_alphanumeric()
+                            && line.as_bytes()[idx - 1] != b'_';
+                    boundary.then_some(&line[idx + marker.len()..])
+                })
+            })
+            .unwrap_or(line)
+            .trim_start();
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 3
+            && !tail
+                .as_bytes()
+                .get(digits)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            && let Ok(status) = tail[..digits].parse::<u16>()
+            && (100..600).contains(&status)
+        {
+            return Some(status);
+        }
+    }
+    None
+}
+
+/// Whether a failed request means the provider is temporarily overloaded on
+/// its side: HTTP 5xx (including the non-standard 529 "overloaded"), or the
+/// wording providers use for a busy period ("heavy usage", "try again in a
+/// moment"). The provider answered, so this is not a network problem, but
+/// waiting and resending the same turn usually works.
+///
+/// Permanent failures are never an overload, even when their body happens
+/// to use overload wording (a 404 model-not-found saying "temporarily
+/// unavailable"): the statuses the provider runtime refuses to retry
+/// (400, 401, 402, 403, 404, 405, 406, 422) are rejected before the wording
+/// is checked.
+pub fn is_provider_overload_message(message: &str) -> bool {
+    let status = parse_http_status_message(message);
+    if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422)) {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    status.is_some_and(|code| (500..=599).contains(&code))
+        || [
+            "overloaded",
+            "heavy usage",
+            "temporarily unavailable",
+            "temporary unavailability",
+            "try again in a moment",
+            "server is busy",
+            "at capacity",
+            "capacity constraints",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+            // A provider mid-deploy ("We're deploying an update right now
+            // ... Please try again shortly.", "code":"DEPLOYING").
+            "deploying",
+            "try again shortly",
+            // The provider lost its own upstream mid-response ("The model
+            // provider's stream was interrupted. Please retry.").
+            "stream was interrupted",
+            // Chinese-language gateways: "服务暂时不可用" ("service temporarily
+            // unavailable ... please retry later").
+            "服务暂时不可用",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +287,82 @@ mod tests {
         ] {
             assert!(is_definitive_usage_exhaustion(message), "{message}");
         }
+    }
+
+    #[test]
+    fn shared_http_status_accepts_formatted_and_relayed_codes() {
+        for (message, expected) in [
+            ("  STATUS:529 upstream busy", 529),
+            ("proxy relayed HTTP 529: upstream busy", 529),
+            ("HTTP 401: temporarily unavailable", 401),
+            ("429 Too Many Requests", 429),
+            ("status: 100 Continue", 100),
+            ("status: 599 upstream failed", 599),
+            (
+                "Anthropic API error (500 Internal Server Error): Internal server error",
+                500,
+            ),
+            (
+                "Anthropic API error (401 Unauthorized): Internal server error",
+                401,
+            ),
+        ] {
+            assert_eq!(
+                parse_http_status_message(message),
+                Some(expected),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_http_status_ignores_metadata_before_real_status() {
+        let message = "endpoint: HTTP 529\n MODEL: status: 503\n auth: HTTP 402\n status: 401 temporarily unavailable";
+        assert_eq!(parse_http_status_message(message), Some(401));
+    }
+
+    #[test]
+    fn shared_http_status_rejects_metadata_and_embedded_codes() {
+        for message in [
+            "",
+            "no status here",
+            "endpoint: HTTP 529",
+            "model: status: 503",
+            "auth: HTTP 401",
+            "model529 failed",
+            "status: 5290",
+            "HTTP 529busy",
+            "status: 529_id",
+            "mystatus: 529",
+            "model_http 529",
+            "status: 099",
+            "status: 600",
+            "status: 99",
+            "status: nope",
+            "endpoint: http://localhost:529",
+            "Anthropic API error (5000 Internal Server Error): failure",
+            "Anthropic API error (500busy): failure",
+            "endpoint: Anthropic API error (500 Internal Server Error)",
+        ] {
+            assert_eq!(parse_http_status_message(message), None, "{message}");
+        }
+    }
+
+    #[test]
+    fn anthropic_runtime_status_drives_overload_classification() {
+        assert!(is_provider_overload_message(
+            "Anthropic API error (500 Internal Server Error): {\"error\":{\"message\":\"Internal server error\"}}"
+        ));
+        assert!(!is_provider_overload_message(
+            "Anthropic API error (401 Unauthorized): temporarily unavailable"
+        ));
+    }
+
+    #[test]
+    fn chinese_gateway_unavailable_is_overload() {
+        assert!(is_provider_overload_message(
+            "服务暂时不可用。 原因：上游服务、网络链路或代理返回异常响应。 解决方案：请稍后重试。"
+        ));
     }
 
     #[test]
