@@ -39,7 +39,9 @@ pub async fn run() -> Result<()> {
             )
         )
     {
-        if let Some(cwd) = &args.cwd {
+        if let Some(cwd) = &args.cwd
+            && !matches!(args.command, Some(Command::Plugin(_)))
+        {
             std::env::set_current_dir(cwd)?;
         }
         return dispatch::run_main(args).await;

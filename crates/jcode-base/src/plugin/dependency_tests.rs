@@ -325,13 +325,14 @@ fn disabled_transitive_cached_dependency_and_scope_masks_are_not_overridden() {
     manager.enable("leaf", PluginScope::Project).unwrap();
     manager.install("leaf", PluginScope::Local).unwrap();
     manager.disable("leaf", PluginScope::Local).unwrap();
-    let before = registry(&manager);
-    let error = manager
-        .update("root", PluginScope::Project)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("masked"), "{error}");
-    assert_eq!(registry(&manager), before);
+    manager.update("root", PluginScope::Project).unwrap();
+    assert!(
+        manager
+            .list()
+            .unwrap()
+            .iter()
+            .any(|p| p.name == "leaf" && p.scope == PluginScope::Local && !p.enabled)
+    );
     assert!(manager.enabled_roots().unwrap().is_empty());
 }
 
@@ -390,4 +391,156 @@ fn disabled_default_root_does_not_activate_new_dependency() {
     assert!(!installed.enabled);
     assert!(manager.list().unwrap().iter().all(|p| !p.enabled));
     assert!(manager.enabled_roots().unwrap().is_empty());
+    manager.enable("root", PluginScope::User).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 2);
+}
+
+#[test]
+fn enabling_an_inactive_root_preserves_explicit_dependency_disables() {
+    let (temp, manager) = fixture();
+    let root = market(
+        temp.path(),
+        "fixture",
+        json!([
+            {"name":"root","source":"./root","defaultEnabled":false,"dependencies":["middle"]},
+            {"name":"middle","source":"./middle","dependencies":["leaf"]},
+            {"name":"leaf","source":"./leaf"}
+        ]),
+        &[],
+    );
+    manager.add_marketplace(root.to_str().unwrap()).unwrap();
+    manager.install("root", PluginScope::User).unwrap();
+    manager.disable("leaf", PluginScope::User).unwrap();
+    let before = registry(&manager);
+    assert!(manager.enable("root", PluginScope::User).is_err());
+    assert_eq!(registry(&manager), before);
+    manager.enable("leaf", PluginScope::User).unwrap();
+    manager.enable("root", PluginScope::User).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 3);
+}
+
+#[test]
+fn requested_scope_changes_succeed_under_higher_disabled_masks() {
+    for with_dependency in [false, true] {
+        let (temp, manager) = fixture();
+        let mut plugin = json!({"name":"root","source":"./root"});
+        if with_dependency {
+            plugin["dependencies"] = json!(["leaf"]);
+        }
+        let root = market(
+            temp.path(),
+            "fixture",
+            json!([
+                plugin, {"name":"leaf","source":"./leaf"}
+            ]),
+            &[],
+        );
+        manager.add_marketplace(root.to_str().unwrap()).unwrap();
+        manager.install("root", PluginScope::Local).unwrap();
+        manager.disable("root", PluginScope::Local).unwrap();
+        if with_dependency {
+            manager.disable("leaf", PluginScope::Local).unwrap();
+        }
+        manager.install("root", PluginScope::User).unwrap();
+        manager.update("root", PluginScope::User).unwrap();
+        assert!(manager.enabled_roots().unwrap().is_empty());
+        assert!(
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|p| p.scope == PluginScope::Local)
+                .all(|p| !p.enabled)
+        );
+        let other = PluginManager::new(manager.user_root.clone(), temp.path().join("other"));
+        assert_eq!(
+            other.enabled_roots().unwrap().len(),
+            if with_dependency { 2 } else { 1 }
+        );
+    }
+}
+
+#[test]
+fn active_root_reuses_automatically_disabled_dependency_without_enabling_other_root() {
+    let (temp, manager) = fixture();
+    let root = market(
+        temp.path(),
+        "fixture",
+        json!([
+            {"name":"inactive","source":"./inactive","defaultEnabled":false,"dependencies":["leaf"]},
+            {"name":"active","source":"./active","dependencies":["leaf"]},
+            {"name":"leaf","source":"./leaf"}
+        ]),
+        &[],
+    );
+    manager.add_marketplace(root.to_str().unwrap()).unwrap();
+    manager.install("inactive", PluginScope::User).unwrap();
+    manager.update("leaf", PluginScope::User).unwrap();
+    manager.update("inactive", PluginScope::User).unwrap();
+    manager.install("active", PluginScope::User).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 2);
+    assert!(
+        !manager
+            .list()
+            .unwrap()
+            .iter()
+            .find(|p| p.name == "inactive")
+            .unwrap()
+            .enabled
+    );
+}
+
+#[test]
+fn higher_scope_marketplace_conflicts_do_not_block_global_management() {
+    let (temp, manager) = fixture();
+    for name in ["local", "global"] {
+        let source = market(
+            temp.path(),
+            name,
+            json!([
+                {"name":"root","source":"./root"}
+            ]),
+            &[],
+        );
+        manager.add_marketplace(source.to_str().unwrap()).unwrap();
+    }
+    manager.install("root@local", PluginScope::Local).unwrap();
+    manager.disable("root@local", PluginScope::Local).unwrap();
+    manager.install("root@global", PluginScope::User).unwrap();
+    manager.update("root@global", PluginScope::User).unwrap();
+    assert!(manager.enabled_roots().unwrap().is_empty());
+    let other = PluginManager::new(manager.user_root.clone(), temp.path().join("other"));
+    let roots = other.enabled_roots().unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].marketplace, "global");
+}
+
+#[test]
+fn legacy_disabled_dependency_without_provenance_stays_explicit() {
+    let (temp, manager) = fixture();
+    let root = market(
+        temp.path(),
+        "fixture",
+        json!([
+            {"name":"root","source":"./root","defaultEnabled":false,"dependencies":["leaf"]},
+            {"name":"leaf","source":"./leaf"}
+        ]),
+        &[],
+    );
+    manager.add_marketplace(root.to_str().unwrap()).unwrap();
+    manager.install("root", PluginScope::User).unwrap();
+    let mut saved: Value = serde_json::from_slice(&registry(&manager)).unwrap();
+    for record in saved["installed"].as_array_mut().unwrap() {
+        record
+            .as_object_mut()
+            .unwrap()
+            .remove("automatically_disabled");
+    }
+    atomic_json(&manager.base().join("registry.json"), &saved).unwrap();
+    let before = registry(&manager);
+    assert!(manager.enable("root", PluginScope::User).is_err());
+    assert_eq!(registry(&manager), before);
+    manager.enable("leaf", PluginScope::User).unwrap();
+    manager.enable("root", PluginScope::User).unwrap();
+    assert_eq!(manager.enabled_roots().unwrap().len(), 2);
 }

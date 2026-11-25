@@ -91,6 +91,8 @@ pub struct InstalledPlugin {
     pub scope: PluginScope,
     pub enabled: bool,
     #[serde(default)]
+    pub automatically_disabled: bool,
+    #[serde(default)]
     pub project: Option<PathBuf>,
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -319,8 +321,12 @@ impl PluginManager {
             matches.len() == 1,
             "plugin not installed or ambiguous: {spec}"
         );
-        for p in matches {
-            p.enabled = enabled;
+        let p = matches.into_iter().next().expect("one matching plugin");
+        p.enabled = enabled;
+        p.automatically_disabled = false;
+        let root = p.clone();
+        if enabled {
+            self.enable_dependency_closure(&mut r, &root)?;
         }
         self.save(&r)
     }
@@ -411,8 +417,12 @@ impl PluginManager {
                     && satisfied.contains(&(p.name.clone(), p.marketplace.clone()))
             })
             .filter_map(|p| {
-                let root = p.root.canonicalize().ok()?;
-                let manifest = Self::validate(&root).ok()?;
+                let Ok(root) = p.root.canonicalize() else {
+                    return None;
+                };
+                let Ok(manifest) = Self::validate(&root) else {
+                    return None;
+                };
                 if !root.starts_with(&base) || manifest.name != p.name {
                     return None;
                 }
@@ -428,14 +438,24 @@ impl PluginManager {
     }
 }
 pub fn enabled_user_plugins() -> Vec<PluginRoot> {
-    crate::storage::jcode_dir()
+    match crate::storage::jcode_dir()
         .and_then(|home| PluginManager::new(home, PathBuf::new()).enabled_user_roots())
-        .unwrap_or_default()
+    {
+        Ok(roots) => roots,
+        Err(error) => {
+            crate::logging::warn(&format!("Unable to discover user plugins: {error}"));
+            Vec::new()
+        }
+    }
 }
 pub fn enabled_plugins_for_dir(dir: &Path) -> Vec<PluginRoot> {
-    PluginManager::for_dir(dir)
-        .and_then(|m| m.enabled_roots())
-        .unwrap_or_default()
+    match PluginManager::for_dir(dir).and_then(|m| m.enabled_roots()) {
+        Ok(roots) => roots,
+        Err(error) => {
+            crate::logging::warn(&format!("Unable to discover project plugins: {error}"));
+            Vec::new()
+        }
+    }
 }
 fn safe_name(s: &str) -> Result<()> {
     ensure!(

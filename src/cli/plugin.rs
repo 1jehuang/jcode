@@ -15,8 +15,11 @@ impl From<PluginScopeArg> for PluginScope {
     }
 }
 
-pub(crate) fn run(args: PluginArgs) -> Result<()> {
+pub(crate) fn run(args: PluginArgs, cwd: Option<&str>) -> Result<()> {
     let result = (|| {
+        if let Some(cwd) = cwd {
+            std::env::set_current_dir(cwd)?;
+        }
         // Validation works even outside a configured project.
         if let PluginCommand::Validate { path } = &args.action {
             return Ok(serde_json::to_value(PluginManager::validate(path)?)?);

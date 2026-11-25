@@ -39,7 +39,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     // Explicit management commands do not bootstrap providers or a daemon.
     match args.command {
         Some(Command::Mcp { action }) => return super::mcp::run(action).await,
-        Some(Command::Plugin(plugin)) => return super::plugin::run(plugin),
+        Some(Command::Plugin(plugin)) => return super::plugin::run(plugin, args.cwd.as_deref()),
         _ => {}
     }
     // The standalone picker is the entire command, not a resume ID lookup.
@@ -100,7 +100,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
-        Some(Command::Plugin(plugin)) => super::plugin::run(plugin)?,
+        Some(Command::Plugin(plugin)) => super::plugin::run(plugin, args.cwd.as_deref())?,
         Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,

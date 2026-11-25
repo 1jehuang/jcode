@@ -121,6 +121,7 @@ struct Walk<'a> {
     scope: PluginScope,
     root_marketplace: String,
     root_active: bool,
+    root_automatically_disabled: bool,
     allowlist: HashSet<String>,
     visiting: Vec<String>,
     visited: HashSet<String>,
@@ -150,21 +151,26 @@ impl Walk<'_> {
             .context("dependency must have a marketplace")?;
         safe_name(name)?;
         safe_name(market)?;
+        let rank = |scope| match scope {
+            PluginScope::User => 0,
+            PluginScope::Project => 1,
+            PluginScope::Local => 2,
+        };
         if !root {
-            let rank = |scope| match scope {
-                PluginScope::User => 0,
-                PluginScope::Project => 1,
-                PluginScope::Local => 2,
-            };
             if let Some(effective) = self
                 .registry
                 .installed
                 .iter()
-                .filter(|p| self.manager.applies(p) && p.name == name && p.marketplace == market)
+                .filter(|p| {
+                    self.manager.applies(p)
+                        && rank(p.scope) <= rank(self.scope)
+                        && p.name == name
+                        && p.marketplace == market
+                })
                 .max_by_key(|p| rank(p.scope))
             {
                 ensure!(
-                    effective.enabled,
+                    effective.enabled || effective.automatically_disabled,
                     "dependency {id} is disabled or masked by {} scope; enable dependency first (automatic override of explicit disabled policy is unsupported)",
                     effective.scope
                 );
@@ -183,30 +189,11 @@ impl Walk<'_> {
             ensure!(existing.len() <= 1, "ambiguous installed dependency: {id}");
             if let Some(existing) = existing.first() {
                 ensure!(
-                    existing.enabled,
+                    existing.enabled || existing.automatically_disabled,
                     "dependency {id} is disabled; enable dependency first (automatic override of explicit disabled policy is unsupported)"
                 );
-                let base = self
-                    .manager
-                    .base()
-                    .join("cache")
-                    .canonicalize()
-                    .context("installed dependency cache missing")?;
-                let location = existing
-                    .root
-                    .canonicalize()
-                    .with_context(|| format!("installed dependency {id} has no payload"))?;
-                ensure!(
-                    location.starts_with(base),
-                    "installed dependency {id} escapes managed cache"
-                );
-                let manifest = PluginManager::validate(&location)?;
-                ensure!(
-                    manifest.name == name,
-                    "installed dependency {id} has invalid manifest identity"
-                );
                 // Reuse installed bytes and dependency edges, not newer catalog bytes.
-                let deps = parse(manifest.extra.get("dependencies"))?;
+                let deps = installed_dependencies(existing, &self.manager.base().join("cache"))?;
                 self.visiting.push(id.to_owned());
                 for dependency in deps {
                     self.visit(&qualified(&dependency, market), false)?;
@@ -221,11 +208,12 @@ impl Walk<'_> {
             );
         }
         ensure!(
-            !self
-                .registry
-                .installed
-                .iter()
-                .any(|p| self.manager.applies(p) && p.name == name && p.marketplace != market),
+            !self.registry.installed.iter().any(|p| {
+                self.manager.applies(p)
+                    && rank(p.scope) <= rank(self.scope)
+                    && p.name == name
+                    && p.marketplace != market
+            }),
             "another marketplace already supplies this visible plugin name: {name}"
         );
         ensure!(
@@ -294,6 +282,11 @@ impl Walk<'_> {
                 .join(uuid::Uuid::new_v4().to_string()),
             scope: self.scope,
             enabled: self.root_active,
+            automatically_disabled: if root {
+                self.root_automatically_disabled
+            } else {
+                !self.root_active
+            },
             project: if self.scope == PluginScope::User {
                 None
             } else {
@@ -316,6 +309,69 @@ impl Walk<'_> {
 }
 
 impl PluginManager {
+    pub(super) fn enable_dependency_closure(
+        &self,
+        registry: &mut Registry,
+        root: &InstalledPlugin,
+    ) -> Result<()> {
+        let base = self.base().join("cache");
+        let mut pending = vec![(root.name.clone(), root.marketplace.clone())];
+        let mut seen = HashSet::new();
+        while let Some((name, market)) = pending.pop() {
+            if !seen.insert((name.clone(), market.clone())) {
+                continue;
+            }
+            ensure!(
+                seen.len() <= MAX_NODES,
+                "dependency graph exceeds 256 nodes"
+            );
+            let record = registry
+                .installed
+                .iter_mut()
+                .find(|p| {
+                    self.applies(p)
+                        && p.scope == root.scope
+                        && p.project == root.project
+                        && p.name == name
+                        && p.marketplace == market
+                })
+                .with_context(|| {
+                    format!(
+                        "dependency {name}@{market} is not installed in {} scope",
+                        root.scope
+                    )
+                })?;
+            if record.automatically_disabled {
+                record.enabled = true;
+                record.automatically_disabled = false;
+            }
+            ensure!(
+                record.enabled,
+                "dependency {name}@{market} is disabled; enable dependency first"
+            );
+            for dependency in installed_dependencies(record, &base)? {
+                let dependency = qualified(&dependency, &market);
+                let (name, market) = dependency.split_once('@').expect("qualified dependency");
+                pending.push((name.to_owned(), market.to_owned()));
+            }
+        }
+        let visible = effective_records(
+            registry
+                .installed
+                .iter()
+                .filter(|p| self.applies(p) && p.scope == root.scope)
+                .cloned()
+                .collect(),
+        );
+        let (allowed, diagnostics) = satisfied(&visible, &base);
+        ensure!(
+            allowed.contains(&(root.name.clone(), root.marketplace.clone())),
+            "required dependency closure cannot activate: {}",
+            diagnostics.join("; ")
+        );
+        Ok(())
+    }
+
     /// Read-only diagnostics for enabled records whose effective dependency graph
     /// cannot load. This never acquires sources or changes enablement.
     pub fn dependency_diagnostics(&self) -> Result<Vec<String>> {
@@ -385,6 +441,7 @@ impl PluginManager {
             scope,
             root_marketplace: root_marketplace.to_owned(),
             root_active: old.as_ref().is_none_or(|p| p.enabled),
+            root_automatically_disabled: old.as_ref().is_some_and(|p| p.automatically_disabled),
             allowlist: root_allowlist(&root_catalog)?,
             visiting: Vec::new(),
             visited: HashSet::new(),
@@ -420,31 +477,42 @@ impl PluginManager {
                 }
             }
             if root.enabled {
-                let visible = effective_records(
-                    registry
-                        .installed
-                        .iter()
-                        .filter(|p| self.applies(p))
-                        .cloned()
-                        .collect(),
-                );
-                let (allowed, diagnostics) = satisfied(&visible, &self.base().join("cache"));
-                ensure!(
-                    allowed.contains(&(root.name.clone(), root.marketplace.clone())),
-                    "required dependency closure cannot activate: {}",
-                    diagnostics.join("; ")
-                );
+                self.enable_dependency_closure(&mut registry, &root)?;
             }
             self.save(&registry)
         })();
-        if let Err(error) = result {
+        if let Err(mut error) = result {
             for path in published {
-                let _ = fs::remove_dir_all(path);
+                if let Err(cleanup) = fs::remove_dir_all(&path) {
+                    error = error.context(format!(
+                        "could not remove abandoned plugin payload {}: {cleanup}",
+                        path.display()
+                    ));
+                }
             }
             return Err(error);
         }
         Ok(root)
     }
+}
+
+fn installed_dependencies(record: &InstalledPlugin, base: &Path) -> Result<Vec<String>> {
+    let base = base.canonicalize()?;
+    let root = record.root.canonicalize()?;
+    ensure!(
+        root.starts_with(base),
+        "dependency {}@{} escapes managed cache",
+        record.name,
+        record.marketplace
+    );
+    let manifest = PluginManager::validate(&root)?;
+    ensure!(
+        manifest.name == record.name,
+        "dependency {}@{} manifest identity mismatch",
+        record.name,
+        record.marketplace
+    );
+    parse(manifest.extra.get("dependencies"))
 }
 
 pub(super) fn effective_records(
@@ -502,21 +570,8 @@ pub(super) fn satisfied(
                 "dependency {id} has conflicting marketplace records"
             ));
         }
-        let result = (|| -> Result<Vec<String>> {
-            let base = base.canonicalize()?;
-            let root = record.root.canonicalize()?;
-            ensure!(
-                root.starts_with(base),
-                "dependency {id} escapes managed cache"
-            );
-            let manifest = PluginManager::validate(&root)?;
-            ensure!(
-                manifest.name == key.0,
-                "dependency {id} manifest identity mismatch"
-            );
-            parse(manifest.extra.get("dependencies"))
-        })()
-        .map_err(|error| format!("dependency {id} is invalid: {error}"));
+        let result = installed_dependencies(record, base)
+            .map_err(|error| format!("dependency {id} is invalid: {error}"));
         let result = match result {
             Err(error) => Err(error),
             Ok(deps) => {

@@ -53,6 +53,9 @@ def main():
             assert ("error" in value if isinstance(value, dict) else False) == reject
             return value
 
+        invalid_directory = cli("list", reject=True, directory=root / "missing-directory")
+        assert isinstance(invalid_directory["error"], str) and invalid_directory["error"]
+
         assert cli("list") == []
         assert not (home / "plugin-catalogs").exists(), "listing must be inert"
         market = root / "catalog"
