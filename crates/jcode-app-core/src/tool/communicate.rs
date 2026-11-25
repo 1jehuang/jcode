@@ -443,7 +443,11 @@ fn format_swarm_model_list(
         out.push_str("\nNo model routes reported. Omit model to use the configured default.");
         return out;
     }
-    out.push_str("\nModel routes (informational only, overrides require agents.swarm_model_selection and an exact agents.swarm_model_allowlist entry):\n");
+    out.push_str(if crate::config::config().agents.swarm_model_registry {
+        "\nModel routes (spawn with model=<model> or <model>@<api_method>; [unavailable] routes are refused):\n"
+    } else {
+        "\nModel routes (informational only, overrides require agents.swarm_model_registry, or agents.swarm_model_selection with an exact agents.swarm_model_allowlist entry):\n"
+    });
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1313,7 +1317,7 @@ impl Tool for CommunicateTool {
                         if !new_session_id.is_empty() =>
                     {
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {new_session_id}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically."
+                            "Spawned new agent: {new_session_id}\nLane {lane_id}: {seeded_count} todo item(s) prepopulated before startup and synced to your lane. The worker received its lane tasks automatically.\nResolved model, provider and token telemetry: swarm status / await_members for {new_session_id}."
                         ))
                         .with_metadata(
                             serde_json::json!({"session_id": new_session_id, "lane": lane_id, "seeded_todo_count": seeded_count, "lane_synced": true}),

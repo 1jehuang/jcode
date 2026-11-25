@@ -617,6 +617,11 @@ swarm_model_allowlist = []
 # swarm_model_selection = true
 # swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
 #
+# Or let agents pick ANY available route from the live registry (`swarm list_models`)
+# per spawn, as `model` or `model@api_method`. Unknown/unavailable models are refused
+# before spawn with the live list. Supersedes the allowlist.
+swarm_model_registry = false
+#
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".
 # Env override: JCODE_SWARM_EFFORT

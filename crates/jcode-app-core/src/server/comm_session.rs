@@ -177,7 +177,8 @@ fn spawn_visible_session_window_with_context(
 mod spawn_model_selection;
 use spawn_model_selection::{
     CoordinatorSpawnIdentity, SwarmSpawnSelection, provider_key_for_spawn_model,
-    resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection, session_swarm_model,
+    registry_requested_model, resolve_coordinator_spawn_identity, resolve_swarm_spawn_selection,
+    session_swarm_model,
 };
 
 fn persist_headed_startup_message(session_id: &str, message: &str) {
@@ -398,6 +399,14 @@ pub(super) async fn spawn_swarm_agent(
     agents_config
         .validate_swarm_model_request(requested_model.as_deref())
         .map_err(anyhow::Error::msg)?;
+    let requested_model = registry_requested_model(
+        requested_model,
+        agents_config.swarm_model_registry,
+        req_session_id,
+        sessions,
+        provider_template,
+    )
+    .await?;
     let resolved_working_dir =
         resolve_spawn_working_dir(working_dir, req_session_id, sessions, swarm_members).await;
     let coordinator = resolve_coordinator_spawn_identity(req_session_id, sessions).await;

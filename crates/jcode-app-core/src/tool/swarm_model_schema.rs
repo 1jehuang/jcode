@@ -7,7 +7,16 @@ pub(super) fn apply_swarm_model_policy(schema: &mut Value, agents: &crate::confi
         );
         return;
     };
-    if !agents.swarm_model_selection || agents.swarm_model_allowlist.is_empty() {
+    if agents.swarm_model_registry {
+        // No enum: the catalog is live and per-session. Spawn validates it.
+        properties.insert(
+            "model".to_string(),
+            json!({
+                "type": "string",
+                "description": "Worker model from `list_models` (available routes only), optionally `model@api_method` to pin the route. Unknown models fail with the live list. Omit for configured default."
+            }),
+        );
+    } else if !agents.swarm_model_selection || agents.swarm_model_allowlist.is_empty() {
         properties.remove("model");
     } else {
         properties.insert(

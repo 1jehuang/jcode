@@ -489,3 +489,29 @@ fn schema_advertises_a_lean_lane_first_action_set() {
         );
     }
 }
+
+#[test]
+fn registry_mode_exposes_free_form_model_without_hardcoded_enum() {
+    let mut schema = CommunicateTool::new().parameters_schema();
+    let agents = crate::config::AgentsConfig {
+        swarm_model_registry: true,
+        ..Default::default()
+    };
+    super::super::apply_swarm_model_policy(&mut schema, &agents);
+    let model = &schema["properties"]["model"];
+    assert_eq!(model["type"], json!("string"));
+    assert!(model.get("enum").is_none());
+    assert!(
+        model["description"]
+            .as_str()
+            .unwrap()
+            .contains("list_models")
+    );
+    assert!(
+        agents
+            .validate_swarm_model_request(Some("anything-the-registry-has"))
+            .is_ok()
+    );
+    assert!(agents.validate_swarm_model_request(Some("  ")).is_err());
+    assert!(agents.validate_swarm_model_request(None).is_ok());
+}

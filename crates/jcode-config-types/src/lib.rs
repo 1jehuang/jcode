@@ -529,6 +529,10 @@ pub struct AgentsConfig {
     pub swarm_model_selection: bool,
     /// Exact model/route strings the agent may request. Empty denies all overrides.
     pub swarm_model_allowlist: Vec<String>,
+    /// Let agents pick any *available* route from the live provider registry
+    /// (`swarm list_models`). Unknown or unavailable models fail before spawn
+    /// with the live list. Supersedes the allowlist when true.
+    pub swarm_model_registry: bool,
     /// Reasoning effort for spawned swarm workers (`"low"`, `"medium"`,
     /// `"high"`, ...). The swarm tool does not let agents choose worker
     /// effort. Unset means `"low"`.
@@ -656,6 +660,7 @@ impl Default for AgentsConfig {
             swarm_model: None,
             swarm_model_selection: false,
             swarm_model_allowlist: Vec::new(),
+            swarm_model_registry: false,
             swarm_effort: None,
             swarm_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
@@ -689,6 +694,16 @@ impl AgentsConfig {
         let Some(model) = model else {
             return Ok(());
         };
+        if self.swarm_model_registry {
+            // Resolved against the live route catalog server-side.
+            return if model.trim().is_empty() {
+                Err(
+                    "Requested swarm model is empty. Omit model to use the user-configured default.",
+                )
+            } else {
+                Ok(())
+            };
+        }
         if !self.swarm_model_selection {
             return Err(
                 "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
