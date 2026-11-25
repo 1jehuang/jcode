@@ -58,6 +58,8 @@ enum Frame {
         message_id: String,
         tool_call_id: String,
         working_dir: Option<PathBuf>,
+        #[serde(default)]
+        outer_handoff: bool,
     },
     Cancel {
         id: u64,
@@ -324,6 +326,7 @@ async fn call(name: &str, input: Value, ctx: &ToolContext) -> Result<ToolOutput>
             message_id: ctx.message_id.clone(),
             tool_call_id: ctx.tool_call_id.clone(),
             working_dir,
+            outer_handoff: super::handoff::has_outer_owner(),
         })
         .map_err(|_| anyhow::anyhow!("execution worker disconnected"))?;
     let result = rx
@@ -391,6 +394,7 @@ where
                 message_id,
                 tool_call_id,
                 working_dir,
+                outer_handoff,
             }) => {
                 let results = results.clone();
                 let registry = registry.clone();
@@ -405,7 +409,12 @@ where
                             graceful_shutdown_signal: None,
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
-                        registry.execute_local(&name, input, ctx).await
+                        let call = registry.execute_local(&name, input, ctx);
+                        if outer_handoff {
+                            super::handoff::scope(call).await
+                        } else {
+                            call.await
+                        }
                     } else {
                         Err(anyhow::anyhow!(
                             "tool `{name}` does not run in the execution environment"
@@ -508,11 +517,28 @@ mod tests {
             message_id: "m".into(),
             tool_call_id: format!("call-{id}"),
             working_dir: Some(dir.to_path_buf()),
+            outer_handoff: true,
         };
         let line = serde_json::to_string(&frame).unwrap() + "\n";
         to_worker.write_all(line.as_bytes()).await.unwrap();
         let line = from_worker.next_line().await.unwrap().unwrap();
         serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn worker_call_ownership_defaults_for_older_clients_and_roundtrips() {
+        let mut value = serde_json::json!({
+            "type":"call", "id":1, "name":"agentgrep", "input":{},
+            "session_id":"worker-session", "message_id":"message", "tool_call_id":"call",
+        });
+        let Frame::Call { outer_handoff, .. } = serde_json::from_value(value.clone()).unwrap()
+        else {
+            panic!("call frame")
+        };
+        assert!(!outer_handoff);
+        value["outer_handoff"] = Value::Bool(true);
+        let frame: Frame = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap()["outer_handoff"], true);
     }
 
     /// The worker performs file and shell work in its own directory, and

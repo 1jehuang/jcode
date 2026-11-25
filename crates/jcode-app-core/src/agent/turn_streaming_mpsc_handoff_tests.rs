@@ -330,3 +330,72 @@ async fn handoff_preserves_shell_delivery_and_ignores_other_tools_flags() {
         crate::background::global().cancel(task_id).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn custom_sdk_shell_names_keep_default_completion_delivery() {
+    let _env = crate::storage::lock_test_env();
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::tool::sdk::remove_session(&self.0);
+        }
+    }
+    for (index, (custom, called)) in [
+        ("shell", "shell"),
+        ("Bash", "functions.Bash"),
+        ("bash", "shell"),
+        ("bash", "functions.bash"),
+        ("remote_exec", "remote_exec"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("sdk-handoff-delivery-{index}");
+        let _cleanup = Cleanup(session.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::tool::sdk::configure(
+            &session,
+            "handoff-owner",
+            crate::protocol::SessionToolConfig {
+                custom: vec![crate::protocol::SessionToolDefinition {
+                    name: custom.into(),
+                    description: "Custom SDK callback".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+                ..Default::default()
+            },
+            tx,
+        )
+        .unwrap();
+        let ctx = ToolContext {
+            session_id: session,
+            message_id: "message".into(),
+            tool_call_id: "sdk-delivery".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let output = execute_with_background_budget(
+            Registry::empty(),
+            called.into(),
+            serde_json::json!({"notify":false,"wake":false}),
+            ctx,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_ok(), "the custom callback must execute");
+        let id = output
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let status = crate::background::global().status(id).await.unwrap();
+        assert!(status.notify && status.wake, "{called} overrides {custom}");
+        crate::background::global().cancel(id).await.unwrap();
+    }
+}

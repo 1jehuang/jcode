@@ -323,6 +323,13 @@ async fn await_or_background_search(
         .0
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("agentgrep task owner is missing"))?;
+    // An outer executor applies the configured budget to the whole call.
+    // A nested promotion would finish that owner before the search finishes.
+    if super::handoff::has_outer_owner() {
+        return work_handle
+            .await
+            .map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?;
+    }
     match tokio::time::timeout(foreground_budget, work_handle).await {
         Ok(joined) => {
             joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?

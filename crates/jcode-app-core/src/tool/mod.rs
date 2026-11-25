@@ -10,6 +10,7 @@ pub(crate) fn background_delivery_notice(wake: bool) -> &'static str {
 }
 
 mod agentgrep;
+pub(crate) mod handoff;
 pub mod ambient;
 mod apply_patch;
 mod bash;

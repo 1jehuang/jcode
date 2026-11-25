@@ -23,8 +23,13 @@ pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> 
 }
 
 /// Only shell tools define notify/wake as this task's delivery flags.
-pub(super) fn handoff_delivery(name: &str, input: &serde_json::Value) -> (bool, bool) {
-    if !matches!(Registry::resolve_tool_name(name), "bash" | "remote_exec") {
+pub(super) fn handoff_delivery(
+    session: &str,
+    name: &str,
+    input: &serde_json::Value,
+) -> (bool, bool) {
+    let resolved = Registry::resolve_tool_name_for_session(session, name);
+    if crate::tool::sdk::custom(session, resolved) || !matches!(resolved, "bash" | "remote_exec") {
         return (true, true);
     }
     let flag = |key: &str| input.get(key).and_then(serde_json::Value::as_bool);
@@ -53,10 +58,11 @@ async fn execute_with_background_budget(
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
-    let (notify, wake) = handoff_delivery(&name, &input);
-    let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
-        registry.execute(&tool_name, input, ctx).await
-    })
+    let (notify, wake) = handoff_delivery(&session_id, &name, &input);
+    let mut work = crate::runtime_activity::spawn_session(
+        &session_id,
+        crate::tool::handoff::scope(async move { registry.execute(&tool_name, input, ctx).await }),
+    )
     .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     tokio::select! {
         biased;

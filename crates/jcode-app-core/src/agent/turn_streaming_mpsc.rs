@@ -1825,21 +1825,20 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
+                let tool_handle = crate::runtime_activity::spawn_session(
+                    &self.session.id,
+                    crate::tool::handoff::scope(async move {
                         registry_clone
                             .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
                             .await
-                    })
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                    })?;
+                    }),
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                })?;
 
-                // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // All tools share the same default foreground budget, including
-                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
@@ -2007,7 +2006,8 @@ impl Agent {
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));
-                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.name, &tc.input);
+                    let (notify, wake) =
+                        tool_handoff::handoff_delivery(&self.session.id, &tc.name, &tc.input);
                     let bg_info = crate::background::global()
                         .adopt_with_options(
                             &tc.name,

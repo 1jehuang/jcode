@@ -47,7 +47,7 @@ impl Tool for JsonTool {
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let id = input["id"].as_i64().unwrap_or_default();
         Ok(ToolOutput::new(
-            json!({ "id": id, "square": id * id }).to_string(),
+            json!({ "id": id, "square": id * id, "outer_owner": crate::tool::handoff::has_outer_owner() }).to_string(),
         ))
     }
 }
@@ -246,4 +246,25 @@ fn report_renders_strings_raw_and_lists_store_keys() {
     assert!(report.starts_with("result:\nplain text\n"), "{report}");
     assert!(report.contains("[1 tool call, "), "{report}");
     assert!(report.contains("stored: k]"), "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codemode_host_calls_preserve_outer_handoff_ownership_across_tasks() {
+    let registry = registry().await;
+    for owned in [false, true] {
+        let input = json!({"code": "return (await tools.lookup({id: 1})).outer_owner;"});
+        let context = ctx(&format!("codemode-handoff-{owned}"));
+        let call = registry.execute("codemode", input, context);
+        let output = if owned {
+            crate::tool::handoff::scope(call).await
+        } else {
+            call.await
+        }
+        .unwrap();
+        assert!(
+            output.output.starts_with(&format!("result:\n{owned}")),
+            "{}",
+            output.output
+        );
+    }
 }
