@@ -66,6 +66,9 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Jump to the live tail. Comma-separate aliases; set "" to disable.
+scroll_to_bottom = "ctrl+end, alt+q"
+
 # Auto-poke toggle. Set "" to disable.
 auto_poke_toggle = "ctrl+p"
 
@@ -1116,5 +1119,14 @@ mod tests {
             );
             assert_eq!(value.len(), 7, "{role} example should be #rrggbb: {value}");
         }
+    }
+
+    #[test]
+    fn jump_to_bottom_template_matches_registry_default() {
+        let config: Config = toml::from_str(&Config::default_config_file_contents()).unwrap();
+        assert_eq!(
+            config.keybindings.scroll_to_bottom,
+            jcode_config_types::KeybindingsConfig::default().scroll_to_bottom
+        );
     }
 }

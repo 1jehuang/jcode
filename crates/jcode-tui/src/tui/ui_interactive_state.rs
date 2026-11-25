@@ -56,6 +56,7 @@ pub(crate) struct InteractiveRenderState {
     idle_area: Option<Rect>,
     badge: (bool, Option<usize>, Option<Rect>),
     tail: (bool, bool),
+    jump: Option<Rect>,
     todo: (Option<Rect>, Option<Rect>, usize, usize, usize),
     images: Vec<(Rect, u64)>,
 }
@@ -82,6 +83,7 @@ pub(crate) fn preserve_interactive_render_state() -> InteractiveRenderState {
             badge_rect(),
         ),
         tail: (tail_catchup_active(), take_tail_follow_snap_request()),
+        jump: viewport::jump_to_bottom_area(),
         todo: viewport::todo_margins::interaction_geometry(),
         images: panel_image_preview::snapshot_regions(),
     }
@@ -114,6 +116,7 @@ impl Drop for InteractiveRenderState {
         if self.tail.1 {
             request_tail_follow_snap();
         }
+        viewport::set_jump_to_bottom_area(self.jump);
         viewport::todo_margins::restore_interaction_geometry(self.todo);
         panel_image_preview::restore_regions(self.images.clone());
     }
@@ -130,15 +133,18 @@ mod tests {
         let area = Rect::new(1, 2, 30, 4);
         let todo = (Some(area), Some(area), 2, 4, 4);
         let images = vec![(area, 42)];
+        viewport::set_jump_to_bottom_area(Some(area));
         viewport::todo_margins::restore_interaction_geometry(todo);
         panel_image_preview::restore_regions(images.clone());
         let result = std::panic::catch_unwind(|| {
             let _saved = preserve_interactive_render_state();
+            viewport::set_jump_to_bottom_area(None);
             viewport::todo_margins::restore_interaction_geometry((None, None, 0, 0, 0));
             panel_image_preview::clear_regions();
             panic!("offscreen diagnostic failed");
         });
         assert!(result.is_err());
+        assert_eq!(viewport::jump_to_bottom_area(), Some(area));
         assert_eq!(viewport::todo_margins::interaction_geometry(), todo);
         assert_eq!(panel_image_preview::snapshot_regions(), images);
     }

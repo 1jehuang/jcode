@@ -803,13 +803,8 @@ pub trait TuiState {
     fn scroll_offset(&self) -> usize;
     /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
     fn auto_scroll_paused(&self) -> bool;
-    /// Whether the screen is currently in the terminal-style cleared state
-    /// produced by Ctrl+L / Cmd+L: the transcript ends in a blank spacer, the
-    /// view is pinned to the bottom, and nothing is streaming. In that state
-    /// the renderer collapses the (entirely blank) messages viewport so the
-    /// status line and numbered prompt sit at the *top* of the screen, exactly
-    /// like a terminal after `clear`, instead of floating at the bottom under
-    /// a screenful of blanks.
+    /// A non-streaming Ctrl+L/Cmd+L clear, pinned at a blank tail spacer.
+    /// Collapse its empty viewport so the status and prompt sit at the top.
     fn terminal_clear_collapsed(&self) -> bool {
         false
     }
@@ -1003,6 +998,11 @@ pub trait TuiState {
     }
     /// Optional configured keybinding label for external dictation.
     fn dictation_key_label(&self) -> Option<String>;
+    /// Label of the `scroll_to_bottom` chord shown in the "Jump to bottom"
+    /// pill, or `None` when the action is unbound.
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        None
+    }
     /// Time since app started (for startup animations)
     fn animation_elapsed(&self) -> f32;
     /// Time remaining until rate limit resets (if rate limited)
