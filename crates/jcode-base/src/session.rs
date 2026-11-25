@@ -220,6 +220,12 @@ fn is_zero_u64(value: &u64) -> bool {
 }
 
 impl Session {
+    pub fn inherit_provider_route(&mut self, parent: &Self) {
+        self.provider_key = parent.provider_key.clone();
+        self.route_api_method = parent.route_api_method.clone();
+        self.account_pins = parent.account_pins.clone();
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;

@@ -695,8 +695,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     child.system_prompt = app.session.system_prompt.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
-    child.provider_key = app.session.provider_key.clone();
-    child.route_api_method = app.session.route_api_method.clone();
+    child.inherit_provider_route(&app.session);
     child.subagent_model = app.session.subagent_model.clone();
     child.autoreview_enabled = app.session.autoreview_enabled;
     child.autojudge_enabled = app.session.autojudge_enabled;

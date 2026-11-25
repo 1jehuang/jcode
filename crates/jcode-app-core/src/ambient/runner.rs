@@ -431,8 +431,7 @@ impl AmbientRunnerHandle {
                 );
                 child.replace_messages(parent.messages.clone());
                 child.compaction = parent.compaction.clone();
-                child.provider_key = parent.provider_key.clone();
-                child.route_api_method = parent.route_api_method.clone();
+                child.inherit_provider_route(&parent);
                 child.model = parent
                     .effective_agent_model("ambient", crate::config::Config::load().ambient.model)
                     .filter(|model| model != "inherit")

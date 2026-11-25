@@ -155,7 +155,7 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        openai_credentials::sync(self.oauth_account_pin().as_ref(), &self.credentials).await?;
+        self.sync_credentials().await?;
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
             return Arc::clone(&self.chatgpt_web)

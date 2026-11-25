@@ -497,3 +497,24 @@ async fn capability_sync_keeps_explicit_account_and_platform_catalog_scopes() {
 
 #[path = "openai_identity_tests.rs"]
 mod identity;
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_reloads_account_capabilities_before_preparing_the_next_request() {
+    let _env = TestEnv::new();
+    let (mut session, _, second) = capability_accounts();
+    session.set_transport("https").unwrap();
+    session.client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+        .build()
+        .unwrap();
+    codex::set_active_account(&second).unwrap();
+    let stream = session.complete(&[], &[], "", None).await.unwrap();
+    // On this current-thread executor, close the consumer before its transport task can run.
+    drop(stream);
+    assert_second_capabilities(&session);
+    let credentials = session.credentials.try_read().unwrap();
+    assert_eq!(credentials.access_token, "second-token");
+    assert_eq!(credentials.account_id.as_deref(), Some("second-workspace"));
+    drop(credentials);
+    tokio::task::yield_now().await;
+}
