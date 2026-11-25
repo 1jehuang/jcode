@@ -67,6 +67,7 @@ fn worker(home: &std::path::Path, target: &str) -> (Worker, BufReader<TcpStream>
             "--nocapture",
         ])
         .env("JCODE_HOME", home)
+        .env_remove("JCODE_GLOBAL_HOME")
         .env("JCODE_ROLE_TEST_BARRIER", address.to_string())
         .env("JCODE_ROLE_TEST_TARGET", target)
         .spawn()
