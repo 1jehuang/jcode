@@ -100,6 +100,13 @@ tools or block management and calls to that peer.
 An empty live catalog also replaces obsolete cached schemas instead of
 advertising removed tools on the next startup.
 
+Search results include `server_instructions` once per matched connected server.
+Guidance stays in tool results, sharing the existing adaptive output budget.
+It is shortened or omitted before it can reduce the number of loaded schemas.
+Retained guidance is capped at 16,384 Unicode characters, with an ellipsis for
+truncated text. Cached schemas remain available before connection; guidance
+appears after initialization without making search start or await a connection.
+
 The entire remote handshake has a 30-second deadline, including credential
 refresh, initialization, legacy fallback, and tool listing. Individual tool
 requests also default to 30 seconds. `timeout_secs` can extend legitimately slow

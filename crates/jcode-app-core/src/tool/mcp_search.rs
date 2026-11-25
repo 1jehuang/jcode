@@ -117,6 +117,7 @@ impl Tool for McpSearchTool {
                             .trim()
                             .to_string(),
                         input_schema: tool.input_schema,
+                        server_instructions: None,
                     },
                 ))
             })
@@ -125,11 +126,20 @@ impl Tool for McpSearchTool {
         // Name matches win. Description-only matches are noise once any tool
         // matches by name, so they are dropped rather than ranked below.
         let best = ranked.iter().map(|(rank, _)| *rank).max();
-        let matches: Vec<McpSearchResult> = ranked
+        let mut matches: Vec<McpSearchResult> = ranked
             .into_iter()
             .filter(|(rank, _)| Some(*rank) == best)
             .map(|(_, result)| result)
             .collect();
+        if !matches.is_empty() {
+            let manager = self.manager.read().await;
+            let mut servers = HashSet::new();
+            for tool in &mut matches {
+                if servers.insert(tool.server.clone()) {
+                    tool.server_instructions = manager.server_instructions(&tool.server).await;
+                }
+            }
+        }
         let total = matches.len();
         let budget = if super::super::accepts_large_output(&input_flags) {
             usize::MAX

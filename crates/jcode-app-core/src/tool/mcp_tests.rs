@@ -354,6 +354,7 @@ fn search_result(n: usize, description_chars: usize) -> McpSearchResult {
         tool: format!("tool_{n}"),
         description: "d".repeat(description_chars),
         input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        server_instructions: None,
     }
 }
 

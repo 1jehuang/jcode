@@ -1,5 +1,9 @@
 //! MCP management tool - stdio/remote connections and noninteractive OAuth management
 
+#[cfg(all(test, unix))]
+#[path = "mcp_instructions_tests.rs"]
+mod instructions_tests;
+
 #[cfg(test)]
 #[path = "mcp_remote_management_tests.rs"]
 mod remote_management_tests;
@@ -31,6 +35,8 @@ struct McpSearchResult {
     tool: String,
     description: String,
     input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_instructions: Option<String>,
 }
 
 /// Upper bound on definitions one `mcp_search` call loads into context via
@@ -92,7 +98,10 @@ fn match_rank(
 /// that fits wins, so small results are never trimmed.
 fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(String, usize)> {
     use jcode_core::util::estimate_tokens;
-    let render = |detailed: usize, description_chars: Option<usize>| -> Result<String> {
+    let render = |detailed: usize,
+                  description_chars: Option<usize>,
+                  include_instructions: bool|
+     -> Result<String> {
         let head: Vec<McpSearchResult> = matches[..detailed]
             .iter()
             .map(|m| McpSearchResult {
@@ -104,6 +113,14 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(Str
                     |max| clip_description(&m.description, max),
                 ),
                 input_schema: m.input_schema.clone(),
+                server_instructions: if include_instructions {
+                    m.server_instructions.as_ref().map(|text| {
+                        description_chars
+                            .map_or_else(|| text.clone(), |max| clip_description(text, max))
+                    })
+                } else {
+                    None
+                },
             })
             .collect();
         let mut out = serde_json::to_string(&head)?;
@@ -122,35 +139,45 @@ fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> Result<(Str
     };
     let fits = |out: &String| estimate_tokens(out) <= budget;
 
-    let full = render(matches.len(), None)?;
+    let full = render(matches.len(), None, true)?;
     if fits(&full) {
         return Ok((full, matches.len()));
     }
     // Shorten descriptions progressively, keeping every schema.
     let longest = matches
         .iter()
-        .map(|m| m.description.chars().count())
+        .map(|m| {
+            m.description.chars().count().max(
+                m.server_instructions
+                    .as_deref()
+                    .map_or(0, |text| text.chars().count()),
+            )
+        })
         .max()
         .unwrap_or(0);
     let mut chars = longest / 2;
     while chars >= MIN_SEARCH_DESCRIPTION_CHARS {
-        let out = render(matches.len(), Some(chars))?;
+        let out = render(matches.len(), Some(chars), true)?;
         if fits(&out) {
             return Ok((out, matches.len()));
         }
         chars /= 2;
     }
-    // Keep full detail for as many leading matches as fit.
+    // Optional guidance must not displace a schema that fits without it.
     let (mut lo, mut hi) = (0usize, matches.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if fits(&render(mid, Some(MIN_SEARCH_DESCRIPTION_CHARS))?) {
+        if fits(&render(mid, Some(MIN_SEARCH_DESCRIPTION_CHARS), false)?) {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
-    Ok((render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS))?, lo))
+    let with_instructions = render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS), true)?;
+    if fits(&with_instructions) {
+        return Ok((with_instructions, lo));
+    }
+    Ok((render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS), false)?, lo))
 }
 
 /// Fixed MCP discovery surface used when individual server definitions are deferred.

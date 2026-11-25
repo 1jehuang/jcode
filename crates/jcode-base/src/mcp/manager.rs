@@ -425,6 +425,18 @@ impl McpManager {
         names
     }
 
+    /// Operational guidance from a connected server; never starts a connection.
+    pub async fn server_instructions(&self, server: &str) -> Option<String> {
+        if let Some(handle) = self.pool_handles.read().await.get(server) {
+            return handle.instructions();
+        }
+        self.owned_clients
+            .read()
+            .await
+            .get(server)
+            .and_then(|client| client.handle().instructions())
+    }
+
     /// Tool definitions for one connected server, or `None` when it is not
     /// connected. Cheaper than [`Self::all_tools`] when reacting to a single
     /// server's connection.
