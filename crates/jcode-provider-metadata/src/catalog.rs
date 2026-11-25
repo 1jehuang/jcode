@@ -111,19 +111,6 @@ pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiComp
     requires_api_key: true,
 };
 
-/// VSLLM provides an OpenAI-compatible gateway. Discover the account's live
-/// model catalog; availability and supported modalities depend on its access.
-pub const VSLLM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
-    id: "vsllm",
-    display_name: "VSLLM",
-    api_base: "https://vsllm.cc/v1",
-    api_key_env: "VSLLM_API_KEY",
-    env_file: "vsllm.env",
-    setup_url: "https://vsllm.cc/",
-    default_model: None,
-    requires_api_key: true,
-};
-
 pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "orcarouter",
     display_name: "OrcaRouter",
@@ -518,7 +505,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 46] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -532,7 +519,6 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 46] = [
     CONIFER_PROFILE,
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
-    VSLLM_PROFILE,
     ORCAROUTER_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
@@ -661,19 +647,6 @@ pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     recommended: false,
     target: LoginProviderTarget::OpenRouter,
     order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
-};
-
-pub const VSLLM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
-    id: "vsllm",
-    display_name: "VSLLM",
-    auth_kind: LoginProviderAuthKind::ApiKey,
-    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
-    auth_status_method: "API key",
-    aliases: &["vs-llm", "weiyun"],
-    menu_detail: "VSLLM API key, OpenAI-compatible model gateway",
-    recommended: false,
-    target: LoginProviderTarget::OpenAiCompatible(VSLLM_PROFILE),
-    order: LoginProviderSurfaceOrder::new(Some(5), Some(4), Some(6), Some(5), Some(5)),
 };
 
 pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1332,7 +1305,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 59] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 58] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1390,6 +1363,5 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 59] = [
     GEMINI_API_LOGIN_PROVIDER,
     ANTIGRAVITY_LOGIN_PROVIDER,
     GOOGLE_LOGIN_PROVIDER,
-    VSLLM_LOGIN_PROVIDER,
     ORCAROUTER_LOGIN_PROVIDER,
 ];

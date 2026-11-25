@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo 'Push blocked: install Gitleaks to scan outgoing commits for credentials.' >&2
+    exit 1
+fi
+
+while read -r local_ref local_oid remote_ref remote_oid; do
+    # Deleting a ref sends no commits.
+    case "$local_oid" in
+        *[!0]*) ;;
+        *) continue ;;
+    esac
+    if git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+        revisions="$remote_oid..$local_oid"
+    else
+        revisions="$local_oid --not --remotes"
+    fi
+    gitleaks git --redact=100 --no-banner --ignore-gitleaks-allow \
+        --log-opts="$revisions" .
+done

@@ -24,3 +24,17 @@ captures/
 # Merge leftovers
 *.orig
 *.rej
+
+# Personal provider settings and credentials stay in JCODE_HOME, outside Git.
+/config.toml
+/config.toml.*
+/.jcode/config.toml
+/.jcode/config.toml.*
+/.jcode/auth.json
+/.jcode/auth.json.*
+.env
+.env.*
+*.env
+*.env.*
+!*.env.example
+!*.env.sample

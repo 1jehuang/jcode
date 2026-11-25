@@ -41,6 +41,17 @@
 
 ## Provider model discovery
 
+- Keep personal provider profiles, model overrides, and credentials in the user's
+  JCODE_HOME and credential directory. Never copy them into tracked files or add
+  built-in provider registrations from personal settings.
+- Preserve provider removals during upstream syncs and installs. A retained key
+  must not reactivate a removed provider through a new built-in registration.
+  Keep the removed-provider metadata regression test passing.
+- Before pushing, scan outgoing commits for secrets. This checkout uses
+  `scripts/git-hooks/pre-push` with Gitleaks; install it as `.git/hooks/pre-push`
+  in fresh clones. Never bypass a secret finding or force-push a history cleanup
+  without the user's explicit authorization.
+
 - Model arrays are offline fallbacks, not release allowlists. Providers with a
   catalog must discover new model IDs without a Jcode release and expose them
   through switching lists and structured model routes.

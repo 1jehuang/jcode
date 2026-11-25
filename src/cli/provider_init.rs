@@ -131,8 +131,6 @@ pub enum ProviderChoice {
     Belvedir,
     #[value(alias = "orca-router")]
     Orcarouter,
-    #[value(alias = "vs-llm", alias = "weiyun")]
-    Vsllm,
     #[value(
         alias = "bailian",
         alias = "aliyun-bailian",
@@ -210,7 +208,6 @@ impl ProviderChoice {
             Self::Cerebras => "cerebras",
             Self::Belvedir => "belvedir",
             Self::Orcarouter => "orcarouter",
-            Self::Vsllm => "vsllm",
             Self::AlibabaCodingPlan => "alibaba-coding-plan",
             Self::OpenaiCompatible => "openai-compatible",
             Self::Cursor => "cursor",
@@ -417,10 +414,6 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Belvedir,
         crate::provider_catalog::BELVEDIR_LOGIN_PROVIDER,
-    ),
-    (
-        ProviderChoice::Vsllm,
-        crate::provider_catalog::VSLLM_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Orcarouter,
@@ -1756,7 +1749,6 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::Cerebras
         | ProviderChoice::Belvedir
         | ProviderChoice::Orcarouter
-        | ProviderChoice::Vsllm
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
         | ProviderChoice::MuseSubscription

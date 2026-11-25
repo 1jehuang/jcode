@@ -378,19 +378,47 @@ mod tests {
     }
 
     #[test]
-    fn vsllm_login_selects_live_openai_compatible_catalog() {
-        let provider = resolve_login_selection("vsllm", &cli_login_providers())
-            .expect("VSLLM CLI login provider");
-        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
-            panic!("VSLLM should use the OpenAI-compatible runtime");
-        };
-
-        assert_eq!(profile.id, "vsllm");
-        assert_eq!(profile.api_base, "https://vsllm.cc/v1");
-        assert_eq!(profile.api_key_env, "VSLLM_API_KEY");
-        assert_eq!(profile.setup_url, "https://vsllm.cc/");
-        assert!(profile.requires_api_key);
-        assert_eq!(profile.default_model, None);
+    fn removed_personal_providers_are_not_builtin_registrations() {
+        for id in [
+            "czc",
+            "czc-glm",
+            "czc-kimi",
+            "kimikx",
+            "opencode-kimikx",
+            "neokens",
+            "opencode-neokens",
+            "opencode-neokens-claude",
+            "nyxos",
+            "opencode-nyxos",
+            "quatarly",
+            "opencode-quatarly",
+            "openference",
+            "opencode-openference",
+            "secretgpt",
+            "opencode-secretgpt",
+            "ntl",
+            "ntl-direct",
+            "opencode-ntl",
+            "vsllm",
+            "vsllm-api",
+            "vs-llm",
+            "weiyun",
+            "yuanyuan-ai",
+            "llmapi",
+            "opencode-llmapi",
+        ] {
+            assert!(resolve_login_provider(id).is_none(), "{id}");
+            assert!(
+                resolve_login_selection(id, &cli_login_providers()).is_none(),
+                "{id}"
+            );
+            assert!(
+                openai_compatible_profiles()
+                    .iter()
+                    .all(|profile| profile.id != id),
+                "{id}"
+            );
+        }
     }
 
     #[test]
