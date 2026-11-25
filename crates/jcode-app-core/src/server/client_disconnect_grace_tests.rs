@@ -492,3 +492,111 @@ async fn busy_without_successor_aborts_owner_and_marks_crashed() {
         SessionStatus::Crashed { .. }
     ));
 }
+
+#[test]
+fn reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it() {
+    const CHILD: &str = "JCODE_RELOAD_EXTRACTION_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::client_disconnect_cleanup::grace_tests::reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", home.path())
+            .env("JCODE_HOME", home.path().join("state"))
+            .env("JCODE_RUNTIME_DIR", home.path().join("runtime"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let log_dir = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".jcode/logs");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut ids = Vec::new();
+        for reloading in ["before", "during", "normal"] {
+            let fixture = Fixture::new(true).await;
+            {
+                let mut agent = fixture.agent.lock().await;
+                agent.set_memory_enabled(true);
+                agent.add_message(
+                    crate::message::Role::User,
+                    vec![crate::message::ContentBlock::Text {
+                        text: "Keep this durable build instruction in memory. ".repeat(10),
+                        cache_control: None,
+                    }],
+                );
+            }
+            if reloading == "before" {
+                crate::server::write_reload_state(
+                    "memory-reload-fixture",
+                    "fixture-hash",
+                    crate::server::ReloadPhase::Starting,
+                    None,
+                );
+            } else {
+                crate::server::clear_reload_marker();
+            }
+            if reloading == "during" {
+                let agent = fixture.agent.lock().await;
+                let cleanup = fixture.cleanup(false, Duration::ZERO);
+                tokio::pin!(cleanup);
+                assert!(futures::poll!(&mut cleanup).is_pending());
+                crate::server::write_reload_state(
+                    "memory-reload-late",
+                    "fixture-hash",
+                    crate::server::ReloadPhase::Starting,
+                    None,
+                );
+                drop(agent);
+                cleanup.await;
+            } else {
+                fixture.cleanup(false, Duration::ZERO).await;
+            }
+            assert!(fixture.sessions.read().await.is_empty());
+            ids.push(fixture.id);
+        }
+        let entries: Vec<serde_json::Value> = std::fs::read_dir(log_dir)
+            .unwrap()
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|entry| entry["event"] == "final_extraction_started")
+            .collect();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[0]),
+            "reload must not trigger final extraction"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[1]),
+            "reload starting while cleanup waits must not trigger extraction"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[2]),
+            "normal disconnect still triggers final extraction"
+        );
+    });
+}
