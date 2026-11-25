@@ -11,6 +11,7 @@ struct Fake {
     endpoint: String,
     requests: Arc<Mutex<Vec<(String, Value)>>>,
     task: JoinHandle<()>,
+    stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Fake {
@@ -19,12 +20,17 @@ impl Fake {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            for (status, response) in responses {
-                let (mut stream, _) = timeout(Duration::from_secs(5), listener.accept())
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let mut responses = responses.into_iter();
+            loop {
+                let (mut stream, _) = tokio::select! {
+                    _ = &mut stopped => break,
+                    request = listener.accept() => request.unwrap(),
+                };
+                let (status, response) = responses
+                    .next()
+                    .unwrap_or_else(|| (500, json!({"error": "unexpected request"})));
                 let mut bytes = Vec::new();
                 let header_end = loop {
                     let mut buffer = [0; 4096];
@@ -71,11 +77,13 @@ impl Fake {
                 );
                 stream.write_all(reply.as_bytes()).await.unwrap();
             }
+            assert_eq!(responses.len(), 0, "expected requests were not sent");
         });
         Self {
             endpoint,
             requests,
             task,
+            stop,
         }
     }
 
@@ -90,6 +98,7 @@ impl Fake {
     }
 
     async fn finish(self) -> Vec<(String, Value)> {
+        self.stop.send(()).unwrap();
         timeout(Duration::from_secs(6), self.task)
             .await
             .unwrap()
@@ -415,4 +424,21 @@ async fn invalid_controls_fail_before_http() {
         assert!(error.contains(expected), "{error}");
     }
     assert!(fake.finish().await.is_empty());
+}
+
+#[tokio::test]
+async fn transport_records_unexpected_writes_after_prepared_responses() {
+    let fake = Fake::new(vec![]).await;
+    let error = fake
+        .tool()
+        .execute(
+            json!({"action":"update", "event_id":"event", "summary":"unexpected write"}),
+            ctx(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("500"));
+    let requests = fake.finish().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].0.starts_with("PATCH "));
 }
