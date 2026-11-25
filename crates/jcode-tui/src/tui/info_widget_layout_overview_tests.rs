@@ -334,6 +334,45 @@ fn compact_overview_fits_four_row_pockets() {
 }
 
 #[test]
+fn lookahead_pockets_do_not_hide_compact_overview() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 32);
+    assert_eq!(
+        calculate_widget_height(WidgetKind::Overview, &data, 40, 32),
+        4
+    );
+    let margins = Margins {
+        right_widths: (0..32)
+            .map(|row| if row % 8 == 0 { 4 } else { 60 })
+            .collect(),
+        // Two guarded rows around each full-width line shrink seven-row pockets to three.
+        right_reliable: (0..32)
+            .map(|row| if (3..=5).contains(&(row % 8)) { 60 } else { 4 })
+            .collect(),
+        ..Default::default()
+    };
+    let out = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("look-ahead fallback", area, &out.visible);
+    assert_eq!(right_kinds(&out.visible), vec![WidgetKind::Overview]);
+    assert_eq!(out.visible[0].rect.height, 4);
+}
+
+#[test]
+fn reliable_three_row_card_is_kept_when_overview_cannot_fit() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 3);
+    let margins = Margins {
+        right_widths: vec![60; 3],
+        right_reliable: vec![30; 3],
+        ..Default::default()
+    };
+    let out = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("three-row reliable card", area, &out.visible);
+    assert_eq!(right_kinds(&out.visible), vec![WidgetKind::ModelInfo]);
+    assert_eq!(out.visible[0].rect.width, 30);
+}
+
+#[test]
 fn resident_overview_grows_before_reliable_pocket_rehoming() {
     let mut data = model_and_context_data();
     let small = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);

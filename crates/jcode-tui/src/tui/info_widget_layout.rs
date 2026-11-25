@@ -102,16 +102,30 @@ struct MarginSpace {
     x_offset: u16,
 }
 
-/// Choose the per-row widths Phase 2 should dock against: prefer the look-ahead
-/// `reliable` profile, but if it admits no placeable region at all (e.g. dense long
-/// lines cover every candidate row) fall back to `instant` so we still show
-/// something. Returns an owned profile to store in the `MarginSpace`.
-fn dock_widths_with_fallback(reliable: &[u16], instant: &[u16]) -> Vec<u16> {
+/// Prefer look-ahead space when it can host the first widget that fits visibly.
+fn dock_widths_with_fallback(
+    reliable: &[u16],
+    instant: &[u16],
+    available: &[WidgetKind],
+    data: &InfoWidgetData,
+) -> Vec<u16> {
     if reliable.is_empty() {
         return instant.to_vec();
     }
+    let visible_rects = find_all_empty_rects(instant, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
+    let Some(required_height) = available
+        .iter()
+        .map(|&kind| phase2_min_height(kind, data))
+        .find(|needed| {
+            visible_rects
+                .iter()
+                .any(|&(_, height, _)| height >= *needed)
+        })
+    else {
+        return instant.to_vec();
+    };
     let reliable_has_dock =
-        !find_all_empty_rects(reliable, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT).is_empty();
+        !find_all_empty_rects(reliable, MIN_WIDGET_WIDTH, required_height).is_empty();
     if reliable_has_dock {
         reliable.to_vec()
     } else {
@@ -147,14 +161,15 @@ pub(crate) fn calculate_placements_anchored(
     }
     let mut margin_spaces: Vec<MarginSpace> = Vec::new();
     if !margins.right_widths.is_empty() {
-        // Phase 2 docks on the *reliable* (look-ahead) widths so a newly placed
-        // widget lands only where space stays free for a few scroll lines. But if
-        // the reliable profile is so covered that it yields no dock at all (dense
-        // long lines), fall back to the instantaneous widths so we still show
-        // something rather than nothing. Phase 1 always sizes pinned widgets to the
-        // instantaneous widths for full coverage.
-        let mut dock =
-            dock_widths_with_fallback(margins.right_dock_widths(), &margins.right_widths);
+        // Keep look-ahead stability when it fits the highest-priority visible card.
+        // Otherwise use current widths so small reliable pockets cannot hide it.
+        // Phase 1 always sizes pinned widgets against current widths.
+        let mut dock = dock_widths_with_fallback(
+            margins.right_dock_widths(),
+            &margins.right_widths,
+            &available,
+            data,
+        );
         // Never dock below the messages area: a margin profile longer than the
         // area (caller bug or stale data) must not let a widget escape the
         // viewport and draw over the input/status rows beneath it.
@@ -166,7 +181,12 @@ pub(crate) fn calculate_placements_anchored(
         });
     }
     if margins.centered && !margins.left_widths.is_empty() {
-        let mut dock = dock_widths_with_fallback(margins.left_dock_widths(), &margins.left_widths);
+        let mut dock = dock_widths_with_fallback(
+            margins.left_dock_widths(),
+            &margins.left_widths,
+            &available,
+            data,
+        );
         dock.truncate(messages_area.height as usize);
         margin_spaces.push(MarginSpace {
             side: Side::Left,
