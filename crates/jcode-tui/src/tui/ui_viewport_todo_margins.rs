@@ -83,10 +83,13 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
         more_line = Some(lines.len());
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
-            Style::default().fg(dim_color()),
-        )));
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                format!("  … +{} more (todo)", hidden),
+                Style::default().fg(dim_color()),
+            )),
+            usize::from(width),
+        ));
     } else {
         if expanded {
             // Expanded bands get a larger budget but stay bounded so a long plan
@@ -109,10 +112,10 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             };
             lines.extend(card_lines.into_iter().skip(offset).take(window));
             more_line = Some(lines.len());
-            lines.push(Line::from(Span::styled(
-                label,
-                Style::default().fg(dim_color()),
-            )));
+            lines.push(super::super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(label, Style::default().fg(dim_color()))),
+                usize::from(width),
+            ));
             return (lines, more_line);
         }
         lines.extend(card_lines);
@@ -291,6 +294,10 @@ mod pinned_todo_projection_tests {
                     for expanded in [false, true] {
                         let (lines, _) =
                             pinned_todo_band_lines_for_payload(payload, expanded, diff, width, 3);
+                        assert!(
+                            lines.iter().all(|line| line.width() <= usize::from(width)),
+                            "width={width}, expanded={expanded}: {lines:?}"
+                        );
                         assert_eq!(
                             visible,
                             !lines.is_empty(),
