@@ -38,7 +38,10 @@ use crate::auth::router_transfer;
 mod cloud_pins;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
-use cloud_pins::{account_pin_proofs, rebind_account_pins, session_credentials};
+use cloud_pins::{
+    account_pin_proofs, capture_credentials, prepare_return_session, rebind_account_pins,
+    send_credentials, session_credentials, set_pin_proofs,
+};
 
 mod transport;
 pub(crate) use transport::Target;
@@ -436,7 +439,7 @@ pub(crate) fn run_move(
 
     // ---- prepare -------------------------------------------------------
     step("prepare", "checking the cloud host");
-    let (staging, sess, auth_accounts, epoch, repo, base) = std::thread::scope(|scope| {
+    let (staging, mut sess, auth_accounts, epoch, repo, base) = std::thread::scope(|scope| {
         let preflight = scope.spawn(|| target.preflight(&host));
         let prepared = timed_move_stage("local snapshot preparation", || -> Result<_> {
             step("prepare", "snapshotting session, repo and environment");
@@ -486,7 +489,7 @@ pub(crate) fn run_move(
                 mcp_servers: configured_mcp_servers(),
                 auth_account: auth_account.clone(),
                 auth_accounts: auth_accounts.clone(),
-                auth_pin_proofs: account_pin_proofs(&sess)?,
+                auth_pin_proofs: Vec::new(),
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
@@ -557,6 +560,32 @@ pub(crate) fn run_move(
             create_repo_bundle(repo, &session_id, staging.path(), base.as_deref())
         })?;
     }
+    let credentials = if dry_run {
+        Vec::new()
+    } else {
+        let (payloads, mut proofs) =
+            capture_credentials(std::slice::from_ref(&sess), &auth_accounts)?;
+        let mut manifest: MoveManifest = read_json(&staging.path().join("manifest.json"))?;
+        set_pin_proofs(
+            &mut manifest,
+            proofs
+                .remove(&sess.id)
+                .context("missing session credential proofs")?,
+        );
+        if let Some(account) = &manifest.auth_account {
+            sess.route_api_method = Some(account.route());
+        }
+        storage::write_json(&staging.path().join("session.json"), &sess)?;
+        manifest.auth_accounts = payloads
+            .iter()
+            .map(|p| CloudAccount {
+                provider: p.provider(),
+                label: p.label().into(),
+            })
+            .collect();
+        storage::write_json(&staging.path().join("manifest.json"), &manifest)?;
+        payloads
+    };
     let tarball = staging.path().join("move.tar");
     timed_move_stage("transfer archive", || {
         tar_dir(
@@ -586,8 +615,7 @@ pub(crate) fn run_move(
     } else {
         Some(export_router_credentials()?).filter(|router| !router.is_empty())
     };
-    let accounts: &[CloudAccount] = if dry_run { &[] } else { &auth_accounts };
-    if !accounts.is_empty() || router.is_some() {
+    if !credentials.is_empty() || router.is_some() {
         step(
             "credentials",
             "securely transferring accounts, keys and routing",
@@ -604,26 +632,13 @@ pub(crate) fn run_move(
                 })
             })
         });
-        let handles: Vec<_> = accounts
+        let handles: Vec<_> = credentials
             .iter()
-            .map(|account| {
+            .map(|payload| {
                 let host = &host;
-                scope.spawn(move || -> Result<CloudAuthBaseline> {
-                    // Export at send time so a token refreshed by another
-                    // local session during snapshotting is not shipped stale.
-                    let credentials = transfer::export_cloud_account_at(
-                        &storage::jcode_dir()?,
-                        account.provider,
-                        Some(&account.label),
-                    )?;
+                scope.spawn(move || {
                     timed_move_stage("credential transfer", || {
-                        retry_ssh(host, "credential transfer", || {
-                            target.exchange_credentials(host, account, Some(credentials.as_bytes()))
-                        })
-                    })?;
-                    Ok(CloudAuthBaseline {
-                        account: account.clone(),
-                        fingerprint: credential_fingerprint(&credentials),
+                        send_credentials(target, host, payload)
                     })
                 })
             })
@@ -858,44 +873,10 @@ pub(crate) fn run_return(
     // lease. Only opt in when the archive explicitly advertises this protocol.
     let requires_completion = stage.join("return-completion-v1").is_file();
 
-    // The cloud has stopped running turns, so export its final refreshed tokens.
-    // On conflict, restore cloud ownership rather than strand the conversation.
-    // The local departure record is authoritative, including when returning
-    // from an older host that does not retain the multi-account manifest field.
-    // Never import unrelated accounts selected or injected on the remote host.
-    let departure_path = baseline_path(&session_id)?;
-    let return_accounts = if departure_path.exists() {
-        let value: serde_json::Value = read_json(&departure_path)?;
-        let baselines = if value.is_array() {
-            serde_json::from_value::<Vec<CloudAuthBaseline>>(value)?
-        } else {
-            vec![serde_json::from_value::<CloudAuthBaseline>(value)?]
-        };
-        baselines
-            .into_iter()
-            .map(|baseline| baseline.account)
-            .collect::<Vec<_>>()
-    } else if manifest.auth_accounts.is_empty() {
-        manifest.auth_account.iter().cloned().collect::<Vec<_>>()
-    } else {
-        manifest.auth_accounts.clone()
-    };
-    if keep_local_auth {
-        step(
-            "credentials",
-            "keeping local OAuth credentials; cloud credentials will not be imported",
-        );
-    }
-    for account in return_accounts.iter().filter(|_| !keep_local_auth) {
-        step(
-            "credentials",
-            "bringing refreshed OAuth credentials back securely",
-        );
-        let imported = retry_ssh(&host, "credential return", || {
-            target.exchange_credentials(&host, account, None)
-        })
-        .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
-        if let Err(error) = imported {
+    // Both import and rebinding belong to the recoverable authentication phase.
+    let mut sess = match prepare_return_session(target, &host, &manifest, stage, keep_local_auth) {
+        Ok(sess) => sess,
+        Err(error) => {
             retry_ssh(&host, "cancel return", || {
                 target.run_remote(
                     &host,
@@ -910,19 +891,16 @@ pub(crate) fn run_return(
                     None,
                 )
             })
-            .context("credential return failed and cloud ownership could not be restored")?;
+            .context(
+                "cloud return authentication failed and cloud ownership could not be restored",
+            )?;
             storage::write_session_lease(&storage::SessionLease {
                 epoch,
                 ..lease.clone()
             })?;
-            return Err(
-                error.context("credential return refused; the session remains on the cloud host. To recover without replacing local OAuth credentials, retry with --keep-local-auth")
-            );
+            return Err(error.context("cloud return authentication refused; the session remains on the cloud host. Retry with --keep-local-auth to retain local account selection"));
         }
-    }
-
-    let mut sess: session::Session = read_json(&stage.join("session.json"))?;
-    rebind_account_pins(&mut sess, &manifest.auth_pin_proofs)?;
+    };
     // ---- code: fetch cloud snapshot as refs, then 3-way merge -----------
     let merge = match (&manifest.repo, lease.repo_root.as_deref()) {
         (Some(remote_repo), Some(root)) => {

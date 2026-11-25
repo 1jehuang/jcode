@@ -166,6 +166,11 @@ fn cloud_activation_rejects_same_label_replacement_without_installing_or_rebindi
         select_home(source.path());
         let (mut sess, payloads) = source_accounts();
         sess.migration_epoch = 1;
+        sess.route_api_method = Some(format!(
+            "{}-oauth@{}",
+            replaced.as_str(),
+            sess.account_pins[replaced.as_str()].label
+        ));
         let manifest = manifest(&sess, account_pin_proofs(&sess).unwrap());
         select_home(destination.path());
         import(&payloads);
@@ -294,5 +299,369 @@ fn returned_cloud_pins_rebind_to_original_local_lineage_after_verified_refresh()
             .0
             .access_token,
         "refreshed-access"
+    );
+}
+
+#[test]
+fn inactive_missing_pin_does_not_block_api_return_export_or_rebinding() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    select_home(&sandbox.root().join("inactive-source"));
+    let (mut sess, _) = source_accounts();
+    sess.route_api_method = Some("claude-api".into());
+    let removed = sess.account_pins["claude"].label.clone();
+    claude::remove_account(&removed).unwrap();
+    let retained = sess.account_pins.clone();
+    assert!(account_pin_proofs(&sess).is_ok());
+    rebind_account_pins(&mut sess, &[]).unwrap();
+    assert_eq!(sess.account_pins, retained);
+    sess.save().unwrap();
+    storage::write_session_lease(&storage::SessionLease {
+        session_id: sess.id.clone(),
+        epoch: 1,
+        away_host: None,
+        repo_root: None,
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: "fixture".into(),
+    })
+    .unwrap();
+    assert!(!export_return_archive(&sess.id, 2, true).unwrap().is_empty());
+}
+
+#[cfg(unix)]
+fn return_fixture(root: &Path, bad_proof: bool) -> (session::Session, Target, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let source = root.join("source");
+    select_home(&source);
+    let (mut local, departure) = source_accounts();
+    local.save().unwrap();
+    let initial = account_pin_proofs(&local).unwrap();
+    storage::write_json_secret(&baseline_path(&local.id).unwrap(), &initial).unwrap();
+    storage::write_session_lease(&storage::SessionLease {
+        session_id: local.id.clone(),
+        epoch: 1,
+        away_host: Some("offline-cloud".into()),
+        repo_root: None,
+        last_sync_snapshot: None,
+        last_sync_head: None,
+        updated_at: "fixture".into(),
+    })
+    .unwrap();
+    select_home(&root.join("cloud"));
+    import(&departure);
+    let mut cloud = local.clone();
+    rebind_account_pins(&mut cloud, &initial).unwrap();
+    cloud.migration_epoch = 2;
+    cloud.title = Some("returned cloud transcript".into());
+    for (family, provider) in [
+        ("claude", TransferProvider::Claude),
+        ("openai", TransferProvider::OpenAi),
+    ] {
+        let label = &cloud.account_pins[family].label;
+        match provider {
+            TransferProvider::Claude => {
+                claude::update_account_tokens(label, "cloud-rotated", "cloud-refresh", i64::MAX)
+                    .unwrap()
+            }
+            TransferProvider::OpenAi => codex::update_account_tokens(
+                label,
+                "cloud-rotated",
+                "cloud-refresh",
+                None,
+                None,
+                Some(i64::MAX),
+            )
+            .unwrap(),
+        }
+        let payload = transfer::export_cloud_account_at(
+            &storage::jcode_dir().unwrap(),
+            provider,
+            Some(label),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(format!("{}.payload", provider.as_str())),
+            payload.as_bytes(),
+        )
+        .unwrap();
+    }
+    let mut manifest = manifest(&cloud, account_pin_proofs(&cloud).unwrap());
+    if bad_proof {
+        manifest
+            .auth_pin_proofs
+            .retain(|p| p.account.provider != TransferProvider::Claude);
+        let pin = cloud.account_pins.get_mut("claude").unwrap();
+        pin.record_id = Some("missing-cloud-record".into());
+        pin.identity = None;
+    }
+    let stage = root.join("return-stage");
+    std::fs::create_dir_all(&stage).unwrap();
+    storage::write_json(&stage.join("session.json"), &cloud).unwrap();
+    storage::write_json(&stage.join("manifest.json"), &manifest).unwrap();
+    std::fs::write(stage.join("return-completion-v1"), "").unwrap();
+    tar_dir(
+        &stage,
+        &source.join("return-fixture.tar"),
+        &["session.json", "manifest.json", "return-completion-v1"],
+    )
+    .unwrap();
+    let script = source.join("return-transport.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+case "$1" in
+  *"'complete-return' '--help'"*) exit 0 ;;
+  *"'cancel-return'"*) printf 'cancel\n' >> "$JCODE_HOME/return-calls" ;;
+  *"'complete-return'"*) printf 'complete\n' >> "$JCODE_HOME/return-calls" ;;
+  *"'export'"*) cat "$JCODE_HOME/return-fixture.tar" ;;
+  *"'credentials'"*)
+    printf 'credentials\n' >> "$JCODE_HOME/return-calls"
+    case "$1" in
+      *"'--provider' 'claude'"*) cat "$JCODE_HOME/claude.payload" ;;
+      *"'--provider' 'openai'"*) cat "$JCODE_HOME/openai.payload" ;;
+      *) exit 91 ;;
+    esac ;;
+  *) exit 92 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    select_home(&source);
+    let target = Target {
+        transport: Some(script.to_string_lossy().into_owned()),
+        ..Target::default()
+    };
+    (local, target, source)
+}
+
+#[cfg(unix)]
+#[test]
+fn keep_local_auth_returns_cloud_transcript_without_adopting_cloud_login() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    for api in [false, true] {
+        let (mut local, target, home) = return_fixture(
+            &sandbox.root().join(if api { "api" } else { "oauth" }),
+            false,
+        );
+        if api {
+            local.route_api_method = Some("claude-api".into());
+            // Model the saved departure choice; ordinary away-session saves are fenced.
+            storage::write_json(&session::session_path(&local.id).unwrap(), &local).unwrap();
+        }
+        let before = std::fs::read(home.join("auth.json")).unwrap();
+        let report = run_return(Some(&local.id), &target, false, true).unwrap();
+        assert_eq!(report.session_id, local.id);
+        let returned = session::Session::load(&local.id).unwrap();
+        assert_eq!(returned.title.as_deref(), Some("returned cloud transcript"));
+        assert_eq!(returned.route_api_method, local.route_api_method);
+        assert_eq!(returned.account_pins, local.account_pins);
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), before);
+        assert!(storage::read_session_lease(&local.id).unwrap().is_here());
+        assert_eq!(
+            std::fs::read_to_string(home.join("return-calls")).unwrap(),
+            "complete\n"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_return_pin_binding_cancels_remote_export_and_restores_cloud_ownership() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (local, target, home) = return_fixture(sandbox.root(), true);
+    assert!(run_return(Some(&local.id), &target, false, false).is_err());
+    let calls = std::fs::read_to_string(home.join("return-calls")).unwrap();
+    assert!(calls.lines().any(|s| s == "cancel"), "{calls}");
+    let lease = storage::read_session_lease(&local.id).unwrap();
+    assert_eq!(lease.epoch, 2);
+    assert_eq!(lease.away_host.as_deref(), Some("offline-cloud"));
+    let unchanged = session::Session::load(&local.id).unwrap();
+    assert_eq!(unchanged.title, local.title);
+    assert_eq!(unchanged.account_pins, local.account_pins);
+}
+
+#[cfg(unix)]
+#[test]
+fn captured_single_and_group_proofs_match_sent_bytes_across_source_refreshes() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let source = sandbox.root().join("capture-source");
+    select_home(&source);
+    let (first, _) = source_accounts();
+    let mut second = first.clone();
+    second.id = "second-group-member".into();
+    let old = account_pin_proofs(&first).unwrap();
+    claude::update_account_tokens(
+        &first.account_pins["claude"].label,
+        "captured-access",
+        "captured-refresh",
+        i64::MAX,
+    )
+    .unwrap();
+    let (payloads, proofs) =
+        capture_credentials(&[first.clone(), second.clone()], &cloud_accounts().unwrap()).unwrap();
+    assert_eq!(payloads.len(), 2);
+    let captured = proofs[&first.id]
+        .iter()
+        .find(|p| p.account.provider == TransferProvider::Claude)
+        .unwrap();
+    assert_ne!(
+        captured.fingerprint,
+        old.iter()
+            .find(|p| p.account.provider == TransferProvider::Claude)
+            .unwrap()
+            .fingerprint
+    );
+    claude::update_account_tokens(
+        &first.account_pins["claude"].label,
+        "later-access",
+        "later-refresh",
+        i64::MAX,
+    )
+    .unwrap();
+    let script = source.join("capture-transport.sh");
+    std::fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+case "$1" in
+  *"'--provider' 'claude'"*) cat > "$JCODE_HOME/wire-claude" ;;
+  *"'--provider' 'openai'"*) cat > "$JCODE_HOME/wire-openai" ;;
+  *) exit 93 ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let target = Target {
+        transport: Some(script.to_string_lossy().into_owned()),
+        ..Target::default()
+    };
+    for payload in &payloads {
+        let baseline = send_credentials(&target, "offline", payload).unwrap();
+        let wire =
+            std::fs::read(source.join(format!("wire-{}", payload.provider().as_str()))).unwrap();
+        assert_eq!(wire, payload.as_bytes());
+        for id in [&first.id, &second.id] {
+            let proof = proofs[id]
+                .iter()
+                .find(|p| p.account == baseline.account)
+                .unwrap();
+            assert_eq!(proof.fingerprint, baseline.fingerprint);
+        }
+    }
+    select_home(&sandbox.root().join("capture-destination"));
+    for payload in &payloads {
+        let wire =
+            std::fs::read(source.join(format!("wire-{}", payload.provider().as_str()))).unwrap();
+        transfer::import_cloud_handoff_at(
+            &storage::jcode_dir().unwrap(),
+            payload.provider(),
+            payload.label(),
+            &wire,
+        )
+        .unwrap();
+    }
+    for mut sess in [first, second] {
+        let expected = proofs[&sess.id].clone();
+        rebind_account_pins(&mut sess, &expected).unwrap();
+        assert_eq!(
+            account_pins::load_claude(&sess.account_pins["claude"])
+                .unwrap()
+                .0
+                .access_token,
+            "captured-access"
+        );
+    }
+}
+
+#[test]
+fn unavailable_inactive_pin_is_retained_while_active_pin_stays_strict() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    select_home(&sandbox.root().join("source"));
+    let (mut sess, _) = source_accounts();
+    let inactive = sess.account_pins["openai"].clone();
+    codex::remove_account(&inactive.label).unwrap();
+    let (payloads, proofs) =
+        capture_credentials(std::slice::from_ref(&sess), &cloud_accounts().unwrap()).unwrap();
+    assert_eq!(payloads.len(), 1);
+    select_home(&sandbox.root().join("destination"));
+    import(&payloads);
+    let expected = proofs[&sess.id].clone();
+    rebind_account_pins(&mut sess, &expected).unwrap();
+    assert_eq!(sess.account_pins["openai"], inactive);
+    assert!(account_pins::load_openai(&inactive).is_err());
+    assert!(account_pins::load_claude(&sess.account_pins["claude"]).is_ok());
+    claude::remove_account(&sess.account_pins["claude"].label).unwrap();
+    assert!(capture_credentials(std::slice::from_ref(&sess), &[]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn return_uses_actual_credential_export_after_archive_snapshot_refresh() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (local, target, source) = return_fixture(sandbox.root(), false);
+    select_home(&sandbox.root().join("cloud"));
+    for (family, provider) in [
+        ("claude", TransferProvider::Claude),
+        ("openai", TransferProvider::OpenAi),
+    ] {
+        let label = &local.account_pins[family].label;
+        match provider {
+            TransferProvider::Claude => {
+                claude::update_account_tokens(label, "second-rotation", "second-refresh", i64::MAX)
+                    .unwrap()
+            }
+            TransferProvider::OpenAi => codex::update_account_tokens(
+                label,
+                "second-rotation",
+                "second-refresh",
+                None,
+                None,
+                Some(i64::MAX),
+            )
+            .unwrap(),
+        }
+        let payload = transfer::export_cloud_account_at(
+            &storage::jcode_dir().unwrap(),
+            provider,
+            Some(label),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join(format!("{}.payload", provider.as_str())),
+            payload.as_bytes(),
+        )
+        .unwrap();
+    }
+    select_home(&source);
+    run_return(Some(&local.id), &target, false, false).unwrap();
+    let returned = session::Session::load(&local.id).unwrap();
+    for family in ["claude", "openai"] {
+        assert_eq!(
+            returned.account_pins[family].record_id,
+            local.account_pins[family].record_id
+        );
+    }
+    assert_eq!(
+        account_pins::load_claude(&returned.account_pins["claude"])
+            .unwrap()
+            .0
+            .access_token,
+        "second-rotation"
+    );
+    assert_eq!(
+        account_pins::load_openai(&returned.account_pins["openai"])
+            .unwrap()
+            .0
+            .access_token,
+        "second-rotation"
+    );
+    assert!(storage::read_session_lease(&local.id).unwrap().is_here());
+    assert_eq!(
+        std::fs::read_to_string(source.join("return-calls")).unwrap(),
+        "credentials\ncredentials\ncomplete\n"
     );
 }
