@@ -47,7 +47,7 @@ pub(super) struct PromptHistoryScope {
     display_is_backfill: bool,
     sessions: std::collections::HashMap<String, Vec<String>>,
     switch_pending: bool,
-    switch_request: Option<u64>,
+    pub(super) switch_request: Option<u64>,
     pending_submissions: Vec<String>,
 }
 
@@ -65,85 +65,112 @@ pub(crate) fn history_file_path(session_id: &str) -> Option<PathBuf> {
         })
 }
 
-/// Load persisted prompts (oldest → newest), deduped keeping the most recent
-/// occurrence, capped to [`MAX_PERSISTED_PROMPTS`].
+/// Load persisted prompts (oldest to newest), deduped and capped.
 pub(crate) fn load_from_path(path: &Path) -> Vec<String> {
-    let Ok(content) = std::fs::read_to_string(path) else {
+    let Ok(entries) = read_history(path) else {
         return Vec::new();
     };
-    let entries: Vec<String> = content
+    entries
+}
+
+fn read_history(path: &Path) -> std::io::Result<Vec<String>> {
+    let content = std::fs::read_to_string(path)?;
+    let entries = content
         .lines()
         .filter_map(|line| serde_json::from_str::<String>(line).ok())
         .filter(|entry| !entry.trim().is_empty())
         .collect();
-    let mut deduped = dedupe_keep_last(entries);
-    if deduped.len() > MAX_PERSISTED_PROMPTS {
-        let overflow = deduped.len() - MAX_PERSISTED_PROMPTS;
-        deduped.drain(..overflow);
+    let mut entries = dedupe_keep_last(entries);
+    if entries.len() > MAX_PERSISTED_PROMPTS {
+        entries.drain(..entries.len() - MAX_PERSISTED_PROMPTS);
     }
-    deduped
+    Ok(entries)
 }
 
-/// Append one prompt to the history file, compacting when the append-only
-/// file grows past [`COMPACT_THRESHOLD_LINES`]. Appends (rather than
-/// rewriting) so concurrent jcode processes do not clobber each other;
-/// dedupe happens at load and compaction time.
-pub(crate) fn append_to_path(path: &Path, text: &str) {
-    append_prompts_to_path(path, std::iter::once(text));
-}
-
-/// Re-emit an ordered snapshot after historical backfill. Loading dedupes by
-/// last occurrence, so disk order matches memory without overwriting another
-/// client's appended prompts.
-pub(super) fn append_snapshot_to_path(path: &Path, entries: &[String]) {
-    append_prompts_to_path(path, entries.iter().map(String::as_str));
-}
-
-fn append_prompts_to_path<'a>(path: &Path, entries: impl IntoIterator<Item = &'a str>) {
-    let mut entries = entries
-        .into_iter()
-        .map(str::trim)
-        .filter(|text| !text.is_empty());
-    let Some(first) = entries.next() else {
-        return;
-    };
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        crate::logging::warn(&format!(
-            "prompt history: failed to create {}: {}",
-            parent.display(),
-            error
-        ));
-        return;
+fn lock_history(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    use std::io::Write;
-    match std::fs::OpenOptions::new()
+    // Compaction replaces the journal inode, so lock a stable sibling instead.
+    let file = std::fs::OpenOptions::new()
         .create(true)
-        .append(true)
-        .open(path)
-    {
-        Ok(mut file) => {
-            for text in std::iter::once(first).chain(entries) {
-                let Ok(line) = serde_json::to_string(text) else {
-                    continue;
-                };
-                if let Err(error) = writeln!(file, "{}", line) {
-                    crate::logging::warn(&format!("prompt history: append failed: {}", error));
-                    return;
-                }
-            }
-        }
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Append an explicit submission under the same lock as historical backfills.
+pub(crate) fn append_to_path(path: &Path, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    let _lock = match lock_history(path) {
+        Ok(lock) => lock,
         Err(error) => {
             crate::logging::warn(&format!(
-                "prompt history: cannot open {}: {}",
-                path.display(),
-                error
+                "prompt history: cannot lock {}: {error}",
+                path.display()
             ));
             return;
         }
+    };
+    if let Err(error) = append_locked(path, std::iter::once(text)) {
+        crate::logging::warn(&format!("prompt history: append failed: {error}"));
+    }
+}
+
+/// Preserve disk recency when a client's cached historical snapshot is stale.
+pub(super) fn append_snapshot_to_path(path: &Path, entries: &[String]) -> Option<Vec<String>> {
+    let _lock = match lock_history(path) {
+        Ok(lock) => lock,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "prompt history: cannot lock {}: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let latest = match read_history(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "prompt history: cannot read {}: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    let merged = backfill_history(&latest, entries.to_vec());
+    if merged != latest
+        && let Err(error) = append_locked(path, merged.iter().map(String::as_str))
+    {
+        crate::logging::warn(&format!("prompt history: backfill failed: {error}"));
+        return None;
+    }
+    Some(merged)
+}
+
+fn append_locked<'a>(
+    path: &Path,
+    entries: impl IntoIterator<Item = &'a str>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for text in entries {
+        let line = serde_json::to_string(text).map_err(std::io::Error::other)?;
+        writeln!(file, "{line}")?;
     }
     maybe_compact(path);
+    Ok(())
 }
 
 fn maybe_compact(path: &Path) {
@@ -363,6 +390,15 @@ impl App {
         }
     }
 
+    pub(super) fn wait_for_prompt_history_switch(&mut self) -> bool {
+        if self.prompt_history_scope.switch_request.is_some() {
+            self.set_status_notice("Wait for the current session switch to finish");
+            true
+        } else {
+            false
+        }
+    }
+
     fn check_prompt_history_switch(&self) -> anyhow::Result<()> {
         if self.prompt_history_scope.switch_request.is_some() {
             anyhow::bail!("Wait for the current session switch to finish");
@@ -374,8 +410,31 @@ impl App {
         &mut self,
         remote: &mut crate::tui::backend::RemoteConnection,
     ) -> anyhow::Result<()> {
-        self.check_prompt_history_switch()?;
+        if self.wait_for_prompt_history_switch() {
+            return Ok(());
+        }
         self.suspend_prompt_history_for_request(remote.clear().await?);
+        self.clear_provider_messages();
+        self.clear_display_messages();
+        self.queued_messages.clear();
+        self.queued_images.clear();
+        self.queued_commands.clear();
+        self.pasted_contents.clear();
+        self.pending_images.clear();
+        self.clear_inline_image_state();
+        self.clear_streaming_render_state();
+        self.clear_live_usage_state();
+        // Full transcript discard: diagrams and side panel pages
+        // are both orphaned (same rationale as
+        // reset_current_session; side panel is #605).
+        crate::tui::mermaid::clear_active_diagrams();
+        self.swarm_plan_items.clear();
+        self.swarm_plan_version = None;
+        self.swarm_plan_swarm_id = None;
+        super::commands_review::clear_side_panel_for_new_session(self);
+        self.is_processing = false;
+        self.status = super::ProcessingStatus::Idle;
+        self.set_status_notice("Session cleared");
         Ok(())
     }
 
@@ -449,14 +508,16 @@ impl App {
         let Some(history) = self.persisted_prompt_history.as_deref() else {
             return;
         };
-        let merged = backfill_history(history, transcript);
+        let mut merged = backfill_history(history, transcript);
         if merged == history {
             return;
         }
         if !cfg!(test)
             && let Some(path) = history_file_path(&self.prompt_history_session_id())
         {
-            append_snapshot_to_path(&path, &merged);
+            if let Some(saved) = append_snapshot_to_path(&path, &merged) {
+                merged = saved;
+            }
         }
         self.persisted_prompt_history = Some(merged);
     }

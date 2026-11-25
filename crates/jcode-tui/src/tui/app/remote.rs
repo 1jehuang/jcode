@@ -307,7 +307,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing {
+    if !app.is_processing && app.prompt_history_scope.switch_request.is_none() {
         if let Some(request) = app.take_pending_catchup_resume() {
             match app.resume_session(remote, &request.target_session_id).await {
                 Ok(()) => {

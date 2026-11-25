@@ -18,6 +18,10 @@ pub(super) async fn handle_workspace_navigation_key(
         return Ok(false);
     };
 
+    if app.wait_for_prompt_history_switch() {
+        return Ok(true);
+    }
+
     let target = match direction {
         WorkspaceNavigationDirection::Left => app.workspace_client.navigate_left(),
         WorkspaceNavigationDirection::Right => app.workspace_client.navigate_right(),

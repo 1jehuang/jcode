@@ -294,7 +294,7 @@ fn test_prompt_history_replay_only_slash_expansion_backfills_and_survives_reopen
     let path = dir.path().join("replay-backfill.jsonl");
     append_to_path(&path, "FIRST");
     append_to_path(&path, "SECOND");
-    append_snapshot_to_path(&path, &app.merged_prompt_history());
+    assert!(append_snapshot_to_path(&path, &app.merged_prompt_history()).is_some());
     assert_eq!(load_from_path(&path), vec!["ARG", "FIRST", "SECOND"]);
     let mut reopened = create_test_app();
     reopened.persisted_prompt_history = Some(load_from_path(&path));
@@ -452,7 +452,7 @@ fn test_prompt_history_serializes_switches_until_acknowledged() {
                 .await
                 .is_err()
         );
-        assert!(app.clear_session(&mut remote).await.is_err());
+        assert!(app.clear_session(&mut remote).await.is_ok());
         assert!(app.merged_prompt_history().is_empty());
         line.clear();
         assert!(
@@ -517,4 +517,142 @@ fn test_prompt_history_switch_buffer_excludes_login_responses() {
     app.pending_login = None;
     app.fail_prompt_history_switch(77);
     assert_eq!(app.merged_prompt_history(), vec!["source prompt"]);
+}
+
+#[test]
+fn test_prompt_history_repeated_workspace_key_waits_without_exiting() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+        app.set_remote_prompt_history_session("navigation-source");
+        app.workspace_client.enable(
+            Some("navigation-source"),
+            &[
+                "navigation-source".into(),
+                "navigation-target".into(),
+                "navigation-third".into(),
+            ],
+        );
+        app.workspace_navigation_keys.right = vec![crate::tui::keybind::KeyBinding {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::ALT,
+        }];
+        app.handle_remote_key(KeyCode::Right, KeyModifiers::ALT, &mut remote)
+            .await
+            .unwrap();
+        assert!(
+            app.handle_remote_key(KeyCode::Right, KeyModifiers::ALT, &mut remote)
+                .await
+                .is_ok()
+        );
+        assert!(
+            app.status_notice()
+                .is_some_and(|notice| notice.contains("session switch"))
+        );
+        let rows = app
+            .workspace_client
+            .visible_rows(1, Some("navigation-source"), false);
+        assert_eq!(rows[0].focused_index, Some(1));
+    });
+}
+
+#[test]
+fn test_prompt_history_clear_during_switch_waits_without_discarding_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+        app.set_remote_prompt_history_session("clear-source");
+        app.replace_display_messages(vec![DisplayMessage::user("keep this transcript")]);
+        app.resume_session(&mut remote, "clear-target")
+            .await
+            .unwrap();
+        app.input = "/clear".into();
+        app.cursor_pos = app.input.len();
+        assert!(
+            app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote)
+                .await
+                .is_ok()
+        );
+        assert_eq!(app.input, "/clear");
+        assert!(
+            app.display_messages
+                .iter()
+                .any(|message| message.content == "keep this transcript")
+        );
+        assert!(
+            app.status_notice()
+                .is_some_and(|notice| notice.contains("session switch"))
+        );
+    });
+}
+
+#[test]
+fn test_prompt_history_backfill_preserves_another_clients_newer_submission() {
+    use crate::tui::app::prompt_history::{append_snapshot_to_path, append_to_path, load_from_path};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared.jsonl");
+    append_to_path(&path, "FIRST");
+    append_to_path(&path, "SECOND");
+    let mut stale = load_from_path(&path);
+    append_to_path(&path, "NEW");
+    stale.insert(0, "ARG".into());
+    assert!(append_snapshot_to_path(&path, &stale).is_some());
+    assert_eq!(load_from_path(&path), vec!["ARG", "FIRST", "SECOND", "NEW"]);
+}
+
+#[test]
+fn test_prompt_history_concurrent_backfills_and_submissions_preserve_order_through_compaction() {
+    use crate::tui::app::prompt_history::{
+        MAX_PERSISTED_PROMPTS, append_snapshot_to_path, append_to_path, load_from_path,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::sync::Arc::new(dir.path().join("concurrent.jsonl"));
+    std::fs::write(
+        path.as_ref(),
+        "\"FIRST\"\n\"SECOND\"\n".repeat(MAX_PERSISTED_PROMPTS + 1),
+    )
+    .unwrap();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let submissions = {
+        let path = path.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            start.wait();
+            for i in 0..12 {
+                append_to_path(&path, &format!("NEW-{i}"));
+            }
+        })
+    };
+    let backfills = {
+        let path = path.clone();
+        let start = start.clone();
+        std::thread::spawn(move || {
+            let stale = vec!["ARG".into(), "FIRST".into(), "SECOND".into()];
+            start.wait();
+            for _ in 0..12 {
+                assert!(append_snapshot_to_path(&path, &stale).is_some());
+            }
+        })
+    };
+    submissions.join().unwrap();
+    backfills.join().unwrap();
+    let mut expected = vec!["ARG".to_string(), "FIRST".into(), "SECOND".into()];
+    expected.extend((0..12).map(|i| format!("NEW-{i}")));
+    assert_eq!(load_from_path(&path), expected);
+}
+
+#[test]
+fn test_prompt_history_backfill_lock_failure_preserves_existing_journal() {
+    use crate::tui::app::prompt_history::{append_snapshot_to_path, append_to_path, load_from_path};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locked.jsonl");
+    append_to_path(&path, "NEW");
+    std::fs::remove_file(path.with_extension("lock")).unwrap();
+    std::fs::create_dir(path.with_extension("lock")).unwrap();
+    assert!(append_snapshot_to_path(&path, &["OLD".into()]).is_none());
+    assert_eq!(load_from_path(&path), vec!["NEW"]);
 }

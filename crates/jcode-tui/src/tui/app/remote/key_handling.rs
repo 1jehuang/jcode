@@ -280,6 +280,12 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             );
             return Ok(());
         }
+        if prepared.expanded.trim() == "/clear" && app.prompt_history_scope.switch_request.is_some()
+        {
+            super::input_dispatch::restore_prepared_remote_input(app, prepared);
+            app.wait_for_prompt_history_switch();
+            return Ok(());
+        }
         let trimmed = prepared.expanded.trim();
 
         // Before the SSH gate: `/local` must work from a client attached
@@ -1125,27 +1131,6 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
 
         if trimmed == "/clear" {
             app.clear_session(remote).await?;
-            app.clear_provider_messages();
-            app.clear_display_messages();
-            app.queued_messages.clear();
-            app.queued_images.clear();
-            app.queued_commands.clear();
-            app.pasted_contents.clear();
-            app.pending_images.clear();
-            app.clear_inline_image_state();
-            app.clear_streaming_render_state();
-            app.clear_live_usage_state();
-            // Full transcript discard: diagrams and side panel pages
-            // are both orphaned (same rationale as
-            // reset_current_session; side panel is #605).
-            crate::tui::mermaid::clear_active_diagrams();
-            app.swarm_plan_items.clear();
-            app.swarm_plan_version = None;
-            app.swarm_plan_swarm_id = None;
-            super::super::commands_review::clear_side_panel_for_new_session(app);
-            app.is_processing = false;
-            app.status = ProcessingStatus::Idle;
-            app.set_status_notice("Session cleared");
             return Ok(());
         }
 
