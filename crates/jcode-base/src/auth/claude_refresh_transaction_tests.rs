@@ -83,6 +83,49 @@ async fn claude_cli_validation_follows_only_its_original_refresh_chain() {
         );
     }
 }
+#[tokio::test]
+async fn claude_cli_validation_follows_owned_spawned_refreshes_only() {
+    use crate::auth::claude_cli_completion::{
+        inherit_validation_refreshes, with_validation_refreshes,
+    };
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for owned in [true, false] {
+        seed();
+        let credentials = claude::load_credentials_for_account("work").unwrap();
+        let validated = with_validation_refreshes(credentials, async {
+            let refresh = async {
+                refresh_claude_tokens_with("original-refresh", "work", async { Ok(rotated()) })
+                    .await
+                    .unwrap();
+            };
+            if owned {
+                tokio::spawn(inherit_validation_refreshes(refresh))
+                    .await
+                    .unwrap();
+            } else {
+                tokio::spawn(refresh).await.unwrap();
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            validated.refresh_token,
+            if owned {
+                "rotated-refresh"
+            } else {
+                "original-refresh"
+            }
+        );
+        assert_eq!(
+            claude::load_credentials_for_account("work")
+                .unwrap()
+                .refresh_token,
+            "rotated-refresh"
+        );
+    }
+}
+
 fn auth_bytes() -> Vec<u8> {
     std::fs::read(crate::storage::jcode_dir().unwrap().join("auth.json")).unwrap()
 }
