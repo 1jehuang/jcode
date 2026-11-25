@@ -2,6 +2,58 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
+pub(super) fn describe_config_reload(
+    forced: bool,
+    previous: &ConfigCacheFingerprint,
+    next: &ConfigCacheFingerprint,
+) -> String {
+    let mut parts = Vec::new();
+    if forced {
+        parts.push("forced=true".to_string());
+    }
+    if previous.path != next.path {
+        parts.push(format!(
+            "path={:?}->{:?}",
+            previous.path.as_ref().map(|p| p.display().to_string()),
+            next.path.as_ref().map(|p| p.display().to_string())
+        ));
+    }
+    if previous.modified != next.modified {
+        parts.push("modified_changed=true".to_string());
+    }
+    if previous.len != next.len {
+        parts.push(format!("len={:?}->{:?}", previous.len, next.len));
+    }
+    if previous.global_path != next.global_path {
+        parts.push(format!(
+            "global_path={:?}->{:?}",
+            previous
+                .global_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            next.global_path.as_ref().map(|p| p.display().to_string())
+        ));
+    }
+    if previous.global_modified != next.global_modified {
+        parts.push("global_modified_changed=true".to_string());
+    }
+    if previous.global_len != next.global_len {
+        parts.push(format!(
+            "global_len={:?}->{:?}",
+            previous.global_len, next.global_len
+        ));
+    }
+    let env_changes = describe_env_changes(&previous.env, &next.env);
+    if !env_changes.is_empty() {
+        parts.push(format!("env=[{}]", env_changes.join(", ")));
+    }
+    if parts.is_empty() {
+        "unchanged".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 type TrustedExternalAuthKey = (
     Option<PathBuf>,
     Option<std::time::SystemTime>,
@@ -157,7 +209,10 @@ impl Config {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        let mut cfg = Self::load_from_path(&path)?.unwrap_or_default();
+        let mut cfg = match Self::load_from_path(&path)? {
+            Some(config) => config,
+            None => Self::default(),
+        };
         #[cfg(test)]
         role_transaction_tests::loaded();
         match target {
@@ -204,10 +259,11 @@ impl Config {
             return;
         };
         let path = PathBuf::from(global_home).join("config.toml");
-        let Ok(global) = Self::load_from_path(&path) else {
-            return;
+        let global = match Self::load_from_path(&path) {
+            Ok(Some(config)) => config,
+            Ok(None) => Self::default(),
+            Err(_) => return,
         };
-        let global = global.unwrap_or_default();
         config.agents.swarm_model = global.agents.swarm_model;
         config.agents.memory_model = global.agents.memory_model;
         config.autoreview.model = global.autoreview.model;

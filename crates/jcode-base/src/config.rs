@@ -339,7 +339,14 @@ impl ConfigCacheFingerprint {
         let global_path = Config::global_path();
         let global_metadata = global_path
             .as_ref()
-            .and_then(|path| std::fs::metadata(path).ok());
+            .and_then(|path| match std::fs::metadata(path) {
+                Ok(metadata) => Some(metadata),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    crate::logging::warn(&format!("Cannot read global config metadata: {error}"));
+                    None
+                }
+            });
         Self {
             path,
             modified: metadata
@@ -347,9 +354,17 @@ impl ConfigCacheFingerprint {
                 .and_then(|metadata| metadata.modified().ok()),
             len: metadata.as_ref().map(std::fs::Metadata::len),
             global_path,
-            global_modified: global_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.modified().ok()),
+            global_modified: global_metadata.as_ref().and_then(|metadata| {
+                match metadata.modified() {
+                    Ok(modified) => Some(modified),
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot read global config modification time: {error}"
+                        ));
+                        None
+                    }
+                }
+            }),
             global_len: global_metadata.as_ref().map(std::fs::Metadata::len),
             env: config_env_fingerprint(),
         }
@@ -429,7 +444,7 @@ pub fn config() -> &'static Config {
         let fingerprint = ConfigCacheFingerprint::current();
         cache.last_checked = now;
         if cache.force_reload || cache.fingerprint != fingerprint {
-            reload_reason = Some(describe_config_reload(
+            reload_reason = Some(config_file::describe_config_reload(
                 cache.force_reload,
                 &cache.fingerprint,
                 &fingerprint,
@@ -478,58 +493,6 @@ pub fn config() -> &'static Config {
     }
 
     config
-}
-
-fn describe_config_reload(
-    forced: bool,
-    previous: &ConfigCacheFingerprint,
-    next: &ConfigCacheFingerprint,
-) -> String {
-    let mut parts = Vec::new();
-    if forced {
-        parts.push("forced=true".to_string());
-    }
-    if previous.path != next.path {
-        parts.push(format!(
-            "path={:?}->{:?}",
-            previous.path.as_ref().map(|p| p.display().to_string()),
-            next.path.as_ref().map(|p| p.display().to_string())
-        ));
-    }
-    if previous.modified != next.modified {
-        parts.push("modified_changed=true".to_string());
-    }
-    if previous.len != next.len {
-        parts.push(format!("len={:?}->{:?}", previous.len, next.len));
-    }
-    if previous.global_path != next.global_path {
-        parts.push(format!(
-            "global_path={:?}->{:?}",
-            previous
-                .global_path
-                .as_ref()
-                .map(|p| p.display().to_string()),
-            next.global_path.as_ref().map(|p| p.display().to_string())
-        ));
-    }
-    if previous.global_modified != next.global_modified {
-        parts.push("global_modified_changed=true".to_string());
-    }
-    if previous.global_len != next.global_len {
-        parts.push(format!(
-            "global_len={:?}->{:?}",
-            previous.global_len, next.global_len
-        ));
-    }
-    let env_changes = describe_env_changes(&previous.env, &next.env);
-    if !env_changes.is_empty() {
-        parts.push(format!("env=[{}]", env_changes.join(", ")));
-    }
-    if parts.is_empty() {
-        "unchanged".to_string()
-    } else {
-        parts.join(" ")
-    }
 }
 
 fn describe_env_changes(previous: &[(String, String)], next: &[(String, String)]) -> Vec<String> {
