@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
@@ -31,7 +31,7 @@ pub use model::{
     format_progress_summary, render_progress_bar,
 };
 use model::{
-    EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
+    EXIT_MARKER_PREFIX, RunningTask, TerminalClaim, normalize_delivery, progress_equivalent,
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
@@ -52,6 +52,93 @@ pub struct BackgroundTaskManager {
 }
 
 impl BackgroundTaskManager {
+    const OUTPUT_PREVIEW_BYTES: usize = 500;
+
+    async fn read_output_preview(path: &std::path::Path) -> String {
+        let mut file = match File::open(path).await {
+            Ok(file) => file.take((Self::OUTPUT_PREVIEW_BYTES + 4) as u64),
+            Err(_) => return String::new(),
+        };
+        let mut bytes = Vec::with_capacity(Self::OUTPUT_PREVIEW_BYTES + 4);
+        if file.read_to_end(&mut bytes).await.is_err() {
+            return String::new();
+        }
+        let read = bytes.len();
+        let is_long = read > Self::OUTPUT_PREVIEW_BYTES;
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error) if error.error_len().is_none() => {
+                let Ok(text) = std::str::from_utf8(&bytes[..error.valid_up_to()]) else {
+                    return String::new();
+                };
+                text
+            }
+            Err(_) => return String::new(),
+        };
+        let preview = crate::util::truncate_str(valid, Self::OUTPUT_PREVIEW_BYTES);
+        if is_long {
+            format!("{preview}...")
+        } else {
+            preview.to_string()
+        }
+    }
+
+    async fn read_output_exit_code(path: &std::path::Path) -> Option<i32> {
+        const CHUNK_BYTES: usize = 64 * 1024;
+        let mut file = File::open(path).await.ok()?;
+        let mut offset = file.metadata().await.ok()?.len();
+        if offset == 0 {
+            return None;
+        }
+
+        // Walk backward from the initial EOF. Read each chunk immediately
+        // before the unfinished line carried over from the chunk to its right.
+        let mut bytes = vec![0; 2 * CHUNK_BYTES];
+        let mut carry_len = 0;
+        let mut discarding_long_line = false;
+        while offset > 0 {
+            let size = offset.min(CHUNK_BYTES as u64) as usize;
+            offset -= size as u64;
+            let start = CHUNK_BYTES - size;
+            file.seek(std::io::SeekFrom::Start(offset)).await.ok()?;
+            file.read_exact(&mut bytes[start..CHUNK_BYTES]).await.ok()?;
+
+            let mut lines = bytes[start..CHUNK_BYTES + carry_len]
+                .rsplit(|&byte| byte == b'\n')
+                .peekable();
+            if discarding_long_line {
+                lines.next();
+                if lines.peek().is_none() {
+                    continue;
+                }
+                discarding_long_line = false;
+            }
+
+            while let Some(line) = lines.next() {
+                if offset != 0 && lines.peek().is_none() {
+                    // The generated marker fits in one chunk. For longer lines,
+                    // discard everything up to the preceding newline, not just
+                    // the carry, so a fragment can't look like a complete marker.
+                    if line.len() > CHUNK_BYTES {
+                        carry_len = 0;
+                        discarding_long_line = true;
+                    } else {
+                        carry_len = line.len();
+                        bytes.copy_within(start..start + carry_len, CHUNK_BYTES);
+                    }
+                    break;
+                }
+                if line.len() <= CHUNK_BYTES
+                    && let Some(code) =
+                        Self::parse_exit_code_from_output(&String::from_utf8_lossy(line))
+                {
+                    return Some(code);
+                }
+            }
+        }
+        None
+    }
+
     /// Create a manager rooted at a specific output directory.
     ///
     /// Primarily for tests; production code should use [`global`].
@@ -153,6 +240,25 @@ impl BackgroundTaskManager {
 
     async fn finalize_detached_status_if_needed(
         &self,
+        status: TaskStatusFile,
+        status_path: &std::path::Path,
+    ) -> TaskStatusFile {
+        if status.status != BackgroundTaskStatus::Running || !status.detached {
+            return status;
+        }
+        // Terminal transitions of detached tasks (natural exit here, or
+        // `cancel`) serialize on the status lock and re-read the file, so only
+        // the first writes a terminal status and publishes its completion.
+        let _status_guard = self.progress_updates.lock().await;
+        let status = self.read_status_file(status_path).await.unwrap_or(status);
+        self.finalize_detached_status_locked(status, status_path)
+            .await
+    }
+
+    /// [`Self::finalize_detached_status_if_needed`] for callers already
+    /// holding `progress_updates`, with `status` read under that lock.
+    async fn finalize_detached_status_locked(
+        &self,
         mut status: TaskStatusFile,
         status_path: &std::path::Path,
     ) -> TaskStatusFile {
@@ -171,8 +277,11 @@ impl BackgroundTaskManager {
         }
 
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
+        let exit_code = match reaped_exit {
+            Some(exit_code) => Some(exit_code),
+            None => Self::read_output_exit_code(&output_path).await,
+        };
+        let output_preview = Self::read_output_preview(&output_path).await;
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
         let final_status = if matches!(exit_code, Some(0)) {
@@ -202,11 +311,6 @@ impl BackgroundTaskManager {
 
         self.write_status_file(status_path, &status).await;
 
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
@@ -296,12 +400,7 @@ impl BackgroundTaskManager {
         self.write_status_file(status_path, &status).await;
 
         let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
+        let output_preview = Self::read_output_preview(&output_path).await;
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),
             tool_name: status.tool_name.clone(),
@@ -501,10 +600,16 @@ impl BackgroundTaskManager {
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let terminal = TerminalClaim::default();
+        let terminal_for_task = terminal.clone();
 
         // Spawn the background task
         let handle = tokio::spawn(runtime_activity.scope(async move {
             let result = execute_fn(output_path_clone.clone()).await;
+            // A cancel that already won owns the status write and the event.
+            if !terminal_for_task.claim() {
+                return result;
+            }
 
             let duration_secs = started_at.elapsed().as_secs_f64();
             let (status, exit_code, error) = match &result {
@@ -581,16 +686,7 @@ impl BackgroundTaskManager {
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             // Read output preview for notification
-            let output_preview = tokio::fs::read_to_string(&output_path_clone)
-                .await
-                .map(|s| {
-                    if s.len() > 500 {
-                        format!("{}...", crate::util::truncate_str(&s, 500))
-                    } else {
-                        s
-                    }
-                })
-                .unwrap_or_default();
+            let output_preview = Self::read_output_preview(&output_path_clone).await;
 
             // Publish completion event to the bus
             Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
@@ -620,6 +716,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339,
             delivery_flags: delivery_flags_tx,
+            terminal,
             handle,
         };
 
@@ -724,9 +821,15 @@ impl BackgroundTaskManager {
         let status_updates = Arc::clone(&self.progress_updates);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
+        let terminal = TerminalClaim::default();
+        let terminal_for_task = terminal.clone();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
             let tool_result = (&mut handle.0).await;
             let duration_secs = started_at.elapsed().as_secs_f64();
+            // A cancel that already won owns the status write and the event.
+            if !terminal_for_task.claim() {
+                return Ok(TaskResult::failed(None, "Cancelled by user"));
+            }
 
             let (status, exit_code, error, output_text) = match tool_result {
                 Ok(Ok(output)) => (
@@ -842,6 +945,7 @@ impl BackgroundTaskManager {
             started_at,
             started_at_rfc3339: initial_status.started_at.clone(),
             delivery_flags: delivery_flags_tx,
+            terminal,
             handle: wrapper_handle,
         };
 
@@ -1252,6 +1356,30 @@ impl BackgroundTaskManager {
         Ok(Some(status))
     }
 
+    /// Publish the terminal event for a user/agent-initiated cancel.
+    ///
+    /// Clients only retire a `bg N` status row on a completion event, and the
+    /// status file alone never reaches them. Silent (`notify=false`,
+    /// `wake=false`): the canceller already knows, so no "task just finished"
+    /// turn may be started; `background_activity` delivery still clears the row.
+    async fn publish_cancelled(&self, status: &TaskStatusFile) {
+        let output_path = self.output_path_for(&status.task_id);
+        let output_preview = Self::read_output_preview(&output_path).await;
+        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+            task_id: status.task_id.clone(),
+            tool_name: status.tool_name.clone(),
+            display_name: status.display_name.clone(),
+            session_id: status.session_id.clone(),
+            status: BackgroundTaskStatus::Failed,
+            exit_code: None,
+            output_preview,
+            output_file: output_path,
+            duration_secs: status.duration_secs.unwrap_or_default(),
+            notify: false,
+            wake: false,
+        }));
+    }
+
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
         self.cancel_with_grace(task_id, std::time::Duration::from_millis(400))
@@ -1265,9 +1393,19 @@ impl BackgroundTaskManager {
         task_id: &str,
         _graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
+        // Exactly one terminal transition per task: claim it from the wrapper
+        // before aborting. If the wrapper already claimed it, its natural
+        // completion (status + event with the original flags) stands.
+        let task = {
+            let mut tasks = self.tasks.write().await;
+            match tasks.get(task_id) {
+                Some(task) if task.terminal.claim() => tasks.remove(task_id),
+                Some(_) => return Ok(false),
+                None => None,
+            }
+        };
         // Never hold the map or status lock while awaiting the task: completion
         // needs both locks before it can exit.
-        let task = self.tasks.write().await.remove(task_id);
         if let Some(mut task) = task {
             task.handle.abort();
             let _ = (&mut task.handle).await;
@@ -1306,6 +1444,7 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
+            self.publish_cancelled(&final_status).await;
 
             Ok(true)
         } else {
@@ -1316,7 +1455,7 @@ impl BackgroundTaskManager {
                 return Ok(false);
             };
             status = self
-                .finalize_detached_status_if_needed(status, &status_path)
+                .finalize_detached_status_locked(status, &status_path)
                 .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
@@ -1353,6 +1492,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            self.publish_cancelled(&status).await;
             Ok(true)
         }
     }
