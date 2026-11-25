@@ -686,11 +686,15 @@ fn spawn_persistent_ws_keepalive_with_interval(
     })
 }
 
+#[path = "openai_credentials.rs"]
+mod openai_credentials;
+use openai_credentials::CachedCredentials;
+
 pub struct OpenAIProvider {
     client: Client,
-    credentials: Arc<RwLock<CodexCredentials>>,
+    credentials: Arc<RwLock<CachedCredentials>>,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
-    oauth_account: StdRwLock<Option<String>>,
+    oauth_account: Arc<StdRwLock<Option<String>>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     cache_session_id: StdRwLock<String>,
@@ -849,9 +853,9 @@ impl OpenAIProvider {
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
-            credentials: Arc::new(RwLock::new(credentials)),
+            credentials: Arc::new(RwLock::new(credentials.into())),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
-            oauth_account: StdRwLock::new(None),
+            oauth_account: Arc::new(StdRwLock::new(None)),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             cache_session_id: StdRwLock::new(Self::new_cache_session_id()),
@@ -894,39 +898,13 @@ impl OpenAIProvider {
 
     fn refresh_account_label(&self) -> Option<String> {
         self.oauth_account_label()
-            .or_else(jcode_base::auth::codex::active_account_label)
-    }
-
-    pub(crate) fn reload_credentials_now(&self) {
-        let mode = self
-            .credential_mode
-            .try_read()
-            .map(|mode| *mode)
-            .unwrap_or(OpenAICredentialMode::Auto);
-        if let Ok(credentials) = self.load_selected_credentials(mode) {
-            match self.credentials.try_write() {
-                Ok(mut guard) => {
-                    *guard = credentials;
-                    self.browser_only.store(false, AtomicOrdering::Release);
-                    drop(guard);
-                    self.reload_cached_reasoning_efforts();
-                }
-                Err(_) => {
-                    jcode_base::logging::info(
-                        "OpenAI credentials were updated on disk, but the in-memory credential lock was busy; async refresh will retry",
-                    );
-                }
-            }
-        }
-
-        self.clear_persistent_ws_try("credentials reloaded");
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {
         let credentials = self.load_selected_credentials(mode)?;
         match self.credentials.try_write() {
             Ok(mut guard) => {
-                *guard = credentials;
+                openai_credentials::adopt_stored(&mut guard, credentials);
                 self.browser_only.store(false, AtomicOrdering::Release);
                 drop(guard);
                 self.reload_cached_reasoning_efforts();

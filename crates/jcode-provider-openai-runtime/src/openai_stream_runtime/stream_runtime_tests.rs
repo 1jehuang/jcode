@@ -90,14 +90,17 @@ fn service_tier_headers_follow_serialized_tier_on_both_transports() {
     }
 }
 
-fn dummy_credentials() -> Arc<RwLock<CodexCredentials>> {
-    Arc::new(RwLock::new(CodexCredentials {
-        access_token: "at_old".into(),
-        refresh_token: "rt_old".into(),
-        id_token: None,
-        account_id: Some("acct_dummy".into()),
-        expires_at: Some(1),
-    }))
+fn dummy_credentials() -> Arc<RwLock<CachedCredentials>> {
+    Arc::new(RwLock::new(
+        CodexCredentials {
+            access_token: "at_old".into(),
+            refresh_token: "rt_old".into(),
+            id_token: None,
+            account_id: Some("acct_dummy".into()),
+            expires_at: Some(1),
+        }
+        .into(),
+    ))
 }
 
 fn rotated_tokens() -> oauth::OAuthTokens {
@@ -114,12 +117,13 @@ fn rotated_tokens() -> oauth::OAuthTokens {
 /// leave the consumed refresh token in memory.
 #[tokio::test]
 async fn refresh_commit_survives_caller_cancellation() {
+    let _env = crate::openai_credentials::tests::TestEnv::new();
     let credentials = dummy_credentials();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
     let caller_credentials = Arc::clone(&credentials);
     let caller = tokio::spawn(async move {
-        refresh_and_commit_openai_tokens(&caller_credentials, async move {
+        refresh_and_commit_openai_tokens(&caller_credentials, "rt_old", None, async move {
             started_tx.send(()).unwrap();
             release_rx.await.unwrap();
             Ok(rotated_tokens())
@@ -146,8 +150,9 @@ async fn refresh_commit_survives_caller_cancellation() {
 
 #[tokio::test]
 async fn refresh_failure_leaves_in_memory_credentials_untouched() {
+    let _env = crate::openai_credentials::tests::TestEnv::new();
     let credentials = dummy_credentials();
-    let err = refresh_and_commit_openai_tokens(&credentials, async {
+    let err = refresh_and_commit_openai_tokens(&credentials, "rt_old", None, async {
         anyhow::bail!("OpenAI token refresh timed out after 30s waiting for response headers")
     })
     .await

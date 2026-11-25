@@ -536,7 +536,11 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         .expect("connect websocket client");
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream: client_ws,
-        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials(), None, None),
+        identity: openai_websocket_prewarm::prewarm_identity(
+            &prewarm_test_credentials(),
+            None,
+            None,
+        ),
         cache_key: None,
         last_response_id: "resp_previous".to_string(),
         connected_at: Instant::now(),
@@ -554,7 +558,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
 
     let result = try_persistent_ws_continuation(
         &persistent_ws,
-        &Arc::new(RwLock::new(prewarm_test_credentials())),
+        &Arc::new(RwLock::new(prewarm_test_credentials().into())),
         &serde_json::json!({"model": "gpt-5.6-sol"}),
         &[
             serde_json::json!({"type": "message", "role": "user", "content": "first"}),
@@ -583,7 +587,7 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
     let (tx, _rx) = mpsc::channel(10);
     let result = try_persistent_ws_continuation(
         &persistent_ws,
-        &Arc::new(RwLock::new(credentials)),
+        &Arc::new(RwLock::new(credentials.into())),
         &serde_json::json!({"model":"gpt-5.6-sol"}),
         &[
             serde_json::json!({"role":"user", "content":"previous"}),
@@ -606,7 +610,7 @@ async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let persistent_ws = Arc::new(Mutex::new(Some(state)));
-    let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
+    let credentials = Arc::new(RwLock::new(prewarm_test_credentials().into()));
     let (tx, mut rx) = mpsc::channel(1);
     let socket = Arc::clone(&persistent_ws);
     let shared_credentials = Arc::clone(&credentials);
