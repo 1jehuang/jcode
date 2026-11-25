@@ -226,3 +226,110 @@ fn claude_refresh_cas_config_directory_must_be_absolute() {
         absolute.join(".credentials.json")
     );
 }
+
+#[tokio::test]
+async fn claude_refresh_cas_background_profile_hydration_keeps_the_rotation() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    seed();
+    let mut auth = claude::load_auth_file().unwrap();
+    auth.anthropic_accounts[0].email = None;
+    claude::save_auth_file(&auth).unwrap();
+    refresh_claude_tokens_with("original-refresh", "work", async {
+        claude::update_account_profile_metadata(
+            "work",
+            Some("hydrated@example.invalid".into()),
+            Some("new-plan".into()),
+        )
+        .unwrap();
+        Ok(rotated())
+    })
+    .await
+    .unwrap();
+    let saved = claude::load_auth_file().unwrap();
+    let account = &saved.anthropic_accounts[0];
+    assert_eq!(account.email.as_deref(), Some("hydrated@example.invalid"));
+    assert_eq!(account.subscription_type.as_deref(), Some("new-plan"));
+    assert_eq!(account.refresh, "rotated-refresh");
+    assert_eq!(account.scopes, ["user:inference"]);
+    assert_eq!(saved.active_anthropic_account.as_deref(), Some("work"));
+}
+
+#[tokio::test]
+async fn claude_refresh_cas_all_generic_external_sources_observe_approval_and_token_changes() {
+    use crate::auth::external::ExternalAuthSource;
+    use crate::config::Config;
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let _trust = EnvGuard::set("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES", None);
+    let _native = EnvGuard::set("CLAUDE_CODE_OAUTH_TOKEN", None);
+    let config_dir = sandbox.root().join("unused-native-config");
+    let _config = EnvGuard::set("CLAUDE_CONFIG_DIR", Some(config_dir.as_os_str()));
+    for source in [
+        ExternalAuthSource::Pi,
+        ExternalAuthSource::OpenClaw,
+        ExternalAuthSource::Hermes,
+    ] {
+        let entry = serde_json::json!({"type":"oauth", "provider":"anthropic",
+            "access":"external-access", "refresh":"external-refresh", "expires":1});
+        let body = match source {
+            ExternalAuthSource::Pi => serde_json::json!({"anthropic":entry}),
+            ExternalAuthSource::OpenClaw => serde_json::json!({"version":1,
+                "profiles":{"anthropic:default":entry}}),
+            ExternalAuthSource::Hermes => serde_json::json!({"version":1,
+                "credential_pool":{"anthropic":[{"auth_type":"oauth_external",
+                    "access_token":"external-access", "refresh_token":"external-refresh",
+                    "expires_at_ms":1}]}}),
+            _ => unreachable!(),
+        };
+        let path = if source == ExternalAuthSource::OpenClaw {
+            sandbox
+                .root()
+                .join("external/.openclaw/agents/main/agent/auth-profiles.json")
+        } else {
+            source.path().unwrap()
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for change in ["revoke", "source-replaced", "label-claimed", "success"] {
+            claude::save_auth_file(&JcodeAuthFile::default()).unwrap();
+            std::fs::write(&path, body.to_string()).unwrap();
+            Config::allow_external_auth_source_for_path(source.source_id(), &path).unwrap();
+            assert_eq!(
+                claude::load_credentials().unwrap().refresh_token,
+                "external-refresh"
+            );
+            let mut before = Vec::new();
+            let result = refresh_claude_tokens_with("external-refresh", "work", async {
+                match change {
+                    "revoke" => {
+                        Config::revoke_external_auth_source_for_path(source.source_id(), &path)
+                            .unwrap()
+                    }
+                    "source-replaced" => std::fs::write(
+                        &path,
+                        body.to_string()
+                            .replace("external-refresh", "replacement-refresh"),
+                    )
+                    .unwrap(),
+                    "label-claimed" => seed(),
+                    "success" => (),
+                    _ => unreachable!(),
+                }
+                before = auth_bytes();
+                Ok(rotated())
+            })
+            .await;
+            if change == "success" {
+                result.unwrap();
+                assert_eq!(
+                    claude::load_auth_file().unwrap().anthropic_accounts[0].refresh,
+                    "rotated-refresh"
+                );
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(!error.contains("external-refresh"));
+                assert_eq!(auth_bytes(), before, "{source:?} {change}");
+            }
+        }
+        Config::revoke_external_auth_source_for_path(source.source_id(), &path).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+}

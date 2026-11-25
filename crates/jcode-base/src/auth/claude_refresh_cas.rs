@@ -38,7 +38,9 @@ fn approved_external_source_holds(refresh_token: &str) -> bool {
                 &path,
             )
     }) && super::load_opencode_credentials().is_ok_and(holds);
-    claude_code || native || opencode
+    let other = crate::auth::external::load_anthropic_oauth_tokens()
+        .is_some_and(|tokens| tokens.refresh_token == refresh_token);
+    claude_code || native || opencode || other
 }
 
 /// Commit tokens refreshed after [`capture_refresh_account`], retaining the original token.
@@ -104,8 +106,18 @@ pub(super) fn commit_refresh_account(
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
     let mut matches = auth.anthropic_accounts.iter_mut().filter(|account| {
-        account.refresh == expected.refresh
-            && account_identity(account) == account_identity(expected)
+        let known_email = |account: &AnthropicAccount| {
+            account
+                .email
+                .as_deref()
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+                .map(str::to_ascii_lowercase)
+        };
+        let conflicting_email = known_email(account)
+            .zip(known_email(expected))
+            .is_some_and(|(current, original)| current != original);
+        account.refresh == expected.refresh && !conflicting_email
     });
     let account = matches.next().ok_or_else(|| {
         anyhow::anyhow!(
