@@ -298,6 +298,7 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
     with_clean_provider_test_env(|| {
         let now_ms = chrono::Utc::now().timestamp_millis() + 60_000;
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "seed-a".to_string(),
             access_token: "acc-a".to_string(),
             refresh_token: "ref-a".to_string(),
@@ -308,6 +309,7 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
         })
         .unwrap();
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "seed-b".to_string(),
             access_token: "acc-b".to_string(),
             refresh_token: "ref-b".to_string(),
@@ -737,6 +739,7 @@ fn configure_catalog_pro_account() {
     let label = "claude-otter";
     let mut auth = crate::auth::claude::JcodeAuthFile::default();
     auth.anthropic_accounts = vec![crate::auth::claude::AnthropicAccount {
+        record_id: None,
         label: label.into(),
         access: "catalog-test-access".into(),
         refresh: "catalog-test-refresh".into(),

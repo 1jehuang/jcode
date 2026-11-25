@@ -207,6 +207,7 @@ fn shadowed_claude_code_file_login_does_not_keep_new_trust() {
     std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"file-token","refreshToken":"file-refresh","expiresAt":1}}"#).unwrap();
     auth::claude::set_active_account_override(None);
     auth::claude::upsert_account(auth::claude::AnthropicAccount {
+        record_id: None,
         label: "saved".to_string(),
         access: "saved-token".to_string(),
         refresh: "saved-refresh".to_string(),

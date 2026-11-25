@@ -504,6 +504,7 @@ pub fn save_claude_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
         tokens.scopes.clone()
     };
     let account = claude_auth::AnthropicAccount {
+        record_id: None,
         label: label.to_string(),
         access: tokens.access_token.clone(),
         refresh: tokens.refresh_token.clone(),

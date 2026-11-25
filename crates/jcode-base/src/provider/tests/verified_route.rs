@@ -62,6 +62,7 @@ fn verified_claude_routes_commit_only_matching_grants_and_default_route_clears_o
         for name in ["route-previous", "route-selected"] {
             labels.push(
                 auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                    record_id: None,
                     label: name.into(),
                     access: name.into(),
                     refresh: format!("{name}-refresh"),
@@ -77,6 +78,12 @@ fn verified_claude_routes_commit_only_matching_grants_and_default_route_clears_o
         let provider = test_multi_provider_with_openai();
         let runtime = Arc::new(VerifiedRuntime(StubExternalRuntime::anthropic()));
         runtime.set_oauth_account(Some(&labels[0])).unwrap();
+        let identity_pin = auth::account_pins::claude_pin(&labels[1]).unwrap();
+        assert!(
+            runtime.set_oauth_account_pin(&identity_pin).is_err(),
+            "providers without identity support must not reduce a strong pin to a label"
+        );
+        assert_eq!(runtime.oauth_account_label(), Some(labels[0].clone()));
         *provider.anthropic.write().unwrap() = Some(runtime.clone());
         let route = RouteSelection {
             model: ALL_CLAUDE_MODELS[0].into(),

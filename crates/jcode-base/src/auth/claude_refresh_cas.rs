@@ -81,6 +81,7 @@ pub(super) fn commit_external_refresh(
         &mut auth.anthropic_accounts,
         &mut auth.active_anthropic_account,
         AnthropicAccount {
+            record_id: None,
             label: label.to_string(),
             access: tokens.access_token.clone(),
             refresh: tokens.refresh_token.clone(),

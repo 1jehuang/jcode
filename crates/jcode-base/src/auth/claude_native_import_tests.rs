@@ -63,6 +63,7 @@ fn snapshot() -> ClaudeCredentials {
 }
 fn saved(label: &str) -> AnthropicAccount {
     AnthropicAccount {
+        record_id: None,
         label: label.into(),
         access: format!("{label}-access"),
         refresh: format!("{label}-refresh"),

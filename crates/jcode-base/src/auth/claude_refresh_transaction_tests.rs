@@ -23,6 +23,7 @@ impl Drop for EnvGuard {
 
 fn login(label: &str, refresh: &str) -> AnthropicAccount {
     AnthropicAccount {
+        record_id: Some(uuid::Uuid::new_v4().to_string()),
         label: label.into(),
         access: "original-access".into(),
         refresh: refresh.into(),

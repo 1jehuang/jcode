@@ -137,6 +137,7 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        record_id: None,
         label: "claude-1".to_string(),
         access: "old_access".to_string(),
         refresh: "old_refresh".to_string(),
@@ -178,6 +179,7 @@ fn save_claude_tokens_updates_fox_without_touching_otter() -> Result<()> {
     ] {
         let assigned =
             crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                record_id: None,
                 label: label.to_string(),
                 access: format!("synthetic-old-access-{label}"),
                 refresh: format!("synthetic-old-refresh-{label}"),
@@ -285,6 +287,7 @@ async fn claude_profile_subscription_metadata_merges_without_clobbering_tokens()
     let temp = tempfile::TempDir::new()?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let label = claude_auth::upsert_account(claude_auth::AnthropicAccount {
+        record_id: None,
         label: "profile-test".into(),
         access: "old_access".into(),
         refresh: "old_refresh".into(),

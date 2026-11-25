@@ -60,6 +60,9 @@ pub struct ClaudeCredentials {
 /// Represents a named Anthropic OAuth account stored in jcode's auth.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicAccount {
+    /// Local record identity retained by refresh and relabel operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
     pub label: String,
     pub access: String,
     pub refresh: String,
@@ -331,6 +334,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
     {
         crate::logging::info("Migrating legacy single-account auth.json to multi-account format");
         auth.anthropic_accounts.push(AnthropicAccount {
+            record_id: None,
             label: primary_account_label(),
             access: legacy.access,
             refresh: legacy.refresh,
@@ -343,7 +347,15 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
         let _ = save_auth_file(&auth);
     }
 
-    if relabel_accounts(&mut auth) {
+    let mut migrated = false;
+    for account in &mut auth.anthropic_accounts {
+        if account.record_id.is_none() {
+            account.record_id = Some(uuid::Uuid::new_v4().to_string());
+            migrated = true;
+        }
+    }
+    let relabeled = relabel_accounts(&mut auth);
+    if migrated || relabeled {
         crate::logging::info(
             "Renaming Claude accounts to animal labels (claude-otter, claude-fox, ...)",
         );
@@ -404,10 +416,18 @@ pub fn set_active_account(label: &str) -> Result<()> {
 }
 
 /// Add or update an account. Returns the label used.
-pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
+pub fn upsert_account(mut account: AnthropicAccount) -> Result<String> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
+    if account.record_id.is_none() {
+        account.record_id = auth
+            .anthropic_accounts
+            .iter()
+            .find(|stored| !account.refresh.is_empty() && stored.refresh == account.refresh)
+            .and_then(|stored| stored.record_id.clone())
+            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    }
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
         &mut auth.anthropic_accounts,
@@ -1026,6 +1046,7 @@ pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> 
         index += 1;
     };
     auth.anthropic_accounts.push(AnthropicAccount {
+        record_id: Some(uuid::Uuid::new_v4().to_string()),
         label: label.clone(),
         access: creds.access_token,
         refresh: creds.refresh_token,

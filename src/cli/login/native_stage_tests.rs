@@ -66,6 +66,7 @@ impl NativeStageFixture {
 
     fn save_account(label: &str) {
         let saved_label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+            record_id: None,
             label: label.into(),
             access: format!("{label}-access"),
             refresh: format!("{label}-refresh"),

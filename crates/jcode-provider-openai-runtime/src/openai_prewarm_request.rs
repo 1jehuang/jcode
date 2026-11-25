@@ -36,7 +36,7 @@ impl OpenAIProvider {
             return;
         };
         if super::openai_credentials::sync_locked(
-            self.oauth_account_label().as_deref(),
+            self.oauth_account_pin().as_ref(),
             &mut credentials,
         )
         .is_err()

@@ -3,7 +3,7 @@ use super::*;
 pub(crate) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CachedCredentials>>,
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     request: &Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,

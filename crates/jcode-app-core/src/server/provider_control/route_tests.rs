@@ -110,6 +110,7 @@ impl Provider for VerifiedProvider {
 
 fn save_account(label: &str) -> String {
     crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        record_id: None,
         label: label.into(),
         access: label.into(),
         refresh: format!("{label}-refresh"),

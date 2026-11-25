@@ -1,3 +1,4 @@
+pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
@@ -18,7 +19,10 @@ pub mod service_tier;
 pub mod transport;
 pub mod ws_deflate;
 
+pub use account_pin::AccountPin;
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
+pub use model_id::grok_build_model_spec;
+use model_id::openrouter_catalog_model_id;
 pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
@@ -202,6 +206,19 @@ pub trait Provider: Send + Sync {
     /// The explicitly bound OAuth account, independent of the global active login.
     fn oauth_account_label(&self) -> Option<String> {
         None
+    }
+
+    /// Identity captured when this runtime was bound, retained across forks.
+    fn oauth_account_pin(&self) -> Option<AccountPin> {
+        None
+    }
+
+    fn set_oauth_account_pin(&self, pin: &AccountPin) -> Result<()> {
+        anyhow::ensure!(
+            pin.identity.is_none() && pin.record_id.is_none(),
+            "This provider cannot verify a saved OAuth identity"
+        );
+        self.set_oauth_account(Some(&pin.label))
     }
 
     /// Saved OAuth account this runtime's cached credential actually belongs
@@ -1090,27 +1107,6 @@ impl RouteSelection {
             | RuntimeKey::Current
             | RuntimeKey::Other { .. } => model.to_string(),
         }
-    }
-}
-
-/// Grok Build routing spec: `grok-4.6` and `grok-build:grok-4.6` both become
-/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the Grok
-/// Build runtime instead of treating the bare id as the active provider's model.
-pub fn grok_build_model_spec(model: &str) -> String {
-    let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
-    format!("grok-build:{bare}")
-}
-
-/// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
-/// prefix, OpenAI models an `openai/` prefix, already-qualified ids pass
-/// through. Mirrors `jcode_base::provider::openrouter_catalog_model_id` but
-/// lives here so [`RouteSelection::routed_model_spec`] has no upward dep.
-fn openrouter_catalog_model_id(model: &str) -> String {
-    let trimmed = model.trim();
-    match crate::models::provider_for_model(trimmed) {
-        Some("claude") => format!("anthropic/{trimmed}"),
-        Some("openai") => format!("openai/{trimmed}"),
-        _ => trimmed.to_string(),
     }
 }
 

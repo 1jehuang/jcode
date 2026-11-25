@@ -11,7 +11,7 @@ pub(super) async fn run_stream_with_retries(
     mut request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
-    oauth_account_label: Option<String>,
+    oauth_account_label: Option<jcode_provider_core::AccountPin>,
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
@@ -248,11 +248,13 @@ pub(super) async fn run_stream_with_retries(
                 if is_oauth
                     && !saw_output
                     && is_account_limit_error(&error_str)
-                    && oauth_account_label.as_deref().is_some_and(|label| {
-                        jcode_base::usage::account_known_exhausted(
-                            jcode_base::usage::MultiAccountProviderKind::Anthropic,
-                            label,
-                        )
+                    && oauth_account_label.as_ref().is_some_and(|pin| {
+                        auth::account_pins::resolve_claude(pin).is_ok_and(|label| {
+                            jcode_base::usage::account_known_exhausted(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                &label,
+                            )
+                        })
                     })
                 {
                     // The API often uses the same generic 429 for exhausted plan

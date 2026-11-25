@@ -65,6 +65,7 @@ fn future_expiry() -> i64 {
 }
 fn save(label: &str, token: &str, workspace: &str) -> String {
     codex::upsert_account(codex::OpenAiAccount {
+        record_id: None,
         label: label.into(),
         access_token: token.into(),
         refresh_token: format!("{token}-refresh"),
@@ -91,7 +92,7 @@ fn provider() -> OpenAIProvider {
         .unwrap()
 }
 async fn token(provider: &OpenAIProvider) -> String {
-    openai_access_token(provider.oauth_account_label(), &provider.credentials)
+    openai_access_token(provider.oauth_account_pin(), &provider.credentials)
         .await
         .unwrap()
 }
@@ -159,7 +160,8 @@ async fn deferred_reload_reads_latest_file_and_current_binding() {
     session.reload_credentials_now();
     tokio::task::yield_now().await;
     save(&second, "latest", "second-id");
-    *session.oauth_account.write().unwrap() = Some(second);
+    *session.oauth_account.write().unwrap() =
+        Some(jcode_base::auth::account_pins::openai_pin(&second).unwrap());
     drop(guard);
     tokio::time::timeout(Duration::from_secs(2), async {
         while session.credentials.read().await.access_token != "latest" {
@@ -300,7 +302,7 @@ async fn deleted_explicit_oauth_binding_fails_closed_but_api_key_rotation_ignore
     session.set_oauth_account(Some(&label)).unwrap();
     codex::remove_account(&label).unwrap();
     assert!(
-        openai_access_token(Some(label.clone()), &session.credentials)
+        openai_access_token(session.oauth_account_pin(), &session.credentials)
             .await
             .is_err()
     );
@@ -345,7 +347,7 @@ async fn deleted_explicit_oauth_binding_fails_closed_but_api_key_rotation_ignore
     super::super::openai_stream_runtime::stream_response(
         Client::new(),
         Arc::clone(&session.credentials),
-        Some(label),
+        Some(jcode_provider_core::AccountPin::new(label, None)),
         &serde_json::json!({"model":"fixture-api-model","input":[]}),
         "fixture".into(),
         tx,
@@ -492,3 +494,6 @@ async fn capability_sync_keeps_explicit_account_and_platform_catalog_scopes() {
     assert_eq!(session.catalog_scope(), scope);
     assert_second_capabilities(&session);
 }
+
+#[path = "openai_identity_tests.rs"]
+mod identity;

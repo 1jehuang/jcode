@@ -585,6 +585,7 @@ mod email_usage_tests {
 
     fn account(label: &str, email: Option<&str>) -> auth::codex::OpenAiAccount {
         auth::codex::OpenAiAccount {
+            record_id: None,
             label: label.into(),
             email: email.map(str::to_string),
             access_token: String::new(),

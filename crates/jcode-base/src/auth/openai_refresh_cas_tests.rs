@@ -36,6 +36,7 @@ impl Drop for TestHome {
 
 fn login(label: &str, identity: &str, refresh: &str) -> OpenAiAccount {
     OpenAiAccount {
+        record_id: None,
         label: label.into(),
         access_token: format!("access-{identity}"),
         refresh_token: refresh.into(),

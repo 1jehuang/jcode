@@ -46,6 +46,7 @@ impl Drop for AccountSandbox {
 
 fn save_account(label: &str, token: &str, refresh: &str, identity: &str) -> String {
     jcode_base::auth::codex::upsert_account(jcode_base::auth::codex::OpenAiAccount {
+        record_id: None,
         label: label.into(),
         access_token: token.into(),
         refresh_token: refresh.into(),
@@ -293,7 +294,10 @@ async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
     );
     assert_eq!(provider.catalog_scope(), personal);
     assert_eq!(
-        provider.refresh_account_label().as_deref(),
+        provider
+            .refresh_account_label()
+            .map(|pin| pin.label)
+            .as_deref(),
         Some(personal.as_str())
     );
 

@@ -1,3 +1,4 @@
+pub mod account_pins;
 pub mod account_pool;
 pub mod account_store;
 pub mod active_method;

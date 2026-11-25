@@ -39,6 +39,7 @@ async fn provider_matrix_account_switch_rebinds_real_runtime_without_changing_mo
         openai_accounts: ["first", "second", "third"]
             .into_iter()
             .map(|label| OpenAiAccount {
+                record_id: None,
                 label: label.into(),
                 access_token: format!("test-access-{label}"),
                 refresh_token: format!("test-refresh-{label}"),

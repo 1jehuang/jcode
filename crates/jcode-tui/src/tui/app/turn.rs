@@ -6,40 +6,7 @@ mod prepared_turn;
 
 use crate::message::ToolDefinition;
 
-/// Keep raw JSON separate for every in-flight call. Unkeyed providers address
-/// the most recently started call, preserving the legacy sequential behavior.
-#[derive(Default)]
-struct PendingStreamingTools {
-    calls: Vec<(ToolCall, String)>,
-}
-
-impl PendingStreamingTools {
-    fn start(&mut self, tool: ToolCall) {
-        self.calls.push((tool, String::new()));
-    }
-
-    fn signature(&mut self, id: &str, signature: &str) {
-        if let Some((tool, _)) = self.calls.iter_mut().find(|(tool, _)| tool.id == id) {
-            tool.thought_signature = Some(signature.to_owned());
-        }
-    }
-
-    fn drain(&mut self) -> impl Iterator<Item = ToolCall> + '_ {
-        self.calls.drain(..).map(|(mut tool, input)| {
-            tool.input = ToolCall::parse_streamed_input_to_object(&input);
-            tool.refresh_intent_from_input();
-            tool
-        })
-    }
-
-    fn is_empty(&self) -> bool {
-        self.calls.is_empty()
-    }
-
-    fn clear(&mut self) {
-        self.calls.clear();
-    }
-}
+use prepared_turn::PendingStreamingTools;
 
 impl App {
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
@@ -56,6 +23,10 @@ impl App {
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
         'turn_loop: loop {
+            crate::provider::account_routes::ensure_account_identity(
+                self.provider.as_ref(),
+                &self.session,
+            )?;
             self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
             // missing progress beats mean a real hang, not an idle client.

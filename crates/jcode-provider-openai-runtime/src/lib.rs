@@ -10,6 +10,8 @@
 // Tests hold the std env/home serialization lock across awaits on purpose.
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+mod account_binding;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
@@ -708,7 +710,7 @@ pub struct OpenAIProvider {
     client: Client,
     credentials: Arc<RwLock<CachedCredentials>>,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
-    oauth_account: Arc<StdRwLock<Option<String>>>,
+    oauth_account: Arc<StdRwLock<Option<jcode_provider_core::AccountPin>>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     cache_session_id: StdRwLock<String>,
@@ -902,16 +904,17 @@ impl OpenAIProvider {
     }
 
     fn load_selected_credentials(&self, mode: OpenAICredentialMode) -> Result<CodexCredentials> {
-        match (mode, self.oauth_account_label()) {
-            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(label)) => {
-                jcode_base::auth::codex::load_credentials_for_account(&label)
+        match (mode, self.oauth_account_pin()) {
+            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(pin)) => {
+                jcode_base::auth::account_pins::load_openai(&pin)
+                    .map(|(credentials, _)| credentials)
             }
             _ => load_credentials_for_mode(mode),
         }
     }
 
-    fn refresh_account_label(&self) -> Option<String> {
-        self.oauth_account_label()
+    fn refresh_account_label(&self) -> Option<jcode_provider_core::AccountPin> {
+        self.oauth_account_pin()
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {

@@ -35,10 +35,15 @@ fn same_login(a: &CodexCredentials, b: &CodexCredentials) -> bool {
         && (a.account_id.is_none() || b.account_id.is_none() || a.account_id == b.account_id)
 }
 
-fn load_current(label: Option<&str>, cached: &CodexCredentials) -> Result<CodexCredentials> {
+fn load_current(
+    label: Option<&jcode_provider_core::AccountPin>,
+    cached: &CodexCredentials,
+) -> Result<CodexCredentials> {
     if OpenAIProvider::is_chatgpt_mode(cached) {
         match label {
-            Some(label) => jcode_base::auth::codex::load_credentials_for_account(label),
+            Some(pin) => {
+                jcode_base::auth::account_pins::load_openai(pin).map(|(credentials, _)| credentials)
+            }
             None => jcode_base::auth::codex::load_oauth_credentials(),
         }
     } else {
@@ -66,7 +71,10 @@ pub(super) fn adopt_stored(cached: &mut CachedCredentials, stored: CodexCredenti
     }
 }
 
-pub(super) fn sync_locked(label: Option<&str>, cached: &mut CachedCredentials) -> Result<()> {
+pub(super) fn sync_locked(
+    label: Option<&jcode_provider_core::AccountPin>,
+    cached: &mut CachedCredentials,
+) -> Result<()> {
     match load_current(label, cached) {
         Ok(stored) => adopt_stored(cached, stored),
         Err(error) if label.is_some() && OpenAIProvider::is_chatgpt_mode(cached) => {
@@ -79,7 +87,7 @@ pub(super) fn sync_locked(label: Option<&str>, cached: &mut CachedCredentials) -
 }
 
 pub(super) async fn sync(
-    label: Option<&str>,
+    label: Option<&jcode_provider_core::AccountPin>,
     credentials: &Arc<RwLock<CachedCredentials>>,
 ) -> Result<()> {
     // Read the file after obtaining the lock, so a queued reload cannot apply
@@ -88,12 +96,12 @@ pub(super) async fn sync(
 }
 
 pub(super) async fn openai_access_token(
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     credentials: &Arc<RwLock<CachedCredentials>>,
 ) -> Result<String> {
     let (access, refresh, needs_refresh) = {
         let mut cached = credentials.write().await;
-        sync_locked(account_label.as_deref(), &mut cached)?;
+        sync_locked(account_label.as_ref(), &mut cached)?;
         anyhow::ensure!(
             !cached.access_token.is_empty(),
             "OpenAI access token is empty"
@@ -117,11 +125,11 @@ pub(super) async fn openai_access_token(
 pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CachedCredentials>>,
     refresh_token: &str,
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
 ) -> Result<String> {
     {
         let mut current = credentials.write().await;
-        sync_locked(account_label.as_deref(), &mut current)?;
+        sync_locked(account_label.as_ref(), &mut current)?;
         if current.refresh_token != refresh_token && !current.access_token.is_empty() {
             return Ok(current.access_token.clone());
         }
@@ -131,7 +139,13 @@ pub(super) async fn force_refresh_openai_token(
     let label = account_label.clone();
     refresh_and_commit_openai_tokens(credentials, &refresh_from, account_label, async move {
         match label {
-            Some(label) => oauth::refresh_openai_tokens_for_account(&refresh_token, &label).await,
+            Some(pin) => {
+                oauth::refresh_openai_tokens_for_account(
+                    &refresh_token,
+                    &jcode_base::auth::account_pins::resolve_openai(&pin)?,
+                )
+                .await
+            }
             None => oauth::refresh_openai_tokens(&refresh_token).await,
         }
     })
@@ -141,7 +155,7 @@ pub(super) async fn force_refresh_openai_token(
 pub(super) async fn refresh_and_commit_openai_tokens(
     credentials: &Arc<RwLock<CachedCredentials>>,
     expected_refresh: &str,
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     refresh: impl std::future::Future<Output = Result<oauth::OAuthTokens>> + Send + 'static,
 ) -> Result<String> {
     let expected = credentials.read().await.clone();
@@ -153,7 +167,7 @@ pub(super) async fn refresh_and_commit_openai_tokens(
     oauth::run_refresh_transaction(async move {
         let result = refresh.await;
         let mut cached = credentials.write().await;
-        sync_locked(account_label.as_deref(), &mut cached)?;
+        sync_locked(account_label.as_ref(), &mut cached)?;
         if !same_login(&cached, &expected) && !cached.access_token.is_empty() {
             return Ok(cached.access_token.clone());
         }
@@ -168,7 +182,7 @@ pub(super) async fn refresh_and_commit_openai_tokens(
         };
         // A persisted rotation becomes its own source. Only an unchanged
         // external source needs provenance to avoid reverting its new bearer.
-        let source = match load_current(account_label.as_deref(), &current) {
+        let source = match load_current(account_label.as_ref(), &current) {
             Ok(stored) if same_login(&stored, &current) => None,
             _ => Some(source),
         };
@@ -180,7 +194,7 @@ pub(super) async fn refresh_and_commit_openai_tokens(
 
 impl OpenAIProvider {
     pub(super) async fn sync_credentials(&self) -> Result<()> {
-        sync(self.oauth_account_label().as_deref(), &self.credentials).await?;
+        sync(self.oauth_account_pin().as_ref(), &self.credentials).await?;
         self.reload_cached_reasoning_efforts();
         Ok(())
     }
@@ -211,17 +225,23 @@ impl OpenAIProvider {
                         let mut cached = slot.write().await;
                         let mode = *mode.read().await;
                         let label = label.read().unwrap_or_else(|p| p.into_inner()).clone();
-                        let loaded = match (mode, label.as_deref()) {
+                        let loaded = match (mode, label.as_ref()) {
                             (
                                 OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth,
                                 Some(label),
-                            ) => jcode_base::auth::codex::load_credentials_for_account(label),
+                            ) => jcode_base::auth::account_pins::load_openai(label)
+                                .map(|(credentials, _)| credentials),
                             _ => load_credentials_for_mode(mode),
                         };
                         if let Ok(credentials) = loaded {
                             adopt_stored(&mut cached, credentials);
                             let scope = if Self::is_chatgpt_mode(&cached) {
-                                label.unwrap_or_else(|| Self::catalog_scope_for(&cached))
+                                label
+                                    .map(|pin| {
+                                        jcode_base::auth::account_pins::resolve_openai(&pin)
+                                            .unwrap_or(pin.label)
+                                    })
+                                    .unwrap_or_else(|| Self::catalog_scope_for(&cached))
                             } else {
                                 Self::catalog_scope_for(&cached)
                             };

@@ -488,6 +488,7 @@ fn claude_saved_account_readiness_uses_live_access_or_usable_refresh() {
         (now - 60_000, "saved-account-fresh-refresh", true),
     ] {
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-otter".into(),
             access: "saved-access".into(),
             refresh: refresh.into(),

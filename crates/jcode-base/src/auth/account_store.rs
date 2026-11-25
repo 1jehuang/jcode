@@ -178,6 +178,48 @@ pub fn account_identity(
         })
 }
 
+/// Resolve identity before a positional label, refusing missing or ambiguous evidence.
+pub fn resolve_pin<T>(
+    pin: &jcode_provider_core::AccountPin,
+    accounts: &[T],
+    label: impl Fn(&T) -> &str,
+    identity: impl Fn(&T) -> Option<String>,
+    record_id: impl Fn(&T) -> Option<&str>,
+) -> Option<String> {
+    if let Some(expected) = pin.record_id.as_deref() {
+        let mut records = accounts
+            .iter()
+            .filter(|account| record_id(account) == Some(expected));
+        if let Some(account) = records.next() {
+            if records.next().is_some() {
+                return None;
+            }
+            // A local record may gain/change an email, but cannot silently move workspaces.
+            if let Some(workspace) = pin.identity.as_deref().filter(|id| id.starts_with("id:"))
+                && identity(account).as_deref() != Some(workspace)
+            {
+                return None;
+            }
+            return Some(label(account).to_owned());
+        }
+        if pin
+            .identity
+            .as_deref()
+            .is_none_or(|id| id.starts_with("rt:"))
+        {
+            return None;
+        }
+    }
+    let mut matches = accounts
+        .iter()
+        .filter(|account| match pin.identity.as_deref() {
+            Some(expected) => identity(account).as_deref() == Some(expected),
+            None => label(account) == pin.label,
+        });
+    let account = matches.next()?;
+    matches.next().is_none().then(|| label(account).to_owned())
+}
+
 /// Runtime (process-local) active-account overrides, keyed by provider
 /// prefix ("claude", "openai", ...). Lets `/account switch <label>` take
 /// effect immediately without rewriting the provider auth file.

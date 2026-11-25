@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn resolve_oauth_access_token(
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,
-    account_label: &Option<String>,
+    account_label: &Option<jcode_provider_core::AccountPin>,
 ) -> Result<(String, bool)> {
     let cached = credentials.read().await;
     let (fresh_creds, refresh_label) = load_scoped_claude_credentials(account_label)?;
@@ -93,7 +93,7 @@ pub(super) async fn resolve_oauth_access_token(
 
 pub(super) async fn force_refresh_oauth_token(
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
-    account_label: &Option<String>,
+    account_label: &Option<jcode_provider_core::AccountPin>,
 ) -> Result<String> {
     // Always start from the stored credential: after a relogin or account
     // switch the cache still holds the previous account's refresh token, and
@@ -157,16 +157,14 @@ pub(super) async fn force_refresh_oauth_token(
 
 /// Explicit bindings fail closed when removed; an unbound runtime follows default resolution.
 fn load_scoped_claude_credentials(
-    account_label: &Option<String>,
+    account_label: &Option<jcode_provider_core::AccountPin>,
 ) -> Result<(auth::claude::ClaudeCredentials, String)> {
-    let credentials = match account_label.as_deref() {
-        Some(label) => auth::claude::load_credentials_for_account(label),
-        None => auth::claude::load_credentials(),
-    }?;
-    let refresh_label = account_label
-        .clone()
-        .or_else(auth::claude::active_account_label)
-        .unwrap_or_else(auth::claude::primary_account_label);
+    if let Some(pin) = account_label {
+        return auth::account_pins::load_claude(pin);
+    }
+    let credentials = auth::claude::load_credentials()?;
+    let refresh_label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
     Ok((credentials, refresh_label))
 }
 
@@ -181,7 +179,7 @@ fn load_scoped_claude_credentials(
 /// and return that login's token instead of the old account's bearer.
 async fn commit_claude_refresh(
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,
-    account_label: &Option<String>,
+    account_label: &Option<jcode_provider_core::AccountPin>,
     source: (String, String),
     refreshed: oauth::OAuthTokens,
 ) -> Result<String> {
@@ -215,7 +213,7 @@ async fn commit_claude_refresh(
 
 // A stale disk refresh can be rejected by CAS after a newer login took over.
 fn replacement_after_refresh_failure(
-    account_label: &Option<String>,
+    account_label: &Option<jcode_provider_core::AccountPin>,
     source: &(String, String),
 ) -> Result<Option<String>> {
     let (current, _) = load_scoped_claude_credentials(account_label)?;

@@ -65,33 +65,57 @@ impl Agent {
     }
 
     pub(super) fn sync_bound_account_route(&mut self) {
-        let Some(label) = self.provider.oauth_account_label() else {
+        let Some((method, label)) =
+            crate::provider::account_routes::observed_oauth_account_route(self.provider.as_ref())
+        else {
+            if self.provider.active_resolved_credential()
+                == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                && self
+                    .session
+                    .route_api_method
+                    .as_deref()
+                    .is_some_and(|method| {
+                        method.starts_with("claude-oauth") || method.starts_with("openai-oauth")
+                    })
+            {
+                self.session.route_api_method = None;
+                self.persist_session_best_effort("observed API credential route");
+            }
             return;
         };
-        if self
-            .session
-            .route_api_method
-            .as_deref()
-            .and_then(jcode_provider_core::oauth_account_label)
-            .is_some_and(|selected| selected != label)
+        let identity = crate::provider::account_routes::ensure_account_identity(
+            self.provider.as_ref(),
+            &self.session,
+        );
+        if identity.is_err()
+            || (self
+                .session
+                .route_api_method
+                .as_deref()
+                .and_then(jcode_provider_core::oauth_account_label)
+                .is_some_and(|selected| selected != label)
+                && !matches!(identity, Ok(true)))
         {
             logging::warn(
                 "Refusing to replace an explicit saved-account route with a different observed account",
             );
             return;
         }
-        let method = match self.provider.name().to_ascii_lowercase().as_str() {
-            "openai" => "openai-oauth",
-            "claude" | "anthropic" => "claude-oauth",
-            _ => return,
-        };
         let route = format!("{method}@{label}");
         if self.session.route_api_method.as_deref() == Some(route.as_str()) {
+            crate::provider::account_routes::record_account_pin(
+                self.provider.as_ref(),
+                &mut self.session,
+            );
             return;
         }
         self.session.route_api_method = Some(route);
         self.session.provider_key = Some(method.to_string());
         self.session.model = Some(self.provider_model());
+        crate::provider::account_routes::record_account_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+        );
         self.persist_session_best_effort("observed saved account route");
     }
 
@@ -294,6 +318,10 @@ impl Agent {
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
         self.session.model = Some(self.provider_model());
+        crate::provider::account_routes::record_account_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+        );
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -322,22 +350,28 @@ impl Agent {
                 self.provider.name(),
                 self.session.provider_key.as_deref(),
             );
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) =
+            crate::provider::account_routes::observed_oauth_account_route(self.provider.as_ref())
+        {
             self.session.route_api_method = Some(format!("{method}@{label}"));
         } else if self
             .session
             .route_api_method
             .as_deref()
-            .is_some_and(|method| jcode_provider_core::oauth_account_label(method).is_some())
+            .is_some_and(|method| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+                    || (self.provider.active_resolved_credential()
+                        == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        && matches!(method, "claude-oauth" | "openai-oauth"))
+            })
         {
             self.session.route_api_method = None;
         }
         self.session.model = Some(self.provider_model());
+        crate::provider::account_routes::record_account_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+        );
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
         self.refresh_compaction_budget();
@@ -458,12 +492,9 @@ impl Agent {
     /// swarm agents inherit this so they reconstruct the coordinator's exact
     /// auth route instead of falling back to the config default.
     pub fn session_route_api_method(&self) -> Option<String> {
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) =
+            crate::provider::account_routes::observed_oauth_account_route(self.provider.as_ref())
+        {
             return Some(format!("{method}@{label}"));
         }
         self.session.route_api_method.clone()

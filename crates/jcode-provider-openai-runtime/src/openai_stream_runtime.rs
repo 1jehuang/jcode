@@ -84,7 +84,7 @@ mod opaque_rejection_tests;
 /// failure of this single HTTPS attempt must not schedule another replay.
 pub(super) async fn recover_opaque_ws_rejection(
     credentials: Arc<RwLock<CachedCredentials>>,
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     request: &Value,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) {
@@ -263,7 +263,7 @@ fn ws_stall_diagnostics(
 
 /// Stream the response from OpenAI API
 #[allow(clippy::too_many_arguments)]
-fn response_http_request(
+pub(crate) fn response_http_request(
     client: &Client,
     url: &str,
     access_token: &str,
@@ -1303,7 +1303,7 @@ mod fresh_ws_wire_tests;
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CachedCredentials>>,
-    account_label: Option<String>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,

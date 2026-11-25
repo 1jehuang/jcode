@@ -134,6 +134,7 @@ mod tests {
 
     fn account(label: &str, token: &str) -> auth::claude::AnthropicAccount {
         auth::claude::AnthropicAccount {
+            record_id: None,
             label: label.into(),
             access: token.into(),
             refresh: String::new(),

@@ -15,6 +15,7 @@
 //! Uses the Anthropic Messages API directly without the Python SDK.
 //! This provides better control and eliminates the Python dependency.
 
+mod account_binding;
 mod reasoning_request;
 mod usage_recording;
 
@@ -489,7 +490,7 @@ pub struct AnthropicProvider {
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
-    oauth_account: std::sync::RwLock<Option<String>>,
+    oauth_account: std::sync::RwLock<Option<jcode_provider_core::AccountPin>>,
     /// Actual credential resolved for this runtime's latest request: unknown,
     /// OAuth, or API key. Auto may fall back after a failed OAuth refresh.
     request_credential: Arc<AtomicU8>,
@@ -971,7 +972,8 @@ impl AnthropicProvider {
         // refresh token has been revoked. Treating that as "OAuth available"
         // prevented the configured API key from ever being tried and made
         // imported Claude Code sessions fail with a 401 on their first turn.
-        if matches!(mode, AnthropicCredentialMode::Auto) {
+        // A selected saved identity cannot silently switch to paid API billing.
+        if matches!(mode, AnthropicCredentialMode::Auto) && self.oauth_account_pin().is_none() {
             match self.get_oauth_access_token().await {
                 Ok(token) => return Ok(token),
                 Err(oauth_err) => match self.direct_api_key() {
@@ -998,7 +1000,7 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
-        resolve_oauth_access_token(&self.credentials, &self.oauth_account_label()).await
+        resolve_oauth_access_token(&self.credentials, &self.oauth_account_pin()).await
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
@@ -1293,7 +1295,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
-        let oauth_account_label = self.oauth_account_label();
+        let oauth_account_label = self.oauth_account_pin();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
@@ -1366,27 +1368,23 @@ impl Provider for AnthropicProvider {
     }
 
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
-        if let Some(label) = label {
-            auth::claude::load_credentials_for_account(label)?;
-        }
-        let mut cached = self.credentials.try_write().map_err(|_| {
-            anyhow::anyhow!("Cannot change Claude account while credentials are in use")
-        })?;
-        *self
-            .oauth_account
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = label.map(str::to_owned);
-        *cached = None;
-        self.request_credential.store(0, Ordering::Release);
-        self.oauth_preflight_done.store(false, Ordering::Release);
-        Ok(())
+        self.bind_account_pin(label.map(auth::account_pins::claude_pin).transpose()?)
     }
 
     fn oauth_account_label(&self) -> Option<String> {
+        let pin = self.oauth_account_pin()?;
+        Some(auth::account_pins::resolve_claude(&pin).unwrap_or(pin.label))
+    }
+
+    fn oauth_account_pin(&self) -> Option<jcode_provider_core::AccountPin> {
         self.oauth_account
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn set_oauth_account_pin(&self, pin: &jcode_provider_core::AccountPin) -> Result<()> {
+        self.bind_account_pin(Some(pin.clone()))
     }
 
     fn active_oauth_account_email(&self) -> Option<String> {
@@ -1648,7 +1646,7 @@ impl Provider for AnthropicProvider {
             reasoning_effort: Arc::new(std::sync::RwLock::new(self.stored_reasoning_effort())),
             service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
             credentials: Arc::new(RwLock::new(None)),
-            oauth_account: std::sync::RwLock::new(self.oauth_account_label()),
+            oauth_account: std::sync::RwLock::new(self.oauth_account_pin()),
             credential_mode: Arc::new(RwLock::new(self.credential_mode_snapshot())),
             request_credential: Arc::new(AtomicU8::new(0)),
             max_tokens_override: self.max_tokens_override,
@@ -1747,7 +1745,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
-        let oauth_account_label = self.oauth_account_label();
+        let oauth_account_label = self.oauth_account_pin();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();

@@ -42,6 +42,7 @@ impl Drop for AccountSandbox {
 
 fn save_account(label: &str, token: &str, refresh: &str) -> String {
     auth::claude::upsert_account(auth::claude::AnthropicAccount {
+        record_id: None,
         label: label.into(),
         access: token.into(),
         refresh: refresh.into(),
@@ -66,6 +67,11 @@ async fn cloud_import_replaces_live_daemon_cached_bearer() {
         .unwrap();
     assert_eq!(provider.get_access_token().await.unwrap().0, "old-access");
     save_account(&label, "imported-access", "imported-refresh");
+    assert!(
+        provider.get_access_token().await.is_err(),
+        "an unknown replacement needs an explicit account choice"
+    );
+    provider.set_oauth_account(Some(&label)).unwrap();
     assert_eq!(
         provider.get_access_token().await.unwrap().0,
         "imported-access"
@@ -169,16 +175,22 @@ async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
         format!("oauth::{personal}")
     );
     assert_eq!(
-        provider.oauth_refresh_label().as_deref(),
+        provider.oauth_account_label().as_deref(),
         Some(personal.as_str())
     );
 
     // Another request already rotated personal's refresh token. Forced refresh
     // must join that account's transaction, not the globally active work login.
-    save_account(&personal, "personal-access-rotated", "personal-refresh-new");
+    auth::claude::update_account_tokens(
+        &personal,
+        "personal-access-rotated",
+        "personal-refresh-new",
+        chrono::Utc::now().timestamp_millis() + 3_600_000,
+    )
+    .unwrap();
     let token = force_refresh_oauth_token(
         Arc::clone(&provider.credentials),
-        &provider.oauth_refresh_label(),
+        &provider.oauth_account_pin(),
     )
     .await
     .unwrap();

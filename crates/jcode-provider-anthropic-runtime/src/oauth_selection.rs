@@ -1,13 +1,8 @@
 use super::*;
 impl AnthropicProvider {
-    pub(super) fn oauth_refresh_label(&self) -> Option<String> {
-        self.oauth_account_label()
-            .or_else(auth::claude::active_account_label)
-    }
-
     pub(super) fn load_oauth_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
-        match self.oauth_account_label() {
-            Some(label) => auth::claude::load_credentials_for_account(&label),
+        match self.oauth_account_pin() {
+            Some(pin) => auth::account_pins::load_claude(&pin).map(|(credentials, _)| credentials),
             None => auth::claude::load_credentials(),
         }
     }

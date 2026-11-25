@@ -1,5 +1,6 @@
 mod accessors;
 mod account_failover;
+pub mod account_routes;
 mod account_selection;
 pub mod activation;
 pub mod anthropic;
@@ -1621,67 +1622,6 @@ impl MultiProvider {
 
         self.set_model(model)
     }
-
-    fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
-        if let Some(label) = self.selected_account_for_provider(active) {
-            let method = if active == ActiveProvider::Claude {
-                "claude-oauth"
-            } else {
-                "openai-oauth"
-            };
-            return format!("{method}@{label}:{current_model}");
-        }
-        let prefix = match active {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    // OAuth/ApiKey emit their canonical model prefix; Auto keeps
-                    // the bare provider key (route without pinning a credential).
-                    anthropic
-                        .credential_mode()
-                        .auth_route(jcode_provider_core::DualAuthProvider::Anthropic)
-                        .map(|route| route.model_prefix())
-                        .unwrap_or("claude")
-                } else {
-                    "claude"
-                }
-            }
-            ActiveProvider::OpenAI => {
-                if let Some(openai) = self.openai_provider() {
-                    openai
-                        .credential_mode()
-                        .auth_route(jcode_provider_core::DualAuthProvider::OpenAI)
-                        .map(|route| route.model_prefix())
-                        .unwrap_or("openai")
-                } else {
-                    "openai"
-                }
-            }
-            ActiveProvider::Copilot => "copilot",
-            ActiveProvider::Antigravity => "antigravity",
-            ActiveProvider::Gemini => "gemini",
-            ActiveProvider::Cursor => "cursor",
-            ActiveProvider::Bedrock => "bedrock",
-            ActiveProvider::OpenRouter => {
-                if let Some(openrouter) = self.active_openrouter_execution_provider()
-                    && let Some((_provider, api_method, _detail)) =
-                        openrouter.direct_openai_compatible_route_parts()
-                    && let Some(profile_id) = api_method
-                        .strip_prefix("openai-compatible:")
-                        .map(str::trim)
-                        .filter(|profile_id| !profile_id.is_empty())
-                {
-                    return format!("{profile_id}:{current_model}");
-                }
-                if let Some(openrouter) = self.openrouter_provider()
-                    && let Some(provider_pin) = openrouter.explicit_provider_pin_for_current_model()
-                {
-                    return format!("openrouter:{current_model}@{provider_pin}");
-                }
-                "openrouter"
-            }
-        };
-        format!("{prefix}:{current_model}")
-    }
 }
 
 impl Default for MultiProvider {
@@ -1946,23 +1886,25 @@ impl Provider for MultiProvider {
     }
 
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
-        let active = self.active_provider();
-        if let Some(label) = label {
-            let method = match active {
-                ActiveProvider::Claude => "claude-oauth",
-                ActiveProvider::OpenAI => "openai-oauth",
-                _ => anyhow::bail!("This provider does not support saved OAuth accounts"),
-            };
-            return self.set_model_on_saved_account(method, label, &self.model());
+        self.select_saved_oauth_account(label)
+    }
+
+    fn oauth_account_pin(&self) -> Option<jcode_provider_core::AccountPin> {
+        match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider()?.oauth_account_pin(),
+            ActiveProvider::OpenAI => self.openai_provider()?.oauth_account_pin(),
+            _ => None,
         }
-        let runtime = match active {
+    }
+
+    fn set_oauth_account_pin(&self, pin: &jcode_provider_core::AccountPin) -> Result<()> {
+        let runtime = match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider(),
             ActiveProvider::OpenAI => self.openai_provider(),
             _ => None,
-        };
-        if let Some(runtime) = runtime {
-            runtime.set_oauth_account(None)?;
         }
+        .ok_or_else(|| anyhow!("This provider does not support saved OAuth accounts"))?;
+        runtime.set_oauth_account_pin(pin)?;
         self.invalidate_routes_memo();
         Ok(())
     }
@@ -2798,17 +2740,15 @@ impl Provider for MultiProvider {
             lap = std::time::Instant::now();
         };
         mark("model_active", &mut laps);
-        let anthropic = if self.anthropic_provider().is_some() {
-            external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
-        } else {
-            None
-        };
+        let anthropic = account_selection::fork_saved_account_runtime(
+            self.anthropic_provider(),
+            external::ANTHROPIC_RUNTIME,
+        );
         mark("anthropic", &mut laps);
-        let openai = if self.openai_provider().is_some() {
-            external::instantiate_expected_external_provider(external::OPENAI_RUNTIME)
-        } else {
-            None
-        };
+        let openai = account_selection::fork_saved_account_runtime(
+            self.openai_provider(),
+            external::OPENAI_RUNTIME,
+        );
         mark("openai", &mut laps);
         let copilot_api = self
             .copilot_api
@@ -2855,6 +2795,12 @@ impl Provider for MultiProvider {
         };
 
         mark("openrouter", &mut laps);
+        let pinned_fork = match active {
+            ActiveProvider::Claude => anthropic.as_ref(),
+            ActiveProvider::OpenAI => openai.as_ref(),
+            _ => None,
+        }
+        .is_some_and(|runtime| runtime.oauth_account_pin().is_some());
         let provider = Self {
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
@@ -2881,8 +2827,10 @@ impl Provider for MultiProvider {
         provider.spawn_openai_catalog_refresh_if_needed();
         let catalog_ms = catalog_start.elapsed().as_millis();
         let set_model_start = std::time::Instant::now();
-        let switch_request = self.fork_model_switch_request(active, &current_model);
-        let _ = provider.set_model(&switch_request);
+        if !pinned_fork {
+            let switch_request = self.fork_model_switch_request(active, &current_model);
+            let _ = provider.set_model(&switch_request);
+        }
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,

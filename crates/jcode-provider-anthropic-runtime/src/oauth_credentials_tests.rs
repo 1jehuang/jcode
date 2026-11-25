@@ -34,6 +34,9 @@ impl TestEnv {
         let config = sandbox.root().join("claude-config");
         Self {
             _guards: vec![
+                EnvGuard::set("HOME", sandbox.root()),
+                EnvGuard::set("JCODE_GLOBAL_HOME", sandbox.root().join("global")),
+                EnvGuard::set("XDG_CONFIG_HOME", sandbox.root().join("config")),
                 EnvGuard::remove("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES"),
                 EnvGuard::set("CLAUDE_CODE_OAUTH_TOKEN", ""),
                 EnvGuard::set("CLAUDE_CONFIG_DIR", config),
@@ -56,6 +59,7 @@ fn offline_provider() -> AnthropicProvider {
 
 fn account(label: &str, token: &str) -> auth::claude::AnthropicAccount {
     auth::claude::AnthropicAccount {
+        record_id: None,
         label: label.into(),
         access: token.into(),
         refresh: format!("{token}-refresh"),
@@ -206,16 +210,12 @@ async fn live_credentials_finished_refresh_does_not_restore_old_choice_or_remove
         "second"
     );
     assert!(credentials.read().await.is_none());
+    let pin = auth::account_pins::claude_pin(&first).unwrap();
     auth::claude::remove_account(&first).unwrap();
     assert!(
-        commit_claude_refresh(
-            &credentials,
-            &Some(first),
-            source,
-            response("rotated-first")
-        )
-        .await
-        .is_err()
+        commit_claude_refresh(&credentials, &Some(pin), source, response("rotated-first"))
+            .await
+            .is_err()
     );
     assert!(credentials.read().await.is_none());
 }
@@ -414,8 +414,9 @@ fn live_credentials_rejected_stale_refresh_can_use_a_new_login_but_not_stale_or_
     saved.anthropic_accounts[0].scopes = vec!["user:profile".into()];
     auth::claude::save_auth_file(&saved).unwrap();
     assert!(replacement_after_refresh_failure(&None, &source).is_err());
+    let pin = auth::account_pins::claude_pin(&label).unwrap();
     auth::claude::remove_account(&label).unwrap();
-    assert!(replacement_after_refresh_failure(&Some(label), &source).is_err());
+    assert!(replacement_after_refresh_failure(&Some(pin), &source).is_err());
 }
 
 #[tokio::test]
@@ -533,3 +534,6 @@ async fn live_credentials_401_after_own_persisted_refresh_does_not_reuse_rejecte
         .await
         .unwrap();
 }
+
+#[path = "oauth_identity_tests.rs"]
+mod identity;

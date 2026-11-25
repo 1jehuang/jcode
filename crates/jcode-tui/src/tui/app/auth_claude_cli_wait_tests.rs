@@ -9,6 +9,7 @@ use std::time::Duration;
 
 fn save_login(access: &str) -> String {
     crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        record_id: None,
         label: access.into(),
         access: access.into(),
         refresh: format!("{access}-refresh"),
@@ -340,6 +341,7 @@ fn changed_grant_and_newer_shared_default_reject_a_completed_receipt() {
 struct ChoiceProvider {
     model: std::sync::RwLock<String>,
     api: bool,
+    retained_pin: Option<jcode_provider_core::AccountPin>,
 }
 #[async_trait::async_trait]
 impl Provider for ChoiceProvider {
@@ -372,10 +374,17 @@ impl Provider for ChoiceProvider {
     fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
         self.active_explicit_credential()
     }
+    fn oauth_account_label(&self) -> Option<String> {
+        self.retained_pin.as_ref().map(|pin| pin.label.clone())
+    }
+    fn oauth_account_pin(&self) -> Option<jcode_provider_core::AccountPin> {
+        self.retained_pin.clone()
+    }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             model: std::sync::RwLock::new(self.model()),
             api: self.api,
+            retained_pin: self.retained_pin.clone(),
         })
     }
 }
@@ -391,6 +400,7 @@ fn later_model_choice_and_explicit_api_billing_are_preserved() {
     app.provider = Arc::new(ChoiceProvider {
         model: std::sync::RwLock::new("original".into()),
         api: false,
+        retained_pin: None,
     });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -412,6 +422,7 @@ fn later_model_choice_and_explicit_api_billing_are_preserved() {
     app.provider = Arc::new(ChoiceProvider {
         model: std::sync::RwLock::new("keep-api".into()),
         api: true,
+        retained_pin: None,
     });
     app.start_claude_code_cli_login();
     let receipt = flow(&app);
@@ -639,4 +650,32 @@ fn receipt_cancellation_serializes_with_the_daemon_activation_commit() {
     cancelling.join().unwrap();
     cancellation.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!(!receipt.path.exists());
+}
+
+#[test]
+fn identity_pin_tui_model_bookkeeping_preserves_api_billing_with_a_removed_pin() {
+    let _home = TestHome::new();
+    let label = save_login("inactive-pin");
+    let pin = crate::auth::account_pins::claude_pin(&label).unwrap();
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.provider = Arc::new(ChoiceProvider {
+        model: std::sync::RwLock::new("claude-future-identity".into()),
+        api: true,
+        retained_pin: Some(pin.clone()),
+    });
+    app.session
+        .account_pins
+        .insert("claude".into(), pin.clone());
+    crate::auth::claude::remove_account(&label).unwrap();
+    app.session.route_api_method = Some("claude-api".into());
+    app.finalize_model_switch("claude-future-identity");
+    assert_eq!(app.session.route_api_method.as_deref(), Some("claude-api"));
+    assert_eq!(app.session.account_pins["claude"], pin);
+    for stale in ["claude-oauth", "claude-oauth@removed"] {
+        app.session.route_api_method = Some(stale.into());
+        app.finalize_model_switch("claude-future-identity");
+        assert!(app.session.route_api_method.is_none());
+    }
+    let saved = crate::session::Session::load(&app.session.id).unwrap();
+    assert_eq!(saved.account_pins, app.session.account_pins);
 }

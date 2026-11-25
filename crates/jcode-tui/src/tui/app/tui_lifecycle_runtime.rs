@@ -396,12 +396,15 @@ impl App {
             self.session.provider_session_id = None;
             let mut restored_model = false;
             if let Some(model) = self.session.model.clone() {
-                match crate::provider::restore_session_model(
-                    self.provider.as_ref(),
-                    &model,
-                    self.session.provider_key.as_deref(),
-                    self.session.route_api_method.as_deref(),
-                ) {
+                match crate::provider::account_routes::restore_account_pin_route(&mut self.session)
+                    .and_then(|_| {
+                        crate::provider::restore_session_model(
+                            self.provider.as_ref(),
+                            self.session.model.as_deref().unwrap_or(&model),
+                            self.session.provider_key.as_deref(),
+                            self.session.route_api_method.as_deref(),
+                        )
+                    }) {
                     Err(e) => {
                         self.push_display_message(DisplayMessage {
                             role: "system".to_string(),
@@ -417,7 +420,15 @@ impl App {
                             self.session.provider_key = healed.provider_key;
                             self.session.route_api_method = healed.route_api_method;
                         }
-                        restored_model = true;
+                        match crate::provider::account_routes::apply_restored_account_pin(
+                            self.provider.as_ref(),
+                            &mut self.session,
+                        ) {
+                            Ok(()) => restored_model = true,
+                            Err(error) => self.push_display_message(DisplayMessage::error(
+                                format!("Cannot restore saved account identity: {error:#}"),
+                            )),
+                        }
                     }
                 }
             }

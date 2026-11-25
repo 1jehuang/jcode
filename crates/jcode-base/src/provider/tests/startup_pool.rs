@@ -23,6 +23,7 @@ fn startup_pool_hydrates_disk_only_exhaustion_before_route_and_request_guards() 
         enter_test_runtime().block_on(async {
             for label in ["claude-otter", "claude-fox"] {
                 let saved = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                    record_id: None,
                     label: label.into(),
                     access: "fixture-access".into(),
                     refresh: "fixture-refresh".into(),
@@ -149,6 +150,7 @@ fn startup_pool_ready_priority_head_wins_over_saved_provider_default() {
         let _guard = runtime.enter();
         let mut pool = startup_pool_fixture();
         let label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-fox".into(),
             access: "access".into(),
             refresh: "refresh".into(),
@@ -224,6 +226,7 @@ fn startup_pool_head_binds_when_no_config_default_exists() {
         let mut pool = startup_pool_fixture();
         crate::config::Config::set_default_model(None, None).unwrap();
         let label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-fox".into(),
             access: "access".into(),
             refresh: "refresh".into(),
@@ -598,6 +601,7 @@ fn startup_pool_claude_default_distinguishes_api_only_auto_from_oauth_alias() {
             crate::env::set_var("ANTHROPIC_API_KEY", "sk-anthropic-test");
             if oauth {
                 let label = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                    record_id: None,
                     label: "claude-test".into(),
                     access: "access".into(),
                     refresh: "refresh".into(),

@@ -57,31 +57,27 @@ impl Provider for OpenAIProvider {
     }
 
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
-        let selected = label
-            .map(jcode_base::auth::codex::load_credentials_for_account)
-            .transpose()?;
-        let mut credentials = self.credentials.try_write().map_err(|_| {
-            anyhow::anyhow!("Cannot change OpenAI account while credentials are in use")
-        })?;
-        *self
-            .oauth_account
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = label.map(str::to_owned);
-        if let Some(selected) = selected {
-            openai_credentials::adopt_stored(&mut credentials, selected);
-            self.browser_only.store(false, AtomicOrdering::Release);
-        }
-        drop(credentials);
-        self.clear_persistent_ws_try("OpenAI account changed");
-        self.reload_cached_reasoning_efforts();
-        Ok(())
+        self.bind_account_pin(
+            label
+                .map(jcode_base::auth::account_pins::openai_pin)
+                .transpose()?,
+        )
     }
 
-    fn oauth_account_label(&self) -> Option<String> {
+    fn oauth_account_pin(&self) -> Option<jcode_provider_core::AccountPin> {
         self.oauth_account
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn oauth_account_label(&self) -> Option<String> {
+        let pin = self.oauth_account_pin()?;
+        Some(jcode_base::auth::account_pins::resolve_openai(&pin).unwrap_or(pin.label))
+    }
+
+    fn set_oauth_account_pin(&self, pin: &jcode_provider_core::AccountPin) -> Result<()> {
+        self.bind_account_pin(Some(pin.clone()))
     }
 
     fn serving_oauth_account_label(&self) -> Option<String> {
@@ -159,7 +155,7 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        openai_credentials::sync(self.oauth_account_label().as_deref(), &self.credentials).await?;
+        openai_credentials::sync(self.oauth_account_pin().as_ref(), &self.credentials).await?;
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
             return Arc::clone(&self.chatgpt_web)
@@ -1154,7 +1150,7 @@ impl Provider for OpenAIProvider {
             client: self.client.clone(),
             credentials: Arc::new(RwLock::new(credentials)),
             credential_mode: Arc::new(RwLock::new(mode)),
-            oauth_account: Arc::new(StdRwLock::new(self.oauth_account_label())),
+            oauth_account: Arc::new(StdRwLock::new(self.oauth_account_pin())),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             cache_session_id: StdRwLock::new(

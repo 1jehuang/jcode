@@ -23,6 +23,7 @@ impl Drop for HomeGuard {
 
 fn account() -> OpenAiAccount {
     OpenAiAccount {
+        record_id: None,
         label: "work".into(),
         access_token: "old-access".into(),
         refresh_token: "old-refresh".into(),

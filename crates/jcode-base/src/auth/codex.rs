@@ -18,6 +18,9 @@ pub struct CodexCredentials {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiAccount {
+    /// Local record identity retained by refresh and relabel operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_id: Option<String>,
     pub label: String,
     pub access_token: String,
     pub refresh_token: String,
@@ -175,7 +178,15 @@ pub fn load_auth_file() -> Result<JcodeOpenAiAuthFile> {
         JcodeOpenAiAuthFile::default()
     };
 
-    if relabel_accounts(&mut auth) {
+    let mut migrated = false;
+    for account in &mut auth.openai_accounts {
+        if account.record_id.is_none() {
+            account.record_id = Some(uuid::Uuid::new_v4().to_string());
+            migrated = true;
+        }
+    }
+    let relabeled = relabel_accounts(&mut auth);
+    if migrated || relabeled {
         crate::logging::info(
             "Renaming OpenAI accounts to animal labels (openai-otter, openai-fox, ...)",
         );
@@ -256,10 +267,20 @@ pub fn set_active_account(label: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn upsert_account(account: OpenAiAccount) -> Result<String> {
+pub fn upsert_account(mut account: OpenAiAccount) -> Result<String> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "openai-auth.json")?;
     let mut auth = load_auth_file()?;
+    if account.record_id.is_none() {
+        account.record_id = auth
+            .openai_accounts
+            .iter()
+            .find(|stored| {
+                !account.refresh_token.is_empty() && stored.refresh_token == account.refresh_token
+            })
+            .and_then(|stored| stored.record_id.clone())
+            .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
+    }
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
         &mut auth.openai_accounts,
@@ -590,6 +611,7 @@ fn account_from_credentials(
     email: Option<String>,
 ) -> OpenAiAccount {
     OpenAiAccount {
+        record_id: None,
         label: label.to_string(),
         access_token: credentials.access_token.clone(),
         refresh_token: credentials.refresh_token.clone(),
