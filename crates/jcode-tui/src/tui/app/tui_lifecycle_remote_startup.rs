@@ -3,6 +3,11 @@
 use super::*;
 
 impl App {
+    /// Create an App instance for remote mode (connecting to server)
+    pub fn new_for_remote(resume_session: Option<String>) -> Self {
+        Self::new_for_remote_with_options(resume_session, false)
+    }
+
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
         let new_start = Instant::now();
         let mut lap = Instant::now();

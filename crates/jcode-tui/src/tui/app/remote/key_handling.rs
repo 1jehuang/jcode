@@ -1124,7 +1124,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
         }
 
         if trimmed == "/clear" {
-            remote.clear().await?;
+            app.clear_session(remote).await?;
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();

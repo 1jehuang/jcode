@@ -309,7 +309,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     if !app.is_processing {
         if let Some(request) = app.take_pending_catchup_resume() {
-            match remote.resume_session(&request.target_session_id).await {
+            match app.resume_session(remote, &request.target_session_id).await {
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&request.target_session_id)
                         .map(|name| name.to_string())
@@ -335,7 +335,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
 
         if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
-            match remote.resume_session(&target_session).await {
+            match app.resume_session(remote, &target_session).await {
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&target_session)
                         .map(|name| name.to_string())

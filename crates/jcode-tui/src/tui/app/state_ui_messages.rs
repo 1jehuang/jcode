@@ -1,3 +1,4 @@
+mod transcript;
 use super::state_ui_history_marker::parse_compacted_history_marker;
 #[path = "state_ui_messages_compacted_history.rs"]
 mod compacted_history;
@@ -149,6 +150,9 @@ impl App {
             message.duration_secs = DisplayMessage::tool_duration_from_output(&message.content);
         }
         compact_display_message_tool_data(&mut message);
+        if message.role == "user" {
+            self.import_prompt_history(&message.content);
+        }
         // Keep Ctrl+L's spacer as a clear boundary when new content arrives.
         // The renderer packs only the content after it while following the tail,
         // so sending a prompt does not restore the pre-clear conversation.
@@ -180,6 +184,7 @@ impl App {
     }
 
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
+        self.capture_visible_prompt_history();
         messages.retain_mut(|message| {
             message.normalize_jarvis_role();
             if !is_background_task_lifecycle_message(&message.content) {
@@ -197,6 +202,7 @@ impl App {
         }
         compact_display_messages_for_storage(&mut messages);
         self.display_messages = messages;
+        self.adopt_prompt_history_display();
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
@@ -689,18 +695,6 @@ impl App {
             content.to_string()
         } else {
             format!("{content} [×{repeat_count}]")
-        }
-    }
-
-    pub(super) fn clear_display_messages(&mut self) {
-        self.compacted_history_lazy = CompactedHistoryLazyState::default();
-        // The transcript is about to be discarded; forget where the live reasoning
-        // block started so a stale offset can't slice the new stream.
-        self.reasoning_block_start = None;
-        self.turn_reasoning_traces.clear();
-        if !self.display_messages.is_empty() {
-            self.display_messages.clear();
-            self.bump_display_messages_version();
         }
     }
 

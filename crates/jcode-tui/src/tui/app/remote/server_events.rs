@@ -1463,17 +1463,7 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
-            app.jarvis_session_changed(&session_id);
-            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
-                app.remote_available_service_tiers = None;
-            }
-            remote.set_session_id(session_id.clone());
-            app.cloud_environment_session_changed(&session_id);
-            app.remote_session_id = Some(session_id.clone());
-            crate::set_current_session(&session_id);
-            app.note_client_focus(true);
-            app.update_terminal_title();
-            false
+            super::server_event_handlers::handle_session_id(app, remote, session_id)
         }
         ServerEvent::SessionCloseRequested { reason } => {
             app.push_display_message(DisplayMessage::system(format!(
@@ -1767,7 +1757,7 @@ fn handle_server_event_inner(
             remote.set_session_id(session_id.clone());
             app.jarvis_session_changed(&session_id);
             app.cloud_environment_session_changed(&session_id);
-            app.remote_session_id = Some(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();
             crate::set_current_session(&session_id);

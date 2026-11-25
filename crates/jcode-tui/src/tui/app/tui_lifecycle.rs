@@ -714,6 +714,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1238,6 +1239,7 @@ impl App {
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
             prompt_history_search: None,
             persisted_prompt_history: None,
+            prompt_history_scope: Default::default(),
         };
 
         for notice in app.provider.drain_startup_notices() {
@@ -1462,11 +1464,6 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
     }
 
     /// Mark that a server was just spawned - run_remote will retry initial connection

@@ -54,6 +54,7 @@ async fn navigate(
 ) -> Result<()> {
     let previous = remote.session_id().map(str::to_owned);
     let request_id = remote.resume_ssh_session(target).await?;
+    app.suspend_prompt_history_for_request(request_id);
     app.ssh_sessions.navigation = Some(Navigation {
         request_id,
         target: target.to_owned(),

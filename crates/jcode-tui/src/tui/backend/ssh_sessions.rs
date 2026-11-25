@@ -5,9 +5,7 @@ impl RemoteConnection {
     /// Switch the existing SSH connection, without consulting a local session file.
     /// Returning the request ID lets navigation roll back on a rejected resume.
     pub async fn resume_ssh_session(&mut self, session_id: &str) -> Result<u64> {
-        let id = self.next_request_id;
-        self.resume_session(session_id).await?;
-        Ok(id)
+        self.resume_session(session_id).await
     }
 
     /// A deliberate catch-up replay must not be discarded as bootstrap duplication.

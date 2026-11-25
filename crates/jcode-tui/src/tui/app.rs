@@ -1935,9 +1935,9 @@ pub struct App {
     workspace_client: super::workspace_client::WorkspaceClientState,
     /// Reverse prompt-history search overlay state (Ctrl+R). None = closed.
     prompt_history_search: Option<prompt_history::PromptHistorySearchState>,
-    /// Lazily-loaded persisted cross-session prompt history (oldest first,
-    /// deduped). None until first use; see `prompt_history.rs`.
+    /// Active session's independent prompt journal (oldest first, deduped).
     persisted_prompt_history: Option<Vec<String>>,
+    prompt_history_scope: prompt_history::PromptHistoryScope,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

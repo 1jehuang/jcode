@@ -34,7 +34,7 @@ pub(super) async fn handle_workspace_navigation_key(
         app.set_status_notice("No workspace session in that direction");
         return Ok(true);
     };
-    remote.resume_session(&target_session_id).await?;
+    app.resume_session(remote, &target_session_id).await?;
     let label = crate::id::extract_session_name(&target_session_id)
         .map(|name| name.to_string())
         .unwrap_or(target_session_id);
