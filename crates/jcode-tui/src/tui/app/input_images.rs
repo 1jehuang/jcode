@@ -119,7 +119,9 @@ impl App {
             }
             self.input_undo_stack.push(rejected);
             self.restore_input_draft(newer);
-            self.set_status_notice("Rejected attachment prompt saved · Ctrl+Z to restore");
+            let notice = "Rejected attachment prompt saved · Ctrl+Z to restore";
+            self.push_display_message(crate::tui::DisplayMessage::system(notice));
+            self.set_status_notice(notice);
         }
         self.reset_tab_completion();
         self.sync_model_picker_preview_from_input();
@@ -433,7 +435,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         had_pending = true;
     }
     if let Some(msg) = app.interleave_message.take()
-        && !msg.is_empty()
+        && (!msg.is_empty() || !app.interleave_images.is_empty())
     {
         app.pending_images.append(&mut app.interleave_images);
         parts.push(msg);

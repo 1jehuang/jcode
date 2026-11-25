@@ -392,3 +392,21 @@ fn image_followup_recovery_spawned_startup_prompt_keeps_image_routing() {
         }
     });
 }
+
+#[test]
+fn review_image_recovery_recall_keeps_a_staged_image_only_prompt() {
+    let mut app = create_test_app();
+    let images = vec![queued_recovery_image()];
+    super::input_images::attach_image(&mut app, images[0].0.clone(), images[0].1.clone());
+    let prepared = super::input::take_prepared_input(&mut app);
+    assert!(prepared.expanded.is_empty());
+    app.interleave_message = Some(prepared.expanded);
+    app.interleave_images = prepared.images;
+    assert!(super::input::retrieve_pending_message_for_edit(&mut app));
+    assert!(app.interleave_message.is_none());
+    assert!(app.interleave_images.is_empty());
+    assert!(app.input_without_owned_image_markers().is_empty());
+    let recalled = super::input::take_prepared_input(&mut app);
+    assert_eq!(recalled.expanded, "");
+    assert_eq!(recalled.images, images);
+}
