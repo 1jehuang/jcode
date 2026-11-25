@@ -6,7 +6,7 @@
 //! plus the most recently installed few for rollback, and deletes the rest.
 
 use crate::{
-    BuildManifest, builds_dir, read_current_version, read_shared_server_version,
+    BuildManifest, builds_dir, manifest_path, read_current_version, read_shared_server_version,
     read_stable_version,
 };
 use anyhow::Result;
@@ -63,7 +63,12 @@ fn protected_versions() -> Result<HashSet<String>> {
             }
         }
     }
-    let manifest = BuildManifest::load()?;
+    // Backup recovery can omit rollback targets added by a newer primary.
+    let manifest: BuildManifest = match std::fs::read(manifest_path()?) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BuildManifest::default(),
+        Err(error) => return Err(error.into()),
+    };
     protected.extend(manifest.stable.clone());
     protected.extend(manifest.canary.clone());
     if let Some(pending) = manifest.pending_activation.as_ref() {
