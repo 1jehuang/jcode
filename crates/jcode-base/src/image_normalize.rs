@@ -126,6 +126,14 @@ fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
     Some(out.into_inner())
 }
 
+/// Fully decode bytes when recovering from a provider rejection. Magic bytes
+/// alone cannot distinguish a valid image from a truncated provider format.
+pub fn validate_image_bytes(bytes: &[u8]) -> Result<(), String> {
+    image::load_from_memory(bytes)
+        .map(|_| ())
+        .map_err(|error| format!("undecodable image data: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

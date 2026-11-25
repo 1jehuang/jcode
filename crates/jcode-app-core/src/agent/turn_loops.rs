@@ -289,6 +289,7 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let request_images = self.image_positions_for_request(send_messages);
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             self.provider.set_session_id(&self.session.id);
@@ -307,7 +308,7 @@ impl Agent {
                 Ok(stream) => stream,
                 Err(e) => {
                     let err_chain = crate::util::format_error_chain(&e);
-                    if self.try_auto_compact_after_context_limit(&err_chain) {
+                    if self.try_auto_compact_after_context_limit(&err_chain, &request_images) {
                         self.record_failed_account_route(&err_chain);
                         context_limit_retries += 1;
                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
@@ -345,8 +346,7 @@ impl Agent {
                 }
             };
 
-            // The provider returned an owned stream, so the request transcript
-            // copies are no longer needed while the response is consumed.
+            // The owned stream no longer needs the request transcript copies.
             drop(stamped);
             drop(messages_with_memory);
             drop(memory_pending);
@@ -411,7 +411,7 @@ impl Agent {
                     Err(e) => {
                         let err_str = crate::util::format_error_chain(&e);
                         usage_recorder.finish();
-                        if self.try_auto_compact_after_context_limit(&err_str) {
+                        if self.try_auto_compact_after_context_limit(&err_str, &request_images) {
                             self.record_failed_account_route(&err_str);
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -929,7 +929,7 @@ impl Agent {
                             eprintln!("[trace] stream_error {}", message);
                         }
                         usage_recorder.finish();
-                        if self.try_auto_compact_after_context_limit(&message) {
+                        if self.try_auto_compact_after_context_limit(&message, &request_images) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,

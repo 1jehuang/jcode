@@ -129,7 +129,11 @@ impl Agent {
     ///
     /// Performs a synchronous hard compaction and resets provider session state,
     /// allowing the caller to retry the same turn immediately.
-    pub(super) fn try_auto_compact_after_context_limit(&mut self, error: &str) -> bool {
+    pub(super) fn try_auto_compact_after_context_limit(
+        &mut self,
+        error: &str,
+        image_positions: &[(usize, usize)],
+    ) -> bool {
         if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error)
             && self.try_recover_oversized_openai_native_compaction()
         {
@@ -143,7 +147,7 @@ impl Agent {
         if self.try_recover_after_payload_too_large(error) {
             return true;
         }
-        if self.try_recover_after_image_rejection(error) {
+        if self.try_recover_after_image_rejection(error, image_positions) {
             return true;
         }
         if !Self::is_context_limit_error(error) {
@@ -270,48 +274,84 @@ impl Agent {
         true
     }
 
+    /// Keep stored positions for images actually included in this request.
+    /// Match newest occurrences first because compaction removes an older prefix.
+    pub(super) fn image_positions_for_request(&self, request: &[Message]) -> Vec<(usize, usize)> {
+        let mut remaining = std::collections::HashMap::new();
+        for block in request.iter().flat_map(|message| &message.content) {
+            if let ContentBlock::Image { media_type, data } = block {
+                *remaining
+                    .entry((media_type.as_str(), data.as_str()))
+                    .or_insert(0usize) += 1;
+            }
+        }
+        let mut positions = Vec::new();
+        for (message_index, message) in self.session.messages.iter().enumerate().rev() {
+            for (block_index, block) in message.content.iter().enumerate().rev() {
+                if let ContentBlock::Image { media_type, data } = block
+                    && let Some(count) = remaining.get_mut(&(media_type.as_str(), data.as_str()))
+                    && *count > 0
+                {
+                    *count -= 1;
+                    positions.push((message_index, block_index));
+                }
+            }
+        }
+        positions
+    }
+
     /// Repair only a uniquely identifiable malformed/unsupported image. Provider
     /// error indices refer to the encoded request, not necessarily stored history
     /// (compaction, memory injection and provider encoding can change positions).
     /// Never guess from those indices or remove otherwise valid images.
-    fn try_recover_after_image_rejection(&mut self, error: &str) -> bool {
+    fn try_recover_after_image_rejection(
+        &mut self,
+        error: &str,
+        image_positions: &[(usize, usize)],
+    ) -> bool {
         use base64::Engine as _;
 
         if !crate::compaction::is_image_rejection_error(error) {
             return false;
         }
         let mut candidate = None;
-        for (message_index, message) in self.session.messages.iter().enumerate() {
-            for (block_index, block) in message.content.iter().enumerate() {
-                let ContentBlock::Image { media_type, data } = block else {
+        for &(message_index, block_index) in image_positions {
+            let Some(ContentBlock::Image { media_type, data }) = self
+                .session
+                .messages
+                .get(message_index)
+                .and_then(|message| message.content.get(block_index))
+            else {
+                continue;
+            };
+            let normalized = base64::engine::general_purpose::STANDARD
+                .decode(data.trim())
+                .map_err(|_| "invalid base64 image data".to_string())
+                .and_then(|bytes| {
+                    crate::image_normalize::validate_image_bytes(&bytes)?;
+                    crate::image_normalize::normalize_image_bytes(bytes)
+                });
+            let replacement = match normalized {
+                Ok(image)
+                    if image.converted_from.is_none()
+                        && image.media_type.eq_ignore_ascii_case(media_type) =>
+                {
                     continue;
-                };
-                let normalized = base64::engine::general_purpose::STANDARD
-                    .decode(data.trim())
-                    .map_err(|_| "invalid base64 image data".to_string())
-                    .and_then(crate::image_normalize::normalize_image_bytes);
-                let replacement = match normalized {
-                    Ok(image)
-                        if image.converted_from.is_none()
-                            && image.media_type.eq_ignore_ascii_case(media_type) =>
-                    {
-                        continue;
-                    }
-                    Ok(image) => ContentBlock::Image {
-                        media_type: image.media_type.into(),
-                        data: base64::engine::general_purpose::STANDARD.encode(image.data),
-                    },
-                    Err(reason) => ContentBlock::Text {
-                        text: format!("[Image omitted: {media_type}: {reason}]"),
-                        cache_control: None,
-                    },
-                };
-                if candidate.is_some() {
-                    logging::warn("Image-rejection recovery skipped: ambiguous offending image");
-                    return false;
                 }
-                candidate = Some((message_index, block_index, replacement));
+                Ok(image) => ContentBlock::Image {
+                    media_type: image.media_type.into(),
+                    data: base64::engine::general_purpose::STANDARD.encode(image.data),
+                },
+                Err(reason) => ContentBlock::Text {
+                    text: format!("[Image omitted: {media_type}: {reason}]"),
+                    cache_control: None,
+                },
+            };
+            if candidate.is_some() {
+                logging::warn("Image-rejection recovery skipped: ambiguous offending image");
+                return false;
             }
+            candidate = Some((message_index, block_index, replacement));
         }
         let Some((message_index, block_index, replacement)) = candidate else {
             logging::warn("Image-rejection recovery skipped: no identifiable invalid image");
@@ -687,5 +727,48 @@ mod image_recovery_tests {
             )
             .await;
         }
+    }
+
+    #[tokio::test]
+    async fn public_recovery_omits_a_corrupt_png_with_a_valid_signature() {
+        let data = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n");
+        for streaming in [false, true] {
+            exercise_recovery(vec![image("image/png", &data)], Some(1), streaming).await;
+        }
+    }
+
+    #[test]
+    fn recovery_never_rewrites_compacted_images_absent_from_the_request() {
+        let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let provider = Arc::new(RecordingProvider::default());
+        let mut agent = Agent::new(provider, Registry::empty());
+        let bmp = base64::engine::general_purpose::STANDARD.encode(bmp_bytes());
+        agent.add_message(Role::User, vec![image("image/bmp", &bmp)]);
+        agent.add_message(Role::User, vec![image("image/png", &png_data())]);
+        let history = agent.session.messages_for_provider();
+        // Compaction excludes the first stored message from the outgoing history.
+        let request = vec![history.last().unwrap().clone()];
+        let positions = agent.image_positions_for_request(&request);
+        assert_eq!(positions, vec![(agent.session.messages.len() - 1, 0)]);
+        assert!(!agent.try_recover_after_image_rejection(REJECTION, &positions));
+        assert_eq!(
+            images(&agent.session.messages_for_provider()),
+            images(&history)
+        );
+
+        // Identical old bytes must not steal the active occurrence's position.
+        agent.add_message(Role::User, vec![image("image/bmp", &bmp)]);
+        let request = vec![
+            agent
+                .session
+                .messages_for_provider()
+                .last()
+                .unwrap()
+                .clone(),
+        ];
+        assert_eq!(
+            agent.image_positions_for_request(&request),
+            vec![(agent.session.messages.len() - 1, 0)]
+        );
     }
 }
