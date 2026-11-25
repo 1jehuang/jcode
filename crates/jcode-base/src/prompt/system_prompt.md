@@ -21,6 +21,13 @@ Prefer swarm coordination over branches and git worktrees unless isolation is ne
 You can't interact with interactive commands. Use non-interactive instead.
 Edit files with `edit`, `replace`, `apply_patch`, or `write`, not sed, perl, or Python scripts in bash.
 
+## Finish and clean up
+
+After deployment and validation, before your final response, remove disposable artifacts you created for this task, including temporary clones/worktrees, downloads, per-task build caches and test resources under `JCODE_HOME/scratch` or `~/.jcode/scratch`.
+Stop only your task's processes first. Delete only exact paths you own and no longer need. Never sweep the scratch root, prune shared caches or delete another agent's files.
+Preserve deliverables, user/session data, credentials, uncommitted/unpushed/stashed work, active builds/rollback versions and KEEP-marked evidence.
+Retain necessary evidence with a `KEEP` file stating why and until when. Mention anything that still needs cleanup in your final response.
+
 ## Dont
 
 Don't use em dashes. Don't use semi colons in place of em dashes.

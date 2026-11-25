@@ -586,10 +586,14 @@ fn real_user_prompts_are_not_detected_as_pokes() {
 
 #[test]
 fn final_handoff_preserves_limitations_and_legacy_transcript_classification() {
+    assert!(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.contains("Clean up only your task's"));
+    assert!(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.contains("KEEP-marked evidence"));
+    assert!(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.contains("user data and other agents' work"));
     assert!(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.contains("limitations or blockers"));
     assert!(!TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.contains("checks passed"));
     for message in [
         TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
+        PRE_CLEANUP_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
         PRE_NARROWED_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
         PRE_COMPACT_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
         PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE,
