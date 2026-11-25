@@ -294,3 +294,27 @@ fn contended_overview_data() -> InfoWidgetData {
         ..model_and_context_data()
     }
 }
+
+#[test]
+fn edge_stuck_overview_stays_below_synthetic_top_rows() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 3, 140, 40);
+    let initial = calculate_placements_anchored(area, &roomy_margins(), &data, true, &[]);
+    let mut anchors = initial.anchors;
+    for scroll_top in 1000..1004 {
+        let margins = Margins {
+            content_start_row: 5,
+            scroll_top,
+            ..roomy_margins()
+        };
+        let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+        assert_placements_sane("sticky top band", area, &out.visible);
+        let overview = out
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("overview remains whole");
+        assert_eq!(overview.rect.y, area.y + 5, "clamp below synthetic chrome");
+        anchors = out.anchors;
+    }
+}
