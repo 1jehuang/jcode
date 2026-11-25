@@ -18,7 +18,6 @@ pub(super) async fn run_stream_with_retries(
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
 ) {
-    let usage_label = usage_recording::credential_label(is_oauth, &initial_token);
     let mut token = initial_token;
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -56,6 +55,19 @@ pub(super) async fn run_stream_with_retries(
                 retry_max
             ));
         }
+
+        if attempt > 0 && is_oauth {
+            match resolve_oauth_access_token(&credentials, &oauth_account_label).await {
+                Ok((current, _)) => token = current,
+                Err(error) => {
+                    if let Ok(permit) = tx.reserve().await {
+                        permit.send(Err(error));
+                    }
+                    return;
+                }
+            }
+        }
+        let usage_label = usage_recording::credential_label(is_oauth, &token);
 
         // Track whether this attempt streams replay-visible output so a
         // mid-stream transport fault can roll the partial output back on the
