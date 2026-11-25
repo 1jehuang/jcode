@@ -1,6 +1,6 @@
 use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
-mod todo_margins;
+pub(super) mod todo_margins;
 pub(crate) use todo_margins::compute_visible_margins;
 pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
 
@@ -1412,33 +1412,6 @@ pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
 
 pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
     PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
-}
-
-// Diagnostics must restore both hit targets and the scroll range they describe.
-pub(super) fn interaction_geometry() -> (Option<Rect>, Option<Rect>, usize, usize, usize) {
-    use std::sync::atomic::Ordering::Relaxed;
-    (
-        *PINNED_TODO_BAND_AREA
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-        *PINNED_TODO_MORE_AREA
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()),
-        PINNED_TODO_SCROLL.load(Relaxed),
-        PINNED_TODO_MAX_SCROLL.load(Relaxed),
-        PINNED_TODO_LAST_MAX.load(Relaxed),
-    )
-}
-
-pub(super) fn restore_interaction_geometry(
-    (band, more, scroll, max_scroll, last_max): (Option<Rect>, Option<Rect>, usize, usize, usize),
-) {
-    use std::sync::atomic::Ordering::Relaxed;
-    set_pinned_todo_band_area(band);
-    set_pinned_todo_more_area(more);
-    PINNED_TODO_SCROLL.store(scroll, Relaxed);
-    PINNED_TODO_MAX_SCROLL.store(max_scroll, Relaxed);
-    PINNED_TODO_LAST_MAX.store(last_max, Relaxed);
 }
 
 /// The same previous-prompt band for live sessions and resume previews. Work on

@@ -54,7 +54,7 @@ mod box_utils;
 #[path = "ui_changelog.rs"]
 mod changelog;
 #[path = "ui_debug_capture.rs"]
-mod debug_capture;
+pub(crate) mod debug_capture;
 #[path = "ui_diagram_pane.rs"]
 mod diagram_pane;
 #[path = "ui_file_diff.rs"]
@@ -73,8 +73,6 @@ mod inline_interactive_ui;
 mod inline_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
-#[path = "ui_interactive_state.rs"]
-pub(crate) mod interactive_state;
 #[path = "ui_memory_estimates.rs"]
 mod memory_estimates;
 #[path = "ui_memory.rs"]

@@ -1,5 +1,5 @@
 //! Live interaction geometry must not be replaced by offscreen diagnostics.
-use super::*;
+use super::super::*;
 
 fn badge_rect() -> Option<Rect> {
     #[cfg(test)]
@@ -82,7 +82,7 @@ pub(crate) fn preserve_interactive_render_state() -> InteractiveRenderState {
             badge_rect(),
         ),
         tail: (tail_catchup_active(), take_tail_follow_snap_request()),
-        todo: viewport::interaction_geometry(),
+        todo: viewport::todo_margins::interaction_geometry(),
         images: panel_image_preview::snapshot_regions(),
     }
 }
@@ -114,7 +114,7 @@ impl Drop for InteractiveRenderState {
         if self.tail.1 {
             request_tail_follow_snap();
         }
-        viewport::restore_interaction_geometry(self.todo);
+        viewport::todo_margins::restore_interaction_geometry(self.todo);
         panel_image_preview::restore_regions(self.images.clone());
     }
 }
@@ -130,16 +130,16 @@ mod tests {
         let area = Rect::new(1, 2, 30, 4);
         let todo = (Some(area), Some(area), 2, 4, 4);
         let images = vec![(area, 42)];
-        viewport::restore_interaction_geometry(todo);
+        viewport::todo_margins::restore_interaction_geometry(todo);
         panel_image_preview::restore_regions(images.clone());
         let result = std::panic::catch_unwind(|| {
             let _saved = preserve_interactive_render_state();
-            viewport::restore_interaction_geometry((None, None, 0, 0, 0));
+            viewport::todo_margins::restore_interaction_geometry((None, None, 0, 0, 0));
             panel_image_preview::clear_regions();
             panic!("offscreen diagnostic failed");
         });
         assert!(result.is_err());
-        assert_eq!(viewport::interaction_geometry(), todo);
+        assert_eq!(viewport::todo_margins::interaction_geometry(), todo);
         assert_eq!(panel_image_preview::snapshot_regions(), images);
     }
 }

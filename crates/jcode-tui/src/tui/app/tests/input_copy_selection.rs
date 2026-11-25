@@ -667,7 +667,8 @@ fn test_offscreen_benchmark_preserves_live_copy_geometry_without_redraw() {
     );
 
     let recovered = std::panic::catch_unwind(|| {
-        let _saved = crate::tui::ui::interactive_state::preserve_interactive_render_state();
+        let _saved =
+            crate::tui::ui::debug_capture::interactive_state::preserve_interactive_render_state();
         crate::tui::ui::clear_copy_viewport_snapshot();
         panic!("offscreen diagnostic failed");
     });
