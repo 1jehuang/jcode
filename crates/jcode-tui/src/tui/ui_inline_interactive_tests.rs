@@ -621,3 +621,19 @@ fn agent_target_picker_uses_specific_column_labels() {
     assert_eq!(picker.tertiary_label(), "CONFIG");
     assert!(!picker.shows_default_shortcut_hint());
 }
+
+#[test]
+fn review_provider_scope_azure_display_keeps_direct_service_identity() {
+    assert_eq!(
+        route_provider_display("Azure OpenAI", "openrouter"),
+        "Azure OpenAI"
+    );
+    assert_eq!(
+        route_provider_display("Azure", "openrouter"),
+        "OpenRouter/Azure"
+    );
+    assert_eq!(
+        route_provider_display("Fireworks", "openrouter"),
+        "OpenRouter/Fireworks"
+    );
+}

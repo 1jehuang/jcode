@@ -869,3 +869,80 @@ fn model_browser_refresh_preserves_scoped_selection_and_original_transport() {
         "openrouter"
     );
 }
+
+fn review_provider_scope_picker() -> crate::tui::InlineInteractiveState {
+    let mut picker = r23_model_browser_state(false);
+    picker.entries = vec![
+        r23_model_browser_entry("native-openai", &[("OpenAI", "openai-oauth")]),
+        r23_model_browser_entry(
+            "direct-fireworks",
+            &[("Fireworks", "openai-compatible:my-fireworks")],
+        ),
+        r23_model_browser_entry("native-azure", &[("Azure OpenAI", "openrouter")]),
+        r23_model_browser_entry("routed-fireworks", &[("Fireworks", "openrouter")]),
+        r23_model_browser_entry("routed-azure", &[("Azure", "openrouter")]),
+    ];
+    picker.filtered = (0..picker.entries.len()).collect();
+    picker
+}
+
+#[test]
+fn review_provider_scope_openai_excludes_compatible_profiles_and_azure() {
+    let mut picker = review_provider_scope_picker();
+    for (scope, name) in [
+        ("@openai", "native-openai"),
+        ("@my-fireworks", "direct-fireworks"),
+        ("@fireworks", "direct-fireworks"),
+    ] {
+        picker.filter = scope.into();
+        App::apply_inline_interactive_filter(&mut picker);
+        let names: Vec<_> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.entries[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec![name], "{scope}");
+        assert_eq!(
+            model_picker_active_provider(&picker).as_deref(),
+            Some(if scope == "@openai" {
+                "OpenAI"
+            } else {
+                "Fireworks"
+            })
+        );
+    }
+}
+
+#[test]
+fn review_provider_scope_azure_uses_direct_identity_in_filter_and_cycle() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(review_provider_scope_picker());
+    let picker = app.inline_interactive_state.as_mut().unwrap();
+    picker.filter = "@azure".into();
+    App::apply_inline_interactive_filter(picker);
+    assert_eq!(picker.filtered.len(), 1);
+    assert_eq!(picker.selected_entry().unwrap().name, "native-azure");
+    assert_eq!(
+        model_picker_active_provider(picker).as_deref(),
+        Some("Azure OpenAI")
+    );
+    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert_eq!(
+        model_picker_active_provider(picker).as_deref(),
+        Some("OpenRouter")
+    );
+    assert_eq!(
+        visible_review_provider_scope_names(picker),
+        vec!["routed-fireworks", "routed-azure"]
+    );
+}
+
+fn visible_review_provider_scope_names(picker: &crate::tui::InlineInteractiveState) -> Vec<&str> {
+    picker
+        .filtered
+        .iter()
+        .map(|&i| picker.entries[i].name.as_str())
+        .collect()
+}

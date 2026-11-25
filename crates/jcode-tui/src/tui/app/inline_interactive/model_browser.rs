@@ -80,7 +80,10 @@ pub(crate) fn split_model_picker_filter(filter: &str) -> (Vec<String>, String) {
 /// cycling. OpenRouter routes name their upstream (e.g. `Fireworks`), but the
 /// user reaches them through OpenRouter.
 pub(super) fn model_route_provider_group(option: &crate::tui::PickerOption) -> String {
-    if crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter() {
+    // Azure preserves its own service identity while reusing this legacy transport.
+    if crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter()
+        && crate::provider::normalize_model_route_provider_label(&option.provider) != "azureopenai"
+    {
         "OpenRouter".to_string()
     } else {
         option.provider.clone()
@@ -95,13 +98,14 @@ pub(super) fn model_route_matches_scopes(
     option: &crate::tui::PickerOption,
     scopes: &[String],
 ) -> bool {
-    use crate::provider::normalize_model_route_provider_label as normalize;
-    let group = normalize(&model_route_provider_group(option));
-    let via_openrouter =
-        crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter();
-    let method = normalize(&option.api_method);
+    let group = model_route_provider_group(option);
+    let profile = super::helpers::openai_compatible_profile_id_for_route(option)
+        .map(|id| crate::provider::normalize_model_route_provider_label(&id));
     scopes.iter().all(|scope| {
-        group.contains(scope.as_str()) || (!via_openrouter && method.contains(scope.as_str()))
+        crate::provider::model_route_provider_labels_match(&group, scope)
+            || (crate::provider::normalize_model_route_provider_label(&group) == "azureopenai"
+                && scope == "azure")
+            || profile.as_ref() == Some(scope)
     })
 }
 
@@ -185,13 +189,13 @@ pub(super) fn cycle_model_picker_provider(picker: &mut InlineInteractiveState, f
     if groups.is_empty() {
         return;
     }
-    let (scopes, search) = split_model_picker_filter(&picker.filter);
-    let current = match scopes.as_slice() {
-        [scope] => groups.iter().position(|group| {
-            crate::provider::normalize_model_route_provider_label(group) == *scope
-        }),
-        _ => None,
-    };
+    let (_, search) = split_model_picker_filter(&picker.filter);
+    let current = model_picker_active_provider(picker).and_then(|active| {
+        groups.iter().position(|group| {
+            crate::provider::normalize_model_route_provider_label(group)
+                == crate::provider::normalize_model_route_provider_label(&active)
+        })
+    });
     // Positions 0..len are providers, len is "all providers".
     let slots = groups.len() + 1;
     let at = current.unwrap_or(groups.len());
@@ -216,9 +220,12 @@ pub(crate) fn model_picker_active_provider(picker: &InlineInteractiveState) -> O
         return (!scopes.is_empty()).then(|| scopes.join(", "));
     };
     Some(
-        model_picker_provider_groups(picker)
-            .into_iter()
-            .find(|group| crate::provider::normalize_model_route_provider_label(group) == *scope)
+        picker
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.options)
+            .find(|route| model_route_matches_scopes(route, &scopes))
+            .map(model_route_provider_group)
             .unwrap_or_else(|| scope.clone()),
     )
 }
