@@ -291,11 +291,31 @@ fn transferred_accounts_path(session_id: &str) -> Result<PathBuf> {
     Ok(baseline_path(session_id)?.with_extension("accounts.json"))
 }
 
-fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
+fn run_credentials(
+    provider: &str,
+    account: &str,
+    export: bool,
+    expected_pin: Option<&str>,
+) -> Result<()> {
     let provider = provider.parse::<TransferProvider>()?;
     let home = storage::jcode_dir()?;
     if export {
-        let payload = transfer::export_cloud_account_at(&home, provider, Some(account))?;
+        let payload = match expected_pin {
+            Some(pin) => {
+                let pin = serde_json::from_str(pin).context("invalid expected account pin")?;
+                let payload = crate::auth::account_pins::export_cloud_pin(provider, &pin)?;
+                anyhow::ensure!(
+                    pin.record_id.is_some(),
+                    "cloud export requires a saved account record"
+                );
+                anyhow::ensure!(
+                    payload.label() == account,
+                    "pinned cloud account was renamed"
+                );
+                payload
+            }
+            None => transfer::export_cloud_account_at(&home, provider, Some(account))?,
+        };
         std::io::stdout().write_all(payload.as_bytes())?;
         std::io::stdout().flush()?;
     } else {
@@ -2287,7 +2307,13 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             provider,
             account,
             export,
-        } => run_credentials(&provider, &account, export),
+            expected_pin,
+        } => run_credentials(
+            provider.as_arg_value(),
+            &account,
+            export,
+            expected_pin.as_deref(),
+        ),
         C::RouterCredentials => run_router_credentials(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),

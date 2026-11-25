@@ -1077,13 +1077,16 @@ pub(crate) enum CloudCommand {
     /// Internal: transfer one named OAuth account over the private SSH channel.
     #[command(hide = true)]
     Credentials {
-        #[arg(long = "provider", id = "cloud_credential_provider")]
-        provider: String,
+        #[arg(from_global)]
+        provider: ProviderChoice,
         #[arg(long = "account", id = "cloud_credential_account")]
         account: String,
         /// Export to stdout instead of importing from stdin.
         #[arg(long)]
         export: bool,
+        /// Require the source account captured by the returning session.
+        #[arg(long, requires = "export", hide = true)]
+        expected_pin: Option<String>,
     },
 
     /// Internal: import the account router's API keys, provider token stores

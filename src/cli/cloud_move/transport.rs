@@ -564,6 +564,7 @@ impl Target {
         host: &str,
         account: &CloudAccount,
         payload: Option<&[u8]>,
+        expected_pin: Option<&str>,
     ) -> Result<Vec<u8>> {
         let mut args = vec![
             "cloud",
@@ -575,6 +576,9 @@ impl Target {
         ];
         if payload.is_none() {
             args.push("--export");
+        }
+        if let Some(pin) = expected_pin {
+            args.extend(["--expected-pin", pin]);
         }
         let mut command = self.remote_command(host, &args)?;
         command.stdin(if payload.is_some() {

@@ -136,11 +136,19 @@ pub fn export_cloud_pin(
     use super::transfer::{TransferProvider, export_cloud_account_at};
     let home = crate::storage::jcode_dir()?;
     let _lock = super::account_store::lock_store(&home, provider.store_name())?;
-    let label = match provider {
-        TransferProvider::Claude => resolve_claude(pin)?,
-        TransferProvider::OpenAi => resolve_openai(pin)?,
+    let current = match provider {
+        TransferProvider::Claude => claude_pin(&resolve_claude(pin)?)?,
+        TransferProvider::OpenAi => openai_pin(&resolve_openai(pin)?)?,
     };
-    Ok(export_cloud_account_at(&home, provider, Some(&label))?)
+    anyhow::ensure!(
+        pin.record_id.is_none() || pin.record_id == current.record_id,
+        "Pinned cloud account was replaced; retry the handoff"
+    );
+    Ok(export_cloud_account_at(
+        &home,
+        provider,
+        Some(&current.label),
+    )?)
 }
 
 /// Rebind a foreign pin only to the credential proven by the private handoff.

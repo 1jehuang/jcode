@@ -145,7 +145,7 @@ pub(super) fn send_credentials(
         label: payload.label().into(),
     };
     retry_ssh(host, "credential transfer", || {
-        target.exchange_credentials(host, &account, Some(payload.as_bytes()))
+        target.exchange_credentials(host, &account, Some(payload.as_bytes()), None)
     })?;
     Ok(CloudAuthBaseline {
         account,
@@ -229,7 +229,10 @@ pub(super) fn prepare_return_session(
             "credentials",
             "keeping local OAuth credentials and session account selection",
         );
-        sess.inherit_provider_route(&session::Session::load(&sess.id)?);
+        let local = session::Session::load(&sess.id)?;
+        sess.inherit_provider_route(&local);
+        sess.model = local.model;
+        sess.reasoning_effort = local.reasoning_effort;
         return Ok(sess);
     }
     let departure_path = baseline_path(&sess.id)?;
@@ -252,8 +255,20 @@ pub(super) fn prepare_return_session(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
         );
+        let family = match account.provider {
+            TransferProvider::Claude => "claude",
+            TransferProvider::OpenAi => "openai",
+        };
+        let pin = sess.account_pins.get(family).filter(|pin| {
+            pin.label == account.label
+                || manifest
+                    .auth_pin_proofs
+                    .iter()
+                    .any(|hint| hint.account == account)
+        });
+        let expected_pin = pin.map(serde_json::to_string).transpose()?;
         let bytes = retry_ssh(host, "credential return", || {
-            target.exchange_credentials(host, &account, None)
+            target.exchange_credentials(host, &account, None, expected_pin.as_deref())
         })?;
         import_return_credentials(&sess.id, &account, &bytes)?;
         returned.push(CloudAuthBaseline {
@@ -261,7 +276,7 @@ pub(super) fn prepare_return_session(
             fingerprint: format!("{:x}", Sha256::digest(&bytes)),
         });
     }
-    // The archive names the selected accounts; only the actual return bytes prove their grant.
+    // Source-side pin validation connects fresh return bytes to the archived account.
     let proofs = manifest
         .auth_pin_proofs
         .iter()

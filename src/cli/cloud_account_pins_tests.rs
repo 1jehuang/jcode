@@ -665,3 +665,146 @@ fn return_uses_actual_credential_export_after_archive_snapshot_refresh() {
         "credentials\ncredentials\ncomplete\n"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn keep_local_auth_restores_the_local_model_and_effort_with_its_route() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (mut local, target, home) = return_fixture(sandbox.root(), false);
+    local.model = Some("claude-sonnet-4-5".into());
+    local.reasoning_effort = Some("high".into());
+    storage::write_json(&session::session_path(&local.id).unwrap(), &local).unwrap();
+    let stage = sandbox.root().join("return-stage");
+    let mut cloud: session::Session = read_json(&stage.join("session.json")).unwrap();
+    cloud.model = Some("gpt-5".into());
+    cloud.reasoning_effort = Some("minimal".into());
+    cloud.route_api_method = Some("openai-oauth@cloud-openai".into());
+    storage::write_json(&stage.join("session.json"), &cloud).unwrap();
+    tar_dir(
+        &stage,
+        &home.join("return-fixture.tar"),
+        &["session.json", "manifest.json", "return-completion-v1"],
+    )
+    .unwrap();
+    run_return(Some(&local.id), &target, false, true).unwrap();
+    let returned = session::Session::load(&local.id).unwrap();
+    assert_eq!(returned.model, local.model);
+    assert_eq!(returned.reasoning_effort, local.reasoning_effort);
+    assert_eq!(
+        crate::provider::MultiProvider::model_switch_request_for_session_route(
+            returned.model.as_deref().unwrap(),
+            returned.provider_key.as_deref(),
+            returned.route_api_method.as_deref()
+        ),
+        format!(
+            "{}:claude-sonnet-4-5",
+            local.route_api_method.as_deref().unwrap()
+        )
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn return_rejects_a_replacement_login_after_the_archive_snapshot() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (local, target, source) = return_fixture(sandbox.root(), false);
+    let stage = sandbox.root().join("return-stage");
+    let cloud: session::Session = read_json(&stage.join("session.json")).unwrap();
+    let captured = cloud.account_pins["claude"].record_id.as_deref().unwrap();
+    select_home(&sandbox.root().join("cloud"));
+    claude::upsert_account(claude::AnthropicAccount {
+        record_id: None,
+        label: cloud.account_pins["claude"].label.clone(),
+        access: "replacement-access".into(),
+        refresh: "replacement-refresh".into(),
+        expires: i64::MAX,
+        email: None,
+        subscription_type: None,
+        scopes: vec![],
+    })
+    .unwrap();
+    assert!(
+        account_pins::export_cloud_pin(TransferProvider::Claude, &cloud.account_pins["claude"])
+            .is_err()
+    );
+    let replacement = transfer::export_cloud_account_at(
+        &storage::jcode_dir().unwrap(),
+        TransferProvider::Claude,
+        Some(&cloud.account_pins["claude"].label),
+    )
+    .unwrap();
+    std::fs::write(source.join("claude.payload"), replacement.as_bytes()).unwrap();
+    // The private host rejects an export guarded by the captured, now-removed record.
+    let script = source.join("return-transport.sh");
+    let original = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(&script, original.replace(
+        "printf 'credentials\\n' >> \"$JCODE_HOME/return-calls\"",
+        &format!("case \"$1\" in *\"'--expected-pin'\"*{captured}*) exit 23 ;; esac\nprintf 'credentials\\n' >> \"$JCODE_HOME/return-calls\"")
+    )).unwrap();
+    select_home(&source);
+    let before = std::fs::read(source.join("auth.json")).unwrap();
+    assert!(run_return(Some(&local.id), &target, false, false).is_err());
+    assert_eq!(std::fs::read(source.join("auth.json")).unwrap(), before);
+    let unchanged = session::Session::load(&local.id).unwrap();
+    assert_eq!(unchanged.account_pins, local.account_pins);
+    assert!(
+        std::fs::read_to_string(source.join("return-calls"))
+            .unwrap()
+            .lines()
+            .any(|line| line == "cancel")
+    );
+}
+
+#[test]
+fn credential_rpc_inherits_the_global_provider_in_both_argument_positions() {
+    // The full application's debug parser exceeds Rust's default test-thread stack.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            use crate::cli::args::{Args, CloudCommand, Command};
+            use clap::Parser;
+            for provider in ["claude", "openai"] {
+                for before in [false, true] {
+                    let mut args = vec!["jcode"];
+                    if before {
+                        args.extend(["--provider", provider]);
+                    }
+                    args.extend(["cloud", "credentials", "--account", "fixture", "--export"]);
+                    if !before {
+                        args.extend(["--provider", provider]);
+                    }
+                    args.extend(["--expected-pin", "{}"]);
+                    let parsed = Args::try_parse_from(args).unwrap();
+                    let Some(Command::Cloud(CloudCommand::Credentials {
+                        provider: actual,
+                        expected_pin,
+                        export,
+                        ..
+                    })) = parsed.command
+                    else {
+                        panic!("expected credential command")
+                    };
+                    assert_eq!(actual.as_arg_value(), provider);
+                    assert_eq!(expected_pin.as_deref(), Some("{}"));
+                    assert!(export);
+                }
+            }
+            assert!(
+                Args::try_parse_from([
+                    "jcode",
+                    "cloud",
+                    "credentials",
+                    "--provider",
+                    "claude",
+                    "--account",
+                    "fixture",
+                    "--expected-pin",
+                    "{}"
+                ])
+                .is_err()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

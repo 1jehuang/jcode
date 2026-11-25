@@ -208,3 +208,26 @@ fn openai_email_without_workspace_does_not_replace_a_removed_record() {
         label
     );
 }
+
+#[test]
+fn cloud_export_keeps_the_captured_record_through_refresh_but_not_relogin() {
+    use crate::auth::transfer::TransferProvider;
+    let _home = TestHome::new();
+    let mut first = claude_account("cloud-export", "first-refresh");
+    first.email = Some("export@example.test".into());
+    let label = claude::upsert_account(first).unwrap();
+    let pin = claude_pin(&label).unwrap();
+    claude::update_account_tokens(&label, "rotated", "rotated-refresh", i64::MAX).unwrap();
+    assert!(export_cloud_pin(TransferProvider::Claude, &pin).is_ok());
+    let mut replacement = claude_account(&label, "replacement-refresh");
+    replacement.email = Some("export@example.test".into());
+    claude::upsert_account(replacement).unwrap();
+    assert_ne!(claude_pin(&label).unwrap().record_id, pin.record_id);
+    assert!(export_cloud_pin(TransferProvider::Claude, &pin).is_err());
+    assert_eq!(
+        claude::load_credentials_for_account(&label)
+            .unwrap()
+            .refresh_token,
+        "replacement-refresh"
+    );
+}

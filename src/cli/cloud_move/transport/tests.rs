@@ -241,7 +241,7 @@ fn ssh_drop_is_distinct_from_remote_command_failure() -> Result<()> {
 fn credential_import_rejects_unexpected_output_without_disclosing_it() -> Result<()> {
     let (_dir, target) = scripted_target("cat >/dev/null\nprintf 'private response'\n")?;
     let error = target
-        .exchange_credentials("unused", &account(), Some(b"credential"))
+        .exchange_credentials("unused", &account(), Some(b"credential"), None)
         .expect_err("imports must not produce output");
     assert!(
         error
@@ -255,7 +255,7 @@ fn credential_import_rejects_unexpected_output_without_disclosing_it() -> Result
 #[test]
 fn credential_export_returns_private_bytes() -> Result<()> {
     let (_dir, target) = scripted_target("printf 'private response'\n")?;
-    let bytes = target.exchange_credentials("unused", &account(), None)?;
+    let bytes = target.exchange_credentials("unused", &account(), None, None)?;
     assert_eq!(bytes, b"private response");
     Ok(())
 }
@@ -265,7 +265,7 @@ fn credential_failures_do_not_echo_remote_secrets() -> Result<()> {
     let (_dir, target) =
         scripted_target("cat >/dev/null\nprintf 'private failure' >&2\nexit 42\n")?;
     let credential_error = target
-        .exchange_credentials("unused", &account(), Some(b"credential"))
+        .exchange_credentials("unused", &account(), Some(b"credential"), None)
         .expect_err("failed credential import must fail");
     let router_error = target
         .send_router_credentials("unused", b"credential")
