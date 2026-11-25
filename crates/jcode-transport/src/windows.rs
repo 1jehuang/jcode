@@ -1,6 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
@@ -29,6 +30,402 @@ fn path_to_pipe_name(path: &Path) -> String {
     format!(r"\\.\pipe\{}-{}", stem, &hash[..16])
 }
 
+// ---------------------------------------------------------------------------
+// Integrity levels and derived pipe names
+// ---------------------------------------------------------------------------
+
+/// Last sub-authority of a mandatory label SID, i.e. the integrity RID.
+pub(crate) const INTEGRITY_LOW: u32 = 0x1000;
+pub(crate) const INTEGRITY_MEDIUM: u32 = 0x2000;
+pub(crate) const INTEGRITY_HIGH: u32 = 0x3000;
+pub(crate) const INTEGRITY_SYSTEM: u32 = 0x4000;
+pub(crate) const INTEGRITY_PROTECTED: u32 = 0x5000;
+
+/// How many times a busy name is retried before the bind is reported as failed.
+const MAX_BUSY_ATTEMPTS: u32 = 10;
+/// How many private fallback names a bind may try after access is denied.
+const MAX_FALLBACK_ATTEMPTS: u32 = 3;
+
+/// Short, stable tag for an integrity level.
+///
+/// A high-integrity (elevated) process and a medium-integrity process must not
+/// contend for one pipe name: whichever runs first creates the object, and the
+/// other is then denied access to an object it may neither open nor add an
+/// instance to. Tagging the name keeps the two apart by construction.
+pub(crate) fn integrity_tag(level_rid: u32) -> &'static str {
+    match level_rid {
+        INTEGRITY_LOW => "low",
+        INTEGRITY_MEDIUM => "med",
+        INTEGRITY_HIGH => "high",
+        INTEGRITY_SYSTEM => "system",
+        INTEGRITY_PROTECTED => "protected",
+        // Medium is the default for an ordinary interactive login. Any
+        // unexpected level falls back to it so an unreadable token still
+        // reaches the daemon a normal user would have started.
+        _ => "med",
+    }
+}
+
+/// Integrity RID of the current process, or `None` when it cannot be read.
+fn current_integrity_rid() -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY, TokenIntegrityLevel,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe {
+        let mut token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+
+        // The label SID varies in length, so ask for the required size first.
+        let mut needed: u32 = 0;
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        );
+        // `usize` words keep the buffer aligned for `TOKEN_MANDATORY_LABEL`.
+        let words = (needed as usize)
+            .div_ceil(std::mem::size_of::<usize>())
+            .max(4);
+        let mut buffer = vec![0usize; words];
+        let mut written: u32 = 0;
+        let read = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * std::mem::size_of::<usize>()) as u32,
+            &mut written,
+        );
+        let _ = CloseHandle(token);
+        if read == 0 {
+            return None;
+        }
+
+        let label = &*buffer.as_ptr().cast::<TOKEN_MANDATORY_LABEL>();
+        let sid = label.Label.Sid;
+        let count = *GetSidSubAuthorityCount(sid);
+        if count == 0 {
+            return None;
+        }
+        Some(*GetSidSubAuthority(sid, u32::from(count) - 1))
+    }
+}
+
+/// Insert a tag immediately before the trailing path hash of `base`.
+pub(crate) fn tag_pipe_name(base: &str, tag: &str) -> String {
+    match base.rsplit_once('-') {
+        Some((head, tail)) => format!("{head}-{tag}-{tail}"),
+        None => format!("{base}-{tag}"),
+    }
+}
+
+/// The name a server for `path` publishes at a given integrity level.
+///
+/// Medium integrity keeps the historical untagged name, so existing medium
+/// installations keep talking to their own daemon across an upgrade and the
+/// TypeScript SDK's derivation stays valid for them. Any other level is tagged,
+/// which is what stops an elevated server and a medium one from contending.
+pub(crate) fn shared_pipe_name_for(base: &str, level_rid: Option<u32>) -> String {
+    match level_rid {
+        Some(rid) if integrity_tag(rid) != "med" => tag_pipe_name(base, integrity_tag(rid)),
+        _ => base.to_string(),
+    }
+}
+
+/// A name private to this process and this bind attempt.
+///
+/// `ERROR_ACCESS_DENIED` means the restricted name can never be opened by this
+/// process, so retrying it is guaranteed to fail again. This name is fresh by
+/// construction: it carries the process id and the attempt number.
+pub(crate) fn private_pipe_name(base: &str, attempt: u32) -> String {
+    tag_pipe_name(base, &format!("p{}-{}", std::process::id(), attempt))
+}
+
+// ---------------------------------------------------------------------------
+// Failure classification
+// ---------------------------------------------------------------------------
+
+/// Why a bind attempt failed, in the terms this module acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindFailure {
+    /// Every published instance is occupied. Retrying the same name is right.
+    Busy,
+    /// The name is owned by an object this process may not touch: another user,
+    /// or the same user at a different integrity level. Retrying the same name
+    /// can never succeed.
+    AccessDenied,
+    /// Anything else; report it verbatim.
+    Other,
+}
+
+impl BindFailure {
+    pub(crate) fn classify(error: &io::Error) -> Self {
+        match error.raw_os_error() {
+            Some(code) if code == windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32 => {
+                Self::Busy
+            }
+            Some(code) if code == windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32 => {
+                Self::AccessDenied
+            }
+            _ => Self::Other,
+        }
+    }
+
+    /// The cause, in the words the error message uses.
+    pub(crate) fn cause(self) -> &'static str {
+        match self {
+            Self::Busy => "every published instance of the pipe is already connected",
+            Self::AccessDenied => {
+                "the pipe belongs to a process this one is not permitted to reach \
+                 (a different Windows integrity level or another user)"
+            }
+            Self::Other => "the operating system refused to create the pipe",
+        }
+    }
+
+    /// Whether the next attempt must target a *different* name.
+    pub(crate) fn requires_fresh_name(self) -> bool {
+        matches!(self, Self::AccessDenied)
+    }
+}
+
+/// The name the next bind attempt will use.
+///
+/// Pure so the fallback decision is testable without elevation. The original
+/// bug was a retry that kept targeting the same restricted name.
+pub(crate) fn next_attempt_name(base: &str, attempt: u32, failure: BindFailure) -> String {
+    if failure.requires_fresh_name() {
+        private_pipe_name(base, attempt)
+    } else {
+        base.to_string()
+    }
+}
+
+/// The retry notice, emitted only when the next attempt really targets a
+/// different pipe name. Announcing a "retry" while re-targeting the same
+/// restricted name is what made the original failure unreadable.
+pub(crate) fn retry_notice(from: &str, to: &str, failure: BindFailure) -> Option<String> {
+    if from == to {
+        return None;
+    }
+    Some(format!(
+        "[windows] named pipe {from} unavailable: {}; falling back to private pipe {to}",
+        failure.cause()
+    ))
+}
+
+fn bind_error(name: &str, failure: BindFailure, error: io::Error) -> io::Error {
+    let mut message = format!(
+        "cannot bind named pipe {name}: {error}; {}",
+        failure.cause()
+    );
+    if failure == BindFailure::AccessDenied {
+        message.push_str(
+            " Remedy: run jcode at the same integrity level as the running server \
+             (typically the same elevated terminal), stop the stale server, or set \
+             JCODE_WINDOWS_PIPE_SHARED=1 to publish a shared pipe that admits the \
+             interactive user at medium integrity.",
+        );
+    }
+    io::Error::new(error.kind(), message)
+}
+
+fn connect_error(path: &Path, last: Option<io::Error>) -> io::Error {
+    let tried = candidate_pipe_names(path);
+    let detail = last
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "no candidate pipe name".to_string());
+    io::Error::new(
+        last.as_ref()
+            .map_or(io::ErrorKind::NotFound, io::Error::kind),
+        format!(
+            "no jcode server is listening for {} (tried {}): {detail}",
+            path.display(),
+            tried.join(", ")
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Published-name marker
+// ---------------------------------------------------------------------------
+
+/// Sidecar recording the pipe name a server actually published.
+///
+/// Per-integrity naming and the private fallback both mean the effective name
+/// is no longer implied by the socket path alone, so the server records it and
+/// every client reads it instead of guessing.
+fn pipe_name_marker(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.pipe-name", path.to_string_lossy()))
+}
+
+fn publish_pipe_name(path: &Path, pipe_name: &str) {
+    let marker = pipe_name_marker(path);
+    if let Some(parent) = marker.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(error) = std::fs::write(&marker, format!("{pipe_name}\n")) {
+        eprintln!(
+            "[windows] could not record the pipe name in {}: {error}",
+            marker.display()
+        );
+    }
+}
+
+fn recorded_pipe_name(path: &Path) -> Option<String> {
+    let recorded = std::fs::read_to_string(pipe_name_marker(path)).ok()?;
+    let name = recorded.trim();
+    name.starts_with(r"\\.\pipe\").then(|| name.to_string())
+}
+
+/// Every pipe name a client should try for `path`, most specific first.
+pub(crate) fn candidate_pipe_names(path: &Path) -> Vec<String> {
+    let base = path_to_pipe_name(path);
+    let mut names: Vec<String> = Vec::with_capacity(3);
+    if let Some(recorded) = recorded_pipe_name(path) {
+        names.push(recorded);
+    }
+    let own = shared_pipe_name_for(&base, current_integrity_rid());
+    if !names.contains(&own) {
+        names.push(own);
+    }
+    if !names.contains(&base) {
+        names.push(base);
+    }
+    names
+}
+
+/// Opt-in for a single server shared across integrity levels.
+///
+/// Off by default: separate per-integrity servers need no security rewrite,
+/// while a shared one has to relax the pipe's DACL and integrity label to admit
+/// medium-integrity clients.
+fn shared_pipe_requested() -> bool {
+    std::env::var_os("JCODE_WINDOWS_PIPE_SHARED").is_some_and(|value| {
+        let value = value.to_string_lossy().to_ascii_lowercase();
+        !(value.is_empty() || value == "0" || value == "false" || value == "no")
+    })
+}
+
+/// Grant the interactive user and local administrators access to a shared
+/// pipe, and label it medium integrity so a medium-integrity client can open a
+/// pipe that an elevated server created.
+///
+/// UNVERIFIED-BY-BUILD: this path needs an elevated server and a separate
+/// medium-integrity client. The manual smoke steps are in the PR. Best effort:
+/// a failure is reported and the server keeps running, because the
+/// per-integrity name already gave this process a working endpoint.
+fn admit_interactive_user(server: &NamedPipeServer) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_KERNEL_OBJECT, SetSecurityInfo,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
+        LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    // IU: interactive user. SY: local system. BA: built-in administrators.
+    // S:(ML;;NW;;;ME) labels the pipe medium integrity, so mandatory integrity
+    // policy no longer blocks a medium-integrity client from opening it.
+    let sddl: Vec<u16> = "D:(A;;GRGW;;;IU)(A;;GA;;;SY)(A;;GA;;;BA)S:(ML;;NW;;;ME)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1, // SDDL_REVISION_1
+            &mut descriptor,
+            std::ptr::null_mut(),
+        ) == 0
+        {
+            eprintln!(
+                "[windows] could not build the shared pipe security descriptor: {}",
+                io::Error::last_os_error()
+            );
+            return;
+        }
+
+        let mut dacl_present: i32 = 0;
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut dacl_defaulted: i32 = 0;
+        let dacl_ok = GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        );
+
+        let mut sacl_present: i32 = 0;
+        let mut sacl: *mut ACL = std::ptr::null_mut();
+        let mut sacl_defaulted: i32 = 0;
+        let sacl_ok = GetSecurityDescriptorSacl(
+            descriptor,
+            &mut sacl_present,
+            &mut sacl,
+            &mut sacl_defaulted,
+        );
+
+        if dacl_ok == 0 || sacl_ok == 0 {
+            eprintln!(
+                "[windows] could not read the shared pipe security descriptor: {}",
+                io::Error::last_os_error()
+            );
+            LocalFree(descriptor as HLOCAL);
+            return;
+        }
+
+        let status = SetSecurityInfo(
+            server.as_raw_handle() as _,
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            sacl,
+        );
+        if status != 0 {
+            eprintln!(
+                "[windows] could not admit medium-integrity clients to the shared pipe: {}",
+                io::Error::from_raw_os_error(status as i32)
+            );
+        }
+        LocalFree(descriptor as HLOCAL);
+    }
+}
+
+/// Open one candidate pipe, waiting out `ERROR_PIPE_BUSY` for a bounded time.
+async fn open_candidate(name: &str) -> io::Result<NamedPipeClient> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match ClientOptions::new().open(name) {
+            Ok(client) => return Ok(client),
+            Err(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Listener wraps a Windows named pipe server, providing an accept loop
 /// that matches the UnixListener interface.
 pub struct Listener {
@@ -37,32 +434,54 @@ pub struct Listener {
 }
 
 impl Listener {
+    /// Bind the endpoint for `path`.
+    ///
+    /// The name carries this process's integrity level, so an elevated server
+    /// and a medium-integrity server never fight over one name. If the name is
+    /// denied anyway, this process cannot reach that object at all, so a
+    /// private server is started under a fresh name and that name is recorded
+    /// for clients to find.
     pub fn bind(path: &Path) -> io::Result<Self> {
-        let pipe_name = path_to_pipe_name(path);
-        match ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe_name)
-        {
-            Ok(server) => Ok(Self {
-                pipe_name,
-                current_server: server,
-            }),
-            Err(e)
-                if e.raw_os_error()
-                    == Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32) =>
-            {
-                eprintln!(
-                    "[windows] Named pipe {} busy (access denied), retrying without first_pipe_instance",
-                    pipe_name
-                );
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let server = ServerOptions::new().create(&pipe_name)?;
-                Ok(Self {
-                    pipe_name,
-                    current_server: server,
-                })
+        let base = path_to_pipe_name(path);
+        let shared = shared_pipe_requested();
+        let mut name = if shared {
+            base.clone()
+        } else {
+            shared_pipe_name_for(&base, current_integrity_rid())
+        };
+        let mut attempt = 1u32;
+
+        loop {
+            match ServerOptions::new().first_pipe_instance(true).create(&name) {
+                Ok(server) => {
+                    if shared {
+                        admit_interactive_user(&server);
+                    }
+                    publish_pipe_name(path, &name);
+                    return Ok(Self {
+                        pipe_name: name,
+                        current_server: server,
+                    });
+                }
+                Err(error) => {
+                    let failure = BindFailure::classify(&error);
+                    if failure == BindFailure::Busy && attempt < MAX_BUSY_ATTEMPTS {
+                        attempt += 1;
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    if failure.requires_fresh_name() && attempt <= MAX_FALLBACK_ATTEMPTS {
+                        let next = next_attempt_name(&base, attempt, failure);
+                        if let Some(notice) = retry_notice(&name, &next, failure) {
+                            eprintln!("{notice}");
+                        }
+                        name = next;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(bind_error(&name, failure, error));
+                }
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -89,19 +508,35 @@ pub enum Stream {
 }
 
 impl Stream {
+    /// Connect to the endpoint for `path`.
+    ///
+    /// The published name is recorded beside the socket path, so candidates are
+    /// the recorded name, this process's own integrity-tagged name, and the
+    /// historical untagged name. A server that is merely busy is waited for
+    /// rather than treated as absent, and an absent server is reported with the
+    /// names that were tried.
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<Self> {
-        let pipe_name = path_to_pipe_name(path.as_ref());
+        let path = path.as_ref();
         loop {
-            match ClientOptions::new().open(&pipe_name) {
-                Ok(client) => return Ok(Stream::Client(client)),
-                Err(e)
-                    if e.raw_os_error()
-                        == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
-                {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let mut busy = false;
+            let mut last_error = None;
+            for name in candidate_pipe_names(path) {
+                match open_candidate(&name).await {
+                    Ok(client) => return Ok(Stream::Client(client)),
+                    Err(error) => {
+                        if error.raw_os_error()
+                            == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
+                        {
+                            busy = true;
+                        }
+                        last_error = Some(error);
+                    }
                 }
-                Err(e) => return Err(e),
             }
+            if !busy {
+                return Err(connect_error(path, last_error));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 
@@ -319,17 +754,38 @@ impl SyncStream {
         use std::os::windows::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
 
-        let handle = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(FILE_FLAG_OVERLAPPED)
-            .open(path_to_pipe_name(path))?;
-        Ok(Self {
-            inner: std::sync::Arc::new(SyncPipe {
-                handle,
-                state: std::sync::Mutex::new(SyncPipeState::default()),
-            }),
-        })
+        let mut last_error = None;
+        for name in candidate_pipe_names(path) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                match std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(FILE_FLAG_OVERLAPPED)
+                    .open(&name)
+                {
+                    Ok(handle) => {
+                        return Ok(Self {
+                            inner: std::sync::Arc::new(SyncPipe {
+                                handle,
+                                state: std::sync::Mutex::new(SyncPipeState::default()),
+                            }),
+                        });
+                    }
+                    Err(error) => {
+                        let busy = error.raw_os_error()
+                            == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32);
+                        if busy && std::time::Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        last_error = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+        Err(connect_error(path, last_error))
     }
 
     pub fn try_clone(&self) -> io::Result<Self> {
@@ -609,29 +1065,30 @@ impl io::Write for SyncStream {
 }
 
 pub fn is_socket_path(path: &Path) -> bool {
-    let pipe_name = path_to_pipe_name(path);
-    match probe_pipe(&pipe_name) {
-        Ok(_) => true,
-        Err(error)
-            if error.raw_os_error()
-                == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
-        {
-            // Every published instance being occupied proves that a server is
-            // listening. Do not report the endpoint as absent and race a second
-            // daemon against it merely because another client connected first.
-            true
-        }
-        Err(_) => false,
-    }
+    candidate_pipe_names(path)
+        .iter()
+        .any(|name| match probe_pipe(name) {
+            Ok(_) => true,
+            Err(error)
+                if error.raw_os_error()
+                    == Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32) =>
+            {
+                // Every published instance being occupied proves that a server
+                // is listening. Do not report the endpoint as absent and race a
+                // second daemon against it merely because another client
+                // connected first.
+                true
+            }
+            Err(_) => false,
+        })
 }
 
 pub fn remove_socket(path: &Path) {
-    let pipe_name = path_to_pipe_name(path);
-    if probe_pipe(&pipe_name).is_ok() {
-        eprintln!(
-            "[windows] Named pipe {} still open, will be replaced by new server",
-            pipe_name
-        );
+    if let Some(name) = candidate_pipe_names(path)
+        .into_iter()
+        .find(|name| probe_pipe(name).is_ok())
+    {
+        eprintln!("[windows] Named pipe {name} still open, will be replaced by new server");
     }
 }
 
@@ -748,6 +1205,153 @@ mod tests {
             "unexpected pipe name: {}",
             a
         );
+    }
+
+    fn bind_failure_on(raw: u32) -> BindFailure {
+        BindFailure::classify(&io::Error::from_raw_os_error(raw as i32))
+    }
+
+    /// The live bug reported access-denied as "busy" and then retried the same
+    /// restricted pipe. Access denied is its own cause and never Busy.
+    #[test]
+    fn access_denied_is_classified_separately_from_busy() {
+        use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
+
+        let denied = bind_failure_on(ERROR_ACCESS_DENIED);
+        let busy = bind_failure_on(ERROR_PIPE_BUSY);
+
+        assert_eq!(denied, BindFailure::AccessDenied);
+        assert_eq!(busy, BindFailure::Busy);
+        assert_ne!(
+            denied,
+            BindFailure::Busy,
+            "access denied must never be reported as a busy pipe"
+        );
+        assert_eq!(bind_failure_on(2), BindFailure::Other);
+    }
+
+    /// Regression: on access-denied the *second* connect attempt must target a
+    /// different pipe name. The live evidence showed both attempts on the same
+    /// name (jcode-a930d863d87e3015), which is what the old retry did.
+    #[test]
+    fn access_denied_retry_targets_a_different_pipe_name() {
+        let base = r"\\.\pipe\jcode-a930d863d87e3015";
+
+        let first_attempt = base.to_string();
+        let second_attempt = next_attempt_name(&first_attempt, 1, BindFailure::AccessDenied);
+
+        assert_ne!(
+            second_attempt, first_attempt,
+            "an access-denied retry must not reuse the restricted pipe name"
+        );
+        assert_eq!(
+            second_attempt,
+            next_attempt_name(&first_attempt, 1, BindFailure::AccessDenied),
+            "fallback naming must be deterministic"
+        );
+
+        let third_attempt = next_attempt_name(&first_attempt, 2, BindFailure::AccessDenied);
+        assert_ne!(third_attempt, second_attempt);
+        assert_ne!(third_attempt, first_attempt);
+    }
+
+    #[test]
+    fn busy_retry_targets_the_same_pipe_name() {
+        let base = r"\\.\pipe\jcode-a930d863d87e3015";
+        assert_eq!(next_attempt_name(base, 1, BindFailure::Busy), base);
+        assert!(!BindFailure::Busy.requires_fresh_name());
+        assert!(BindFailure::AccessDenied.requires_fresh_name());
+        assert!(!BindFailure::Other.requires_fresh_name());
+    }
+
+    /// The "retrying" notice is only truthful when the next attempt genuinely
+    /// uses another name; printing it next to the same name was the misreport.
+    #[test]
+    fn retry_notice_only_when_the_name_changes() {
+        let base = r"\\.\pipe\jcode-a930d863d87e3015";
+
+        assert!(
+            retry_notice(base, base, BindFailure::AccessDenied).is_none(),
+            "a retry against the same name must not announce a fallback"
+        );
+
+        let fresh = next_attempt_name(base, 1, BindFailure::AccessDenied);
+        let notice = retry_notice(base, &fresh, BindFailure::AccessDenied)
+            .expect("a genuine fallback must be announced");
+        assert!(
+            notice.contains(base),
+            "notice must name the restricted pipe"
+        );
+        assert!(notice.contains(&fresh), "notice must name the fresh pipe");
+        assert!(
+            !notice.contains("busy"),
+            "access denied must not be described as busy"
+        );
+    }
+
+    /// Two integrity levels must derive two distinct names, deterministically.
+    #[test]
+    fn integrity_levels_derive_distinct_names() {
+        let base = r"\\.\pipe\jcode-api-5e00c01702e8cfe4";
+
+        let medium = shared_pipe_name_for(base, Some(INTEGRITY_MEDIUM));
+        let high = shared_pipe_name_for(base, Some(INTEGRITY_HIGH));
+
+        assert_eq!(medium, base, "medium integrity keeps the historical name");
+        assert_ne!(
+            high, medium,
+            "an elevated server must not contend with a medium-integrity one"
+        );
+        assert_eq!(
+            high,
+            shared_pipe_name_for(base, Some(INTEGRITY_HIGH)),
+            "name derivation must be deterministic"
+        );
+        assert_ne!(
+            shared_pipe_name_for(base, Some(INTEGRITY_LOW)),
+            shared_pipe_name_for(base, Some(INTEGRITY_SYSTEM)),
+            "distinct levels must produce distinct names"
+        );
+        assert_eq!(integrity_tag(INTEGRITY_MEDIUM), "med");
+        assert_ne!(
+            integrity_tag(INTEGRITY_MEDIUM),
+            integrity_tag(INTEGRITY_HIGH)
+        );
+        assert!(high.starts_with(r"\\.\pipe\jcode-api-high-"));
+    }
+
+    /// Clients must be able to find a name a server published, since the
+    /// effective name is no longer implied by the socket path alone.
+    #[test]
+    fn candidate_names_lead_with_the_recorded_pipe_name() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-marker-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let base = path_to_pipe_name(&path);
+        let private = private_pipe_name(&base, 1);
+
+        // Without a sidecar the candidates are this process's own name plus the
+        // historical one; tests may run elevated, so do not assume which comes
+        // first, only that the historical name is last and always tried.
+        let unrecorded = candidate_pipe_names(&path);
+        assert_eq!(unrecorded.last(), Some(&base));
+        assert!(unrecorded.contains(&base));
+
+        publish_pipe_name(&path, &private);
+        let candidates = candidate_pipe_names(&path);
+        assert_eq!(
+            candidates.first(),
+            Some(&private),
+            "a recorded name must be tried first"
+        );
+        assert!(
+            candidates.contains(&base),
+            "the historical name must still be tried"
+        );
+
+        let _ = std::fs::remove_file(pipe_name_marker(&path));
     }
 
     #[test]
