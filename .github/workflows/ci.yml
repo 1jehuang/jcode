@@ -216,6 +216,11 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
+      - name: Run Bash 3.2 secret-scan regression
+        if: runner.os == 'macOS'
+        shell: bash
+        run: python3 tests/test_security_preflight_portability.py
+
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |
