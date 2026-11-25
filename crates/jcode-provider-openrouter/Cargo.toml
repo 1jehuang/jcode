@@ -14,4 +14,5 @@ futures = "0.3"
 jcode-core = { path = "../jcode-core" }
 jcode-logging = { path = "../jcode-logging" }
 jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }

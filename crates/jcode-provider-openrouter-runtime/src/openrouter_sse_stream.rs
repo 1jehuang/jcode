@@ -573,7 +573,18 @@ fn is_retryable_error(error_str: &str) -> bool {
     // (auth, billing, malformed request) where retrying is futile and just
     // burns time/credits. 429 (rate limit) is classified explicitly so it does
     // not depend on provider-specific body wording.
-    match parsed_http_status(error_str) {
+    let status = parsed_http_status(error_str);
+    let payload = error_str
+        .lines()
+        .filter(|line| {
+            !["endpoint:", "model:", "auth:"]
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let error_str = payload.as_str();
+    match status {
         Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422) => return false,
         // 429 rate limit, and every 5xx: the server answered but is overloaded
         // or failing on its side. This includes non-standard codes such as the
@@ -586,7 +597,23 @@ fn is_retryable_error(error_str: &str) -> bool {
         _ => {}
     }
 
+    if jcode_provider_core::is_definitive_usage_exhaustion(error_str)
+        || [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "invalid_api_key",
+            "model_not_found",
+            "content_filter",
+        ]
+        .iter()
+        .any(|marker| error_str.contains(marker))
+    {
+        return false;
+    }
     jcode_provider_core::is_transient_transport_error(error_str)
+        || error_str.contains("rate limit")
+        || error_str.contains("rate_limit")
         || error_str.contains("stream error")
         || error_str.contains("eof")
         || is_provider_overload_message(error_str)

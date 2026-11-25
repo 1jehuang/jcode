@@ -232,6 +232,9 @@ pub fn is_provider_overload_message(message: &str) -> bool {
     status.is_some_and(|code| (500..=599).contains(&code))
         || [
             "overloaded",
+            "internal server error",
+            "server_error",
+            "service_unavailable",
             "heavy usage",
             "temporarily unavailable",
             "temporary unavailability",

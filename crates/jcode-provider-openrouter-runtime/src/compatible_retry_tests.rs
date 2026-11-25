@@ -2,7 +2,7 @@ use super::*;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -329,72 +329,26 @@ fn retry_after_is_honored_past_the_backoff_cap() {
     assert!(RATE_LIMIT_HINT.contains("up to 60s"));
 }
 
-/// Dropping the consumer's receiver cancels the turn: the retry loop must
-/// stop without burning the remaining attempts or sitting out the backoff
-/// wait against a server that keeps answering retryable 500s.
+/// Cancel only after a visible failed attempt enters a server-requested wait.
 #[test]
 fn cancelled_stream_stops_retrying_and_wakes_from_backoff() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    rt.block_on(async {
-        let connections = Arc::new(AtomicUsize::new(0));
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failing server");
-        let addr = listener.local_addr().expect("failing server addr");
-        let counted = Arc::clone(&connections);
-        std::thread::spawn(move || {
-            for _ in 0..64 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .expect("set read timeout");
-                let mut request = vec![0u8; 65536];
-                let _ = stream.read(&mut request);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
-                counted.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        let api_base = format!("http://{addr}/v1");
-
-        let (tx, mut rx) = mpsc::channel(16);
-        // Consume the first (pre-request) event, then drop the receiver
-        // to cancel the turn while the first attempt is still in flight.
-        tokio::spawn(async move {
-            let _ = rx.recv().await;
-        });
-
-        let start = std::time::Instant::now();
-        run_stream_with_retries(
-            Client::new(),
-            api_base,
-            ProviderAuth::None {
-                label: "test".to_string(),
-            },
-            false,
-            "conv".to_string(),
-            serde_json::json!({"model": "glm-5.3", "messages": [], "stream": true}),
-            false, // Not Azure Responses.
-            tx,
-            Arc::new(Mutex::new(None)),
-            "glm-5.3".to_string(),
-            false, // Exercise chat-completions, not the Responses API.
-        )
-        .await;
-
-        assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "cancelled turn must not sit out the retry budget"
-        );
-        assert!(
-            connections.load(Ordering::SeqCst) <= 1,
-            "cancelled turn must not retry the request"
-        );
-    });
+    let run = run_with_failing_first_attempt(
+        format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices":[{"delta":{"content":"partial"}}]}),
+            serde_json::json!({"error":{"message":"temporarily unavailable","code":503,"retry_after_seconds":60}}),
+        ),
+        true,
+    );
+    assert_eq!(
+        run.rollbacks, 1,
+        "receiver stayed open through the failed attempt"
+    );
+    assert_eq!(
+        run.connections, 1,
+        "canceled backoff must not send another request"
+    );
+    assert!(run.errors.is_empty());
 }
 
 /// The exact error a local proxy relayed while its upstream was
@@ -443,81 +397,89 @@ struct RetryRun {
 
 /// Serve `first_body` as a 200 SSE response to the first request and a
 /// healthy answer to the second, then run the real retry loop against it.
-fn run_with_failing_first_attempt(first_body: String) -> RetryRun {
+fn run_with_failing_first_attempt(first_body: String, cancel_on_rollback: bool) -> RetryRun {
+    let _lock = crate::tests::ENV_LOCK.lock();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::tests::EnvVarGuard::set("JCODE_HOME", home.path());
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("runtime");
+        .unwrap();
     rt.block_on(async {
         let connections = Arc::new(AtomicUsize::new(0));
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let addr = listener.local_addr().expect("test server addr");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
         let counted = Arc::clone(&connections);
-        std::thread::spawn(move || {
-            for attempt in 0..2 {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) && counted.load(Ordering::SeqCst) < 2 {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept: {error}"),
                 };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .expect("set read timeout");
-                let mut request = vec![0u8; 65536];
-                let _ = stream.read(&mut request);
-                let body = if attempt == 0 {
-                    first_body.clone()
-                } else {
-                    HEALTHY_ANSWER_SSE.to_string()
-                };
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-                counted.fetch_add(1, Ordering::SeqCst);
+                socket.set_nonblocking(false).unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).unwrap();
+                    if count == 0 { return; }
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() <= 65_536);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                        let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                        if bytes.len() >= end + 4 + length { break; }
+                    }
+                }
+                let attempt = counted.fetch_add(1, Ordering::SeqCst);
+                let body = if attempt == 0 { &first_body } else { HEALTHY_ANSWER_SSE };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                let _ = socket.write_all(response.as_bytes());
             }
         });
-
         let (tx, mut rx) = mpsc::channel(64);
-        let api_base = format!("http://{addr}/v1");
         let run = tokio::spawn(async move {
             run_stream_with_retries(
-                Client::new(),
-                api_base,
-                ProviderAuth::None {
-                    label: "test".to_string(),
-                },
-                false,
-                "conv".to_string(),
-                serde_json::json!({"model": "ntl/claude", "messages": [], "stream": true}),
-                false, // Not Azure Responses.
-                tx,
-                Arc::new(Mutex::new(None)),
-                "ntl/claude".to_string(),
-                false, // Exercise chat-completions, not the Responses API.
-            )
-            .await;
+                Client::new(), format!("http://{addr}/v1"),
+                ProviderAuth::None { label: "test".into() }, false, "conv".into(),
+                serde_json::json!({"model":"ntl/claude","messages":[],"stream":true}),
+                false, tx, Arc::new(Mutex::new(None)), "ntl/claude".into(), false,
+            ).await;
         });
-
-        let mut result = RetryRun {
-            text: String::new(),
-            errors: Vec::new(),
-            rollbacks: 0,
-            connections: 0,
-        };
+        let mut result = RetryRun { text: String::new(), errors: Vec::new(), rollbacks: 0, connections: 0 };
         while let Some(item) = rx.recv().await {
             match item {
                 Ok(StreamEvent::TextDelta(delta)) => result.text.push_str(&delta),
                 Ok(StreamEvent::RetryRollback { .. }) => {
                     result.rollbacks += 1;
                     result.text.clear();
+                    if cancel_on_rollback {
+                        // Let the producer park in backoff while the receiver remains open.
+                        tokio::task::yield_now().await;
+                        break;
+                    }
                 }
                 Ok(StreamEvent::Error { message, .. }) => result.errors.push(message),
                 Err(error) => result.errors.push(format!("{error:#}")),
                 Ok(_) => {}
             }
         }
-        run.await.expect("retry loop task");
+        drop(rx);
+        let completion = if cancel_on_rollback {
+            tokio::time::timeout(Duration::from_secs(1), run).await
+        } else {
+            Ok(run.await)
+        };
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        completion.expect("cancellation must wake the 60-second backoff").expect("retry loop task");
         result.connections = connections.load(Ordering::SeqCst);
         result
     })
@@ -528,10 +490,13 @@ fn run_with_failing_first_attempt(first_body: String) -> RetryRun {
 /// see the answer, not the error.
 #[test]
 fn in_stream_deploying_503_is_retried_until_the_provider_answers() {
-    let run = run_with_failing_first_attempt(format!(
-        "data: {}\n\ndata: [DONE]\n\n",
-        serde_json::json!({"error": {"message": PROXY_DEPLOYING_503}})
-    ));
+    let run = run_with_failing_first_attempt(
+        format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"error": {"message": PROXY_DEPLOYING_503}})
+        ),
+        false,
+    );
     assert!(
         run.errors.is_empty(),
         "deploy 503 must not reach the turn: {:?}",
@@ -564,11 +529,14 @@ fn interrupted_stream_message_is_retryable() {
 /// resent, so the turn sees one clean answer and no error.
 #[test]
 fn interrupted_stream_mid_answer_is_rolled_back_and_retried() {
-    let run = run_with_failing_first_attempt(format!(
-        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-        serde_json::json!({"choices": [{"delta": {"content": "half an ans"}}]}),
-        serde_json::json!({"error": {"message": INTERRUPTED_STREAM}})
-    ));
+    let run = run_with_failing_first_attempt(
+        format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices": [{"delta": {"content": "half an ans"}}]}),
+            serde_json::json!({"error": {"message": INTERRUPTED_STREAM}})
+        ),
+        false,
+    );
     assert!(
         run.errors.is_empty(),
         "an interrupted stream must not end the turn: {:?}",
@@ -657,4 +625,43 @@ fn metadata_model_and_endpoint_digits_do_not_make_a_failure_retryable() {
     ] {
         assert!(!is_retryable_error(message), "{message}");
     }
+}
+
+#[test]
+fn common_transient_sse_errors_retry_but_permanent_and_quota_errors_do_not() {
+    for error in [
+        serde_json::json!({"message":"Rate limit exceeded","type":"rate_limit_error"}),
+        serde_json::json!({"message":"Internal server error","type":"server_error"}),
+        serde_json::json!({"message":"Please try later","code":503}),
+        serde_json::json!("Rate limit exceeded"),
+    ] {
+        let run = run_with_failing_first_attempt(
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                serde_json::json!({"error":error})
+            ),
+            false,
+        );
+        assert!(run.errors.is_empty(), "{:?}", run.errors);
+        assert_eq!(run.text, "back online");
+        assert_eq!(run.connections, 2);
+    }
+    for error in [
+        serde_json::json!({"message":"Rate limit exceeded","code":"insufficient_quota"}),
+        serde_json::json!({"message":"temporarily unavailable","type":"authentication_error"}),
+        serde_json::json!({"message":"Internal server error","code":400}),
+    ] {
+        let run = run_with_failing_first_attempt(
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                serde_json::json!({"error":error})
+            ),
+            false,
+        );
+        assert_eq!(run.errors.len(), 1);
+        assert_eq!(run.connections, 1);
+    }
+    assert!(is_retryable_error(
+        "model: billing-503\nerror: rate limit exceeded"
+    ));
 }

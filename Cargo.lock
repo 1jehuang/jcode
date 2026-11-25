@@ -4432,6 +4432,7 @@ dependencies = [
  "jcode-core",
  "jcode-logging",
  "jcode-message-types",
+ "jcode-provider-core",
  "jcode-schema-dialect",
  "reqwest 0.12.28",
  "serde",
