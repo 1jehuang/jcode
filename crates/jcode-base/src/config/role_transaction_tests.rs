@@ -213,3 +213,30 @@ fn role_update_atomic_replacement_preserves_existing_permissions() {
     assert_eq!(current.permissions().mode() & 0o777, 0o640);
     assert_ne!(current.ino(), old_file.metadata().unwrap().ino());
 }
+
+#[cfg(unix)]
+#[test]
+fn role_update_preserves_symlink_and_updates_managed_target() {
+    use std::os::unix::fs::symlink;
+    let _guard = crate::storage::lock_test_env();
+    let home = TestHome::new();
+    let managed = tempfile::tempdir().unwrap();
+    let target = managed.path().join("managed.toml");
+    std::fs::write(&target, "[autoreview]\nmodel = 'old'\n").unwrap();
+    symlink(&target, home.path()).unwrap();
+    Config::set_agent_model_default("review", Some("new")).unwrap();
+    assert!(home.path().is_symlink());
+    let saved: Config = toml::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(saved.autoreview.model.as_deref(), Some("new"));
+    assert!(managed.path().join("config.toml.lock").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn role_update_refuses_dangling_symlink_without_replacing_it() {
+    let _guard = crate::storage::lock_test_env();
+    let home = TestHome::new();
+    std::os::unix::fs::symlink(home.directory.path().join("missing.toml"), home.path()).unwrap();
+    assert!(Config::set_agent_model_default("review", Some("new")).is_err());
+    assert!(home.path().is_symlink());
+}

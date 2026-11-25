@@ -69,6 +69,10 @@ impl Config {
         let Some(path) = Self::path() else {
             return Ok(None);
         };
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
@@ -116,6 +120,14 @@ impl Config {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        // Preserve managed config links and serialize writers through the same target.
+        let path = match path.canonicalize() {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
+                path
+            }
+            Err(error) => return Err(error.into()),
+        };
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
@@ -143,7 +155,7 @@ impl Config {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        let mut cfg = Self::load_for_update()?;
+        let mut cfg = Self::load_from_path(&path)?.unwrap_or_default();
         #[cfg(test)]
         role_transaction_tests::loaded();
         match target {
@@ -166,6 +178,8 @@ impl Config {
         replacement.write_all(toml::to_string_pretty(&cfg)?.as_bytes())?;
         replacement.as_file().sync_all()?;
         replacement.persist(&path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
         Self::invalidate_cache();
         Ok(())
     }
