@@ -1796,6 +1796,15 @@ pub struct InlineInteractiveState {
     pub preview: bool,
     /// Route choices temporarily replaced by a provider scope.
     pub scoped_route_restore: Vec<(usize, usize)>,
+    /// Model list retained while choosing a reasoning level.
+    pub effort_step: Option<Box<ModelEffortStep>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelEffortStep {
+    pub model: PickerEntry,
+    pub parent: InlineInteractiveState,
+    pub save_default: bool,
 }
 
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {

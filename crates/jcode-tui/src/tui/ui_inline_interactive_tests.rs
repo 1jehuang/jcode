@@ -78,6 +78,7 @@ fn selected_fallback_model_shows_warning_notice() {
 fn sample_picker() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
         scoped_route_restore: Vec::new(),
+        effort_step: None,
         kind: crate::tui::PickerKind::Model,
         filtered: vec![0],
         selected: 0,
@@ -225,6 +226,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
 
     crate::tui::InlineInteractiveState {
         scoped_route_restore: Vec::new(),
+        effort_step: None,
         kind: crate::tui::PickerKind::Account,
         filtered: (0..models.len()).collect(),
         selected: 0,
@@ -238,6 +240,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
 fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
         scoped_route_restore: Vec::new(),
+        effort_step: None,
         kind: crate::tui::PickerKind::Model,
         filtered: vec![0],
         selected: 0,

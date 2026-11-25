@@ -54,6 +54,7 @@ fn model_picker_state() -> TestState {
     TestState {
         inline_interactive_state: Some(crate::tui::InlineInteractiveState {
             scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: crate::tui::PickerKind::Model,
             filtered: vec![0],
             selected: 0,
@@ -287,4 +288,47 @@ fn model_browser_chrome_fits_narrow_unicode_terminals() {
     assert!(text.contains("Search: future▏"), "{text}");
     assert!(text.contains("Provider: openai"), "{text}");
     assert!(text.contains("Ctrl+P provider"), "{text}");
+}
+
+#[test]
+fn model_effort_step_keeps_selected_level_visible_in_short_terminals() {
+    let mut state = model_picker_state();
+    let mut parent = state.inline_interactive_state.take().unwrap();
+    parent.entries[0].name = "未來模型".repeat(20);
+    let model = parent.entries[0].clone();
+    let mut picker = parent.clone();
+    picker.entries = ["low", "med", "high", "xhigh", "max"]
+        .iter()
+        .map(|name| {
+            let mut entry = model.clone();
+            entry.name = (*name).into();
+            entry.options.clear();
+            entry.effort = Some((*name).into());
+            entry
+        })
+        .collect();
+    picker.filtered = (0..5).collect();
+    picker.selected = 4;
+    picker.effort_step = Some(Box::new(crate::tui::ModelEffortStep {
+        model,
+        parent,
+        save_default: false,
+    }));
+    state.inline_interactive_state = Some(picker);
+    for height in [1, 2, 3, 4, 12] {
+        for width in [1, 2, 8, 24, 80] {
+            let lines = render_model_suggestions(&state, width, 20, height);
+            assert!(
+                lines[height as usize..]
+                    .iter()
+                    .all(|line| line.trim().is_empty())
+            );
+            if width >= 8 {
+                assert!(
+                    lines.join("\n").contains("▸ max"),
+                    "{width}/{height}: {lines:?}"
+                );
+            }
+        }
+    }
 }

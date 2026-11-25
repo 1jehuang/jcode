@@ -142,3 +142,5 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
 }
 
 include!("model_browser.rs");
+
+include!("model_effort_step.rs");

@@ -34,6 +34,7 @@ fn model_browser_test_entry() -> crate::tui::PickerEntry {
 fn model_browser_test_picker() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
         scoped_route_restore: Vec::new(),
+        effort_step: None,
         kind: crate::tui::PickerKind::Model,
         entries: vec![model_browser_test_entry()],
         filtered: vec![0],
@@ -370,6 +371,7 @@ fn r23_model_browser_state(preview: bool) -> crate::tui::InlineInteractiveState 
         filter: String::new(),
         preview,
         scoped_route_restore: Vec::new(),
+        effort_step: None,
     }
 }
 
@@ -775,7 +777,7 @@ fn r23_press(app: &mut App, code: KeyCode) {
     app.handle_key(code, KeyModifiers::NONE).unwrap();
 }
 fn r23_press_enter(app: &mut App) {
-    r23_press(app, KeyCode::Enter);
+    r24_enter_and_confirm_level(app);
 }
 fn r23_selected_row_name(app: &App) -> String {
     app.inline_interactive_state

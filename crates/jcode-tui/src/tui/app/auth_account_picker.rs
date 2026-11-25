@@ -98,8 +98,7 @@ impl App {
         ));
     }
 
-    /// AccountUsage contains named OAuth inventory, not a complete auth catalog.
-    /// Never fill missing/pending remote data from the client's auth store.
+    /// AccountUsage is OAuth inventory only; never fill it from this client's auth store.
     pub(crate) fn open_remote_account_picker(&mut self, provider_filter: Option<&str>) {
         self.account_picker_overlay = None;
         self.inline_interactive_state = None;
@@ -155,17 +154,17 @@ impl App {
             ));
             return;
         }
-        let selected = entries
-            .iter()
-            .position(|entry| entry.is_current)
-            .unwrap_or(0);
         self.inline_view_state = None;
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: crate::tui::PickerKind::Account,
             filtered: (0..entries.len()).collect(),
+            selected: entries
+                .iter()
+                .position(|entry| entry.is_current)
+                .unwrap_or(0),
             entries,
-            selected,
             column: 0,
             filter: String::new(),
             preview: false,
@@ -329,6 +328,7 @@ impl App {
         self.inline_view_state = None;
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
             scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: crate::tui::PickerKind::Account,
             filtered: (0..models.len()).collect(),
             entries: models,

@@ -1266,14 +1266,14 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         );
     }
 
-    // Models with reasoning-effort support expand into effort rows (issue
-    // #458); the hydrated route must be preserved on each variant.
+    // Models with reasoning-effort support keep one row per route (the
+    // level is picked in a second step); the hydrated route is preserved.
     assert_eq!(
-        routes_by_model.get("gpt-5.5 (high)"),
+        routes_by_model.get("gpt-5.5"),
         Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("claude-opus-4-6 (high)"),
+        routes_by_model.get("claude-opus-4-6"),
         Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
     );
     assert_eq!(
@@ -1281,7 +1281,7 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro (high)"),
+        routes_by_model.get("deepseek/deepseek-v4-pro"),
         Some(&("auto".to_string(), "openrouter".to_string()))
     );
 
@@ -1763,37 +1763,6 @@ fn test_local_antigravity_model_picker_selection_preserves_antigravity_provider(
 }
 
 #[test]
-fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_prefix() {
-    let (mut app, set_model_calls) = create_openrouter_spec_capture_test_app();
-    app.open_model_picker();
-    wait_for_model_picker_load(&mut app);
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-    let model_idx = picker
-        .entries
-        .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == model_idx)
-        .expect("entry should be in filtered list");
-
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .expect("model picker selection should succeed");
-
-    assert_eq!(
-        set_model_calls.lock().unwrap().as_slice(),
-        ["openai/gpt-5.4@OpenAI"]
-    );
-}
-
-#[test]
 fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_prefix() {
     let (mut app, _set_model_calls) = create_openrouter_spec_capture_test_app();
 
@@ -1806,8 +1775,8 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI entry should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1911,9 +1880,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         render_and_snap(app, &mut terminal)
     };
 
-    // Effort-capable routes now expand into multiple rows. Render focused
-    // slices so each provider remains observable without assuming the complete
-    // catalog fits in one terminal viewport.
+    // Render focused slices so each provider remains observable without
+    // assuming the complete catalog fits in one terminal viewport.
     let openai_text = render_filtered(&mut app, "gpt-5.4");
     let comtegra_text = render_filtered(&mut app, "glm-51-nvfp4");
     let copilot_text = render_filtered(&mut app, "claude-opus-4.6");

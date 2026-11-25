@@ -1,4 +1,7 @@
+#[path = "ui_inline_interactive/effort_step.rs"]
+mod effort_step;
 use super::*;
+use effort_step::model_effort_step_lines;
 use ratatui::widgets::{Block, BorderType, Borders};
 use unicode_width::UnicodeWidthStr;
 
@@ -470,6 +473,9 @@ pub(super) fn model_suggestion_lines(
 ) -> Vec<Line<'static>> {
     if available_rows == 0 {
         return Vec::new();
+    }
+    if let Some(step) = picker.effort_step.as_deref() {
+        return model_effort_step_lines(picker, step, available_rows);
     }
     let dim = Style::default().fg(dim_color());
     let browsing = !picker.preview

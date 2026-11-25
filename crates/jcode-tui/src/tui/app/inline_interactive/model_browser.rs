@@ -397,6 +397,16 @@ impl InlineInteractiveState {
             .iter()
             .map(crate::tui::estimate_picker_entry_bytes)
             .sum();
+        let effort_step_bytes = self
+            .effort_step
+            .as_ref()
+            .map(|step| {
+                crate::tui::estimate_picker_entry_bytes(&step.model)
+                    + step.parent.debug_memory_profile()["total_estimate_bytes"]
+                        .as_u64()
+                        .unwrap_or(0) as usize
+            })
+            .unwrap_or(0);
         let filtered_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
         let filter_bytes = self.filter.capacity();
         let scoped_routes_bytes =
@@ -408,7 +418,8 @@ impl InlineInteractiveState {
             "filtered_bytes": filtered_bytes,
             "filter_bytes": filter_bytes,
             "scoped_routes_bytes": scoped_routes_bytes,
-            "total_estimate_bytes": entries_bytes + filtered_bytes + filter_bytes + scoped_routes_bytes,
+            "effort_step_bytes": effort_step_bytes,
+            "total_estimate_bytes": entries_bytes + filtered_bytes + filter_bytes + scoped_routes_bytes + effort_step_bytes,
         })
     }
 }
