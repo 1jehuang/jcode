@@ -158,7 +158,7 @@ pub fn import_opencode_session_from_path(
             // Modern OpenCode (Go storage) stores message body text in
             // storage/part/<messageID>/*.json; fall back to legacy inline
             // content/summary for older stores.
-            let text = msg_value
+            let text = match msg_value
                 .get("id")
                 .and_then(|v| v.as_str())
                 .map(|id| extract_opencode_part_text(&parts_base, id, true))
@@ -170,7 +170,10 @@ pub fn import_opencode_session_from_path(
                         .filter(|text| !text.trim().is_empty())
                 })
                 .or_else(|| msg_value.get("summary").map(extract_text_from_json_value))
-                .unwrap_or_default();
+            {
+                Some(text) => text,
+                None => String::new(),
+            };
             if model.is_none() {
                 model = msg_value
                     .get("modelID")
