@@ -497,3 +497,147 @@ async fn test_reload_empty_config() {
             || result.output.contains("Reloaded MCP config")
     );
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn exact_selection_loads_only_advertised_allowed_tools() {
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _guard = crate::storage::lock_test_env();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    let mut config = crate::mcp::McpConfig::default();
+    let mut cache = crate::mcp::McpSchemaCache::default();
+    for (server, names, enabled) in [
+        (
+            "alpha",
+            vec!["lookup", "lookup_extra", "describe", "x-y", "x_y"],
+            true,
+        ),
+        ("beta", vec!["lookup"], true),
+        ("disabled", vec!["lookup"], false),
+    ] {
+        let server_config: McpServerConfig = serde_json::from_value(json!({
+            "command":"must-not-start-exact-selection-fixture", "enabled":enabled
+        }))
+        .unwrap();
+        let tools = names
+            .into_iter()
+            .map(|name| crate::mcp::McpToolDef {
+                name: name.into(),
+                description: Some("lookup information".into()),
+                input_schema: json!({"type":"object","properties":{"value":{"type":"string"}}}),
+            })
+            .collect();
+        cache.update(server, &server_config, tools);
+        config.servers.insert(server.into(), server_config);
+    }
+    cache.save();
+    let manager = Arc::new(RwLock::new(McpManager::with_config(config)));
+    let registry = crate::tool::Registry::empty();
+    registry
+        .register(
+            "mcp".into(),
+            Arc::new(McpManagementTool::new(manager.clone()).with_registry(registry.clone())),
+        )
+        .await;
+    let mut ctx = create_test_context();
+    ctx.session_id = "exact-mcp-selection-fixture".into();
+    let query = " select: mcp__alpha__lookup, mcp__alpha__describe, mcp__alpha__lookup ";
+    let output = registry
+        .execute("mcp", json!({"action":"search","query":query}), ctx.clone())
+        .await
+        .unwrap();
+    let selected: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(
+        selected
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["mcp__alpha__describe", "mcp__alpha__lookup"]
+    );
+    assert_eq!(
+        output.metadata.unwrap()["tool_references"],
+        json!(["mcp__alpha__describe", "mcp__alpha__lookup"])
+    );
+    let schema = McpManagementTool::new(manager.clone()).parameters_schema();
+    assert!(
+        schema["properties"]["query"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("select:")
+    );
+    for query in [
+        "select:",
+        "select: , ",
+        "select:unknown",
+        "select:mcp__disabled__lookup",
+        "select:mcp__alpha__x_y",
+    ] {
+        let output = registry
+            .execute("mcp", json!({"action":"search","query":query}), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(output.output, "[]", "query {query}");
+        assert_eq!(output.metadata.unwrap()["tool_references"], json!([]));
+    }
+    let output = registry.execute("mcp", json!({"action":"search","server":"beta","query":"select:mcp__alpha__lookup,mcp__beta__lookup"}), ctx.clone()).await.unwrap();
+    let filtered: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["name"], "mcp__beta__lookup");
+    let output = registry
+        .execute(
+            "mcp",
+            json!({"action":"search","query":"lookup"}),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let fuzzy: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(fuzzy.len(), 3);
+    let output = registry
+        .execute("mcp", json!({"action":"search"}), ctx.clone())
+        .await
+        .unwrap();
+    let advertised: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    let canonical = advertised
+        .iter()
+        .find(|tool| tool["tool"] == "x-y")
+        .unwrap()["name"]
+        .as_str()
+        .unwrap();
+    let output = registry
+        .execute(
+            "mcp",
+            json!({"action":"search","query":format!("select:{canonical}")}),
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    let exact: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0]["tool"], "x-y");
+    let _policy = crate::tool::register_session_tool_policy(
+        &ctx.session_id,
+        Some(std::collections::HashSet::from([
+            "mcp__alpha__lookup".into()
+        ])),
+        std::collections::HashSet::new(),
+    );
+    let output = registry
+        .execute("mcp", json!({"action":"search","query":query}), ctx)
+        .await
+        .unwrap();
+    let allowed: Vec<Value> = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(allowed.len(), 1);
+    assert_eq!(allowed[0]["name"], "mcp__alpha__lookup");
+    assert!(manager.read().await.connected_servers().await.is_empty());
+}
