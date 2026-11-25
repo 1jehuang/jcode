@@ -2,7 +2,8 @@ use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
 mod todo_margins;
 pub(crate) use todo_margins::{
-    compute_visible_margins, pinned_todo_band_lines_for_payload, pinned_todo_card_area,
+    clear_pinned_todo_hit_areas, compute_visible_margins, pinned_todo_band_lines_for_payload,
+    pinned_todo_card_area,
 };
 
 use std::fmt::Write as _;

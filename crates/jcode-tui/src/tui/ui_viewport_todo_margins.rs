@@ -453,3 +453,8 @@ pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
     .intersection(band);
     (!area.is_empty()).then_some(area)
 }
+
+pub(crate) fn clear_pinned_todo_hit_areas() {
+    set_pinned_todo_band_area(None);
+    set_pinned_todo_more_area(None);
+}

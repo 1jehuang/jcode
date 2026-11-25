@@ -88,3 +88,56 @@ fn pinned_todo_body_clicks_follow_long_history_without_toggling_other_rows() {
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
     crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
 }
+
+#[test]
+fn hidden_todo_card_does_not_catch_composer_clicks_after_clear() {
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": (0..12)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("Todo {i}"), "pending"))
+        .collect::<Vec<_>>()})
+        .to_string(),
+    );
+    app.display_messages = vec![DisplayMessage::assistant(
+        "history before clear\n".repeat(30),
+    )];
+    app.bump_display_messages_version();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 25)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    assert!(crate::tui::ui::viewport::pinned_todo_card_area().is_some());
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.input = "composer row\n".repeat(5);
+    app.cursor_pos = app.input.len();
+    let cleared = render_and_snap(&app, &mut terminal);
+    assert!(app.terminal_clear_collapsed(), "{cleared}");
+    assert!(
+        crate::tui::ui::viewport::pinned_todo_card_area().is_none(),
+        "hidden card has no target"
+    );
+    assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+    let input = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .input_area
+        .unwrap();
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: input.x + 2,
+        row: input.y + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(
+        !app.pinned_todos_expanded,
+        "composer click toggled hidden todos"
+    );
+    app.scroll_up(1);
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::viewport::pinned_todo_card_area().is_some(),
+        "restoring history republishes the card"
+    );
+}
