@@ -203,6 +203,79 @@ fn authenticate_accepts_only_advertised_method() {
     assert!(authenticate_result(&json!({})).is_err());
 }
 
+#[tokio::test]
+async fn stdio_authenticate_routes_advertised_method_and_rejects_others() {
+    let (client_in, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, client_out) = tokio::io::duplex(64 * 1024);
+    let runtime = AcpRuntime::with_output(
+        AcpProfile::Standard,
+        ProviderChoice::Claude,
+        None,
+        None,
+        Box::pin(server_out),
+    );
+    let server = tokio::spawn(runtime.run_with_input(server_in));
+
+    let mut client_in = client_in;
+    let mut responses = BufReader::new(client_out).lines();
+    async fn exchange(
+        input: &mut tokio::io::DuplexStream,
+        output: &mut tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
+        request: Value,
+    ) -> Value {
+        let mut line = request.to_string();
+        line.push('\n');
+        input.write_all(line.as_bytes()).await.unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), output.next_line())
+            .await
+            .expect("ACP response timed out")
+            .unwrap()
+            .expect("ACP stdout closed");
+        serde_json::from_str(&response).unwrap()
+    }
+
+    let init = exchange(
+        &mut client_in,
+        &mut responses,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1}}),
+    )
+    .await;
+    assert_eq!(init["id"], 1);
+    let method_id = init["result"]["authMethods"][0]["id"]
+        .as_str()
+        .expect("initialize advertises an auth method id")
+        .to_string();
+
+    let ok = exchange(
+        &mut client_in,
+        &mut responses,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "authenticate", "params": {"methodId": method_id}}),
+    )
+    .await;
+    assert_eq!(ok["id"], 2);
+    assert_eq!(ok["result"], json!({}));
+    assert!(ok.get("error").is_none());
+
+    for (id, params) in [(3, json!({"methodId": "oauth"})), (4, json!({}))] {
+        let err = exchange(
+            &mut client_in,
+            &mut responses,
+            json!({"jsonrpc": "2.0", "id": id, "method": "authenticate", "params": params}),
+        )
+        .await;
+        assert_eq!(err["id"], id);
+        assert_eq!(err["error"]["code"], -32602);
+        assert!(err.get("result").is_none());
+    }
+
+    drop(client_in);
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("ACP runtime did not exit on EOF")
+        .unwrap()
+        .unwrap();
+}
+
 #[test]
 fn initialize_full_advertises_jcode_extension_meta() {
     let result = initialize_result(&json!({"protocolVersion": 1}), AcpProfile::Full);

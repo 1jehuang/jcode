@@ -383,9 +383,11 @@ impl DaemonSession {
     }
 }
 
+type AcpOutput = std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>;
+
 #[derive(Clone)]
 struct AcpRuntime {
-    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    stdout: Arc<Mutex<AcpOutput>>,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     profile: AcpProfile,
     provider_choice: ProviderChoice,
@@ -400,8 +402,24 @@ impl AcpRuntime {
         model: Option<String>,
         provider_profile: Option<String>,
     ) -> Self {
+        Self::with_output(
+            profile,
+            provider_choice,
+            model,
+            provider_profile,
+            Box::pin(tokio::io::stdout()),
+        )
+    }
+
+    fn with_output(
+        profile: AcpProfile,
+        provider_choice: ProviderChoice,
+        model: Option<String>,
+        provider_profile: Option<String>,
+        output: AcpOutput,
+    ) -> Self {
         Self {
-            stdout: Arc::new(Mutex::new(tokio::io::stdout())),
+            stdout: Arc::new(Mutex::new(output)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             profile,
             provider_choice,
@@ -411,8 +429,14 @@ impl AcpRuntime {
     }
 
     async fn run(self) -> Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = BufReader::new(stdin);
+        self.run_with_input(tokio::io::stdin()).await
+    }
+
+    async fn run_with_input<R>(self, input: R) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut reader = BufReader::new(input);
         let mut line = String::new();
 
         loop {
