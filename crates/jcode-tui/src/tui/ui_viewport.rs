@@ -1,9 +1,9 @@
 use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
 mod todo_margins;
-pub(crate) use todo_margins::{compute_visible_margins, pinned_todo_band_lines};
 #[cfg(test)]
 pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
+pub(crate) use todo_margins::{compute_visible_margins, pinned_todo_band_lines};
 
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
