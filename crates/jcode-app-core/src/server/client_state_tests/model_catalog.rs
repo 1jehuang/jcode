@@ -115,3 +115,61 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+/// A busy worker answers catalog requests from its persisted session. The
+/// effort must come from that session (`medium`, set at spawn), not from the
+/// connection provider's own default (`high` in this mock) (#2291).
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
+)]
+#[tokio::test]
+async fn busy_model_catalog_reports_persisted_session_effort() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_busy_catalog_persisted_effort";
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.model = Some("persisted-model".to_string());
+    session.reasoning_effort = Some("medium".to_string());
+    session.save().expect("save session");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(None));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let busy_guard = agent.lock().await;
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    handle_get_model_catalog(45, session_id, &agent, &provider, &writer)
+        .await
+        .expect("catalog fallback should write history event");
+    drop(busy_guard);
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b.read_to_end(&mut bytes).await.expect("read event");
+    let mut line = String::new();
+    std::io::Cursor::new(bytes)
+        .read_line(&mut line)
+        .expect("read line");
+    match serde_json::from_str::<crate::protocol::ServerEvent>(line.trim()).expect("decode") {
+        crate::protocol::ServerEvent::History {
+            reasoning_effort, ..
+        } => assert_eq!(reasoning_effort.as_deref(), Some("medium")),
+        other => panic!("expected history event, got {:?}", other),
+    }
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

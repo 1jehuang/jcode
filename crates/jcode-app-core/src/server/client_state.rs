@@ -278,6 +278,13 @@ async fn build_model_catalog(
                         .ok();
                     let persisted_model =
                         persisted.as_ref().and_then(|session| session.model.clone());
+                    // The connection-level `provider` is a fresh fork that never
+                    // saw this session's effort, so it reports the model default
+                    // (`low` for Opus 5.x). Prefer the effort persisted with the
+                    // session, like the model above (#2291).
+                    let persisted_effort = persisted
+                        .as_ref()
+                        .and_then(|session| session.reasoning_effort.clone());
                     let mut model_routes = provider.model_routes();
                     crate::model_usage::enrich_routes(&mut model_routes);
                     (
@@ -299,7 +306,7 @@ async fn build_model_catalog(
                                 .map(str::to_string)
                                 .collect(),
                         ),
-                        provider.reasoning_effort(),
+                        persisted_effort.or_else(|| provider.reasoning_effort()),
                         "fallback",
                         provider_oauth_email(provider.as_ref()),
                         provider.serving_oauth_account_label(),
