@@ -615,3 +615,49 @@ fn test_input_composer_drag_then_release_copies_via_full_mouse_path() {
         app.status_notice()
     );
 }
+
+#[test]
+fn test_first_chat_drag_into_composer_stays_in_chat_pane() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.display_messages = (0..12)
+        .map(|index| DisplayMessage::assistant(format!("history marker {index}")))
+        .collect();
+    app.bump_display_messages_version();
+    app.input = "composer must not leak into chat copy".to_string();
+    app.cursor_pos = app.input.len();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let start = (0..24u16)
+        .flat_map(|row| (0..80u16).map(move |col| (col, row)))
+        .find(|(col, row)| {
+            crate::tui::ui::copy_point_from_screen(*col, *row).is_some_and(|point| {
+                point.pane == crate::tui::CopySelectionPane::Chat
+                    && crate::tui::ui::copy_viewport_line_text(point.abs_line)
+                        .is_some_and(|text| text.contains("history marker 11"))
+            })
+        })
+        .expect("last message is visible");
+    let input = input_pane_screen_points(80, 24);
+    let target = (input[0].0, input[0].1);
+    let expected = crate::tui::ui::copy_selection_text(crate::tui::CopySelectionRange {
+        start: crate::tui::ui::copy_point_from_screen(start.0, start.1).unwrap(),
+        end: crate::tui::ui::copy_pane_drag_point(
+            crate::tui::CopySelectionPane::Chat,
+            target.0,
+            target.1,
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let copied = drag_copy(&mut app, start, target);
+    assert!(expected.contains("history marker 11"), "{expected:?}");
+    assert!(!expected.contains(&app.input));
+    assert_eq!(copied, expected);
+    assert_eq!(
+        app.current_copy_selection_pane(),
+        Some(crate::tui::CopySelectionPane::Chat)
+    );
+    assert!(!app.copy_selection_dragging);
+    assert!(app.copy_selection_pending_anchor.is_none());
+}
