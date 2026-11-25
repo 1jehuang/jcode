@@ -357,6 +357,11 @@ fn last_chat_scrollbar_visible() -> bool {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn chat_scrollbar_visible_for_tests() -> bool {
+    last_chat_scrollbar_visible()
+}
+
 /// Get the total line count from the pinned diff/content pane (set during render).
 pub fn pinned_pane_total_lines() -> usize {
     #[cfg(test)]
@@ -3175,8 +3180,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
         let started = Instant::now();
-        let result =
-            (prepared.total_wrapped_lines().max(1) as u16) + stable_fixed_height > available_height;
+        // Transcript lengths can exceed the u16 range used for terminal coordinates.
+        let result = prepared.total_wrapped_lines().max(1)
+            > usize::from(available_height.saturating_sub(stable_fixed_height));
         note_prep_overflow(started.elapsed());
         result
     };
@@ -3193,7 +3199,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let initial_content_height;
     let (prepared, chat_scrollbar_visible) = if !scrollbar_enabled {
         let prepared_wide = prepare_at(wide_prepare_width);
-        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1);
         (prepared_wide, false)
     } else if last_chat_scrollbar_visible()
         || transcript_definitely_overflows(
@@ -3204,7 +3210,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         // Prior visibility or the source-row lower bound suggests starting
         // narrow. Still check the actual layout before keeping the scrollbar.
         let prepared_narrow = prepare_at(narrow_prepare_width);
-        initial_content_height = prepared_narrow.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_narrow.total_wrapped_lines().max(1);
         if overflows(&prepared_narrow) {
             (prepared_narrow, true)
         } else {
@@ -3216,7 +3222,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         // No scrollbar last frame: prepare the wide layout first. Only when it
         // overflows do we evaluate the narrow layout to decide on the scrollbar.
         let prepared_wide = prepare_at(wide_prepare_width);
-        initial_content_height = prepared_wide.total_wrapped_lines().max(1) as u16;
+        initial_content_height = prepared_wide.total_wrapped_lines().max(1);
         if !overflows(&prepared_wide) {
             (prepared_wide, false)
         } else {
@@ -3428,7 +3434,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
         messages_area,
-        initial_content_height: initial_content_height as usize,
+        initial_content_height,
         content_height: content_height as usize,
         chat_scrollbar_visible,
         use_packed_layout: use_packed,
