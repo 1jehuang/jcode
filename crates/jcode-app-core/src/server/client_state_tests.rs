@@ -1,6 +1,4 @@
-use super::handle_get_history;
-use super::handle_get_model_catalog;
-use super::session_activity_snapshot;
+use super::{handle_get_history, handle_get_model_catalog, session_activity_snapshot};
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
