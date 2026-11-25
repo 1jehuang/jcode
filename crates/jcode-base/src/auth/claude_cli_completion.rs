@@ -4,6 +4,44 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+tokio::task_local! {
+    static VALIDATION_TOKENS: std::cell::RefCell<claude::ClaudeCredentials>;
+}
+
+/// Follow only successful refresh commits in this validation task.
+pub async fn with_validation_refreshes(
+    credentials: claude::ClaudeCredentials,
+    validation: impl std::future::Future<Output = Result<()>>,
+) -> Result<claude::ClaudeCredentials> {
+    VALIDATION_TOKENS
+        .scope(std::cell::RefCell::new(credentials), async {
+            validation.await?;
+            Ok(VALIDATION_TOKENS.with(|tokens| tokens.borrow().clone()))
+        })
+        .await
+}
+
+pub(in crate::auth) fn follow_validation_refresh(
+    previous_refresh: &str,
+    access: &str,
+    refresh: &str,
+    expires: i64,
+) -> bool {
+    matches!(
+        VALIDATION_TOKENS.try_with(|tokens| {
+            let mut tokens = tokens.borrow_mut();
+            if previous_refresh.trim().is_empty() || tokens.refresh_token != previous_refresh {
+                return false;
+            }
+            tokens.access_token = access.into();
+            tokens.refresh_token = refresh.into();
+            tokens.expires_at = expires;
+            true
+        }),
+        Ok(true)
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LoginSource {
     Native,
