@@ -3487,6 +3487,7 @@ fn vsllm_uses_conservative_context_when_catalog_omits_limits() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
     let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let profile = jcode_base::config::NamedProviderConfig {
         base_url: "https://vsllm.cc/v1".to_string(),
         auth: jcode_base::config::NamedProviderAuth::None,
