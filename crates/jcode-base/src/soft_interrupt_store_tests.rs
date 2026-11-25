@@ -12,10 +12,10 @@ fn append_take_and_clear_round_trip() {
         session_id,
         SoftInterruptMessage {
             content: "hello".to_string(),
-            images: Vec::new(),
+            images: vec![("image/png".into(), "ZmFrZQ==".into())],
             urgent: true,
             source: SoftInterruptSource::System,
-            client_id: None,
+            client_id: Some("image-client".into()),
         },
     )
     .expect("append first interrupt");
@@ -35,11 +35,15 @@ fn append_take_and_clear_round_trip() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].content, "hello");
     assert!(loaded[0].urgent);
+    assert_eq!(loaded[0].images, [("image/png".into(), "ZmFrZQ==".into())]);
+    assert_eq!(loaded[0].client_id.as_deref(), Some("image-client"));
     assert_eq!(loaded[1].content, "world");
     assert_eq!(loaded[1].source, SoftInterruptSource::FileActivity);
 
     let taken = take(session_id).expect("take interrupts");
     assert_eq!(taken.len(), 2);
+    assert_eq!(taken[0].images, loaded[0].images);
+    assert_eq!(taken[0].client_id, loaded[0].client_id);
     assert!(load(session_id).expect("reload after take").is_empty());
 
     append(

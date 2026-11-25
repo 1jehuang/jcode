@@ -2,6 +2,8 @@ use super::*;
 
 #[test]
 fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
     let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
     let control = SessionControlHandle::cancel_only(
         "session_cancel_by_id_test",
@@ -26,7 +28,7 @@ fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
     assert_eq!(control.pending_soft_interrupt_count(), 4);
 
     let requested: Vec<String> = ["f3", "gone", "f1", "f3"].map(String::from).to_vec();
-    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&requested);
+    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&requested).unwrap();
     assert_eq!(cancelled, vec!["f3".to_string(), "f1".to_string()]);
     assert_eq!(not_queued, vec!["gone".to_string()]);
 
@@ -40,7 +42,9 @@ fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
 
     // Once drained (injected), the same id can no longer be cancelled.
     queue.lock().expect("queue lock").clear();
-    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&["f2".to_string()]);
+    let (cancelled, not_queued) = control
+        .cancel_soft_interrupts_by_id(&["f2".to_string()])
+        .unwrap();
     assert!(cancelled.is_empty());
     assert_eq!(not_queued, vec!["f2".to_string()]);
 }
@@ -51,6 +55,8 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
         forked: Arc::new(AtomicBool::new(false)),
     });
     let registry = Registry::new(Arc::clone(&provider)).await;
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
 
     let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -74,7 +80,7 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
         ));
         control.request_cancel();
         assert!(control.request_background_current_tool());
-        control.clear_soft_interrupts();
+        control.clear_soft_interrupts().unwrap();
     })
     .await
     .expect("lock-free control operations should not wait for the agent mutex");
@@ -512,5 +518,191 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
     assert!(
         !stop_signal.is_set(),
         "the newest cancel's deferred reset should eventually clear the flag"
+    );
+}
+
+#[test]
+fn soft_interrupt_enqueue_failure_returns_error_without_a_receipt_ack() {
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(
+        "failed-image-enqueue",
+        queue.clone(),
+        InterruptSignal::new(),
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _guard = queue.lock().unwrap();
+            panic!("poison the test queue");
+        })
+        .is_err()
+    );
+    let (tx, mut events) = mpsc::unbounded_channel();
+    crate::server::client_lifecycle::client_processing::queue_soft_interrupt(
+        301,
+        String::new(),
+        vec![("image/png".into(), "ZmFrZQ==".into())],
+        false,
+        false,
+        Some("image-client".into()),
+        &control,
+        &tx,
+    );
+    assert!(
+        matches!(
+            events.try_recv().unwrap(),
+            ServerEvent::Error { id: 301, .. }
+        ),
+        "failed image enqueue must not be acknowledged"
+    );
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn image_only_soft_interrupt_receipt_preserves_payload_and_cancellable_id() {
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control =
+        SessionControlHandle::cancel_only("image-enqueue", queue.clone(), InterruptSignal::new());
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let images = vec![("image/png".into(), "ZmFrZQ==".into())];
+    crate::server::client_lifecycle::client_processing::queue_soft_interrupt(
+        302,
+        String::new(),
+        images.clone(),
+        false,
+        false,
+        Some("image-client".into()),
+        &control,
+        &tx,
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ServerEvent::Ack { id: 302 }
+    ));
+    {
+        let pending = queue.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].content.is_empty());
+        assert_eq!(pending[0].images, images);
+        assert_eq!(pending[0].client_id.as_deref(), Some("image-client"));
+    }
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    crate::soft_interrupt_store::append("image-enqueue", queue.lock().unwrap()[0].clone()).unwrap();
+    crate::server::client_lifecycle::client_processing::cancel_soft_interrupts_by_id(
+        303,
+        "image-enqueue",
+        &["image-client".into()],
+        &control,
+        &tx,
+    );
+    assert!(
+        matches!(events.try_recv().unwrap(), ServerEvent::SoftInterruptsCancelled { id: 303, cancelled, not_queued } if cancelled == ["image-client"] && not_queued.is_empty())
+    );
+    assert!(queue.lock().unwrap().is_empty());
+    assert!(
+        crate::soft_interrupt_store::load("image-enqueue")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn soft_interrupt_cancel_failure_never_claims_ids_were_injected_or_unknown() {
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(
+        "failed-image-cancel",
+        queue.clone(),
+        InterruptSignal::new(),
+    );
+    assert!(control.queue_soft_interrupt_with_id(
+        String::new(),
+        vec![("image/png".into(), "ZmFrZQ==".into())],
+        false,
+        SoftInterruptSource::User,
+        Some("held-image".into())
+    ));
+    assert!(
+        std::panic::catch_unwind(|| {
+            let _guard = queue.lock().unwrap();
+            panic!("poison the test queue");
+        })
+        .is_err()
+    );
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let (tx, mut events) = mpsc::unbounded_channel();
+    crate::server::client_lifecycle::client_processing::cancel_soft_interrupts_by_id(
+        304,
+        "failed-image-cancel",
+        &["held-image".into()],
+        &control,
+        &tx,
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ServerEvent::Error { id: 304, .. }
+    ));
+    assert_eq!(queue.lock().unwrap_err().into_inner().len(), 1);
+    assert!(events.try_recv().is_err());
+    crate::server::client_lifecycle::client_processing::clear_soft_interrupts(
+        305,
+        "failed-image-cancel",
+        &control,
+        &tx,
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ServerEvent::Error { id: 305, .. }
+    ));
+}
+
+#[test]
+fn soft_interrupt_persisted_cancel_failure_returns_error_without_a_verdict() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let home = crate::storage::jcode_dir().unwrap();
+    let pending = home.join("pending-soft-interrupts/failed-persisted-cancel.json");
+    std::fs::create_dir_all(&pending).unwrap();
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(
+        "failed-persisted-cancel",
+        queue.clone(),
+        InterruptSignal::new(),
+    );
+    assert!(control.queue_soft_interrupt_with_id(
+        String::new(),
+        vec![("image/png".into(), "ZmFrZQ==".into())],
+        false,
+        SoftInterruptSource::User,
+        Some("held-image".into()),
+    ));
+    let (tx, mut events) = mpsc::unbounded_channel();
+    crate::server::client_lifecycle::client_processing::cancel_soft_interrupts_by_id(
+        306,
+        "failed-persisted-cancel",
+        &["held-image".into()],
+        &control,
+        &tx,
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ServerEvent::Error { id: 306, .. }
+    ));
+    assert!(events.try_recv().is_err());
+    crate::server::client_lifecycle::client_processing::clear_soft_interrupts(
+        307,
+        "failed-persisted-cancel",
+        &control,
+        &tx,
+    );
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        ServerEvent::Error { id: 307, .. }
+    ));
+    assert!(pending.is_dir());
+    assert_eq!(
+        queue.lock().unwrap().len(),
+        1,
+        "failed cancellation must retain live input"
     );
 }

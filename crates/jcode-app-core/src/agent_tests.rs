@@ -611,37 +611,8 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
     }
 }
 
-#[tokio::test]
-async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
-    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
-    let registry = Registry::new(provider.clone()).await;
-    let _guard = crate::storage::lock_test_env();
-    let mut agent = Agent::new(provider, registry);
-
-    agent.queue_soft_interrupt(
-        "look at this".to_string(),
-        vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
-        false,
-        SoftInterruptSource::User,
-    );
-    let injected = agent.inject_soft_interrupts();
-
-    assert_eq!(injected.len(), 1);
-    let message = agent
-        .session
-        .messages
-        .last()
-        .expect("soft interrupt should append a user message");
-    assert!(matches!(
-        &message.content[0],
-        ContentBlock::Image { media_type, data }
-            if media_type == "image/png" && data == "ZmFrZQ=="
-    ));
-    assert!(matches!(
-        &message.content[1],
-        ContentBlock::Text { text, .. } if text == "look at this"
-    ));
-}
+#[path = "agent_tests/soft_interrupt_images.rs"]
+mod soft_interrupt_images;
 
 #[tokio::test]
 async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {

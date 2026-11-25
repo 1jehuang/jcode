@@ -94,21 +94,19 @@ pub fn load(session_id: &str) -> Result<Vec<SoftInterruptMessage>> {
 }
 
 pub fn take(session_id: &str) -> Result<Vec<SoftInterruptMessage>> {
-    let path = path_for_session(session_id)?;
     let loaded = load(session_id)?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
+    clear(session_id)?;
     Ok(loaded)
 }
 
 pub fn overwrite(session_id: &str, interrupts: &[SoftInterruptMessage]) -> Result<()> {
     let path = path_for_session(session_id)?;
     if interrupts.is_empty() {
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
-        }
-        return Ok(());
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        };
     }
 
     if let Some(parent) = path.parent() {

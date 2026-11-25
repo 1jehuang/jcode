@@ -76,6 +76,16 @@ pub(super) enum PostToolInterruptOutcome {
 
 impl Agent {
     pub fn restore_persisted_soft_interrupts(&self) -> usize {
+        let mut queue = match self.soft_interrupt_queue.lock() {
+            Ok(queue) => queue,
+            Err(_) => {
+                logging::warn(&format!(
+                    "Failed to restore persisted soft interrupts for {} because queue lock was poisoned",
+                    self.session_id()
+                ));
+                return 0;
+            }
+        };
         let restored = match crate::soft_interrupt_store::take(self.session_id()) {
             Ok(items) => items,
             Err(err) => {
@@ -87,21 +97,11 @@ impl Agent {
                 return 0;
             }
         };
-
-        if restored.is_empty() {
-            return 0;
-        }
-
         let restored_count = restored.len();
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            queue.extend(restored);
-        } else {
-            logging::warn(&format!(
-                "Failed to restore persisted soft interrupts for {} because queue lock was poisoned",
-                self.session_id()
-            ));
+        if restored_count == 0 {
             return 0;
         }
+        queue.extend(restored);
 
         logging::info(&format!(
             "Restored {} persisted soft interrupt(s) for session {}",
@@ -113,7 +113,7 @@ impl Agent {
 
     pub fn persist_soft_interrupt_snapshot(&self) {
         let pending = match self.soft_interrupt_queue.lock() {
-            Ok(queue) => queue.clone(),
+            Ok(queue) => queue,
             Err(_) => {
                 logging::warn(&format!(
                     "Failed to snapshot soft interrupts for {} because queue lock was poisoned",

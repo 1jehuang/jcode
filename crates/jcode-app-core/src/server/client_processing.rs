@@ -774,10 +774,19 @@ pub(super) fn queue_soft_interrupt(
     ));
     let queued =
         session_control.queue_soft_interrupt_with_id(content, images, urgent, source, client_id);
-    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    let event = if queued {
+        ServerEvent::Ack { id }
+    } else {
+        ServerEvent::Error {
+            id,
+            message: "Soft interrupt queue is unavailable".into(),
+            retry_after_secs: None,
+        }
+    };
+    let response_queued = client_event_tx.send(event).is_ok();
     crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
-        id, session_control.session_id, queued, ack_queued
+        "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} response_queued={}",
+        id, session_control.session_id, queued, response_queued
     ));
 }
 
@@ -788,27 +797,27 @@ pub(super) fn cancel_soft_interrupts_by_id(
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let (mut cancelled, mut not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
-    // An interrupt sent while no live queue was reachable is parked on disk
-    // until the session restores it. It is just as cancellable.
-    if !not_queued.is_empty() {
-        match crate::soft_interrupt_store::remove_by_client_ids(session_id, &not_queued) {
-            Ok(removed) if !removed.is_empty() => {
-                not_queued.retain(|id| !removed.contains(id));
-                cancelled.extend(removed);
-            }
-            Ok(_) => {}
-            Err(err) => crate::logging::warn(&format!(
-                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_PERSISTED_FAILED id={} session={} error={}",
+    let event = match session_control.cancel_soft_interrupts_by_id(client_ids) {
+        Ok((cancelled, not_queued)) => ServerEvent::SoftInterruptsCancelled {
+            id,
+            cancelled,
+            not_queued,
+        },
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_FAILED id={} session={} error={}",
                 id, session_id, err
-            )),
+            ));
+            ServerEvent::Error {
+                id,
+                message: format!("Could not cancel soft interrupts: {err}"),
+                retry_after_secs: None,
+            }
         }
+    };
+    if client_event_tx.send(event).is_err() {
+        crate::logging::debug("Soft interrupt control response receiver closed");
     }
-    let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
-        id,
-        cancelled,
-        not_queued,
-    });
 }
 
 pub(super) fn clear_soft_interrupts(
@@ -821,22 +830,23 @@ pub(super) fn clear_soft_interrupts(
         "SERVER_SOFT_INTERRUPT_CLEAR_REQUEST id={} session={} control_session={}",
         id, session_id, session_control.session_id
     ));
-    session_control.clear_soft_interrupts();
-    let persisted_clear = match crate::soft_interrupt_store::clear(session_id) {
-        Ok(()) => true,
+    let event = match session_control.clear_soft_interrupts() {
+        Ok(()) => ServerEvent::Ack { id },
         Err(err) => {
             crate::logging::warn(&format!(
-                "SERVER_SOFT_INTERRUPT_CLEAR_PERSISTED_FAILED id={} session={} error={}",
+                "SERVER_SOFT_INTERRUPT_CLEAR_FAILED id={} session={} error={}",
                 id, session_id, err
             ));
-            false
+            ServerEvent::Error {
+                id,
+                message: format!("Could not clear soft interrupts: {err}"),
+                retry_after_secs: None,
+            }
         }
     };
-    let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
-    crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_CLEAR_RESULT id={} session={} persisted_clear={} ack_queued={}",
-        id, session_id, persisted_clear, ack_queued
-    ));
+    if client_event_tx.send(event).is_err() {
+        crate::logging::debug("Soft interrupt control response receiver closed");
+    }
 }
 
 pub(super) fn move_tool_to_background(
