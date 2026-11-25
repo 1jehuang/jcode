@@ -1145,9 +1145,9 @@ fn forward_pending_reasoning_effort_sends_effort_request_to_server() {
         "staged effort must be consumed after dispatch"
     );
     assert_eq!(
-        app.remote_reasoning_effort.as_deref(),
+        app.remote_reasoning_effort_hint().as_deref(),
         Some("high"),
-        "requested effort should be tracked optimistically for the UI"
+        "pending effort should drive repeated picker and hotkey selection"
     );
     assert!(
         app.suppress_next_reasoning_effort_message,

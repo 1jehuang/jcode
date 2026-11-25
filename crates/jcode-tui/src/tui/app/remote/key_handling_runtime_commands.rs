@@ -42,13 +42,7 @@ pub(super) async fn apply_remote_effort_direction(
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
-        app.remote_reasoning_effort = Some(next_effort.to_string());
-        app.invalidate_model_picker_cache();
-        app.set_status_notice(format!(
-            "Effort: {} (will apply to next request)",
-            app_mod::effort_display_label(next_effort)
-        ));
-        remote.set_reasoning_effort(next_effort).await?;
+        request_remote_effort(app, remote, next_effort).await?;
     }
     Ok(())
 }

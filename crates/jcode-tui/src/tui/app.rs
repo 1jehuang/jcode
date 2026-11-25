@@ -41,8 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -1385,6 +1384,7 @@ pub struct App {
         Vec<crate::session::RenderedImage>,
     )>,
     remote_reasoning_effort: Option<String>,
+    remote_effort_state: remote::effort::RemoteEffortState,
     remote_service_tier: Option<String>,
     remote_available_service_tiers: Option<Vec<String>>,
     remote_reported_service_tier: Option<(Option<String>, String)>,

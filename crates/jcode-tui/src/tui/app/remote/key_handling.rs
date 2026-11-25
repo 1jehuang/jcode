@@ -684,16 +684,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                 return Ok(());
             }
-            let efforts = app.remote_available_efforts();
-            if efforts.contains(&level) {
-                app.remote_reasoning_effort = Some(level.to_string());
-                app.invalidate_model_picker_cache();
-                app.set_status_notice(format!(
-                    "Effort: {} (will apply to next request)",
-                    app_mod::effort_display_label(level)
-                ));
-            }
-            remote.set_reasoning_effort(level).await?;
+            request_remote_effort(app, remote, level).await?;
             return Ok(());
         }
 

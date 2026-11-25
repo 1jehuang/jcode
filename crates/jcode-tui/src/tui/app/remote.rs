@@ -21,6 +21,8 @@ use crossterm::event::{
 use ratatui::{DefaultTerminal, Terminal, backend::Backend};
 use std::time::{Duration, Instant};
 
+pub(super) mod effort;
+use effort::{forward_pending_reasoning_effort, request_remote_effort};
 mod input_dispatch;
 mod key_handling;
 mod latency;
@@ -601,32 +603,6 @@ pub(super) async fn dispatch_due_remote_retry(
         );
     }
     true
-}
-
-/// Forward the reasoning-effort variant staged by a model-picker selection
-/// (e.g. "gpt-5.5 (high)") to the server right after the model-switch request.
-/// In remote mode the picker cannot apply effort to `app.provider` (a local
-/// stand-in), so skipping this leaves the server on its configured default
-/// effort - typically low - silently downgrading the request (issue #427).
-async fn forward_pending_reasoning_effort(app: &mut App, remote: &mut RemoteConnection) {
-    let Some(effort) = app.pending_reasoning_effort.take() else {
-        return;
-    };
-    match remote.set_reasoning_effort(&effort).await {
-        Ok(()) => {
-            // Optimistically track the requested effort so the widget/header
-            // reflect the picker choice; ReasoningEffortChanged confirms it.
-            app.remote_reasoning_effort = Some(effort);
-            app.suppress_next_reasoning_effort_message = true;
-        }
-        Err(error) => {
-            app.push_display_message(DisplayMessage::error(format!(
-                "Failed to request reasoning effort '{}': {}",
-                effort, error
-            )));
-            app.set_status_notice("Effort switch failed");
-        }
-    }
 }
 
 pub(super) async fn handle_terminal_event(

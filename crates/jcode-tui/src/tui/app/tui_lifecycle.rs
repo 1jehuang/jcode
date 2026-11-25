@@ -448,6 +448,7 @@ impl App {
             advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
+            remote_effort_state: Default::default(),
             remote_service_tier: None,
             remote_available_service_tiers: None,
             remote_reported_service_tier: None,
@@ -972,6 +973,7 @@ impl App {
             advertised_history_base: None,
             model_catalog_after_history: false,
             remote_reasoning_effort: None,
+            remote_effort_state: Default::default(),
             remote_service_tier: None,
             remote_available_service_tiers: None,
             remote_reported_service_tier: None,
@@ -1462,11 +1464,6 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
     }
 
     /// Mark that a server was just spawned - run_remote will retry initial connection

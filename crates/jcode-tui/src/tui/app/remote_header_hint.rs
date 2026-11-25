@@ -166,7 +166,7 @@ impl App {
         // A brand-new session starts at the configured per-family effort, so
         // that is known too. A resumed session keeps whatever it last used,
         // which only the server knows.
-        if self.resume_session_id.is_none() {
+        if self.resume_session_id.is_none() && self.remote_effort_state.requested.is_none() {
             self.remote_reasoning_effort = self.remote_reasoning_effort_hint();
         }
         self.remote_session_facts_provisional = true;

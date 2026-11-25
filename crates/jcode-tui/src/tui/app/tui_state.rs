@@ -250,51 +250,6 @@ impl App {
         inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
     }
 
-    /// Best-known current reasoning effort for the remote session. Falls back
-    /// to the configured provider-family default when the server has not
-    /// reported one yet, so pre-settle effort cycling starts from the value the
-    /// session will actually use instead of assuming the maximum.
-    pub(super) fn remote_reasoning_effort_hint(&self) -> Option<String> {
-        if crate::tui::is_ssh_remote() {
-            return self.remote_reasoning_effort.clone().or_else(|| {
-                let (provider, model) = self.remote_effort_identity();
-                if provider
-                    .as_deref()
-                    .is_some_and(|p| p.to_ascii_lowercase().contains("antigravity"))
-                {
-                    model.as_deref().and_then(|m| {
-                        jcode_provider_core::split_antigravity_model_effort(m)
-                            .map(|(_, effort)| effort.to_string())
-                    })
-                } else {
-                    None
-                }
-            });
-        }
-        self.remote_reasoning_effort.clone().or_else(|| {
-            let (provider, model) = self.remote_effort_identity();
-            let provider = provider.unwrap_or_default().to_ascii_lowercase();
-            let model = model.unwrap_or_default().to_ascii_lowercase();
-            let cfg = &crate::config::config().provider;
-            if provider.contains("antigravity") {
-                jcode_provider_core::split_antigravity_model_effort(&model)
-                    .map(|(_, effort)| effort.to_string())
-            } else if provider.contains("anthropic")
-                || provider.contains("claude")
-                || model.starts_with("claude-")
-            {
-                cfg.anthropic_reasoning_effort.clone()
-            } else if provider.contains("openai")
-                || provider.contains("codex")
-                || model.starts_with("gpt-")
-            {
-                cfg.openai_reasoning_effort.clone()
-            } else {
-                None
-            }
-        })
-    }
-
     fn remote_header_provider_model(&self) -> Option<String> {
         let effective_model = self.effective_remote_provider_model();
 
