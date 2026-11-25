@@ -1,8 +1,8 @@
 use super::client_actions::{
-    AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
-    handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
-    handle_set_session_saved, handle_set_subagent_model, handle_split, handle_stdin_response,
-    handle_transfer, handle_trigger_memory_extraction,
+    NotifySessionContext, handle_compact, handle_input_shell, handle_notify_session,
+    handle_rename_session, handle_run_subagent, handle_set_feature, handle_set_session_saved,
+    handle_set_subagent_model, handle_split, handle_stdin_response, handle_transfer,
+    handle_trigger_memory_extraction,
 };
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
@@ -96,41 +96,6 @@ fn event_for_transport(
             event => return Some(event),
         };
     }
-}
-
-struct ProcessingMessage {
-    jarvis_voice: bool,
-    id: u64,
-    content: String,
-    images: Vec<(String, String)>,
-    system_reminder: Option<String>,
-    active_skill: Option<String>,
-    /// Retry on the next pool account after a usage limit (API clients).
-    server_failover: bool,
-}
-
-// A client request ID is not a turn identity: clients can reuse it after cancel.
-type ProcessingCompletion = (
-    u64,
-    Result<()>,
-    Option<String>,
-    tokio::task::Id,
-    Option<crate::agent::TurnPublicationPin>,
-);
-
-struct ProcessingState<'a> {
-    client_is_processing: &'a mut bool,
-    message_id: &'a mut Option<u64>,
-    session_id: &'a mut Option<String>,
-    task: &'a mut Option<tokio::task::JoinHandle<()>>,
-}
-
-struct SwarmStatusRefs<'a> {
-    members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
-    swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
-    event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
-    event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
-    event_tx: &'a broadcast::Sender<SwarmEvent>,
 }
 
 #[path = "request_watchdog.rs"]
@@ -1129,6 +1094,7 @@ pub(super) async fn handle_client(
                 let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
+                        prepared_agent: None,
                         jarvis_voice,
                         id,
                         content,
@@ -1246,6 +1212,7 @@ pub(super) async fn handle_client(
                     let accepted_content = content.clone();
                     start_processing_message(
                         ProcessingMessage {
+                            prepared_agent: None,
                             jarvis_voice,
                             id,
                             content,
@@ -2286,21 +2253,32 @@ pub(super) async fn handle_client(
             }
 
             Request::AgentTask { id, task, .. } => {
-                handle_agent_task(
+                if start_agent_task(
                     id,
                     task,
                     &client_session_id,
+                    &mut ProcessingState {
+                        client_is_processing: &mut client_is_processing,
+                        message_id: &mut processing_message_id,
+                        session_id: &mut processing_session_id,
+                        task: &mut processing_task,
+                    },
                     &agent,
-                    &AgentTaskContext {
-                        client_event_tx: &client_event_tx,
-                        swarm_members: &swarm_members,
+                    &client_event_tx,
+                    &processing_done_tx,
+                    active_terminal_env.clone(),
+                    &SwarmStatusRefs {
+                        members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
                         event_history: &event_history,
                         event_counter: &event_counter,
-                        swarm_event_tx: &swarm_event_tx,
+                        event_tx: &swarm_event_tx,
                     },
-                )
-                .await;
+                ).await
+                    && let Some(info) = client_connections.write().await.get_mut(&client_connection_id)
+                {
+                    info.is_processing = true;
+                }
             }
 
             Request::AgentCapabilities { id } => {
@@ -2427,6 +2405,7 @@ pub(super) async fn handle_client(
                             }
                             start_processing_message(
                                 ProcessingMessage {
+                                    prepared_agent: None,
                                     jarvis_voice: false,
                                     id, content, images: Vec::new(), system_reminder: None,
                                     active_skill: None, server_failover: true,
@@ -3455,10 +3434,11 @@ mod model_catalog_retry_tests;
 #[path = "client_processing.rs"]
 mod client_processing;
 use client_processing::{
+    ProcessingCompletion, ProcessingMessage, ProcessingState, SwarmStatusRefs,
     append_context_message, cancel_processing_message, cancel_soft_interrupts_by_id,
     clear_soft_interrupts, move_tool_to_background, queue_soft_interrupt,
-    reconcile_processing_completions, record_processing_completion, start_processing_message,
-    try_available_models_snapshot,
+    reconcile_processing_completions, record_processing_completion, start_agent_task,
+    start_processing_message, try_available_models_snapshot,
 };
 
 /// Process a message and stream events (mpsc channel - per-client)

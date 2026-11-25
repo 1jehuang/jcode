@@ -452,6 +452,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 42,
                 content: "do not start during reload".to_string(),
@@ -555,6 +556,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            prepared_agent: None,
             jarvis_voice: false,
             id: 479,
             content: "stream to every attachment".to_string(),
@@ -781,6 +783,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let other_connection = agent.lock().await.claim_server_turn().unwrap();
     start_processing_message(
         ProcessingMessage {
+            prepared_agent: None,
             jarvis_voice: false,
             id: 1,
             content: "must not enter transcript".into(),
@@ -809,6 +812,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
             .send(ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id,
                 content: content.into(),
@@ -1087,6 +1091,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 77,
                 content: "continue after reload".to_string(),
@@ -1149,6 +1154,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 78,
                 content: String::new(),
@@ -1214,6 +1220,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             }
             start_processing_message(
                 ProcessingMessage {
+                    prepared_agent: None,
                     jarvis_voice: false,
                     id,
                     content: continuation.to_string(),
@@ -1309,6 +1316,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    prepared_agent: None,
                     jarvis_voice: false,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
@@ -1515,6 +1523,8 @@ mod socket_workflows;
 
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
+#[path = "client_lifecycle_tests/agent_task.rs"]
+mod agent_task;
 
 #[path = "client_lifecycle_tests/stream_coalescing.rs"]
 mod stream_coalescing;
