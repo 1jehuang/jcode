@@ -76,7 +76,7 @@ if [[ -n "$git_hash" ]]; then
   if [[ "$git_dirty" == "1" ]]; then
     expected_git_identity="($git_hash, dirty)"
   fi
-  if [[ "$($bin --version)" != *"$expected_git_identity"* ]]; then
+  if [[ "$("$bin" --version)" != *"$expected_git_identity"* ]]; then
     echo "Release binary does not report expected git identity: $expected_git_identity" >&2
     exit 1
   fi
