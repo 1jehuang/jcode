@@ -1019,7 +1019,11 @@ if (-not $Version) { Write-Err "Failed to determine latest version" }
 $VersionNum = $Version.TrimStart('v')
 $DownloadBases = Get-JcodeReleaseDownloadBases $Version
 
-$BuildsDir = Join-Path (Get-JcodeLocalAppDataDir) "jcode\builds"
+$BuildsDir = if ($env:JCODE_HOME) {
+    Join-Path $env:JCODE_HOME "builds"
+} else {
+    Join-Path (Get-JcodeLocalAppDataDir) "jcode\builds"
+}
 $StableDir = Join-Path $BuildsDir "stable"
 $VersionDir = Join-Path $BuildsDir "versions\$VersionNum"
 $LauncherPath = Join-Path $InstallDir "jcode.exe"

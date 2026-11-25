@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset -f cargo 2>/dev/null || true
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -33,16 +34,17 @@ chmod +x "$TEST_REPO/target/release/jcode"
 EOF
 chmod +x "$fake_bin/git" "$fake_bin/cargo"
 run_install() {
-  HOME="$tmp/home" PATH="$fake_bin:/usr/bin:/bin" TEST_REPO="$fixture" JCODE_RELEASE_PROFILE=release \
+  HOME="$tmp/home" JCODE_HOME="$tmp/selected home" PATH="$fake_bin:/usr/bin:/bin" TEST_REPO="$fixture" JCODE_RELEASE_PROFILE=release \
     JCODE_INSTALL_DIR="$tmp/launcher" JCODE_SKIP_SERVER_RELOAD=1 "$fixture/scripts/install_release.sh"
 }
 TEST_DIRTY=1 run_install >/dev/null
-test -x "$tmp/home/.jcode/builds/versions/abc123def-dirty/jcode"
-test "$(cat "$tmp/home/.jcode/builds/current-version")" = abc123def-dirty
-rm -rf "$tmp/home" "$tmp/launcher"
+test -x "$tmp/selected home/builds/versions/abc123def-dirty/jcode"
+test "$(cat "$tmp/selected home/builds/current-version")" = abc123def-dirty
+test ! -e "$tmp/home/.jcode/builds"
+rm -rf "$tmp/home" "$tmp/selected home" "$tmp/launcher"
 if TEST_BINARY_HASH=stale999 TEST_DIRTY=0 run_install >"$tmp/out" 2>"$tmp/err"; then
   echo "installer accepted a binary with stale metadata" >&2; exit 1
 fi
 grep -Fq 'does not report expected git identity: (abc123def)' "$tmp/err"
-test ! -e "$tmp/home/.jcode/builds/current-version"
+test ! -e "$tmp/selected home/builds/current-version"
 echo "install_release metadata regression test passed"

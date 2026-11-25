@@ -57,8 +57,8 @@ $installScript = Join-Path $repoRoot 'scripts\install.ps1'
     -ArtifactExePath $resolvedArtifact
 
 $launcherPath = Join-Path $installDir 'jcode.exe'
-$versionDir = Join-Path $localAppData ('jcode\builds\versions\' + $Version.TrimStart('v') + '\jcode.exe')
-$stablePath = Join-Path $localAppData 'jcode\builds\stable\jcode.exe'
+$versionDir = Join-Path $jcodeHome ('builds\versions\' + $Version.TrimStart('v') + '\jcode.exe')
+$stablePath = Join-Path $jcodeHome 'builds\stable\jcode.exe'
 
 foreach ($path in @($launcherPath, $versionDir, $stablePath)) {
     if (-not (Test-Path -LiteralPath $path)) {

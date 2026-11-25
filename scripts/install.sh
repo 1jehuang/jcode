@@ -425,7 +425,7 @@ GITHUB_RELEASE_BASE="https://github.com/$REPO/releases/download/$VERSION"
 
 if [ "$IS_WINDOWS" = true ]; then
   EXE=".exe"
-  builds_dir="$LOCALAPPDATA/jcode/builds"
+  builds_dir="${JCODE_HOME:-$LOCALAPPDATA/jcode}/builds"
 else
   EXE=""
   builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
