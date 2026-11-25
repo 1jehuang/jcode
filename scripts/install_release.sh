@@ -85,7 +85,7 @@ fi
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
 builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
 mkdir -p "$builds_dir"
-builds_dir="$(cd -P -- "$builds_dir" && printf '%s/' "$PWD")"
+builds_dir="$(CDPATH= cd -P -- "$builds_dir" && printf '%s/' "$PWD")"
 builds_dir=${builds_dir%/}
 version_dir="$builds_dir/versions/$hash"
 mkdir -p "$version_dir"

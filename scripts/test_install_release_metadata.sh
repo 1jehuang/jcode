@@ -49,7 +49,7 @@ grep -Fq 'does not report expected git identity: (abc123def)' "$tmp/err"
 test ! -e "$tmp/selected home/builds/current-version"
 (
   cd "$tmp"
-  TEST_DIRTY=1 TEST_JCODE_HOME='./relative home' run_install >/dev/null
+  CDPATH=. TEST_DIRTY=1 TEST_JCODE_HOME='relative home' run_install >/dev/null
   "$tmp/launcher/jcode" --version | grep -Fq 'jcode v0.0.0-dev (abc123def, dirty)'
   test -x "$tmp/relative home/builds/stable/jcode"
   test -x "$tmp/relative home/builds/current/jcode"
