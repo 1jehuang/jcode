@@ -19,6 +19,15 @@ fn canonical_input_parts(request: &Value) -> (&[Value], Option<&Value>, Option<&
 
 #[async_trait]
 impl Provider for OpenRouterProvider {
+    fn set_session_id(&self, session_id: &str) {
+        if !session_id.is_empty() {
+            *self
+                .cache_session_id
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(session_id.to_owned());
+        }
+    }
+
     fn runtime_display_name(&self) -> String {
         OpenRouterProvider::runtime_display_name(self)
     }
@@ -152,6 +161,17 @@ impl Provider for OpenRouterProvider {
             "messages": api_messages,
             "stream": true,
         });
+
+        // Give the gateway and upstream a stable cache routing hint on every tool round.
+        if is_a6api_api_base(&self.api_base) {
+            request["prompt_cache_key"] = serde_json::json!(
+                self.cache_session_id
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_deref()
+                    .unwrap_or(&self.conversation_id)
+            );
+        }
 
         if !self.supports_provider_features {
             request["stream_options"] = serde_json::json!({
@@ -857,6 +877,7 @@ impl Provider for OpenRouterProvider {
             // A fork is a new conversation (new session or subagent), so it
             // gets its own stable id.
             conversation_id: new_conversation_id(),
+            cache_session_id: Mutex::new(None),
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),
             provider_routing: Arc::new(RwLock::new(

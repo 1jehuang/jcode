@@ -46,6 +46,97 @@ fn opencode_session_ids_are_uuids_and_unique() {
     assert!(uuid::Uuid::parse_str(&a).is_ok());
 }
 
+#[test]
+fn a6api_cache_key_hosts_are_scoped() {
+    for url in [
+        "https://a6api.com/v1",
+        "https://api.a6api.com/v1",
+        "https://api.a6api.vip/v1",
+        "https://cf.a6api.net/v1",
+    ] {
+        assert!(is_a6api_api_base(url), "{url}");
+    }
+    for url in [
+        "https://compat.example.test/v1",
+        "https://nota6api.com/v1",
+        "https://a6api.com.example.test/v1",
+        "https://example.test/a6api.com",
+        "not a url",
+    ] {
+        assert!(!is_a6api_api_base(url), "{url}");
+    }
+}
+
+#[test]
+fn a6api_cache_key_on_wire_survives_resume_and_respects_fork_and_override() {
+    for (host, session_id, fork, override_key) in [
+        ("api.a6api.com", None, false, None),
+        ("api.a6api.com", Some("session-resumed"), false, None),
+        ("api.a6api.com", Some("session-resumed"), false, None),
+        ("api.a6api.com", None, true, None),
+        ("api.a6api.com", Some("session-child"), true, None),
+        (
+            "api.a6api.com",
+            Some("session-resumed"),
+            false,
+            Some("custom-key"),
+        ),
+        ("compat.example.test", Some("session-resumed"), false, None),
+    ] {
+        let (addr, captured) = spawn_header_capturing_server();
+        let provider = OpenRouterProvider {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .resolve(host, addr)
+                .build()
+                .unwrap(),
+            api_base: format!("http://{host}:{}/v1", addr.port()),
+            supports_model_catalog: false,
+            extra_body: override_key
+                .map(|key| serde_json::Map::from_iter([("prompt_cache_key".into(), key.into())])),
+            ..make_custom_compatible_provider()
+        };
+        let fallback_key = provider.conversation_id.clone();
+        let active: Arc<dyn Provider> = if fork {
+            provider.set_session_id("session-parent");
+            provider.fork()
+        } else {
+            Arc::new(provider)
+        };
+        if let Some(session_id) = session_id {
+            active.set_session_id(session_id);
+        }
+        active.set_session_id("");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut stream = active
+                .complete(&[], &[], "cache fixture", None)
+                .await
+                .unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        });
+        let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+        let body = parse_captured_request_body(&raw);
+        if host != "api.a6api.com" {
+            assert!(body.get("prompt_cache_key").is_none());
+        } else if let Some(key) = override_key.or(session_id) {
+            assert_eq!(body["prompt_cache_key"], key);
+        } else if fork {
+            let key = body["prompt_cache_key"].as_str().unwrap();
+            assert_ne!(key, fallback_key);
+            assert_ne!(key, "session-parent");
+            assert!(uuid::Uuid::parse_str(key).is_ok());
+        } else {
+            assert_eq!(body["prompt_cache_key"], fallback_key);
+        }
+    }
+}
+
 /// Wire-level check for issue #1167: a real `chat/completions` request whose
 /// api_base host is `opencode.ai` carries `x-opencode-session`, and a
 /// request to another host does not. The DNS override points the hostname at

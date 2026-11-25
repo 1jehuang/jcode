@@ -60,6 +60,16 @@ pub(crate) fn new_conversation_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+pub(crate) fn is_a6api_api_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default();
+    ["a6api.com", "a6api.vip", "a6api.net"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 /// OpenCode Go/Zen require a stable per-conversation `x-opencode-session`
 /// header on inference requests (rejected from 2026-09-05 without it).
 pub(crate) fn apply_opencode_session_header(
