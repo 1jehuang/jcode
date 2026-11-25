@@ -6,6 +6,7 @@
 
 fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: crate::tui::PickerKind::Model,
         filtered: vec![0],
         entries: vec![crate::tui::PickerEntry {

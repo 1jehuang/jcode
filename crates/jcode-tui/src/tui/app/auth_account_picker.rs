@@ -75,8 +75,7 @@ impl App {
             }
             (accounts, current)
         };
-        // Keep repeated presses moving while a busy daemon is still applying
-        // earlier requests. The visible header remains on confirmed identity.
+        // Repeated presses follow pending intent; the header keeps confirmed identity.
         let current = self
             .pending_account_switch_target
             .as_ref()
@@ -162,6 +161,7 @@ impl App {
             .unwrap_or(0);
         self.inline_view_state = None;
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: crate::tui::PickerKind::Account,
             filtered: (0..entries.len()).collect(),
             entries,
@@ -328,6 +328,7 @@ impl App {
 
         self.inline_view_state = None;
         self.inline_interactive_state = Some(crate::tui::InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: crate::tui::PickerKind::Account,
             filtered: (0..models.len()).collect(),
             entries: models,
@@ -389,8 +390,7 @@ impl App {
         use crate::provider_catalog::LoginProviderTarget;
 
         let status = crate::auth::AuthStatus::check_fast();
-        // Unlike /login, /account is an inventory, including manual/excluded
-        // providers. Auto Import is a discovery action, not a saved credential.
+        // Inventory includes manual/excluded providers; Auto Import is a discovery action.
         for &provider in crate::provider_catalog::login_providers() {
             if matches!(provider.target, LoginProviderTarget::AutoImport)
                 || (scope == "claude"

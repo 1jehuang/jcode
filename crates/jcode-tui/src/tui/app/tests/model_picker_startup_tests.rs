@@ -140,3 +140,5 @@ fn test_large_remote_model_picker_builds_off_ui_thread_then_caches() {
             .is_some_and(|p| p.entries.len() >= 600)
     );
 }
+
+include!("model_browser.rs");

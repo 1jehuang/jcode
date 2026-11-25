@@ -145,6 +145,7 @@ impl App {
         }).collect();
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: PickerKind::Login,
             entries,
             filtered: vec![0, 1],

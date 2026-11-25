@@ -41,8 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -86,6 +85,7 @@ pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod idle_hibernation;
 mod inline_interactive;
+pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
 mod jarvis;

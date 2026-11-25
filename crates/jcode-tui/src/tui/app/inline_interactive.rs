@@ -1,8 +1,19 @@
 #[path = "inline_interactive/cache_signature.rs"]
 mod cache_signature;
 use super::*;
+#[path = "inline_interactive/model_browser.rs"]
+mod model_browser;
 #[path = "inline_interactive_model_picker.rs"]
 mod model_picker;
+use model_browser::{
+    key_char_eq_ignore_ascii_case, model_picker_provider_hint_from_model_spec,
+    model_picker_route_provider_matches_key, model_picker_scopes, model_route_matches_scopes,
+    restore_model_browser_after_refresh, step_scoped_route,
+};
+pub(crate) use model_browser::{model_picker_active_provider, split_model_picker_filter};
+pub(super) use model_browser::{
+    model_picker_initial_selection, picker_enter_should_focus_model_browser,
+};
 
 use crate::tui::session_picker::{self, OverlayAction, PickerResult, ResumeTarget, SessionPicker};
 use crate::tui::{
@@ -359,10 +370,6 @@ pub(crate) fn agent_models_picker_view(
     })
 }
 
-fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
-    matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
-}
-
 fn remote_model_catalog_cache_path() -> Option<std::path::PathBuf> {
     if crate::tui::is_ssh_remote() {
         return None;
@@ -499,46 +506,6 @@ fn model_picker_route_is_recommended(model_name: &str, route: &PickerOption) -> 
             &route.api_method,
             route.available,
         )
-}
-
-fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
-    let (provider_hint, bare_model) = model_spec.split_once(':')?;
-    let provider_hint = provider_hint.trim();
-    let bare_model = bare_model.trim();
-    if provider_hint.is_empty() || bare_model.is_empty() {
-        return None;
-    }
-
-    let normalized = provider_hint.to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "claude"
-            | "anthropic"
-            | "openai"
-            | "copilot"
-            | "cursor"
-            | "antigravity"
-            | "bedrock"
-            | "openrouter"
-            | "gemini"
-    ) || crate::provider_catalog::openai_compatible_profile_by_id(provider_hint).is_some()
-    {
-        Some((provider_hint, bare_model))
-    } else {
-        None
-    }
-}
-
-fn model_picker_route_provider_matches_key(
-    route_provider_key: Option<&str>,
-    route_provider_label: &str,
-    desired_provider: &str,
-) -> bool {
-    jcode_provider_core::model_route_provider_matches_key(
-        route_provider_key,
-        route_provider_label,
-        desired_provider,
-    )
 }
 
 /// Whether an effort-qualified picker entry matches the persisted reasoning
@@ -1075,10 +1042,11 @@ impl App {
         let model_count = cache.model_count;
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: PickerKind::Model,
             filtered: (0..entry_count).collect(),
+            selected: model_picker_initial_selection(&entries),
             entries,
-            selected: 0,
             column: 0,
             filter: String::new(),
             preview: false,
@@ -1169,6 +1137,7 @@ impl App {
         };
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: PickerKind::Model,
             filtered: vec![0],
             entries: vec![PickerEntry {
@@ -1925,6 +1894,11 @@ impl App {
             } => (entries, model_count, routes),
         };
 
+        let previous_browser = self
+            .inline_interactive_state
+            .as_ref()
+            .filter(|p| picker_is_runtime_model_picker(p))
+            .cloned();
         let previous_picker = self.inline_interactive_state.as_ref().and_then(|picker| {
             if picker.kind == PickerKind::Model {
                 Some((
@@ -1958,10 +1932,11 @@ impl App {
             self.model_picker_cache = None;
         }
         self.inline_interactive_state = Some(InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
+            selected: model_picker_initial_selection(&entries),
             entries,
-            selected: 0,
             column: 0,
             filter: String::new(),
             preview: false,
@@ -1980,7 +1955,11 @@ impl App {
             picker.filter = filter;
             picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
             picker.column = column.min(picker.max_navigable_column());
-            Self::apply_inline_interactive_filter(picker);
+            if let Some(previous) = previous_browser.as_ref() {
+                restore_model_browser_after_refresh(picker, previous);
+            } else {
+                Self::apply_inline_interactive_filter(picker);
+            }
         }
 
         if let Some((input, cursor_pos)) = saved_input {
@@ -2176,36 +2155,6 @@ impl App {
         )
     }
 
-    /// When a runtime model-picker preview is visible, route its favorite/default
-    /// hotkeys to the focused picker handler. Returns true if the key was consumed.
-    pub(super) fn model_picker_preview_hotkey(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<bool> {
-        let active = self
-            .inline_interactive_state
-            .as_ref()
-            .map(|picker| picker.preview && picker_is_runtime_model_picker(picker))
-            .unwrap_or(false);
-        if !active {
-            return Ok(false);
-        }
-        // Use Ctrl+O (set default) and Ctrl+N (toggle favorite) so the picker
-        // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
-        // prefix and readline word-navigation keys users rely on while editing
-        // the `/model` command line. Cycling favorites stays on Shift+Tab.
-        let is_default =
-            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
-        let is_favorite =
-            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
-        if is_default || is_favorite {
-            self.handle_inline_interactive_key(code, modifiers)?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
     pub(super) fn handle_inline_interactive_preview_key(
         &mut self,
         code: &KeyCode,
@@ -2261,6 +2210,9 @@ impl App {
             KeyCode::Enter => {
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.filtered.is_empty() {
+                        if picker.kind == PickerKind::Model {
+                            return Ok(true);
+                        }
                         self.inline_interactive_state = None;
                         self.input.clear();
                         self.cursor_pos = 0;
@@ -2274,6 +2226,13 @@ impl App {
                         && picker.filter.is_empty()
                         && picker.selected == 0
                     {
+                        picker.preview = false;
+                        picker.column = 0;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                        return Ok(true);
+                    }
+                    if picker_enter_should_focus_model_browser(picker) {
                         picker.preview = false;
                         picker.column = 0;
                         self.input.clear();
@@ -3329,6 +3288,9 @@ impl App {
             });
             return Ok(());
         }
+        if self.handle_model_browser_key(code, modifiers) {
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -3360,8 +3322,12 @@ impl App {
                     if picker.column == 0 {
                         picker.selected = picker.selected.saturating_sub(1);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.entries[idx];
-                        entry.selected_option = entry.selected_option.saturating_sub(1);
+                        let next = step_scoped_route(
+                            &picker.entries[idx],
+                            &model_picker_scopes(picker),
+                            false,
+                        );
+                        picker.choose_route(idx, next);
                     }
                 }
             }
@@ -3386,9 +3352,12 @@ impl App {
                         let max = picker.filtered.len().saturating_sub(1);
                         picker.selected = (picker.selected + 1).min(max);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.entries[idx];
-                        let max = entry.options.len().saturating_sub(1);
-                        entry.selected_option = (entry.selected_option + 1).min(max);
+                        let next = step_scoped_route(
+                            &picker.entries[idx],
+                            &model_picker_scopes(picker),
+                            true,
+                        );
+                        picker.choose_route(idx, next);
                     }
                 }
             }
@@ -3439,7 +3408,10 @@ impl App {
                     if picker.uses_compact_navigation() {
                         return Ok(());
                     }
-                    if picker.column == 0 && !picker.filter.is_empty() {
+                    if picker.column == 0
+                        && !picker.filter.is_empty()
+                        && model_picker_scopes(picker).is_empty()
+                    {
                         Self::tab_complete_inline_interactive_filter(picker);
                     } else if picker.column < picker.max_navigable_column()
                         && let Some(&idx) = picker.filtered.get(picker.selected)
@@ -3595,8 +3567,12 @@ impl App {
                     } else {
                         route.detail.clone()
                     };
-                    self.inline_interactive_state = None;
-                    self.set_status_notice(format!("{} - {}", entry.name, detail));
+                    if matches!(entry.action, PickerAction::Model) {
+                        self.set_status_notice(format!("{} unavailable - {}", entry.name, detail));
+                    } else {
+                        self.inline_interactive_state = None;
+                        self.set_status_notice(format!("{} - {}", entry.name, detail));
+                    }
                     return Ok(());
                 }
 

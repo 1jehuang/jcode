@@ -68,17 +68,6 @@ fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
 }
 
-fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
-    if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
-        0
-    } else {
-        selected
-            .saturating_add(1)
-            .saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .min(suggestion_count.saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT))
-    }
-}
-
 /// Where the command-suggestion popover should render, given the input chunk.
 ///
 /// Suggestions are an overlay: they never participate in the vertical layout,
@@ -229,7 +218,16 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
         // Keep it above the composer and size the window before building rows
         // so the selected model remains visible even on short terminals.
         let height = area.y.saturating_sub(frame.area().y);
-        let lines = super::inline_interactive_ui::model_suggestion_lines(picker, height as usize);
+        let lines: Vec<_> =
+            super::inline_interactive_ui::model_suggestion_lines(picker, height as usize)
+                .into_iter()
+                .map(|line| {
+                    jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                        &line,
+                        area.width as usize,
+                    )
+                })
+                .collect();
         if !lines.is_empty() && area.width > 0 {
             let rect = Rect::new(
                 area.x,

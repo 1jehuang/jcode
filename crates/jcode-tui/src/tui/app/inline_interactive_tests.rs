@@ -142,6 +142,7 @@ fn model_picker_hotkey_char_matching_is_case_insensitive() {
 #[test]
 fn runtime_model_picker_scope_excludes_agent_model_picker() {
     let runtime = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0],
         entries: vec![picker_entry("gpt-5.5", "OpenAI", 0)],
@@ -153,6 +154,7 @@ fn runtime_model_picker_scope_excludes_agent_model_picker() {
     let mut agent_entry = picker_entry("Swarm / subagent", "gpt-5 default", 0);
     agent_entry.action = PickerAction::AgentTarget(AgentModelTarget::Swarm);
     let agent = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0],
         entries: vec![agent_entry],
@@ -204,6 +206,7 @@ fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
             )
         });
         let picker = InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: PickerKind::Model,
             filtered: (0..entries.len()).collect(),
             entries,
@@ -233,6 +236,7 @@ fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
 #[test]
 fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
     let mut picker = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0, 1],
         entries: vec![
@@ -253,6 +257,7 @@ fn model_picker_fuzzy_filter_prefers_previously_selected_route() {
 #[test]
 fn model_picker_literal_multi_word_match_outranks_heavily_used_loose_match() {
     let mut picker = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0, 1, 2],
         entries: vec![
@@ -274,6 +279,7 @@ fn model_picker_literal_multi_word_match_outranks_heavily_used_loose_match() {
 #[test]
 fn model_picker_fuzzy_filter_tolerates_common_typos() {
     let mut picker = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0, 1],
         entries: vec![
@@ -294,6 +300,7 @@ fn model_picker_fuzzy_filter_tolerates_common_typos() {
 #[test]
 fn model_picker_exact_name_outranks_longer_frequently_used_prefix() {
     let mut picker = InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: PickerKind::Model,
         filtered: vec![0, 1],
         entries: vec![
