@@ -92,7 +92,10 @@ fn prune_due(dir: &Path) -> bool {
 }
 
 fn mark_pruned(dir: &Path) {
-    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
+    // A non-empty payload is required: an empty write never reaches the
+    // filesystem, so the marker mtime would not move and the daily slot
+    // would never be consumed.
+    let _ = storage::touch_stamp(&dir.join(PRUNE_MARKER));
 }
 
 /// Core of [`prune_stale_scratch`], parameterized for unit testing.
