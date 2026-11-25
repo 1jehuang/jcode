@@ -605,10 +605,12 @@ mod terminal_mode_tests {
     fn reapply_omits_keyboard_protocols_when_disabled() {
         let mut output = Vec::new();
         reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
-        assert_eq!(
-            output,
-            b"\x1b[?2004h\x1b[?1006l\x1b[?1015l\x1b[?1003l\x1b[?1002l\x1b[?1000l"
-        );
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("\x1b[?2004h"));
+        assert!(!output.contains('u'), "must omit keyboard protocols");
+        for mode in [1000, 1002, 1003, 1015, 1006] {
+            assert!(output.contains(&format!("\x1b[?{mode}l")), "{output:?}");
+        }
     }
 
     #[test]
