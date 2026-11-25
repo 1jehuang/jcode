@@ -85,8 +85,10 @@ pub fn model_name_is_likely_non_chat(model: &str) -> bool {
     ];
     // Vision-language chat is legitimate, but a vision/chat marker must not
     // rescue an independently disqualifying media token (such as Sora).
-    let vision_chat =
-        tokens.contains(&"instruct") || tokens.contains(&"chat") || tokens.contains(&"vl");
+    let vision_chat = tokens.contains(&"instruct")
+        || tokens.contains(&"chat")
+        || tokens.contains(&"vl")
+        || tokens.contains(&"deepseek");
     tokens
         .iter()
         .any(|t| TOKEN_MARKERS.contains(t) && !(*t == "vision" && vision_chat))
@@ -273,6 +275,8 @@ mod listable_tests {
             "01-ai/yi-large",
             "anthropic/claude-opus-4.8",
             "deepseek-chat",
+            "deepseek-v4-flash-vision-exp",
+            "a6api:deepseek-future-vision-preview",
             "kimi-k2",
         ] {
             assert!(
@@ -326,6 +330,7 @@ mod listable_tests {
             "gpt-4o-realtime-preview",
             "gpt-realtime",
             "sora-2-vision-chat",
+            "deepseek-image-vision",
         ] {
             assert!(
                 model_name_is_likely_non_chat(model),
