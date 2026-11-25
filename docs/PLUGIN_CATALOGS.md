@@ -26,3 +26,5 @@ Installing or updating validates the dependency closure in the requested scope. 
 Already enabled dependencies in lower visible scopes remain usable when re-enabling a root. Automatic enablement changes only records in the requested scope; disabled lower-scope dependencies need a separate explicit enable command.
 
 These commands manage catalog records and files. Plugin skill, command, hook, MCP and LSP activation is provided by separate integrations; this catalog layer does not run component code. It does not register external provider extensions.
+
+Runtime integrations use `plugin::data_path` for pure discovery and `plugin::prepare_data_dir` immediately before execution. Persistent data lives at `JCODE_HOME/plugin-data/<encoded-name-marketplace>`, separate from immutable cached code and external-provider bundles. The qualified plugin identity owns this directory across versions, workspaces and installation scopes. Updates and uninstall preserve it. Identity collisions, existing unowned contents and symlinked data paths are refused. On Unix, data directories are private to the current user and newly created identity markers use mode `0600`.

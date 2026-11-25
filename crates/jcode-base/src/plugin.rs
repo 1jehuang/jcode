@@ -13,6 +13,10 @@ use std::{
 #[path = "plugin/dependencies.rs"]
 mod dependencies;
 
+#[path = "plugin/data.rs"]
+mod data;
+pub use data::{data_path, prepare_data_dir};
+
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)

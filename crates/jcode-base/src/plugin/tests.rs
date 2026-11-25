@@ -461,7 +461,7 @@ fn uninstall_ambiguous_registry_preserves_all_records() {
     m.uninstall("demo@second", PluginScope::User).unwrap();
     assert_eq!(m.list().unwrap().len(), 1);
 }
-fn fixture() -> (tempfile::TempDir, PluginManager, PathBuf) {
+pub(super) fn fixture() -> (tempfile::TempDir, PluginManager, PathBuf) {
     let t = tempfile::tempdir().unwrap();
     let project = t.path().join("project");
     fs::create_dir(&project).unwrap();
