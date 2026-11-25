@@ -41,8 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -1893,6 +1892,7 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
+    jump_to_bottom_mouse_down: bool,
     /// Absolute paths edited by the agent's edit-style tool calls, derived
     /// from `display_messages` and cached by `display_messages_version`.
     agent_edited_cache: std::cell::RefCell<

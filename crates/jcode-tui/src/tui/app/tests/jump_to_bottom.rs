@@ -141,6 +141,90 @@ fn clicking_jump_to_bottom_pill_jumps_to_bottom() {
 }
 
 #[test]
+fn jump_to_bottom_click_does_not_open_link_on_release() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use std::sync::Arc;
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join("docs")).unwrap();
+    std::fs::write(repository.path().join("docs/guide.md"), "# Guide\n").unwrap();
+    for redraw in [false, true] {
+        let (mut app, mut terminal, screen) = jump_to_bottom_scrolled_up_app();
+        app.session.working_dir = Some(repository.path().to_string_lossy().into_owned());
+        let (column, row) = find_on_screen(&screen, "Jump to bottom").unwrap();
+        let record_link = || {
+            crate::tui::ui::record_copy_viewport_snapshot(
+                Arc::new(vec!["guide".into()]),
+                Arc::new(vec![0]),
+                Arc::new(vec!["[guide](docs/guide.md)".into()]),
+                Arc::new(vec![crate::tui::ui::WrappedLineMap {
+                    raw_line: 0,
+                    start_col: 0,
+                    end_col: 5,
+                }]),
+                0,
+                1,
+                Rect::new(column, row, 10, 1),
+                &[0],
+            );
+        };
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: column + 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        record_link();
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left)));
+        if redraw {
+            render_and_snap(&app, &mut terminal);
+            record_link();
+        }
+        app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left)));
+        app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert!(app.side_panel.focused_page().is_none(), "redraw={redraw}");
+        app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left)));
+        app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(app.side_panel.focused_page().unwrap().title, "guide.md");
+    }
+}
+
+#[test]
+fn jump_to_bottom_cancels_queued_chat_scrolling() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
+    for use_key in [false, true] {
+        let (mut app, _terminal, screen) = jump_to_bottom_scrolled_up_app();
+        app.enqueue_native_scroll(super::MouseScrollTarget::Chat, -20);
+        assert!(app.mouse_scroll_queue < 0);
+        if use_key {
+            app.handle_key(KeyCode::End, KeyModifiers::CONTROL).unwrap();
+        } else {
+            let (column, row) = find_on_screen(&screen, "Jump to bottom").unwrap();
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: column + 2,
+                row,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        app.progress_mouse_scroll_animation();
+        assert!(!app.auto_scroll_paused, "use_key={use_key}");
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.mouse_scroll_queue, 0);
+
+        app.mouse_scroll_target = Some(super::MouseScrollTarget::SidePane);
+        app.mouse_scroll_queue = 3;
+        app.jump_to_chat_bottom();
+        assert_eq!(app.mouse_scroll_queue, 3, "preserve side-pane scrolling");
+    }
+}
+
+#[test]
 fn clicking_outside_jump_to_bottom_pill_does_not_jump() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

@@ -25,10 +25,6 @@ impl App {
         remote::begin_remote_send(self, remote, content, images, is_system, None, false, 0).await
     }
 
-    pub(super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
-        self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
-    }
-
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
@@ -691,6 +687,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            jump_to_bottom_mouse_down: false,
             agent_edited_cache: std::cell::RefCell::new(None),
             changelog_scroll: None,
             help_scroll: None,
@@ -1215,6 +1212,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            jump_to_bottom_mouse_down: false,
             agent_edited_cache: std::cell::RefCell::new(None),
             changelog_scroll: None,
             help_scroll: None,

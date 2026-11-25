@@ -175,6 +175,10 @@ impl App {
 }
 
 impl App {
+    pub(in super::super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
+        self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
+    }
+
     pub(in super::super) fn schedule_pending_remote_retry_with_limit(
         &mut self,
         reason: &str,

@@ -138,6 +138,11 @@ impl App {
     /// and resume auto-follow. Unlike the Ctrl+G bookmark this is one-way, so
     /// any stashed bookmark is dropped.
     pub(in crate::tui::app) fn jump_to_chat_bottom(&mut self) {
+        if self.mouse_scroll_target == Some(MouseScrollTarget::Chat) {
+            self.mouse_scroll_target = None;
+            self.mouse_scroll_queue = 0;
+            self.last_mouse_scroll = None;
+        }
         self.scroll_bookmark = None;
         self.follow_chat_bottom();
     }

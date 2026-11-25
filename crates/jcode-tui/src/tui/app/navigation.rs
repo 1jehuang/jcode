@@ -1317,6 +1317,19 @@ impl App {
             }};
         }
 
+        // The pill owns its release even after the jump removes it from the frame.
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.jump_to_bottom_mouse_down = false,
+            MouseEventKind::Up(MouseButton::Left) if self.jump_to_bottom_mouse_down => {
+                self.jump_to_bottom_mouse_down = false;
+                finish_mouse_event!(false, "jump_to_bottom_pill_release");
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.jump_to_bottom_mouse_down => {
+                finish_mouse_event!(false, "jump_to_bottom_pill_drag");
+            }
+            _ => {}
+        }
+
         if self.panel_image_preview.is_some() {
             if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
                 self.close_panel_image_preview();
@@ -1544,6 +1557,7 @@ impl App {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })
         {
+            self.jump_to_bottom_mouse_down = true;
             self.jump_to_chat_bottom();
             crate::tui::ui::viewport::set_jump_to_bottom_area(None);
             finish_mouse_event!(false, "jump_to_bottom_pill");
