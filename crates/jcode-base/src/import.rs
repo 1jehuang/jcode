@@ -522,7 +522,7 @@ fn normalize_imported_history(session: &mut Session, apply_limits: bool) -> bool
                     role: Role::User,
                     content: vec![ContentBlock::Text {
                         text: format!(
-                            "[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"
+                            "[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Earlier history remains in the original external session.]"
                         ),
                         cache_control: None,
                     }].into(),
@@ -677,6 +677,14 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
+    // An unreadable opencode.db must not hide a match in the other stores, so
+    // its error is only returned when nothing else matched.
+    let opencode_db = opencode_db_with_session(resume_id);
+    if let Ok(Some(db)) = &opencode_db {
+        let session = import_opencode_db_session(db, resume_id)?;
+        return Ok(Some(session.id));
+    }
+
     if let Ok(path) = find_opencode_session_file(resume_id) {
         let session = import_opencode_session_from_path(&path, Some(resume_id))?;
         return Ok(Some(session.id));
@@ -693,7 +701,7 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
-    Ok(None)
+    opencode_db.map(|_| None)
 }
 
 /// Import a Claude Code session from a file path
@@ -962,9 +970,18 @@ fn append_text_message(
 }
 
 fn finalize_imported_session(
+    session: Session,
+    created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
+) -> Result<Session> {
+    finalize_imported_session_with_omissions(session, created_at, updated_at, 0)
+}
+
+fn finalize_imported_session_with_omissions(
     mut session: Session,
     created_at: DateTime<Utc>,
     updated_at: Option<DateTime<Utc>>,
+    omitted: usize,
 ) -> Result<Session> {
     // Never overwrite a jcode-side continuation with a shorter external
     // transcript. This protection applies to every importer, not only Claude.
@@ -978,12 +995,25 @@ fn finalize_imported_session(
         return Ok(existing);
     }
 
-    let original_messages = session.messages.len();
+    let original_messages = session.messages.len().saturating_add(omitted);
     session.created_at = created_at;
     session.updated_at = updated_at.unwrap_or(created_at);
     session.last_active_at = updated_at.or(Some(created_at));
     session.status = SessionStatus::Closed;
     normalize_imported_history(&mut session, true);
+    if omitted > 0 {
+        let mut messages = std::mem::take(&mut session.messages);
+        messages.insert(0, StoredMessage {
+            id: crate::id::new_id("message"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Earlier history remains in the original external session.]"),
+                cache_control: None,
+            }].into(),
+            display_role: None, timestamp: None, tool_duration_ms: None, token_usage: None,
+        });
+        session.replace_messages(messages);
+    }
     session.save()?;
     crate::logging::info(&format!(
         "Imported session prepared: source_messages={original_messages} kept_messages={}",
@@ -1244,137 +1274,12 @@ pub fn import_pi_session(session_path: &str) -> Result<Session> {
     finalize_imported_session(session, created_at, updated_at)
 }
 
-fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
-    let root = crate::storage::user_home_path(".local/share/opencode/storage/session")?;
-    for path in collect_files_recursive(&root, "json") {
-        let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(File::open(&path)?) else {
-            continue;
-        };
-        if value.get("id").and_then(|v| v.as_str()) == Some(session_id) {
-            return Ok(path);
-        }
-    }
-    anyhow::bail!("OpenCode session {} not found", session_id)
-}
-
-pub fn import_opencode_session(session_id: &str) -> Result<Session> {
-    let session_path = find_opencode_session_file(session_id)?;
-    import_opencode_session_from_path(&session_path, Some(session_id))
-}
-
-pub fn import_opencode_session_from_path(
-    session_path: &Path,
-    session_id_hint: Option<&str>,
-) -> Result<Session> {
-    let value: serde_json::Value = serde_json::from_reader(File::open(session_path)?)?;
-    let session_id = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .filter(|id| !id.is_empty())
-        .or(session_id_hint)
-        .ok_or_else(|| {
-            anyhow::anyhow!("OpenCode session id missing in {}", session_path.display())
-        })?;
-    let created_at = value
-        .get("time")
-        .and_then(|time| time.get("created"))
-        .and_then(|v| v.as_i64())
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .unwrap_or_else(Utc::now);
-    let mut updated_at = value
-        .get("time")
-        .and_then(|time| time.get("updated"))
-        .and_then(|v| v.as_i64())
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .or(Some(created_at));
-    let mut session = Session::create_with_id(imported_opencode_session_id(session_id), None, None);
-    session.provider_session_id = Some(session_id.to_string());
-    session.provider_key = Some("opencode".to_string());
-    session.working_dir = value
-        .get("directory")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    session.title = value
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(truncate_title);
-
-    let messages_root = crate::storage::user_home_path(format!(
-        ".local/share/opencode/storage/message/{}",
-        session_id
-    ))?;
-    let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part")?;
-    let mut messages: Vec<(Option<DateTime<Utc>>, Role, String)> = Vec::new();
-    let mut model: Option<String> = None;
-    let mut provider_key = session.provider_key.clone();
-
-    if messages_root.exists() {
-        for msg_path in collect_files_recursive(&messages_root, "json") {
-            let Ok(msg_value) =
-                serde_json::from_reader::<_, serde_json::Value>(File::open(&msg_path)?)
-            else {
-                continue;
-            };
-            let role = match msg_value.get("role").and_then(|v| v.as_str()) {
-                Some("user") => Role::User,
-                Some("assistant") => Role::Assistant,
-                _ => continue,
-            };
-            // Modern OpenCode (Go storage) stores message body text in
-            // storage/part/<messageID>/*.json; fall back to legacy inline
-            // content/summary for older stores.
-            let text = msg_value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|id| extract_opencode_part_text(&parts_base, id, true))
-                .filter(|text| !text.trim().is_empty())
-                .or_else(|| {
-                    msg_value
-                        .get("content")
-                        .map(extract_text_from_json_value)
-                        .filter(|text| !text.trim().is_empty())
-                })
-                .or_else(|| msg_value.get("summary").map(extract_text_from_json_value))
-                .unwrap_or_default();
-            if model.is_none() {
-                model = msg_value
-                    .get("modelID")
-                    .or_else(|| msg_value.get("model").and_then(|m| m.get("modelID")))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
-            if provider_key.as_deref() == Some("opencode") {
-                provider_key = msg_value
-                    .get("providerID")
-                    .or_else(|| msg_value.get("model").and_then(|m| m.get("providerID")))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or(provider_key);
-            }
-            let timestamp = msg_value
-                .get("time")
-                .and_then(|time| time.get("created"))
-                .and_then(|v| v.as_i64())
-                .and_then(DateTime::<Utc>::from_timestamp_millis);
-            if timestamp.is_some() {
-                updated_at = timestamp;
-            }
-            messages.push((timestamp, role, text));
-        }
-    }
-
-    messages.sort_by_key(|(timestamp, _, _)| *timestamp);
-    for (timestamp, role, text) in messages {
-        append_text_message(&mut session, role, text, timestamp);
-    }
-
-    if session.title.is_none() {
-        session.title = Some(format!("OpenCode session {}", session_id));
-    }
-    session.provider_key = provider_key;
-    session.model = model;
-    finalize_imported_session(session, created_at, updated_at)
-}
+#[path = "import_opencode.rs"]
+mod opencode;
+use opencode::{find_opencode_session_file, opencode_db_with_session};
+pub use opencode::{
+    import_opencode_db_session, import_opencode_session, import_opencode_session_from_path,
+};
 
 /// Locate a Cursor agent transcript file for the given session id.
 ///
@@ -1456,3 +1361,7 @@ pub fn import_cursor_session_from_path(
 #[cfg(test)]
 #[path = "import_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "import_sqlite_budget_tests.rs"]
+mod sqlite_budget_tests;
