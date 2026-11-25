@@ -12,7 +12,11 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
+mod claude_cli;
+mod command;
 mod device_login;
+use claude_cli::*;
+pub(super) use command::run_login_command;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -24,6 +28,7 @@ use scriptable::*;
 #[derive(Debug, Clone, Default)]
 pub struct LoginOptions {
     pub no_browser: bool,
+    pub claude_code: bool,
     pub print_auth_url: bool,
     pub callback_url: Option<String>,
     pub auth_code: Option<String>,
@@ -232,6 +237,9 @@ pub async fn run_login(
     options: LoginOptions,
 ) -> Result<()> {
     options.validate()?;
+    if options.claude_code && login_provider_for_choice(choice).is_none() {
+        anyhow::bail!("--claude-code requires --provider claude.");
+    }
     if let Some(provider) = login_provider_for_choice(choice) {
         return run_login_provider(provider, account_label, options).await;
     }
@@ -280,6 +288,7 @@ pub async fn run_login_provider(
     options: LoginOptions,
 ) -> Result<()> {
     options.validate()?;
+    validate_claude_code_method(provider, account_label, &options)?;
     if options.cancel {
         return cancel_scriptable_login(provider, &options);
     }
@@ -381,6 +390,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::Jcode => login_jcode_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Claude if options.claude_code => {
+                login_claude_code_flow().map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::Claude => login_claude_flow(account_label, options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
@@ -656,34 +668,6 @@ pub(crate) async fn run_jcode_account_login(no_browser: bool) -> Result<()> {
 #[path = "login_key_flows.rs"]
 mod key_flows;
 use key_flows::*;
-async fn login_claude_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
-    let label = auth::claude::login_target_label(requested_label)?;
-    eprintln!("Logging in to Claude (account: {})...", label);
-    let tokens = auth::oauth::login_claude(no_browser).await?;
-    auth::oauth::save_claude_tokens_for_account(&tokens, &label)?;
-    let profile_email =
-        match auth::oauth::update_claude_account_profile(&label, &tokens.access_token).await {
-            Ok(email) => email,
-            Err(e) => {
-                eprintln!(
-                    "Warning: logged in but failed to fetch profile metadata: {}",
-                    e
-                );
-                None
-            }
-        };
-    eprintln!("Successfully logged in to Claude!");
-    eprintln!(
-        "Account '{}' stored at {}",
-        label,
-        auth::claude::jcode_path()?.display()
-    );
-    if let Some(email) = profile_email {
-        eprintln!("Profile email: {}", email);
-    }
-    crate::telemetry::record_auth_success("claude", "oauth");
-    Ok(())
-}
 
 async fn login_openai_flow(requested_label: Option<&str>, no_browser: bool) -> Result<()> {
     let label = auth::codex::login_target_label(requested_label)?;

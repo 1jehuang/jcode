@@ -240,6 +240,14 @@ pub(crate) enum Command {
         #[arg(long, alias = "headless")]
         no_browser: bool,
 
+        /// Sign in with the installed Claude Code CLI and approve credential reuse.
+        /// Used by default for interactive Claude login when the CLI is installed.
+        #[arg(long, conflicts_with_all = ["no_browser", "account", "oauth"])]
+        claude_code: bool,
+        /// Use Jcode's OAuth browser flow for Claude.
+        #[arg(long)]
+        oauth: bool,
+
         /// Print a script-friendly auth URL and persist temporary login state for later completion.
         #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
         print_auth_url: bool,
@@ -1170,3 +1178,7 @@ pub(crate) use management::ProviderCommand;
 pub(crate) use management::SessionCommand;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "args/claude_login_tests.rs"]
+mod claude_login_tests;

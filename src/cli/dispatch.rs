@@ -272,50 +272,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             )
             .await?;
         }
-        Some(Command::Login {
-            provider: login_provider,
-            account,
-            no_browser,
-            print_auth_url,
-            callback_url,
-            auth_code,
-            json,
-            complete,
-            flow_id,
-            cancel,
-            no_validate,
-            device_code,
-            google,
-            api_base,
-            api_key,
-            api_key_env,
-            region,
-        }) => {
-            let mut options = login::LoginOptions {
-                no_browser,
-                print_auth_url,
-                callback_url,
-                auth_code,
-                json,
-                complete,
-                flow_id,
-                cancel,
-                no_validate,
-                device_code,
-                openai_compatible_api_base: api_base,
-                openai_compatible_api_key: api_key,
-                openai_compatible_api_key_env: api_key_env,
-                openai_compatible_default_model: args.model.clone(),
-                region,
-                ..Default::default()
-            };
-            google.apply(&mut options)?;
-            login::run_login(
-                &login_provider.unwrap_or(args.provider),
-                account.as_deref(),
-                options,
-            )
-            .await?;
+        Some(command @ Command::Login { .. }) => {
+            login::run_login_command(command, args.provider, args.model.clone()).await?;
         }
         Some(Command::Account { action }) => match action {
             super::args::AccountCommand::Login { no_browser } => {

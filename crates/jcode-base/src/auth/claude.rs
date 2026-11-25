@@ -598,6 +598,19 @@ pub fn account_identity(account: &AnthropicAccount) -> Option<String> {
 /// Load credentials for the active Anthropic account.
 /// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
 pub fn load_credentials() -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(None)
+}
+
+/// Validate source precedence without importing or trusting a native snapshot.
+pub fn load_credentials_with_staged_native(
+    credentials: &ClaudeCredentials,
+) -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(Some(credentials))
+}
+
+fn load_credentials_with_candidate(
+    staged_native: Option<&ClaudeCredentials>,
+) -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
@@ -628,7 +641,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // macOS Keychain is NOT read here: it can trigger an interactive unlock
     // prompt, so it is read once at import time and copied into jcode's own
     // auth.json (see `import_native_credentials_into_account`).
-    if native_source_allowed()
+    if (staged_native.is_some() || native_source_allowed())
         && let Some(creds) = load_claude_code_env_credentials()
     {
         if creds.expires_at > now_ms {
@@ -637,7 +650,11 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("claude-native", creds));
     }
 
-    if let Ok(creds) = load_jcode_credentials() {
+    let jcode_credentials = match staged_native {
+        Some(credentials) => Ok(credentials.clone()),
+        None => load_jcode_credentials(),
+    };
+    if let Ok(creds) = jcode_credentials {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }
@@ -733,7 +750,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
     })
 }
 
-fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
+pub fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = crate::storage::validate_external_auth_file(&claude_code_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
@@ -1066,3 +1083,44 @@ mod tests;
 #[cfg(test)]
 #[path = "claude_native_import_tests.rs"]
 mod native_import_tests;
+
+pub fn prefer_claude_code_cli_login() -> bool {
+    match std::env::var("JCODE_CLAUDE_LOGIN_METHOD")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Ok("oauth" | "jcode") => false,
+        Ok("cli" | "claude-code" | "claude_code") => true,
+        _ => crate::auth::command_exists("claude"),
+    }
+}
+
+/// Active saved label and refresh generation observed before native sign-in.
+pub fn native_import_selection() -> Result<(Option<String>, Option<String>)> {
+    let auth = load_auth_file()?;
+    let label = get_active_account_override().or(auth.active_anthropic_account);
+    let refresh = label
+        .as_ref()
+        .and_then(|label| {
+            auth.anthropic_accounts
+                .iter()
+                .find(|account| &account.label == label)
+        })
+        .map(|account| account.refresh.clone());
+    Ok((label, refresh))
+}
+
+/// Activate a validated snapshot only if sign-in has not been superseded.
+pub fn activate_native_credentials_if_unchanged(
+    credentials: ClaudeCredentials,
+    expected: &(Option<String>, Option<String>),
+) -> Result<()> {
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    anyhow::ensure!(
+        &native_import_selection()? == expected,
+        "The saved Claude account selection changed during login. Retry to use this native login."
+    );
+    let label = import_native_credentials_into_account_from(credentials)?;
+    set_active_account(&label)
+}

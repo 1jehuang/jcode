@@ -1,9 +1,12 @@
 #[derive(Debug, Clone)]
 pub(crate) enum PendingLogin {
     /// Credentials are exchanging asynchronously. Keep input out of AI prompts/history.
-    Exchanging { provider: String },
+    Exchanging {
+        provider: String,
+    },
     /// SSH flow state and sensitive input are held separately, never in local auth.
     Remote,
+    ClaudeMethodChoice,
     /// Waiting for user to paste Claude OAuth code for a specific stored account
     ClaudeAccount {
         verifier: String,
@@ -82,18 +85,26 @@ pub(crate) enum PendingLogin {
     /// Waiting for Azure OpenAI endpoint.
     AzureEndpoint,
     /// Waiting for Azure OpenAI deployment/model name.
-    AzureModel { endpoint: String },
+    AzureModel {
+        endpoint: String,
+    },
     /// Waiting for Azure OpenAI auth method choice.
-    AzureAuthChoice { endpoint: String, model: String },
+    AzureAuthChoice {
+        endpoint: String,
+        model: String,
+    },
     /// Waiting for Azure OpenAI API key.
-    AzureApiKey { endpoint: String, model: String },
+    AzureApiKey {
+        endpoint: String,
+        model: String,
+    },
 }
 
 impl PendingLogin {
     pub(crate) fn telemetry_context(&self) -> Option<(String, String)> {
         match self {
             Self::Exchanging { provider } => Some((provider.clone(), "oauth".to_string())),
-            Self::Remote => None,
+            Self::Remote | Self::ClaudeMethodChoice => None,
             Self::ClaudeAccount { .. } => Some(("claude".to_string(), "oauth".to_string())),
             Self::OpenAiAccount { .. } => Some(("openai".to_string(), "oauth".to_string())),
             Self::Gemini { .. } => Some(("gemini".to_string(), "oauth".to_string())),
