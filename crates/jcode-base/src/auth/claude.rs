@@ -98,6 +98,10 @@ struct LegacyAnthropicAuth {
 
 const ACCOUNT_LABEL_PREFIX: &str = "claude";
 
+#[path = "claude_refresh_cas.rs"]
+mod refresh_cas;
+pub(in crate::auth) use refresh_cas::{capture_refresh_account, commit_captured_refresh};
+
 /// Set the runtime override for the active account label.
 /// This allows `/account switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
@@ -284,6 +288,16 @@ struct OpenCodeAnthropicAuth {
 }
 
 fn claude_code_path() -> Result<PathBuf> {
+    if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        let config_dir = PathBuf::from(config_dir);
+        anyhow::ensure!(
+            config_dir.is_absolute(),
+            "CLAUDE_CONFIG_DIR must be absolute to reuse Claude Code credentials across Jcode processes."
+        );
+        return Ok(config_dir.join(".credentials.json"));
+    }
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
@@ -574,6 +588,11 @@ pub fn is_max_subscription() -> bool {
         Some(t) => t != "pro",
         None => true,
     }
+}
+
+/// Identity claims, or a fingerprint of the current saved refresh generation.
+pub fn account_identity(account: &AnthropicAccount) -> Option<String> {
+    crate::auth::account_store::account_identity(account.email.as_deref(), None, &account.refresh)
 }
 
 /// Load credentials for the active Anthropic account.

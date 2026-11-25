@@ -775,10 +775,7 @@ async fn send_claude_refresh_request(
     Ok(resp.json().await?)
 }
 
-async fn refresh_claude_tokens_inner(
-    refresh_token: &str,
-    label: Option<&str>,
-) -> Result<OAuthTokens> {
+async fn request_claude_token_refresh(refresh_token: &str) -> Result<OAuthTokens> {
     let scoped_result =
         send_claude_refresh_request(refresh_token, Some(claude::REFRESH_SCOPES)).await;
     let tokens = match scoped_result {
@@ -812,12 +809,22 @@ async fn refresh_claude_tokens_inner(
         scopes,
     };
 
-    let save_label = label.map(ToString::to_string).unwrap_or_else(|| {
+    Ok(oauth_tokens)
+}
+
+async fn refresh_claude_tokens_inner(
+    refresh_token: &str,
+    label: Option<&str>,
+) -> Result<OAuthTokens> {
+    let label = label.map(ToString::to_string).unwrap_or_else(|| {
         claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label)
     });
-    save_claude_tokens_for_account(&oauth_tokens, &save_label)?;
-
-    Ok(oauth_tokens)
+    claude_refresh_cas::refresh_claude_tokens_with(
+        refresh_token,
+        &label,
+        request_claude_token_refresh(refresh_token),
+    )
+    .await
 }
 
 /// Refresh Claude OAuth tokens for the active (or primary) stored account.
@@ -1421,3 +1428,6 @@ mod tests;
 
 #[path = "openai_refresh_cas.rs"]
 mod openai_refresh_cas;
+
+#[path = "claude_refresh_transaction.rs"]
+mod claude_refresh_cas;
