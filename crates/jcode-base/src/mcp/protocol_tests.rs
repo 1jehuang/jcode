@@ -1030,6 +1030,21 @@ fn jcode_mcp_overrides_imported_claude_commands() {
             assert!(config.servers.contains_key("claude-only"));
         }
 
+        // Explicit remote or malformed entries must not displace runnable stdio.
+        for remote in [
+            serde_json::json!({"type":"http","url":"https://example.invalid/mcp"}),
+            serde_json::json!({"type":"http"}),
+        ] {
+            std::fs::write(
+                home.path().join("mcp.json"),
+                serde_json::json!({"servers":{"amq":remote}}).to_string(),
+            )
+            .unwrap();
+            let config = McpConfig::load_for_dir(Some(project.path()));
+            assert_eq!(config.servers["amq"].command, "amq-mcp");
+            assert_eq!(config.servers["amq"].args, ["local", "channel", "claude"]);
+        }
+
         std::fs::write(
             project.path().join(".mcp.json"),
             r#"{"mcpServers":{"amq":{"command":"project-amq"}}}"#,

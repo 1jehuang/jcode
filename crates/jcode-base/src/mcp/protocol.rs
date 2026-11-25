@@ -762,7 +762,7 @@ impl McpConfig {
             let jcode_mcp = jcode_dir.join("mcp.json");
             if jcode_mcp.exists() {
                 if let Ok(config) = Self::load_from_file(&jcode_mcp) {
-                    merged.servers.extend(config.servers);
+                    Self::merge_servers_preferring_runnable(&mut merged.servers, config.servers);
                 }
             }
         }
