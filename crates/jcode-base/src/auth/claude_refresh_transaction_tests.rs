@@ -47,6 +47,42 @@ fn seed() {
     auth.active_anthropic_account = Some("work".into());
     claude::save_auth_file(&auth).unwrap();
 }
+
+#[tokio::test]
+async fn claude_cli_validation_follows_only_its_original_refresh_chain() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    for replacement in [false, true] {
+        seed();
+        let credentials = claude::load_credentials_for_account("work").unwrap();
+        let validated =
+            crate::auth::claude_cli_completion::with_validation_refreshes(credentials, async {
+                let refresh = if replacement {
+                    claude::upsert_account(login("work", "replacement-refresh"))?;
+                    "replacement-refresh"
+                } else {
+                    "original-refresh"
+                };
+                refresh_claude_tokens_with(refresh, "work", async { Ok(rotated()) }).await?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            validated.refresh_token,
+            if replacement {
+                "original-refresh"
+            } else {
+                "rotated-refresh"
+            }
+        );
+        assert_eq!(
+            claude::load_credentials_for_account("work")
+                .unwrap()
+                .refresh_token,
+            "rotated-refresh"
+        );
+    }
+}
 fn auth_bytes() -> Vec<u8> {
     std::fs::read(crate::storage::jcode_dir().unwrap().join("auth.json")).unwrap()
 }

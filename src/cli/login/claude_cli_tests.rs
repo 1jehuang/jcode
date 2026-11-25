@@ -516,6 +516,100 @@ async fn fake_cli_completion_validation_failure_never_reports_success() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn fake_cli_completion_accepts_its_first_saved_file_refresh() {
+    let home = TestHome::new();
+    let mut env = FakeCliEnv::new(home._sandbox.root(), true);
+    env.set("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-expired-access");
+    env.set("JCODE_FIXTURE_AUTH_JSON",r#"{"claudeAiOauth":{"accessToken":"fake-cli-access","refreshToken":"fake-cli-refresh","expiresAt":1}}"#);
+    let _answer = PromptAnswer::set(true);
+    let completed = login_claude_code_flow(async {
+        auth::oauth::save_claude_tokens_for_account(
+            &auth::oauth::OAuthTokens {
+                access_token: "fake-cli-access".into(),
+                refresh_token: "fake-cli-refresh".into(),
+                expires_at: 1,
+                id_token: None,
+                scopes: Vec::new(),
+            },
+            "first-file-login",
+        )?;
+        let label = auth::claude::list_accounts()?.remove(0).label;
+        auth::claude::update_account_tokens(
+            &label,
+            "file-refreshed-access",
+            "file-refreshed-refresh",
+            4_102_444_800_000,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        completed.saved_account,
+        auth::claude::active_account_label()
+    );
+    assert_eq!(
+        auth::claude::load_credentials().unwrap().access_token,
+        "file-refreshed-access"
+    );
+    assert_eq!(
+        completed.fingerprint,
+        auth::claude_cli_completion::fingerprint(&auth::claude::load_credentials().unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fake_cli_completion_rejects_same_label_replacement_or_unobserved_refresh() {
+    for unrelated_refresh in [false, true] {
+        let home = TestHome::new();
+        let mut env = FakeCliEnv::new(home._sandbox.root(), false);
+        env.set("CLAUDE_CODE_OAUTH_TOKEN",r#"{"claudeAiOauth":{"accessToken":"fake-native-access","refreshToken":"fake-native-refresh","expiresAt":4102444800000}}"#);
+        let _answer = PromptAnswer::set(true);
+        let flow = auth::claude_cli_completion::LoginFlow::new().unwrap();
+        let attempt = auth::claude_cli_completion::claim(&flow.path).unwrap();
+        let result = login_claude_code_flow(async {
+            env.set("CLAUDE_CODE_OAUTH_TOKEN", "");
+            let account = auth::claude::list_accounts().unwrap().remove(0);
+            if unrelated_refresh {
+                tokio::spawn(async move {
+                    auth::claude::update_account_tokens(
+                        &account.label,
+                        "another-access",
+                        "another-refresh",
+                        account.expires,
+                    )
+                })
+                .await??;
+            } else {
+                auth::oauth::save_claude_tokens_for_account(
+                    &auth::oauth::OAuthTokens {
+                        access_token: "another-access".into(),
+                        refresh_token: "another-refresh".into(),
+                        expires_at: account.expires,
+                        id_token: None,
+                        scopes: Vec::new(),
+                    },
+                    &account.label,
+                )?;
+            }
+            Ok(())
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "another login must not complete this attempt"
+        );
+        auth::claude_cli_completion::finish(&flow.path, &attempt, None).unwrap();
+        assert!(matches!(flow.result().unwrap(), Some(None)));
+        assert_eq!(
+            auth::claude::load_credentials().unwrap().access_token,
+            "another-access"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn fake_cli_completion_preserves_account_choice_during_validation() {
     let home = TestHome::new();
     let mut env = FakeCliEnv::new(home._sandbox.root(), false);

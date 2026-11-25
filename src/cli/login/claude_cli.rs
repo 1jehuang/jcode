@@ -253,20 +253,22 @@ pub(super) async fn login_claude_code_flow(
         auth::claude::get_active_account_override(),
         auth::claude::load_auth_file()?.active_anthropic_account,
     );
-    validation.await?;
+    let credentials =
+        auth::claude_cli_completion::with_validation_refreshes(credentials, validation).await?;
     anyhow::ensure!(
-        (
-            auth::claude::get_active_account_override(),
-            auth::claude::load_auth_file()?.active_anthropic_account,
-        ) == selection,
+        auth::claude::get_active_account_override() == selection.0,
         "The saved Claude account selection changed during validation. Retry to use this login."
     );
-    // Follow this attempt's saved account through refresh, never a new source.
-    let credentials = match acquired.saved_account {
-        Some(label) => auth::claude::load_credentials_for_account(&label)?,
-        None => credentials,
-    };
     let completed = auth::claude_cli_completion::capture(&credentials, source)?;
+    let default_after = auth::claude::load_auth_file()?.active_anthropic_account;
+    anyhow::ensure!(
+        default_after == selection.1
+            || (selection.1.is_none()
+                && acquired.saved_account.is_none()
+                && completed.fingerprint != acquired.fingerprint
+                && default_after == completed.saved_account),
+        "The saved Claude account selection changed during validation. Retry to use this login."
+    );
     eprintln!("Claude Code login is now available to Jcode.");
     crate::telemetry::record_auth_success("claude", "claude_code_cli");
     Ok(completed)

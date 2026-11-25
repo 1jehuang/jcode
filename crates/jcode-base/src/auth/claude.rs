@@ -468,9 +468,15 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
         .find(|a| a.label == label)
     {
         account.access = access.to_string();
-        account.refresh = refresh.to_string();
+        let previous_refresh = std::mem::replace(&mut account.refresh, refresh.to_string());
         account.expires = expires;
         save_auth_file(&auth)?;
+        super::claude_cli_completion::follow_validation_refresh(
+            &previous_refresh,
+            access,
+            refresh,
+            expires,
+        );
         Ok(())
     } else {
         anyhow::bail!("No account with label '{}' found for token update", label);

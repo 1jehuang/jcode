@@ -52,7 +52,14 @@ pub(in crate::auth) fn commit_captured_refresh(
     match expected {
         Some(expected) => commit_refresh_account(expected, tokens),
         None => commit_external_refresh(label, refresh_token, tokens),
-    }
+    }?;
+    crate::auth::claude_cli_completion::follow_validation_refresh(
+        refresh_token,
+        &tokens.access_token,
+        &tokens.refresh_token,
+        tokens.expires_at,
+    );
+    Ok(())
 }
 
 /// Anthropic rotates refresh tokens, so an external login's old token is spent
