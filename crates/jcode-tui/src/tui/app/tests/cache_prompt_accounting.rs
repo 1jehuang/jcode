@@ -427,12 +427,26 @@ fn record_live_cache_request(app: &mut App, input: u64, read: u64) {
     assert!(app.record_completed_stream_cache_usage());
 }
 
-fn kv_cache_summary(app: &App) -> String {
-    let info = app.info_widget_data().cache_hit_info.unwrap();
-    crate::tui::info_widget::render_kv_cache_summary_line(&info)
-        .spans
+fn kv_cache_widget_text(app: &App) -> String {
+    use crate::tui::info_widget::{Side, WidgetKind, WidgetPlacement, render_all};
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 6)).unwrap();
+    terminal
+        .draw(|frame| {
+            let placement = WidgetPlacement {
+                kind: WidgetKind::KvCache,
+                rect: frame.area(),
+                side: Side::Right,
+            };
+            render_all(frame, &[placement], &app.info_widget_data());
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
         .iter()
-        .map(|span| span.content.as_ref())
+        .map(|cell| cell.symbol())
         .collect()
 }
 
@@ -449,10 +463,10 @@ fn cache_yield_after_resume_uses_live_scope_not_priming() {
         ..Default::default()
     });
     record_live_cache_request(&mut app, 10_000, 0);
-    assert!(kv_cache_summary(&app).contains("hit "));
+    assert!(kv_cache_widget_text(&app).contains("% hit"));
     record_live_cache_request(&mut app, 10_000, 9_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 90%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("90% yield"), "{summary}");
     assert!(!summary.contains("priming"), "{summary}");
     let info = app.info_widget_data().cache_hit_info.unwrap();
     // Yield is live-scope only: 9k live reads / 10k live optimal.
@@ -465,9 +479,9 @@ fn cache_yield_after_resume_uses_live_scope_not_priming() {
 fn cache_yield_new_session_single_request_is_priming() {
     let mut app = cache_accounting_openai_app();
     record_live_cache_request(&mut app, 10_000, 0);
-    assert!(kv_cache_summary(&app).contains("hit "));
+    assert!(kv_cache_widget_text(&app).contains("% hit"));
     record_live_cache_request(&mut app, 10_000, 8_000);
-    assert!(kv_cache_summary(&app).contains("yield 80%"));
+    assert!(kv_cache_widget_text(&app).contains("80% yield"));
 }
 
 #[test]
@@ -482,8 +496,8 @@ fn cache_yield_after_resume_ignores_first_warm_read_without_optimal() {
     });
     record_live_cache_request(&mut app, 10_000, 9_000);
     record_live_cache_request(&mut app, 10_000, 5_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 50%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("50% yield"), "{summary}");
     let stats = cache_accounting_stats(&mut app);
     assert!(
         stats.contains("cache_read_pct_of_optimal_input: 50%"),
@@ -496,8 +510,8 @@ fn cache_yield_fresh_session_ignores_warm_prefix_first_read() {
     let mut app = cache_accounting_openai_app();
     record_live_cache_request(&mut app, 10_000, 4_000);
     record_live_cache_request(&mut app, 10_000, 8_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 80%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("80% yield"), "{summary}");
 }
 
 fn cache_usage_event(
@@ -533,8 +547,8 @@ fn cache_yield_follows_later_usage_snapshots_for_same_request() {
     cache_usage_event(&mut app, &mut remote, 10_000, 4_000);
     cache_usage_event(&mut app, &mut remote, 10_000, 6_000);
     assert_eq!(app.token_accounting.total_cache_optimal_read_tokens, 6_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 60%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("60% yield"), "{summary}");
     let stats = cache_accounting_stats(&mut app);
     assert!(
         stats.contains("cache_read_pct_of_optimal_input: 60%"),
@@ -610,12 +624,12 @@ fn history_refresh_same_session_clears_optimal_baseline() {
     // First request after refresh has no baseline: no yield yet.
     record_live_cache_request(&mut app, 10_000, 8_000);
     assert_eq!(app.token_accounting.total_cache_optimal_input_tokens, 0);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("hit "), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("% hit"), "{summary}");
     // Second request starts a clean measurement.
     record_live_cache_request(&mut app, 10_000, 5_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 50%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("50% yield"), "{summary}");
 }
 
 #[test]
@@ -624,6 +638,6 @@ fn cache_yield_excludes_reads_with_a_zero_optimal_denominator() {
     app.token_accounting.cache_next_optimal_input_tokens = Some(0);
     record_live_cache_request(&mut app, 10_000, 9_000);
     record_live_cache_request(&mut app, 10_000, 5_000);
-    let summary = kv_cache_summary(&app);
-    assert!(summary.contains("yield 50%"), "{summary}");
+    let summary = kv_cache_widget_text(&app);
+    assert!(summary.contains("50% yield"), "{summary}");
 }
