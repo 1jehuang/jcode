@@ -280,3 +280,61 @@ post_tool     = "~/bin/jcode-event-log"
   building any payload, so unconfigured hooks cost ~nothing.
 - The recursion guard (`JCODE_HOOKS_DISABLED=1`) means a hook may safely call
   `jcode` CLI commands without re-triggering hooks in that nested process.
+
+
+## Plugin command hooks
+
+Enabled plugins can supply `hooks/hooks.json` or a `hooks` declaration in
+`.claude-plugin/plugin.json`. Discovery reads enabled roots for the session's
+working directory; listing and installation do not run hooks. Manifest hook
+paths must remain inside the plugin, and canonical aliases are loaded once.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "^Bash$",
+      "hooks": [{
+        "type": "command",
+        "command": "\"$CLAUDE_PLUGIN_ROOT/hooks/policy.sh\"",
+        "timeout": 5
+      }]
+    }]
+  }
+}
+```
+
+The shell example uses Unix syntax; use the host shell's variable syntax on
+Windows, or an `args` array for platform-independent substitutions.
+
+`SessionStart`, `SessionEnd` and successful `PostToolUse` calls are observers.
+Their stdout cannot block a tool or inject model context. `PreToolUse` supports
+exit 2 or JSON denial, approval requests that block, and object-valued
+`hookSpecificOutput.updatedInput` rewrites. Native policy gates still run and
+receive the rewritten input. Invalid rewrite types block the call. Pre-tool
+context uses the same bounded JSON fields as native hooks.
+
+Each command receives JSON on stdin, including `hook_event_name`, `session_id`,
+`cwd` and, for tool events, `tool_name` and `tool_input`. Post-tool observers also
+receive the complete textual `tool_response`; the native environment prefix
+remains truncated as before. Both native and Claude tool names can match the
+regular expression. An `args` array launches a program directly with literal
+arguments; without it, `command` runs through the platform shell.
+
+`CLAUDE_PLUGIN_ROOT` names cached code. `CLAUDE_PLUGIN_DATA` names the plugin's
+private persistent directory, prepared only for a matching execution. Child
+processes receive the initiating client's terminal identity and the recursion
+guard. Root/data substitutions in argument arrays are expanded once and do not
+match longer variable names.
+
+Timeouts use seconds (positive, finite, up to 3600), defaulting to the configured
+native pre-tool timeout. Stdin writing and both output pipes share that deadline.
+The shared runner from #2032 retains at most 1 MiB per captured output stream
+and drains excess bytes within the deadline. Truncated gate stdout blocks the
+call rather than running an unapplied rewrite. Execution errors and timeouts
+follow the native command-hook fail-open policy. Unix cleanup stops the hook's
+process group on timeout or cancellation. Windows currently guarantees only
+direct-child cleanup; native Windows was not validated for this integration.
+
+Stop, prompt, agent, HTTP and asynchronous hooks are diagnosed and skipped
+because this integration does not provide their lifecycle contracts.

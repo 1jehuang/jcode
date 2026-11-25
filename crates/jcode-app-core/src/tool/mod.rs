@@ -903,7 +903,7 @@ impl Registry {
         // context for the model. Skipped entirely when not configured.
         let mut input = input;
         let mut gate_context: Vec<String> = Vec::new();
-        if crate::hooks::hook_configured("pre_tool") {
+        if crate::hooks::hook_configured_for_dir("pre_tool", working_dir.as_deref()) {
             let input_json = input.to_string();
             let outcome = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,

@@ -25,6 +25,9 @@
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
+mod plugin_hooks;
+mod sync_runner;
+
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -119,13 +122,17 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
         crate::logging::warn("Hook 'pre_tool' printed invalid JSON on stdout (ignored)");
         return CommandVerdict::default();
     };
+    parse_gate_value(&value)
+}
+
+fn parse_gate_value(value: &Value) -> CommandVerdict {
     let specific = value.get("hookSpecificOutput").unwrap_or(&Value::Null);
     let mut verdict = CommandVerdict::default();
 
-    let top_decision = json_str(&value, "decision").map(str::to_ascii_lowercase);
+    let top_decision = json_str(value, "decision").map(str::to_ascii_lowercase);
     if matches!(top_decision.as_deref(), Some("block" | "deny")) {
         verdict.block = Some(
-            json_str(&value, "reason")
+            json_str(value, "reason")
                 .unwrap_or("blocked by pre_tool hook")
                 .to_string(),
         );
@@ -135,14 +142,14 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
         Some("deny") => {
             verdict.block = Some(
                 json_str(specific, "permissionDecisionReason")
-                    .or_else(|| json_str(&value, "reason"))
+                    .or_else(|| json_str(value, "reason"))
                     .unwrap_or("blocked by pre_tool hook")
                     .to_string(),
             );
         }
         Some("ask") => {
             let reason = json_str(specific, "permissionDecisionReason")
-                .or_else(|| json_str(&value, "reason"));
+                .or_else(|| json_str(value, "reason"));
             verdict.block = Some(match reason {
                 Some(reason) => format!("requires user approval: {reason}"),
                 None => "requires user approval (pre_tool hook asked)".to_string(),
@@ -161,7 +168,7 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
     }
     let context: Vec<&str> = [
         json_str(specific, "additionalContext"),
-        json_str(&value, "systemMessage"),
+        json_str(value, "systemMessage"),
     ]
     .into_iter()
     .flatten()
@@ -183,6 +190,7 @@ pub struct HookEvent {
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
     /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
+    plugin_tool_payload: Option<(Value, Value)>,
 }
 
 impl HookEvent {
@@ -192,6 +200,7 @@ impl HookEvent {
             session_id: None,
             cwd: None,
             fields: Vec::new(),
+            plugin_tool_payload: None,
         }
     }
 
@@ -207,6 +216,11 @@ impl HookEvent {
 
     pub fn field(mut self, key: &'static str, value: impl Into<String>) -> Self {
         self.fields.push((key, value.into()));
+        self
+    }
+
+    pub fn plugin_tool_payload(mut self, input: Value, response: Value) -> Self {
+        self.plugin_tool_payload = Some((input, response));
         self
     }
 }
@@ -279,6 +293,12 @@ pub fn hook_command(event: &str) -> Option<String> {
 /// skip payload construction entirely when no hook is set.
 pub fn hook_configured(event: &str) -> bool {
     !hook_commands(event).is_empty()
+}
+
+/// Scope-aware fast path; plugin discovery never executes commands.
+pub fn hook_configured_for_dir(event: &str, cwd: Option<&str>) -> bool {
+    hook_configured(event)
+        || (!hooks_suppressed() && cwd.is_some_and(|cwd| plugin_hooks::configured(event, cwd)))
 }
 
 /// Run configured tool-input transformers in declaration order. Transformers
@@ -544,6 +564,7 @@ fn build_hook_process(
 /// Detached and fire-and-forget: failures are logged, never propagated, and
 /// the hook process cannot block the agent.
 pub fn dispatch_observer(event: HookEvent) {
+    plugin_hooks::observe(&event);
     let command_lines = hook_commands(event.event);
     if command_lines.is_empty() {
         return;
@@ -591,12 +612,17 @@ pub async fn run_pre_tool_gate(
     tool_input_json: &str,
 ) -> GateOutcome {
     let command_lines = hook_commands("pre_tool");
-    let mut outcome = GateOutcome::allow();
-    if command_lines.is_empty() {
-        return outcome;
+    let mut event = HookEvent::new("pre_tool")
+        .session_id(session_id)
+        .field("TOOL_NAME", tool_name);
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
     }
-
-    let mut current_input = tool_input_json.to_string();
+    let mut outcome = plugin_hooks::gate(&event, tool_input_json).await;
+    let mut current_input = match &outcome.updated_input {
+        Some(updated) => updated.to_string(),
+        None => tool_input_json.to_string(),
+    };
     for command_line in command_lines {
         let mut event = HookEvent::new("pre_tool")
             .session_id(session_id)

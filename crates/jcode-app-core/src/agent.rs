@@ -8,6 +8,7 @@ mod environment;
 mod idle_hibernation;
 mod inline_tail;
 mod interrupts;
+mod lifecycle_hooks;
 mod messages;
 #[cfg(test)]
 mod model_usage_tests;
@@ -1259,22 +1260,6 @@ impl Agent {
             );
         }
         self.fire_session_lifecycle_hook("session_end", "close");
-    }
-
-    /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
-    /// No-op when the hook is not configured.
-    pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
-        if !crate::hooks::hook_configured(event_name) {
-            return;
-        }
-        let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(self.session.id.clone())
-            .field("SOURCE", source)
-            .field("MODEL", self.provider_model());
-        if let Some(cwd) = self.working_dir() {
-            event = event.cwd(cwd);
-        }
-        crate::hooks::dispatch_observer(event);
     }
 
     pub fn mark_crashed(&mut self, message: Option<String>) {
