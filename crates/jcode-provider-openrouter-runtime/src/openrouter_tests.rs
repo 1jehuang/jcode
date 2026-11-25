@@ -3482,6 +3482,39 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
     assert_eq!(Provider::display_name(&provider), "example-compat");
 }
 
+#[test]
+fn vsllm_uses_conservative_context_when_catalog_omits_limits() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "https://vsllm.cc/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        model_catalog: true,
+        default_model: Some("vsllm-future-2099".to_string()),
+        ..Default::default()
+    };
+    let mut provider = OpenRouterProvider::new_named_openai_compatible("vsllm-api", &profile)
+        .expect("VSLLM profile should initialize");
+    provider
+        .set_model("vsllm-future-2099")
+        .expect("VSLLM accepts catalog model ids");
+    assert_eq!(provider.context_window(), 32_768);
+    provider
+        .static_context_limits
+        .insert("vsllm-future-2099".into(), 65_536);
+    assert_eq!(provider.context_window(), 65_536);
+    provider.static_context_limits.clear();
+    provider.models_cache.blocking_write().models.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "vsllm-future-2099",
+            "context_length": 98_304
+        }))
+        .unwrap(),
+    );
+    assert_eq!(provider.context_window(), 98_304);
+}
+
 #[path = "openrouter_wire_tests.rs"]
 mod wire_tests;
 
