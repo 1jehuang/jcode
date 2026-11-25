@@ -1149,6 +1149,51 @@ fn forward_pending_reasoning_effort_sends_effort_request_to_server() {
         Some("high"),
         "requested effort should be tracked optimistically for the UI"
     );
+    assert!(
+        app.suppress_next_reasoning_effort_message,
+        "picker-staged effort should suppress the duplicate Reasoning effort transcript line"
+    );
+
+    // The companion ReasoningEffortChanged event should update state without
+    // emitting a second transcript message after ModelChanged.
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        super::server_events::handle_server_event(
+            &mut app,
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 1,
+                effort: Some("high".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                error: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|msg| msg.content.contains("Reasoning effort →")),
+            "picker-staged ReasoningEffortChanged should not duplicate the model switch message"
+        );
+
+        // A subsequent standalone ReasoningEffortChanged (e.g. from `/effort`)
+        // must still announce the change in the transcript.
+        super::server_events::handle_server_event(
+            &mut app,
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 2,
+                effort: Some("medium".to_string()),
+                model: None,
+                error: None,
+            },
+            &mut remote,
+        );
+    });
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|msg| msg.content.contains("✓ Reasoning effort → Medium")),
+        "standalone ReasoningEffortChanged should still appear in the transcript"
+    );
 }
 
 /// The dispatcher must be a no-op when no effort variant was staged (plain

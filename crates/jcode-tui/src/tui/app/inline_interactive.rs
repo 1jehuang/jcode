@@ -3889,7 +3889,7 @@ impl App {
                         if let Some(effort) = effort {
                             let _ = self.provider.set_reasoning_effort(&effort);
                         }
-                        if !route_detail.is_empty() {
+                        if !self.is_remote && !route_detail.is_empty() {
                             self.push_display_message(DisplayMessage::system(format!(
                                 "{}\n{}",
                                 notice, route_detail

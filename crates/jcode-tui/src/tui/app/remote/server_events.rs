@@ -2838,10 +2838,12 @@ fn handle_server_event_inner(
                     .as_deref()
                     .map(app_mod::effort_display_label)
                     .unwrap_or("default");
-                app.push_display_message(DisplayMessage::system(format!(
-                    "✓ Reasoning effort → {}",
-                    label
-                )));
+                if !std::mem::take(&mut app.suppress_next_reasoning_effort_message) {
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "✓ Reasoning effort → {}",
+                        label
+                    )));
+                }
                 app.set_status_notice(format!("Effort: {}", label));
                 true
             }
