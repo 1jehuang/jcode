@@ -318,3 +318,45 @@ fn edge_stuck_overview_stays_below_synthetic_top_rows() {
         anchors = out.anchors;
     }
 }
+
+#[test]
+fn compact_overview_fits_four_row_pockets() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    assert_eq!(
+        calculate_widget_height(WidgetKind::Overview, &data, 40, 40),
+        4
+    );
+    let out = calculate_placements_anchored(area, &ragged_margins(5, 0), &data, true, &[]);
+    assert_placements_sane("four-row overview", area, &out.visible);
+    assert_eq!(right_kinds(&out.visible), vec![WidgetKind::Overview]);
+    assert_eq!(out.visible[0].rect.height, 4);
+}
+
+#[test]
+fn resident_overview_grows_before_reliable_pocket_rehoming() {
+    let mut data = model_and_context_data();
+    let small = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    data.background_info = contended_overview_data().background_info;
+    let grown = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    assert!(grown > small && grown > 5);
+    let area = Rect::new(0, 3, 140, 40);
+    // New residents can only use five-row pockets, but this resident has room.
+    let margins = Margins {
+        right_reliable: ragged_margins(6, 0).right_reliable,
+        content_start_row: 5,
+        content_churning: true,
+        ..roomy_margins()
+    };
+    let mut anchor = right_anchor(WidgetKind::Overview, 5, small);
+    anchor.placement.rect.y += area.y;
+    let mut anchors = vec![anchor];
+    for _ in 0..2 {
+        let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+        assert_placements_sane("grown resident", area, &out.visible);
+        assert_eq!(right_kinds(&out.visible), vec![WidgetKind::Overview]);
+        assert_eq!(out.visible[0].rect.height, grown);
+        assert_eq!(out.visible[0].rect.y, area.y + 5);
+        anchors = out.anchors;
+    }
+}

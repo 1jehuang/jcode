@@ -10,7 +10,7 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 /// Maximum width the widget can take.
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget.
-const MIN_WIDGET_HEIGHT: u16 = 5;
+const MIN_WIDGET_HEIGHT: u16 = 3;
 /// How many consecutive frames a widget may stay hidden-in-place before its
 /// anchor is abandoned and Phase 2 is allowed to re-home it elsewhere.
 ///
@@ -258,16 +258,6 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
         let last_start = row_limit - height;
-        // Overview can be seated in a pocket that only fits its current content
-        // (e.g. model + context). If that content grows (todos appear), the old
-        // slot can no longer show it; holding the anchor would suppress the parts
-        // and leave the slot blank. Let it re-home at its new height instead.
-        if prev.kind == WidgetKind::Overview
-            && prev.rect.height < phase2_min_height(WidgetKind::Overview, data)
-        {
-            continue;
-        }
-
         let fit_at = |start: usize| -> u16 {
             widths[start..start + height]
                 .iter()
@@ -379,13 +369,9 @@ pub(crate) fn calculate_placements_anchored(
         // good right after startup. Grow the slot in place into free rows
         // directly above or below when there are any (the render path truncates
         // when there are not, so the widget never disappears).
+        let needed =
+            calculate_widget_height(prev.kind, data, kept_width, messages_area.height) as usize;
         let (row_start, row_end, target_y, content_top) = {
-            let needed = super::info_widget::calculate_widget_height(
-                prev.kind,
-                data,
-                kept_width,
-                messages_area.height,
-            ) as usize;
             if needed > height {
                 let extra = needed - height;
                 let limit = widths.len().min(messages_area.height as usize);
@@ -410,7 +396,9 @@ pub(crate) fn calculate_placements_anchored(
                         && widths[start..end].iter().all(|&w| w >= kept_width)
                         && !occupied(start, end)
                 };
-                if row_start >= extra && free(row_start - extra, row_start) {
+                if row_start.saturating_sub(first_row) >= extra
+                    && free(row_start - extra, row_start)
+                {
                     let start = row_start - extra;
                     (
                         start,
@@ -427,6 +415,12 @@ pub(crate) fn calculate_placements_anchored(
                 (row_start, row_end, target_y, content_top)
             }
         };
+
+        // An incomplete Overview hides all its parts, so re-home only after
+        // trying the resident's current margin for growth.
+        if prev.kind == WidgetKind::Overview && row_end - row_start < needed {
+            continue;
+        }
 
         let kept_x = match prev.side {
             Side::Right => messages_area
