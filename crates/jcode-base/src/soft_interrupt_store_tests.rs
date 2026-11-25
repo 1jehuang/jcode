@@ -88,3 +88,65 @@ fn append_take_and_clear_round_trip() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_parent_is_an_error_and_preserves_stored_prompts() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission-denial fixture skipped: root bypasses directory permissions");
+        return;
+    }
+    let _env = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let session = "unreadable-parent";
+    append(
+        session,
+        SoftInterruptMessage {
+            content: "pending".into(),
+            images: vec![("image/png".into(), "ZmFrZQ==".into())],
+            urgent: false,
+            source: SoftInterruptSource::User,
+            client_id: Some("held-image".into()),
+        },
+    )
+    .unwrap();
+    let path = path_for_session(session).unwrap();
+    let parent = path.parent().unwrap();
+    let permissions = std::fs::metadata(parent).unwrap().permissions();
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0)).unwrap();
+    let loaded = load(session);
+    let removed = remove_by_client_ids(session, &["held-image".into()]);
+    std::fs::set_permissions(parent, permissions).unwrap();
+    assert!(loaded.is_err(), "an unsearchable store must not look empty");
+    assert!(
+        removed.is_err(),
+        "unreadable input must not appear not_queued"
+    );
+    let left = load(session).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].client_id.as_deref(), Some("held-image"));
+    assert_eq!(left[0].images, [("image/png".into(), "ZmFrZQ==".into())]);
+}
+
+#[test]
+fn corrupt_primary_keeps_existing_backup_recovery() {
+    let _env = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let session = "backup-recovery";
+    append(
+        session,
+        SoftInterruptMessage {
+            content: "recoverable".into(),
+            images: Vec::new(),
+            urgent: false,
+            source: SoftInterruptSource::User,
+            client_id: Some("recoverable-id".into()),
+        },
+    )
+    .unwrap();
+    let path = path_for_session(session).unwrap();
+    std::fs::copy(&path, path.with_extension("bak")).unwrap();
+    std::fs::write(&path, "broken JSON").unwrap();
+    let recovered = load(session).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].client_id.as_deref(), Some("recoverable-id"));
+}

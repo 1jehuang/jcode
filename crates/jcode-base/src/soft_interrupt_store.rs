@@ -82,11 +82,16 @@ fn path_for_session(session_id: &str) -> Result<PathBuf> {
 
 pub fn load(session_id: &str) -> Result<Vec<SoftInterruptMessage>> {
     let path = path_for_session(session_id)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let persisted: Vec<PersistedSoftInterrupt> = crate::storage::read_json(&path)?;
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let persisted: Vec<PersistedSoftInterrupt> = match serde_json::from_str(&data) {
+        Ok(persisted) => persisted,
+        // Keep the existing backup recovery and its diagnostics for corrupt JSON.
+        Err(_) => crate::storage::read_json(&path)?,
+    };
     Ok(persisted
         .into_iter()
         .map(SoftInterruptMessage::from)

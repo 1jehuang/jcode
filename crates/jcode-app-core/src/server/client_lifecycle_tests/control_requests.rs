@@ -706,3 +706,64 @@ fn soft_interrupt_persisted_cancel_failure_returns_error_without_a_verdict() {
         "failed cancellation must retain live input"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn unreadable_store_never_confirms_a_live_or_persisted_cancel() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("permission-denial fixture skipped: root bypasses directory permissions");
+        return;
+    }
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    for (live, clear_all) in [(false, false), (true, false), (false, true), (true, true)] {
+        let session = format!("unreadable-cancel-{live}-{clear_all}");
+        let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let control =
+            SessionControlHandle::cancel_only(&session, queue.clone(), InterruptSignal::new());
+        assert!(control.queue_soft_interrupt_with_id(
+            String::new(),
+            vec![("image/png".into(), "ZmFrZQ==".into())],
+            false,
+            SoftInterruptSource::User,
+            Some("held-image".into())
+        ));
+        crate::soft_interrupt_store::append(&session, queue.lock().unwrap()[0].clone()).unwrap();
+        if !live {
+            queue.lock().unwrap().clear();
+        }
+        let parent = crate::storage::jcode_dir()
+            .unwrap()
+            .join("pending-soft-interrupts");
+        let permissions = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0)).unwrap();
+        let (tx, mut events) = mpsc::unbounded_channel();
+        if clear_all {
+            crate::server::client_lifecycle::client_processing::clear_soft_interrupts(
+                308, &session, &control, &tx,
+            );
+        } else {
+            crate::server::client_lifecycle::client_processing::cancel_soft_interrupts_by_id(
+                308,
+                &session,
+                &["held-image".into()],
+                &control,
+                &tx,
+            );
+        }
+        std::fs::set_permissions(&parent, permissions).unwrap();
+        assert!(
+            matches!(
+                events.try_recv().unwrap(),
+                ServerEvent::Error { id: 308, .. }
+            ),
+            "live={live} clear_all={clear_all}"
+        );
+        assert_eq!(queue.lock().unwrap().len(), usize::from(live));
+        assert_eq!(
+            crate::soft_interrupt_store::load(&session).unwrap().len(),
+            1
+        );
+    }
+}
