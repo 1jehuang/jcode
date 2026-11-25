@@ -712,6 +712,8 @@ fn known_no_tool_models_do_not_advertise_tools() {
     assert!(!BedrockProvider::model_info("openai.gpt-oss-120b-1:0").supports_tools);
     assert!(BedrockProvider::model_info("us.amazon.nova-2-lite-v1:0").supports_tools);
     assert!(BedrockProvider::model_info("us.anthropic.claude-sonnet-4-6").supports_tools);
+    assert!(BedrockProvider::model_info("zai.glm-5").supports_tools);
+    assert!(BedrockProvider::model_info("global.zai.glm-5.3").supports_tools);
 }
 
 #[test]
