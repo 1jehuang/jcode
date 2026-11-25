@@ -23,6 +23,39 @@ pub(super) fn boolean_action(
     }
 }
 
+/// Stop one of this session's background tasks, as `bg cancel` does.
+pub(super) async fn background_cancel(
+    session_id: &str,
+    args: &[String],
+) -> Result<(Value, String)> {
+    let [task_id] = args else {
+        bail!("Usage: background_cancel <task_id>");
+    };
+    let manager = crate::background::global();
+    let plain_id = std::path::Path::new(task_id)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some(task_id.as_str());
+    // Read the status file raw: status() can settle a finished detached task
+    // and publish its completion, which must not happen for another session.
+    let owner = if plain_id {
+        tokio::fs::read(manager.status_path_for(task_id)).await.ok()
+    } else {
+        None
+    }
+    .and_then(|bytes| serde_json::from_slice::<crate::background::TaskStatusFile>(&bytes).ok());
+    if owner.is_none_or(|status| status.session_id != session_id) {
+        bail!("No background task {task_id} in this session");
+    }
+    let cancelled = manager.cancel(task_id).await?;
+    let message = if cancelled {
+        format!("Stopped background task {task_id}")
+    } else {
+        format!("Background task {task_id} is not running")
+    };
+    Ok((json!({"task_id": task_id, "cancelled": cancelled}), message))
+}
+
 fn status_only(args: &[String]) -> Result<()> {
     match args {
         [] => Ok(()),
@@ -40,6 +73,9 @@ pub(super) async fn execute(
 ) -> Result<(Value, String)> {
     let config = crate::config::Config::load();
     let data = match command {
+        RuntimeCommand::BackgroundCancel => {
+            return background_cancel(agent.session_id(), args).await;
+        }
         RuntimeCommand::Review | RuntimeCommand::Judge | RuntimeCommand::Subagent => {
             let role = match command {
                 RuntimeCommand::Review => "review",
@@ -656,5 +692,68 @@ mod tests {
         );
         assert!(role_args(&["--model".into()], "swarm").is_err());
         assert!(role_args(&["--continue".into(), "session".into()], "swarm").is_err());
+    }
+    #[tokio::test]
+    async fn background_cancel_stops_only_this_sessions_tasks() {
+        let manager = crate::background::global();
+        let info = manager
+            .spawn("bash", "tasks-dialog-owner", |_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(crate::background::TaskResult {
+                    exit_code: Some(0),
+                    error: None,
+                    status: None,
+                })
+            })
+            .await;
+        let id = vec![info.task_id.clone()];
+        assert!(background_cancel("tasks-dialog-owner", &[]).await.is_err());
+        assert!(
+            background_cancel("tasks-dialog-owner", &[id[0].clone(), id[0].clone()])
+                .await
+                .is_err()
+        );
+        assert!(background_cancel("someone-else", &id).await.is_err());
+        assert!(
+            background_cancel("tasks-dialog-owner", &["../x".into()])
+                .await
+                .is_err()
+        );
+        let (data, _) = background_cancel("tasks-dialog-owner", &id).await.unwrap();
+        assert_eq!(data["cancelled"], true);
+        let status = manager.status(&info.task_id).await.unwrap();
+        assert_eq!(status.status, crate::bus::BackgroundTaskStatus::Failed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_cancel_ownership_check_does_not_settle_another_sessions_task() {
+        let manager = crate::background::global();
+        let info = manager.reserve_task_info();
+        manager
+            .register_detached_task(
+                &info,
+                "bash",
+                None,
+                "tasks-dialog-detached-owner",
+                i32::MAX as u32,
+                &chrono::Utc::now().to_rfc3339(),
+                true,
+                true,
+            )
+            .await;
+        let id = vec![info.task_id.clone()];
+        assert!(background_cancel("someone-else", &id).await.is_err());
+        let raw: crate::background::TaskStatusFile =
+            serde_json::from_slice(&std::fs::read(&info.status_file).unwrap()).unwrap();
+        assert_eq!(
+            raw.status,
+            crate::bus::BackgroundTaskStatus::Running,
+            "a foreign session's request must not settle or publish the task"
+        );
+        let (data, _) = background_cancel("tasks-dialog-detached-owner", &id)
+            .await
+            .unwrap();
+        assert_eq!(data["cancelled"], false, "the owner's request settles it");
     }
 }

@@ -9,6 +9,7 @@ pub enum RuntimeCommand {
     Context,
     Info,
     Cache,
+    BackgroundCancel,
     Memory,
     Swarm,
     Agents,

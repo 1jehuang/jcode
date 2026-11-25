@@ -2309,13 +2309,13 @@ pub(super) async fn handle_client(
 
             Request::RuntimeCommand { id, command, args } => {
                 let result: anyhow::Result<(serde_json::Value, String)> = async {
-                    // Stop/status must remain available while a loop's model or
-                    // tool turn owns the Agent mutex.
+                    // Stop/status control remains available while a turn owns the Agent mutex.
                     if let Some(result) = super::runtime_ssh_loops::control(&client_session_id, &command, &args)? {
                         return Ok(result);
                     }
-                    // Supplemental SSH/cloud commands intentionally precede the shared
-                    // enum parser so new host workflows do not require a wire-enum release.
+                    // Background cancellation also cannot wait for the Agent mutex.
+                    if command == "background_cancel" { return super::runtime_commands::background_cancel(&client_session_id, &args).await; }
+                    // Supplemental SSH/cloud commands precede the shared enum parser.
                     if super::runtime_ssh_sessions::handles(&command)
                         || super::runtime_ssh_loops::handles(&command)
                         || super::runtime_ssh_accounts::handles(&command)

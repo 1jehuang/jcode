@@ -87,3 +87,12 @@ test("socket path rules match the Rust resolver", async () => {
   }
   assert.ok(source.includes("jcode-api.sock") && sdk.includes("jcode-api.sock"));
 });
+
+test("runtime command names match the Rust enum", () => {
+  const rust = enumVariants("runtime_commands.rs", "RuntimeCommand").sort();
+  const source = fs.readFileSync(path.resolve(here, "../src/protocol.ts"), "utf8");
+  const union = /export type RuntimeCommand = ([^;]+);/.exec(source);
+  assert.ok(union, "TypeScript RuntimeCommand union not found");
+  const typescript = [...union[1].matchAll(/"([^"]+)"/g)].map(match => match[1]).sort();
+  assert.deepEqual(typescript, rust);
+});

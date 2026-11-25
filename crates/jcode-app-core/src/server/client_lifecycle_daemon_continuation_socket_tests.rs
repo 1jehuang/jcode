@@ -195,6 +195,43 @@ async fn continuation_socket_workflow(disable_from_observer: bool) {
     .await;
     assert!(before_release.is_err());
 
+    // A real runtime command must bypass the Agent mutex held by this request.
+    let manager = crate::background::global();
+    let background = manager
+        .spawn("bash", &session_id, |_| async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(crate::background::TaskResult {
+                exit_code: Some(0),
+                error: None,
+                status: None,
+            })
+        })
+        .await;
+    send(
+        &mut writer,
+        json!({"type":"runtime_command", "id":51,
+        "command":"background_cancel", "args":[background.task_id]}),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = receive(&mut reader).await;
+            assert!(
+                !matches!(event, ServerEvent::Error { id: 51, .. }),
+                "cancel rejected while busy: {event:?}"
+            );
+            if let ServerEvent::RuntimeCommandResult { id: 51, data, .. } = event {
+                assert_eq!(data["cancelled"], true);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("background cancel waited for the running Agent");
+    for path in [background.status_file, background.output_file] {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
     if let Some((_, observer_reader, observer_writer)) = observer.as_mut() {
         send(
             observer_writer,
