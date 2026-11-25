@@ -668,3 +668,90 @@ fn unreadable_sqlite_metadata_does_not_hide_a_valid_legacy_copy() {
         );
     });
 }
+
+#[test]
+fn sqlite_search_uses_message_metadata_for_filtered_body_and_title_hits() {
+    with_temp_home(|home| {
+        let db = opencode_db_fixture(home);
+        db.session(
+            "fallback-model",
+            None,
+            "catalogmetadata",
+            "/fixture",
+            "unused",
+            "unused",
+            9000,
+            None,
+        )
+        .message("fallback-model", "message", "assistant", 1)
+        .text("fallback-model", "message", "part", "transcriptbody");
+        db.0.execute("UPDATE session SET model = NULL", []).unwrap();
+        db.0.execute(
+            "UPDATE message SET data = json_set(data, '$.providerID', 'anthropic', '$.modelID', 'future-model-9001')",
+            [],
+        ).unwrap();
+        drop(db);
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".into());
+        options.provider_filter = Some("anthropic".into());
+        options.model_filter = Some("future-model-9001".into());
+        let report = run_report(home, "transcriptbody", &options);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|row| row.kind == SearchResultKind::Message)
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|row| row.provider_key.as_deref() == Some("anthropic")
+                    && row.model.as_deref() == Some("future-model-9001"))
+        );
+        OPENCODE_DB_LOADS.with(|loads| loads.set(0));
+        let report = run_report(home, "catalogmetadata", &options);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|row| row.kind == SearchResultKind::Metadata)
+        );
+        OPENCODE_DB_LOADS.with(|loads| {
+            assert_eq!(
+                loads.get(),
+                0,
+                "metadata fallback must not load full histories"
+            )
+        });
+        options.model_filter = Some("different-model".into());
+        assert!(
+            run_report(home, "transcriptbody", &options)
+                .results
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn sqlite_preselection_and_rust_ranking_use_the_same_id_tie_break() {
+    with_temp_home(|home| {
+        let db = opencode_db_fixture(home);
+        for id in ["zulu", "yankee", "xray", "alpha"] {
+            db.session(id, None, "tie-needle", "/fixture", "p", "m", 9000, None);
+        }
+        drop(db);
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".into());
+        options.max_scan_sessions = 1;
+        let report = run_report(home, "tie-needle", &options);
+        assert!(report.truncated);
+        assert!(!report.results.is_empty());
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|row| row.session_id == "opencode:alpha")
+        );
+    });
+}

@@ -151,7 +151,16 @@ fn ms(value: Option<i64>) -> Option<DateTime<Utc>> {
 }
 
 const SESSION_COLUMNS: &str = "s.id, s.title, s.directory, \
-     json_extract(s.model, '$.providerID'), json_extract(s.model, '$.id'), \
+     COALESCE(NULLIF(json_extract(s.model, '$.providerID'), ''), \
+       (SELECT NULLIF(json_extract(m.data, '$.providerID'), '') FROM message m \
+        WHERE m.session_id = s.id AND json_extract(m.data, '$.role') IN ('user', 'assistant') \
+          AND NULLIF(json_extract(m.data, '$.providerID'), '') IS NOT NULL \
+        ORDER BY m.time_created ASC, m.id ASC LIMIT 1)), \
+     COALESCE(NULLIF(json_extract(s.model, '$.id'), ''), \
+       (SELECT NULLIF(json_extract(m.data, '$.modelID'), '') FROM message m \
+        WHERE m.session_id = s.id AND json_extract(m.data, '$.role') IN ('user', 'assistant') \
+          AND NULLIF(json_extract(m.data, '$.modelID'), '') IS NOT NULL \
+        ORDER BY m.time_created ASC, m.id ASC LIMIT 1)), \
      s.time_created, s.time_updated, \
      (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id)";
 
@@ -177,7 +186,7 @@ pub fn list_sessions(path: &Path, limit: usize) -> Result<Vec<OpenCodeDbSession>
     let sql = format!(
         "SELECT {SESSION_COLUMNS} FROM session s \
          WHERE s.parent_id IS NULL AND s.time_archived IS NULL \
-         ORDER BY s.time_updated DESC LIMIT ?1"
+         ORDER BY s.time_updated DESC, s.id ASC LIMIT ?1"
     );
     let mut stmt = db.prepare(&sql)?;
     let rows = stmt
