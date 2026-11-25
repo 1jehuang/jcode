@@ -1,4 +1,13 @@
-pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
+pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "Meanwhile, work on anything that does not depend on its result. Do not start a second copy or change inputs it is still using.";
+
+/// What a backgrounded task's reply tells the model about its completion.
+pub(crate) fn background_delivery_notice(wake: bool) -> &'static str {
+    if wake {
+        "You will be notified when it completes. Do not poll or sleep while waiting."
+    } else {
+        "You will not be notified when it completes; check on it with `bg` when you need its result."
+    }
+}
 
 mod agentgrep;
 pub mod ambient;

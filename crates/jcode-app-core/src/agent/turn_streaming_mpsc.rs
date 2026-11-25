@@ -2002,20 +2002,19 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));
-
+                    let (notify, wake) = tool_handoff::handoff_delivery(&tc.name, &tc.input);
                     let bg_info = crate::background::global()
                         .adopt_with_options(
                             &tc.name,
                             tool_handoff::handoff_display_name(&tc.input),
                             &self.session.id,
-                            true,
-                            false,
+                            notify,
+                            wake,
                             tool_handle,
                         )
                         .await;
@@ -2026,10 +2025,11 @@ impl Agent {
                         "by the user".to_string()
                     };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
                         tc.name,
                         reason,
                         bg_info.task_id,
+                        crate::tool::background_delivery_notice(wake),
                         crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 

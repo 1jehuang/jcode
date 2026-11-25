@@ -87,8 +87,17 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
     );
     assert!(!output.output.contains("Use `bg"));
 
-    // The adopted handle must remain alive after the foreground call returns.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let task_id = metadata["task_id"].as_str().expect("task id");
+    let finished = crate::background::global()
+        .wait(task_id, std::time::Duration::from_secs(5), false)
+        .await
+        .expect("adopted search should complete");
+    assert!(finished.task.notify && finished.task.wake);
+    assert!(
+        output
+            .output
+            .contains(crate::tool::background_delivery_notice(true))
+    );
     let output_path = metadata["output_file"].as_str().expect("output path");
     let saved = tokio::fs::read_to_string(output_path)
         .await

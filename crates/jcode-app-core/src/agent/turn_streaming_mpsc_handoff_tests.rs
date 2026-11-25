@@ -261,3 +261,72 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn handoff_preserves_shell_delivery_and_ignores_other_tools_flags() {
+    for (name, input, expected) in [
+        ("bash", serde_json::json!({}), (true, true)),
+        (
+            "functions.shell",
+            serde_json::json!({"wake": false}),
+            (true, false),
+        ),
+        (
+            "Bash",
+            serde_json::json!({"notify": false, "wake": null}),
+            (false, false),
+        ),
+        (
+            "remote_exec",
+            serde_json::json!({"notify": false}),
+            (false, false),
+        ),
+        (
+            "communicate",
+            serde_json::json!({"notify": false, "wake": false}),
+            (true, true),
+        ),
+    ] {
+        let registry = Registry::empty();
+        registry
+            .register(
+                Registry::resolve_tool_name(name).into(),
+                Arc::new(WaitProbe),
+            )
+            .await;
+        let ctx = ToolContext {
+            session_id: format!("handoff-delivery-{name}"),
+            message_id: "message".into(),
+            tool_call_id: "delivery-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let result = execute_with_background_budget(
+            registry,
+            name.into(),
+            input,
+            ctx,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result
+                .output
+                .contains(crate::tool::background_delivery_notice(expected.1))
+        );
+        let task_id = result
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let status = crate::background::global().status(task_id).await.unwrap();
+        assert_eq!((status.notify, status.wake), expected, "{name}");
+        crate::background::global().cancel(task_id).await.unwrap();
+    }
+}

@@ -22,6 +22,16 @@ pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> 
     (!intent.is_empty()).then(|| crate::util::truncate_str(&intent, 28).to_string())
 }
 
+/// Only shell tools define notify/wake as this task's delivery flags.
+pub(super) fn handoff_delivery(name: &str, input: &serde_json::Value) -> (bool, bool) {
+    if !matches!(Registry::resolve_tool_name(name), "bash" | "remote_exec") {
+        return (true, true);
+    }
+    let flag = |key: &str| input.get(key).and_then(serde_json::Value::as_bool);
+    let notify = flag("notify").unwrap_or(true);
+    (notify, flag("wake").unwrap_or(notify))
+}
+
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
 pub(in crate::agent) async fn execute_with_background(
     registry: Registry,
@@ -43,6 +53,7 @@ async fn execute_with_background_budget(
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
+    let (notify, wake) = handoff_delivery(&name, &input);
     let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
         registry.execute(&tool_name, input, ctx).await
     })
@@ -52,11 +63,11 @@ async fn execute_with_background_budget(
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
             let info = crate::background::global()
-                .adopt_with_options(&name, display_name, &session_id, true, false, work)
+                .adopt_with_options(&name, display_name, &session_id, notify, wake, work)
                 .await;
             Ok(crate::tool::ToolOutput::new(format!(
-                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
-                name, automatic_handoff_reason(budget), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
+                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
+                name, automatic_handoff_reason(budget), info.task_id, crate::tool::background_delivery_notice(wake), crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }

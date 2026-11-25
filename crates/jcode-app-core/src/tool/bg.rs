@@ -17,10 +17,6 @@ fn default_watch_notify() -> bool {
     true
 }
 
-fn default_watch_wake() -> bool {
-    true
-}
-
 fn default_wait_return_on_progress() -> bool {
     true
 }
@@ -71,7 +67,7 @@ struct BgInput {
     /// Whether to notify on completion when using watch/delivery (default: true)
     #[serde(default)]
     notify: Option<bool>,
-    /// Whether to wake on completion when using watch/delivery (default: true)
+    /// Whether to wake on completion when using watch/delivery (default: notify)
     #[serde(default)]
     wake: Option<bool>,
     /// For watch/delivery: also arm a stall watchdog that wakes the agent after
@@ -544,7 +540,7 @@ impl Tool for BgTool {
                 },
                 "max_age_hours": { "type": "integer", "description": "cleanup: default 24." },
                 "notify": { "type": "boolean", "description": "delivery: default true." },
-                "wake": { "type": "boolean", "description": "delivery: default true." },
+                "wake": { "type": "boolean", "description": "delivery: default notify." },
                 "stall_wake_seconds": { "type": "integer", "description": "delivery: also wake after N seconds without output (min 30)." },
                 "max_wait_seconds": { "type": "integer", "description": "wait: default 60, cap 3600, 0 checks without blocking." },
                 "return_on_progress": { "type": "boolean", "description": "wait: also return on first progress event. Default true." },
@@ -715,7 +711,7 @@ impl Tool for BgTool {
                     .await?
                     .remove(0);
                 let notify = params.notify.unwrap_or_else(default_watch_notify);
-                let wake = params.wake.unwrap_or_else(default_watch_wake);
+                let wake = params.wake.unwrap_or(notify);
                 let stall_armed = match params.stall_wake_seconds {
                     Some(requested) => manager.arm_stall_watchdog(&task_id, requested).await,
                     None => None,
@@ -967,6 +963,39 @@ mod tests {
         );
         drop(future);
         assert_eq!(crate::wait_registry::current(sid), None);
+        manager.cancel(&task.task_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivery_defaults_follow_notify_without_overriding_explicit_wake() {
+        let manager = background::global();
+        let task = manager
+            .spawn("test", "bg-delivery-defaults", |_| std::future::pending())
+            .await;
+        for (flags, expected) in [
+            (json!({}), (true, true)),
+            (json!({"notify": false}), (false, false)),
+            (json!({"wake": false}), (true, false)),
+            (json!({"notify": false, "wake": true}), (true, true)),
+        ] {
+            let mut input = json!({"action": "delivery", "intent": "Set completion delivery", "task_id": task.task_id});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(flags.as_object().unwrap().clone());
+            let ctx = ToolContext {
+                session_id: "bg-delivery-defaults".into(),
+                message_id: "message".into(),
+                tool_call_id: "delivery-probe".into(),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: None,
+                execution_mode: crate::tool::ToolExecutionMode::Direct,
+            };
+            BgTool::new().execute(input, ctx).await.unwrap();
+            let status = manager.status(&task.task_id).await.unwrap();
+            assert_eq!((status.notify, status.wake), expected);
+        }
         manager.cancel(&task.task_id).await.unwrap();
     }
 
