@@ -110,7 +110,7 @@ impl Drop for InteractiveRenderState {
         set_visible_expand_edit_badge(self.badge.0, self.badge.1);
         set_visible_expand_edit_badge_rect(self.badge.2);
         set_tail_catchup_active(self.tail.0);
-        let _ = take_tail_follow_snap_request();
+        take_tail_follow_snap_request();
         if self.tail.1 {
             request_tail_follow_snap();
         }
