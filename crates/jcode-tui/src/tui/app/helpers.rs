@@ -318,9 +318,7 @@ pub(super) fn debug_response_path() -> PathBuf {
 
 #[path = "helpers_rate_limit_parse.rs"]
 mod rate_limit_parse;
-pub(super) use rate_limit_parse::{
-    MAX_TURN_HOLD_SECS, parse_quota_window_reset, parse_rate_limit_error,
-};
+pub(super) use rate_limit_parse::{MAX_TURN_HOLD_SECS, parse_rate_limit_error, rate_limit_hold};
 
 pub(super) fn is_context_limit_error(error: &str) -> bool {
     if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error) {

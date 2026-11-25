@@ -168,6 +168,19 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
     None
 }
 
+// A timestamped quota window can reopen; permanent exhaustion without one cannot.
+pub(crate) fn rate_limit_hold(error: &str, retry_after_secs: Option<u64>) -> Option<Duration> {
+    if let Some(reset) = parse_quota_window_reset(error, chrono::Utc::now()) {
+        return Some(reset);
+    }
+    if jcode_provider_core::is_definitive_usage_exhaustion(error) {
+        return None;
+    }
+    retry_after_secs
+        .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
+        .or_else(|| parse_rate_limit_error(error))
+}
+
 /// Slack added past the provider's reset instant so clock skew does not
 /// resend a moment early and hit the same exhausted window.
 const QUOTA_WINDOW_RESET_SLACK: Duration = Duration::from_secs(15);
