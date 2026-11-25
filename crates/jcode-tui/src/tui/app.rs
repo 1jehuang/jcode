@@ -1789,8 +1789,8 @@ pub struct App {
     // Every soft interrupt still shown as pending, by request id. Unlike the
     // list above this survives the ack, so recovery can name them to the server.
     sent_soft_interrupts: Vec<(u64, String)>,
-    // In-flight by-id cancel used to recover stranded soft interrupts.
-    soft_interrupt_recovery: Option<(u64, Instant)>,
+    // Correlated cancellation phase used to recover stranded soft interrupts.
+    soft_interrupt_recovery: Option<remote::queue_recovery::SoftInterruptRecovery>,
     // Whether the current remote turn should trigger autoreview after completion.
     autoreview_after_current_turn: bool,
     // Whether the current remote turn should trigger autojudge after completion.

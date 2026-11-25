@@ -784,11 +784,11 @@ fn test_remote_escape_with_pending_prompt_runs_it_after_interrupt() {
     assert!(!app.is_processing, "held until Interrupted");
     assert_eq!(app.pending_soft_interrupts, vec!["do this instead"]);
 
-    // Interrupted arrives: the prompt is recovered and sent as the next turn.
+    // Interrupted arrives: confirm cancellation before sending the next turn.
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
     assert!(app.pending_queued_dispatch);
     app.pending_queued_dispatch = false;
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    rt.block_on(process_followups_with_clear_ack(&mut app, &mut remote));
     if !app.is_processing {
         app.pending_queued_dispatch = false;
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));

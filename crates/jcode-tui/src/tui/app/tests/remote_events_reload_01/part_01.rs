@@ -1248,7 +1248,7 @@ fn test_remote_interrupted_recovers_pending_interleaves_in_order() {
     );
     assert_eq!(app.pending_soft_interrupts, vec!["acked interleave"]);
 
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    rt.block_on(process_followups_with_clear_ack(&mut app, &mut remote));
     assert!(app.pending_soft_interrupts.is_empty());
     assert!(app.pending_soft_interrupt_requests.is_empty());
     assert_eq!(
@@ -1303,7 +1303,7 @@ fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
     );
     assert_eq!(app.queued_messages(), &["queued later"]);
 
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    rt.block_on(process_followups_with_clear_ack(&mut app, &mut remote));
 
     assert!(app.pending_soft_interrupts.is_empty());
     assert!(app.pending_soft_interrupt_requests.is_empty());

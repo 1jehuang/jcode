@@ -57,7 +57,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
         vec![(88, "acked interleave".to_string())]
     );
 
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    rt.block_on(process_followups_with_clear_ack(&mut app, &mut remote));
 
     assert!(app.pending_soft_interrupts.is_empty());
     assert!(app.pending_soft_interrupt_requests.is_empty());

@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 mod input_dispatch;
 mod key_handling;
 mod latency;
-mod queue_recovery;
+pub(super) mod queue_recovery;
 mod reconnect;
 mod server_event_handlers;
 mod server_events;

@@ -867,10 +867,7 @@ fn handle_server_event_inner(
             });
             true
         }
-        ServerEvent::Ack { id } => {
-            let _ = app.acknowledge_pending_soft_interrupt(id);
-            false
-        }
+        ServerEvent::Ack { id } => app.acknowledge_pending_soft_interrupt(id),
         ServerEvent::SoftInterruptsCancelled {
             id,
             cancelled,
