@@ -1,0 +1,401 @@
+use super::*;
+use std::sync::Mutex;
+
+// Serialize env-var mutation across tests in this module: `std::env` is
+// process-global, and cargo runs tests in this crate on multiple threads.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+#[test]
+fn antigravity_endpoint_defaults_to_daily_host() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+    assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+    assert_eq!(
+        fetch_models_api_url(),
+        format!("{DEFAULT_ENDPOINT}/v1internal:fetchAvailableModels")
+    );
+    assert_eq!(
+        generate_content_api_url(),
+        format!("{DEFAULT_ENDPOINT}/v1internal:generateContent")
+    );
+}
+
+#[test]
+fn antigravity_endpoint_honors_env_override_and_trims_trailing_slash() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, " https://example.googleapis.com/ ");
+    }
+    assert_eq!(antigravity_endpoint(), "https://example.googleapis.com");
+    assert_eq!(
+        fetch_models_api_url(),
+        "https://example.googleapis.com/v1internal:fetchAvailableModels"
+    );
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+#[test]
+fn antigravity_endpoint_ignores_blank_env_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, "   ");
+    }
+    assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+#[test]
+fn antigravity_endpoint_falls_back_on_scheme_less_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, "example.googleapis.com");
+    }
+    assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+#[test]
+fn antigravity_endpoint_falls_back_on_override_with_query_string() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(
+            ENDPOINT_ENV,
+            "https://example.googleapis.com?not=a-base-url",
+        );
+    }
+    assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+#[test]
+fn antigravity_endpoint_falls_back_on_override_with_fragment() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com#frag");
+    }
+    assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+#[test]
+fn antigravity_endpoint_accepts_valid_http_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, "http://localhost:8080");
+    }
+    assert_eq!(antigravity_endpoint(), "http://localhost:8080");
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+fn sample_catalog(endpoint: Option<&str>) -> PersistedCatalog {
+    PersistedCatalog {
+        models: vec![CatalogModel {
+            id: "gemini-3-flash".to_string(),
+            display_name: None,
+            reset_time: None,
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: true,
+            remaining_fraction_milli: None,
+        }],
+        fetched_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+        default_model_id: None,
+        endpoint: endpoint.map(str::to_string),
+        cli_version: Some(ANTIGRAVITY_VERSION.to_string()),
+    }
+}
+
+#[test]
+fn catalog_with_no_recorded_endpoint_matches_any_current_endpoint() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+    assert!(catalog_matches_current_endpoint(&sample_catalog(None)));
+}
+
+#[test]
+fn catalog_stamped_with_current_endpoint_matches() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+    assert!(catalog_matches_current_endpoint(&sample_catalog(Some(
+        DEFAULT_ENDPOINT
+    ))));
+}
+
+#[test]
+fn catalog_stamped_with_stale_endpoint_does_not_match_after_override() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com");
+    }
+    // Cached from the old default before the override was set.
+    assert!(!catalog_matches_current_endpoint(&sample_catalog(Some(
+        DEFAULT_ENDPOINT
+    ))));
+    unsafe {
+        std::env::remove_var(ENDPOINT_ENV);
+    }
+}
+
+struct VersionEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl VersionEnvGuard {
+    fn acquire() -> Self {
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prev = std::env::var_os(VERSION_ENV);
+        Self { _lock: lock, prev }
+    }
+}
+
+impl Drop for VersionEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(prev) = self.prev.as_ref() {
+                std::env::set_var(VERSION_ENV, prev);
+            } else {
+                std::env::remove_var(VERSION_ENV);
+            }
+        }
+    }
+}
+
+#[test]
+fn antigravity_user_agent_normalizes_env_overrides_and_falls_back_cleanly() {
+    let _guard = VersionEnvGuard::acquire();
+    unsafe {
+        std::env::remove_var(VERSION_ENV);
+    }
+    assert!(is_valid_antigravity_semver(ANTIGRAVITY_VERSION));
+    assert_eq!(antigravity_version(), ANTIGRAVITY_VERSION);
+    assert_eq!(
+        antigravity_user_agent(),
+        format!(
+            "antigravity/hub/{ANTIGRAVITY_VERSION} {}",
+            antigravity_platform_suffix()
+        )
+    );
+
+    for blank in [
+        "",
+        "   ",
+        "\t\n",
+        "hub/",
+        "cli/",
+        "  hub/   ",
+        "antigravity/hub/",
+        "antigravity/cli/",
+        "bad\r\nheader",
+        "1",
+        "2.30.0; echo injected",
+        "2.30.0-",
+        "2..30",
+    ] {
+        unsafe {
+            std::env::set_var(VERSION_ENV, blank);
+        }
+        assert_eq!(
+            antigravity_version(),
+            ANTIGRAVITY_VERSION,
+            "invalid override {blank:?} must fall back cleanly"
+        );
+    }
+
+    for (expected_ver, raw_variants) in [
+        (
+            "2.31.0",
+            [
+                "2.31.0",
+                "  2.31.0  ",
+                "hub/2.31.0",
+                "antigravity/hub/2.31.0",
+                "  antigravity/hub/2.31.0  ",
+            ],
+        ),
+        (
+            "2.30.0",
+            [
+                "2.30.0",
+                "v2.30.0",
+                "cli/2.30.0",
+                "antigravity/cli/2.30.0",
+                "  hub/2.30.0  ",
+            ],
+        ),
+    ] {
+        let expected_ua = format!(
+            "antigravity/hub/{expected_ver} {}",
+            antigravity_platform_suffix()
+        );
+        for raw in raw_variants {
+            unsafe {
+                std::env::set_var(VERSION_ENV, raw);
+            }
+            assert_eq!(antigravity_version(), expected_ver);
+            assert_eq!(antigravity_user_agent(), expected_ua);
+        }
+    }
+}
+
+#[test]
+fn catalog_cli_version_and_legacy_non_cli_checks_invalidate_stale_caches() {
+    let _guard = VersionEnvGuard::acquire();
+    unsafe {
+        std::env::set_var(VERSION_ENV, "1.5.5");
+    }
+    let mut catalog = sample_catalog(Some(DEFAULT_ENDPOINT));
+    catalog.cli_version = Some("1.5.5".to_string());
+    assert!(catalog_matches_current_cli_version(&catalog));
+
+    catalog.cli_version = Some("1.4.2".to_string());
+    assert!(!catalog_matches_current_cli_version(&catalog));
+
+    catalog.cli_version = None;
+    assert!(!catalog_matches_current_cli_version(&catalog));
+
+    // Legacy non-CLI marker without active CLI Gemini 4 models (even if
+    // `gemini-4-hydrogen-sonar` or disabled placeholders are present) is rejected.
+    catalog.models[0].id = "gemini-3.8-flash-tiered".to_string();
+    assert!(!catalog_has_cli_models(&catalog));
+
+    let mut sonar_model = catalog.models[0].clone();
+    sonar_model.id = "gemini-4-hydrogen-sonar".to_string();
+    catalog.models.push(sonar_model);
+    assert!(!catalog_has_cli_models(&catalog));
+
+    let mut disabled_model = catalog.models[0].clone();
+    disabled_model.id = "gemini-4-carbon-disabled".to_string();
+    disabled_model.available = false;
+    catalog.models.push(disabled_model);
+    assert!(!catalog_has_cli_models(&catalog));
+
+    for active_cli_model in [
+        "gemini-4-neon-high",
+        "gemini-4-hydrogen-xhigh",
+        "gemini-4-carbon-medium",
+        "gemini-4-argon-medium",
+    ] {
+        let mut with_cli = catalog.clone();
+        let mut entry = catalog.models[0].clone();
+        entry.id = active_cli_model.to_string();
+        entry.available = true;
+        with_cli.models.push(entry);
+        assert!(
+            catalog_has_cli_models(&with_cli),
+            "expected {active_cli_model} to satisfy CLI catalog check"
+        );
+    }
+}
+
+#[test]
+fn parse_fetch_available_models_marks_disabled_models_unavailable() {
+    let response: FetchAvailableModelsResponse = serde_json::from_value(serde_json::json!({
+        "defaultAgentModelId": "gemini-4-neon-high",
+        "models": {
+            "gemini-4-neon-high": {
+                "displayName": "Gemini 4 Neon (High)",
+                "quotaInfo": { "remainingFraction": 0.96 },
+                "recommended": true
+            },
+            "gemini-4-carbon-disabled": {
+                "displayName": "Gemini 4 Carbon",
+                "disabled": true,
+                "tagTitle": "Unavailable"
+            }
+        }
+    }))
+    .expect("parse response");
+
+    let snapshot = parse_fetch_available_models_response(&response);
+    assert_eq!(
+        snapshot.default_model_id.as_deref(),
+        Some("gemini-4-neon-high")
+    );
+    let neon = snapshot
+        .models
+        .iter()
+        .find(|model| model.id == "gemini-4-neon-high")
+        .expect("neon entry");
+    assert!(neon.available);
+    let carbon_disabled = snapshot
+        .models
+        .iter()
+        .find(|model| model.id == "gemini-4-carbon-disabled")
+        .expect("disabled carbon entry");
+    assert!(!carbon_disabled.available);
+    assert_eq!(snapshot.models[0].id, "gemini-4-neon-high");
+    assert_eq!(
+        snapshot.models.last().map(|m| m.id.as_str()),
+        Some("gemini-4-carbon-disabled")
+    );
+}
+
+#[test]
+fn model_aliases_and_exclusivity_match_ascii_case_insensitively() {
+    for (input, expected) in [
+        ("NEON", "gemini-4-neon-medium"),
+        ("neon-low", "gemini-4-neon-low"),
+        ("NEON-HIGH", "gemini-4-neon-high"),
+        ("Neon-XHigh", "gemini-4-neon-xhigh"),
+        ("Gemini-4-Neon", "gemini-4-neon-medium"),
+        ("GEMINI-4-NEON-XHIGH", "gemini-4-neon-xhigh"),
+        ("HYDROGEN", "gemini-4-hydrogen-medium"),
+        ("hydrogen-low", "gemini-4-hydrogen-low"),
+        ("HYDROGEN-HIGH", "gemini-4-hydrogen-high"),
+        ("Hydrogen-XHigh", "gemini-4-hydrogen-xhigh"),
+        ("Gemini-4-Hydrogen", "gemini-4-hydrogen-medium"),
+        ("GEMINI-4-HYDROGEN-XHIGH", "gemini-4-hydrogen-xhigh"),
+        ("CARBON-LOW", "gemini-4-carbon-low"),
+        ("Carbon", "gemini-4-carbon-medium"),
+        ("Gemini-4-Argon", "gemini-4-argon-medium"),
+        ("ARGON-HIGH", "gemini-4-argon-high"),
+        ("GEMINI-3.8-FLASH", "gemini-3.8-flash-medium"),
+        ("GEMINI-3.1-PRO-HIGH", "gemini-pro-agent"),
+        ("GEMINI-4-CARBON-HIGH", "gemini-4-carbon-high"),
+        ("GPT-OSS-120B-MEDIUM", "gpt-oss-120b-medium"),
+    ] {
+        assert_eq!(remap_unsupported_model(input), expected, "input={input}");
+        assert!(is_known_model(input), "input={input}");
+        assert!(is_antigravity_exclusive_model(input), "input={input}");
+    }
+
+    for (shared, canonical) in [
+        ("CLAUDE-SONNET-4-6", "claude-sonnet-4-6"),
+        ("Gemini-3-Flash", "gemini-3-flash"),
+    ] {
+        assert_eq!(remap_unsupported_model(shared), canonical);
+        assert!(is_known_model(shared));
+        assert!(!is_antigravity_exclusive_model(shared));
+    }
+
+    assert_eq!(
+        remap_unsupported_model("Gemini-5-Xenon-Ultra"),
+        "Gemini-5-Xenon-Ultra"
+    );
+    assert!(!is_known_model("Gemini-5-Xenon-Ultra"));
+    assert!(!is_antigravity_exclusive_model("Gemini-5-Xenon-Ultra"));
+}
