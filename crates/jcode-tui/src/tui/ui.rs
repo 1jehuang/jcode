@@ -343,7 +343,7 @@ fn set_last_chat_scrollbar_visible(visible: bool) {
 /// Used as hysteresis so steady-state frames only prepare a single chat width
 /// instead of both the wide and narrow variants (which thrashes the prep caches
 /// on long transcripts during streaming).
-fn last_chat_scrollbar_visible() -> bool {
+pub(crate) fn last_chat_scrollbar_visible() -> bool {
     if secondary_render_active() {
         return false;
     }
@@ -355,11 +355,6 @@ fn last_chat_scrollbar_visible() -> bool {
     {
         LAST_CHAT_SCROLLBAR_VISIBLE.load(Ordering::Relaxed) != 0
     }
-}
-
-#[cfg(test)]
-pub(crate) fn chat_scrollbar_visible_for_tests() -> bool {
-    last_chat_scrollbar_visible()
 }
 
 /// Get the total line count from the pinned diff/content pane (set during render).
@@ -3180,7 +3175,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
         let started = Instant::now();
-        // Transcript lengths can exceed the u16 range used for terminal coordinates.
         let result = prepared.total_wrapped_lines().max(1)
             > usize::from(available_height.saturating_sub(stable_fixed_height));
         note_prep_overflow(started.elapsed());

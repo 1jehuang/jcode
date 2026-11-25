@@ -651,10 +651,7 @@ fn test_long_transcript_u16_boundaries_keep_copy_geometry() {
             app.chat_native_scrollbar = scrollbar;
             render_and_snap(&app, &mut terminal);
             assert_eq!(crate::tui::ui::copy_viewport_line_count(), Some(target));
-            assert_eq!(
-                crate::tui::ui::chat_scrollbar_visible_for_tests(),
-                scrollbar
-            );
+            assert_eq!(crate::tui::ui::last_chat_scrollbar_visible(), scrollbar);
             assert!(
                 crate::tui::ui::copy_viewport_visible_range()
                     .is_some_and(|(start, end)| start < end && end <= target)
