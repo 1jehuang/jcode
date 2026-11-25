@@ -64,3 +64,22 @@ fn issue_832_disconnected_ctrl_k_kills_draft_but_ctrl_shift_k_scrolls() {
     assert_eq!(app.cursor_pos(), "hello world ".len());
     assert!(app.scroll_offset > 0, "Ctrl+Shift+K must still scroll up");
 }
+
+#[test]
+fn remote_native_text_is_not_an_alt_word_shortcut() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = create_scroll_test_app(100, 30, 1, 20);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.set_input_for_test("hello world");
+    app.cursor_pos = app.input.len();
+    rt.block_on(app.handle_remote_key(KeyCode::Char('∫'), KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    assert_eq!(app.input(), "hello world∫");
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('b'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+    assert!(app.cursor_pos() < app.input().len());
+}
