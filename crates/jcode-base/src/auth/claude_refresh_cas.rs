@@ -1,7 +1,7 @@
 use super::*;
 
 /// `None` means no login is saved under `label` and an approved external
-/// source (Claude Code, OpenCode) holds the token, so it may still refresh.
+/// source still holds the token, so it may refresh.
 /// A saved login removed while its refresh was pending is rejected instead.
 pub(in crate::auth) fn capture_refresh_account(
     label: &str,
@@ -38,8 +38,7 @@ fn approved_external_source_holds(refresh_token: &str) -> bool {
                 &path,
             )
     }) && super::load_opencode_credentials().is_ok_and(holds);
-    let other = crate::auth::external::load_anthropic_oauth_tokens()
-        .is_some_and(|tokens| tokens.refresh_token == refresh_token);
+    let other = crate::auth::external::has_approved_anthropic_refresh_token(refresh_token);
     claude_code || native || opencode || other
 }
 
