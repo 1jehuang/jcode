@@ -303,7 +303,7 @@ where
 }
 
 pub(in crate::tui::app) mod newline;
-mod paste_guard;
+pub(crate) mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
 use paste_guard::load_dropped_image;
@@ -816,7 +816,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-
+    paste_guard::note_text_input(text);
     let onboarding_suggestions = matches!(
         app.onboarding_phase(),
         Some(crate::tui::app::onboarding_flow::OnboardingPhase::Suggestions)

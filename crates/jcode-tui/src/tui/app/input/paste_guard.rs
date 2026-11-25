@@ -10,6 +10,61 @@ use std::time::{Duration, Instant};
 
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(150);
 
+/// How soon after a character a `Ctrl+Enter` must arrive to be that character's
+/// pasted line break.
+///
+/// Measured on a real ConPTY: a terminal paste reaches this TUI as one Press/Release
+/// pair per character, and **every newline inside the paste arrives as
+/// `KeyCode::Enter` with `KeyModifiers::CONTROL`**, not as a plain Enter and not as a
+/// text character. A human's deliberate `Ctrl+Enter` never follows a character
+/// keystroke within this window, so the two are distinguishable without a timer.
+// 150ms rather than the ~60ms a quiet machine shows: a busy machine can deliver a
+// pasted newline that long after the previous character, and at 60ms that gap read as
+// a deliberate chord and split a seven-line paste into two prompts (measured: one run
+// in five under load, none in five when quiet). A human pressing Ctrl+Enter does not
+// do it within 150ms of a character keystroke.
+const PASTED_NEWLINE_MAX_GAP: Duration = Duration::from_millis(150);
+
+thread_local! {
+    static LAST_CHAR_PRESS: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Remember that a character arrived from a key press.
+pub(super) fn note_char_press() {
+    LAST_CHAR_PRESS.with(|cell| cell.set(Some(Instant::now())));
+}
+
+/// Whether a `Ctrl+Enter` right now is the line break of a paste, rather than a
+/// deliberate chord.
+pub(crate) fn ctrl_enter_is_pasted_newline() -> bool {
+    LAST_CHAR_PRESS.with(|cell| {
+        cell.get()
+            .is_some_and(|at| at.elapsed() <= PASTED_NEWLINE_MAX_GAP)
+    })
+}
+
+/// Remember a typed chunk: one character arms the pasted-newline window, anything
+/// else ends it.
+pub(super) fn note_text_input(text: &str) {
+    if text.chars().count() == 1 {
+        note_char_press();
+    } else {
+        clear_char_press();
+    }
+}
+
+/// The paste is over once a key other than a character or its newline arrives.
+pub(crate) fn clear_char_press() {
+    LAST_CHAR_PRESS.with(|cell| cell.set(None));
+}
+
+/// Test hook: pretend the last character arrived `age` ago, so window edges can be
+/// checked without sleeping and without a load-sensitive race.
+#[cfg(test)]
+pub(super) fn age_char_press_for_test(age: Duration) {
+    LAST_CHAR_PRESS.with(|cell| cell.set(Instant::now().checked_sub(age)));
+}
+
 thread_local! {
     static LAST_PASTE: Cell<Option<Instant>> = const { Cell::new(None) };
 }
@@ -88,5 +143,38 @@ pub(super) fn load_dropped_image(path: &std::path::Path) -> Option<(String, Vec<
             ));
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Duration, PASTED_NEWLINE_MAX_GAP, age_char_press_for_test, clear_char_press,
+        ctrl_enter_is_pasted_newline,
+    };
+
+    #[test]
+    fn a_plain_ctrl_enter_with_no_character_before_it_is_the_deliberate_chord() {
+        clear_char_press();
+        assert!(!ctrl_enter_is_pasted_newline());
+    }
+
+    #[test]
+    fn a_ctrl_enter_right_after_a_character_is_a_pasted_line_break() {
+        age_char_press_for_test(Duration::from_millis(5));
+        assert!(ctrl_enter_is_pasted_newline());
+    }
+
+    #[test]
+    fn a_ctrl_enter_after_the_window_is_the_deliberate_chord() {
+        age_char_press_for_test(PASTED_NEWLINE_MAX_GAP + Duration::from_millis(60));
+        assert!(!ctrl_enter_is_pasted_newline());
+    }
+
+    #[test]
+    fn clearing_the_character_press_ends_the_paste() {
+        age_char_press_for_test(Duration::from_millis(5));
+        clear_char_press();
+        assert!(!ctrl_enter_is_pasted_newline());
     }
 }

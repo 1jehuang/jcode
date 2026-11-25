@@ -654,6 +654,19 @@ pub(super) async fn handle_remote_key_internal(
         }
     }
 
+    // A terminal paste arrives as one Press/Release pair per character, and every
+    // newline inside it arrives as Ctrl+Enter (measured on a real ConPTY). That is a
+    // line break in the pasted text, so it has to be claimed before the Ctrl+Enter
+    // handlers below, which otherwise treat it as the deliberate chord and send the
+    // first line of the block on its own.
+    if code == KeyCode::Enter
+        && modifiers.contains(KeyModifiers::CONTROL)
+        && input::paste_guard::ctrl_enter_is_pasted_newline()
+    {
+        input::handle_text_input(app, "\n");
+        return Ok(());
+    }
+
     if input::is_alternate_enter(code, modifiers) && input::try_queue_command(app) {
         return Ok(());
     }
