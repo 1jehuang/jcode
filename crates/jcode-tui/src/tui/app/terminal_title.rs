@@ -68,12 +68,124 @@ impl App {
         if self.suppress_terminal_title_updates || !self.is_remote_client() {
             return;
         }
-        let state = if self.is_processing() {
+        let state = if self.herdr_core_blocked_kind().is_some() {
+            crate::tui::herdr::AgentState::Blocked
+        } else if self.is_processing() {
             crate::tui::herdr::AgentState::Working
         } else {
             crate::tui::herdr::AgentState::Idle
         };
         crate::tui::herdr::sync(state, self.active_client_session_id());
+        self.sync_herdr_core_agent_state();
+    }
+
+    /// Report state to Herdr Desktop (herdr-core) over OSC 7501. Runs on the
+    /// UI thread between frames; a no-op outside herdr-core terminals.
+    fn sync_herdr_core_agent_state(&self) {
+        if !crate::tui::herdr_core::enabled() {
+            return;
+        }
+        let state = if let Some(kind) = self.herdr_core_blocked_kind() {
+            crate::tui::herdr_core::State::Blocked(kind)
+        } else if self.is_processing() {
+            crate::tui::herdr_core::State::Working
+        } else {
+            crate::tui::herdr_core::State::Idle
+        };
+        let title = self.terminal_title.borrow().base.clone();
+        let activity = self.herdr_core_activity(state);
+        crate::tui::herdr_core::sync(state, &title, &activity);
+    }
+
+    /// One short line for herdr's `msg`: what jcode is doing or waiting on.
+    /// Deliberately free of timers and token counts, so it only changes
+    /// when the activity does and reports stay rare.
+    fn herdr_core_activity(&self, state: crate::tui::herdr_core::State) -> String {
+        use super::ProcessingStatus;
+        use crate::tui::herdr_core::{BlockedKind, State};
+        match state {
+            State::Idle => return String::new(),
+            State::Blocked(BlockedKind::Auth) => return "Waiting for login input".into(),
+            State::Blocked(BlockedKind::Permission) => return "Waiting for approval".into(),
+            State::Blocked(BlockedKind::Question) => {
+                let key = crate::tui::keybind::fallback_switch_key_label();
+                return match &self.pending_fallback_offer {
+                    Some(offer) => format!(
+                        "{} failed. Press {} to switch to {}",
+                        offer.from_label, key, offer.target_label
+                    ),
+                    None => "Waiting for you".into(),
+                };
+            }
+            State::Working => {}
+        }
+        if let Some(subagent) = self.subagent_status().filter(|s| !s.trim().is_empty()) {
+            return subagent.to_string();
+        }
+        // An in-flight tool call is the most specific answer. Remote turns
+        // may keep `status` at Streaming while a tool runs, so look at the
+        // calls themselves rather than only at `RunningTool`.
+        let running_tool = match &self.status {
+            ProcessingStatus::RunningTool(name) => Some(name.as_str()),
+            _ => self
+                .streaming_tool_calls
+                .last()
+                .map(|call| call.name.as_str()),
+        };
+        if let Some(name) = running_tool {
+            return self.herdr_core_tool_activity(name);
+        }
+        match &self.status {
+            ProcessingStatus::RunningTool(name) => self.herdr_core_tool_activity(name),
+            ProcessingStatus::Thinking(_) => "Thinking".into(),
+            ProcessingStatus::Streaming => "Writing".into(),
+            ProcessingStatus::Sending => "Sending".into(),
+            ProcessingStatus::Connecting(phase) => format!("Connecting: {phase}"),
+            ProcessingStatus::WaitingForNetwork { .. } => "Waiting for network".into(),
+            ProcessingStatus::Idle => "Working".into(),
+        }
+    }
+
+    /// `bash: Run the tests`, `Running batch: 2/5 done`, or `Running grep`.
+    fn herdr_core_tool_activity(&self, name: &str) -> String {
+        if name == "batch"
+            && let Some(progress) = self.batch_progress.as_ref()
+        {
+            return format!(
+                "Running batch: {}/{} done",
+                progress.completed, progress.total
+            );
+        }
+        let detail = self
+            .streaming_tool_calls
+            .iter()
+            .rev()
+            .find(|call| call.name == name)
+            .map(crate::tui::ui::tools_ui::get_tool_activity_detail)
+            .filter(|detail| !detail.trim().is_empty());
+        match detail {
+            Some(detail) => format!("{name}: {detail}"),
+            None => format!("Running {name}"),
+        }
+    }
+
+    /// Whether jcode is stopped until the user acts, and why. A pending login
+    /// waits for a pasted code or key; a fallback offer waits for the switch
+    /// key after a failed turn. The automatic failover countdown proceeds on
+    /// its own, so it is not blocked.
+    fn herdr_core_blocked_kind(&self) -> Option<crate::tui::herdr_core::BlockedKind> {
+        use crate::tui::herdr_core::BlockedKind;
+        if self
+            .pending_login
+            .as_ref()
+            .is_some_and(|login| !matches!(login, super::PendingLogin::Exchanging { .. }))
+        {
+            return Some(BlockedKind::Auth);
+        }
+        if self.pending_fallback_offer.is_some() && !self.is_processing() {
+            return Some(BlockedKind::Question);
+        }
+        None
     }
 
     pub(super) fn set_terminal_title_base(&self, session_id: &str, base: String) {
