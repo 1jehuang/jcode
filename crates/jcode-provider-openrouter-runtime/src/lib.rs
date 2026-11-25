@@ -973,21 +973,6 @@ impl OpenRouterProvider {
         self.model_reasoning_config().and_then(|config| config.0)
     }
 
-    fn model_config(&self, model: &str) -> Option<&jcode_base::config::NamedProviderModelConfig> {
-        self.profile_id.as_ref()?;
-        self.static_model_config.get(
-            &self
-                .strip_session_profile_prefix(model)
-                .trim()
-                .to_ascii_lowercase(),
-        )
-    }
-
-    fn model_supports_chat(&self, model: &str) -> bool {
-        self.model_config(model)
-            .is_none_or(jcode_base::provider::named_provider_model_supports_chat)
-    }
-
     fn configured_effort_for_model(&self) -> Option<String> {
         self.model_reasoning_config()
             .and_then(|config| config.1.clone())
@@ -1856,17 +1841,6 @@ impl OpenRouterProvider {
             .last_attempt_unix
             .map(|last| now.saturating_sub(last) >= MODEL_CATALOG_REFRESH_RETRY_SECS)
             .unwrap_or(true)
-    }
-
-    pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
-        if self.profile_id.is_none() {
-            return models;
-        }
-
-        models
-            .into_iter()
-            .filter(|model| self.model_supports_chat(model))
-            .collect()
     }
 
     fn model_disk_cache_source_matches(

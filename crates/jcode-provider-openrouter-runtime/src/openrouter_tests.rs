@@ -2195,12 +2195,9 @@ fn named_openai_compatible_model_context_window_overrides_default() {
         api_key: Some("test".to_string()),
         default_model: Some("custom-long-context".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
-            supports_chat: None,
             id: "custom-long-context".to_string(),
             context_window: Some(512_000),
-            reasoning: None,
-            reasoning_effort: None,
-            input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -2225,12 +2222,9 @@ fn named_profile_context_window_survives_provider_qualified_model() {
         auth: jcode_base::config::NamedProviderAuth::None,
         default_model: Some("qwen3.6-35b-a2000-128k".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
-            supports_chat: None,
             id: "qwen3.6-35b-a2000-128k".to_string(),
             context_window: Some(131_072),
-            reasoning: None,
-            reasoning_effort: None,
-            input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };

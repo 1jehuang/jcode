@@ -200,6 +200,7 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
 mod model_ranking;
 #[cfg(test)]
 use model_ranking::openai_compatible_model_quality_tier;
+pub use model_ranking::openai_compatible_profile_model_supports_chat;
 use model_ranking::rank_newest_released_model;
 fn apply_profile_key_based_endpoint_overrides(
     profile: OpenAiCompatibleProfile,
@@ -638,25 +639,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     }
 
     models
-}
-
-pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
-    let config = crate::config::config();
-    let profile = config.providers.get(profile_id).or_else(|| {
-        config
-            .providers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(profile_id))
-            .map(|(_, profile)| profile)
-    });
-    profile
-        .and_then(|profile| {
-            profile
-                .models
-                .iter()
-                .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))
-        })
-        .is_none_or(crate::provider::named_provider_model_supports_chat)
 }
 
 pub fn openai_compatible_profile_static_context_limits(

@@ -1,6 +1,32 @@
 use super::*;
 
 impl OpenRouterProvider {
+    fn model_config(&self, model: &str) -> Option<&jcode_base::config::NamedProviderModelConfig> {
+        self.profile_id.as_ref()?;
+        self.static_model_config.get(
+            &self
+                .strip_session_profile_prefix(model)
+                .trim()
+                .to_ascii_lowercase(),
+        )
+    }
+
+    pub(super) fn model_supports_chat(&self, model: &str) -> bool {
+        self.model_config(model)
+            .is_none_or(jcode_base::provider::named_provider_model_supports_chat)
+    }
+
+    pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
+        if self.profile_id.is_none() {
+            return models;
+        }
+
+        models
+            .into_iter()
+            .filter(|model| self.model_supports_chat(model))
+            .collect()
+    }
+
     pub fn new_openai_compatible_profile_runtime(
         profile: jcode_base::provider_catalog::OpenAiCompatibleProfile,
     ) -> Result<Self> {
