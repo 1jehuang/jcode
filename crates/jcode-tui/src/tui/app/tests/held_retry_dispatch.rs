@@ -138,8 +138,17 @@ fn held_retry_failed_write_at_limit_restores_draft_and_images() {
     assert!(!app.is_processing);
     assert!(app.rate_limit_reset.is_none());
     assert!(app.rate_limit_pending_message.is_none());
-    assert_eq!(app.input, original.content);
+    assert_eq!(app.input, format!("{} [image 1]", original.content));
+    assert_eq!(app.input_without_owned_image_markers(), original.content);
     assert_eq!(app.pending_images, original.images);
+    // This wire payload's marker-looking text is literal; only the fresh span owns the image.
+    let literal_start = app.input.find("[image 1]").unwrap();
+    app.remove_input_range(literal_start, literal_start + "[image 1]".len());
+    assert_eq!(app.pending_images, original.images);
+    app.cursor_pos = app.input.len();
+    app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+        .unwrap();
+    assert!(app.pending_images.is_empty());
     assert!(!app.auto_poke_incomplete_todos);
     assert!(
         app.display_messages()

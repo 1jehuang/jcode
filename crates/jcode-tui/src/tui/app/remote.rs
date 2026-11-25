@@ -1247,15 +1247,7 @@ fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
         app.restore_failover_payload(payload);
     }
     if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
-        app.restore_failover_payload(super::FallbackResendPayload {
-            content: prepared.expanded,
-            images: prepared.images,
-            is_system: false,
-            system_reminder: None,
-            auto_retry: false,
-            retry_attempts: 0,
-            raw_input: Some(prepared.raw_input),
-        });
+        input_dispatch::restore_undelivered_prepared_input(app, prepared);
     }
 }
 

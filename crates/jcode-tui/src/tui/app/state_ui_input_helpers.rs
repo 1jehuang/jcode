@@ -1413,8 +1413,10 @@ impl App {
         }
 
         self.remember_input_undo_state();
-        self.input = cmd;
-        self.cursor_pos = self.input.len();
+        let (start, end) =
+            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
+                .unwrap_or((0, self.input.len()));
+        self.replace_input_range(start, end, &cmd);
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
         self.sync_model_picker_preview_from_input();
@@ -1514,8 +1516,7 @@ impl App {
                 let next_index = (idx + 1) % base_suggestions.len();
                 let (cmd, _) = &base_suggestions[next_index];
                 self.remember_input_undo_state();
-                self.input = cmd.clone();
-                self.cursor_pos = self.input.len();
+                self.replace_input_range(0, self.input.len(), cmd);
                 self.tab_completion_state = Some((base.clone(), next_index));
                 return true;
             }
@@ -1533,8 +1534,7 @@ impl App {
         if current_suggestions.len() == 1 && current_suggestions[0].0 == self.input {
             if !self.input.ends_with(' ') && Self::command_accepts_args(&self.input) {
                 self.remember_input_undo_state();
-                self.input.push(' ');
-                self.cursor_pos = self.input.len();
+                self.replace_input_range(self.input.len(), self.input.len(), " ");
                 return true;
             }
             self.tab_completion_state = None;
@@ -1548,12 +1548,11 @@ impl App {
         let (cmd, _) = &current_suggestions[selected];
         let base = self.input.clone();
         self.remember_input_undo_state();
-        self.input = cmd.clone();
-        // If unique match, add trailing space for arg-accepting commands
-        if current_suggestions.len() == 1 && Self::command_accepts_args(&self.input) {
-            self.input.push(' ');
+        let mut replacement = cmd.clone();
+        if current_suggestions.len() == 1 && Self::command_accepts_args(cmd) {
+            replacement.push(' ');
         }
-        self.cursor_pos = self.input.len();
+        self.replace_input_range(0, self.input.len(), &replacement);
         self.tab_completion_state = Some((base, selected));
         self.command_suggestion_selected = 0;
         true
@@ -1578,8 +1577,7 @@ impl App {
                 let next_index = (idx + 1) % base_suggestions.len();
                 let (command, _) = &base_suggestions[next_index];
                 self.remember_input_undo_state();
-                self.input.replace_range(range.0..range.1, command.as_str());
-                self.cursor_pos = range.0 + command.len();
+                self.replace_input_range(range.0, range.1, command);
                 self.tab_completion_state = Some((base.clone(), next_index));
                 return true;
             }
@@ -1593,9 +1591,7 @@ impl App {
         if current_suggestions.len() == 1 && current_suggestions[0].0 == current_token {
             if Self::command_accepts_args(&current_token) {
                 self.remember_input_undo_state();
-                self.input
-                    .replace_range(range.0..range.1, &format!("{} ", current_token));
-                self.cursor_pos = range.1 + 1;
+                self.replace_input_range(range.0, range.1, &format!("{} ", current_token));
                 return true;
             }
             self.tab_completion_state = None;
@@ -1612,9 +1608,7 @@ impl App {
             replacement.push(' ');
         }
         self.remember_input_undo_state();
-        self.input
-            .replace_range(range.0..range.1, replacement.as_str());
-        self.cursor_pos = range.0 + replacement.len();
+        self.replace_input_range(range.0, range.1, &replacement);
         self.tab_completion_state = Some((base, selected));
         self.command_suggestion_selected = 0;
         true

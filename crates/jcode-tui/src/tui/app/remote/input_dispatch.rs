@@ -179,6 +179,28 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.cursor_pos = app.input.len();
 }
 
+pub(in crate::tui::app) fn restore_undelivered_prepared_input(
+    app: &mut App,
+    prepared: input::PreparedInput,
+) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        restore_prepared_remote_input(app, prepared);
+    } else {
+        app.restore_failover_payload(super::super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            raw_input: Some(input::expand_paste_placeholders_with(
+                &prepared.pasted_contents,
+                &prepared.raw_input,
+            )),
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+        });
+    }
+}
+
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
     if !app.submit_input_on_startup || !app.pending_images.is_empty() || app.input.trim().is_empty()
     {
@@ -296,22 +318,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
             app.queued_messages.len()
         ));
         app.remove_display_message(echo_index);
-        if app.input.is_empty() && app.pending_images.is_empty() {
-            restore_prepared_remote_input(app, prepared);
-        } else {
-            app.restore_failover_payload(super::super::FallbackResendPayload {
-                content: prepared.expanded,
-                images: prepared.images,
-                raw_input: Some(input::expand_paste_placeholders_with(
-                    &prepared.pasted_contents,
-                    &prepared.raw_input,
-                )),
-                is_system: false,
-                system_reminder: None,
-                auto_retry: false,
-                retry_attempts: 0,
-            });
-        }
+        restore_undelivered_prepared_input(app, prepared);
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to send message: {error}"
         )));

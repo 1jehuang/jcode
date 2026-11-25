@@ -379,3 +379,88 @@ fn image_provenance_cut_clears_full_draft_and_undo_restores_it() {
         vec!["one\ntwo\nthree\nfour\nfive\nsix"]
     );
 }
+
+#[test]
+fn provenance_review_tab_completion_keeps_one_owned_image() {
+    for prefix in ["", "界🦀 "] {
+        for selected in [false, true] {
+            let mut app = create_test_app();
+            super::input::insert_input_text(&mut app, &format!("{prefix}/he "));
+            provenance_attach_image(&mut app);
+            let original = app.input.clone();
+            app.cursor_pos = prefix.len() + 3;
+            if selected {
+                assert!(app.accept_selected_command_suggestion());
+            } else {
+                app.handle_key(KeyCode::Tab, KeyModifiers::NONE).unwrap();
+                app.handle_key(KeyCode::Tab, KeyModifiers::NONE).unwrap();
+            }
+            app.ensure_input_image_markers();
+            assert_eq!(app.input.matches("[image 1]").count(), 1);
+            app.cursor_pos = app.input.len();
+            app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+                .unwrap();
+            assert!(app.pending_images.is_empty());
+            app.undo_input_change();
+            assert_eq!(app.pending_images.len(), 1);
+            app.undo_input_change();
+            if !selected {
+                app.undo_input_change();
+            }
+            assert_eq!(app.input, original);
+        }
+    }
+}
+
+#[test]
+fn provenance_review_recalled_image_prompts_keep_shell_and_slash_intent() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for text in ["!echo hello", "/help", "/model"] {
+        let mut app = create_test_app();
+        provenance_attach_image(&mut app);
+        super::input::insert_input_text(&mut app, text);
+        super::input::queue_message(&mut app);
+        assert!(super::input::retrieve_pending_message_for_edit(&mut app));
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert!(super::input::extract_input_shell_command(prepared.routing_input()).is_none());
+        assert!(!prepared.routing_input().trim_start().starts_with('/'));
+        assert_eq!(prepared.expanded, text);
+        app.is_remote = true;
+        app.runtime_mode = super::AppRuntimeMode::RemoteClient;
+        rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            super::remote::input_dispatch::restore_prepared_remote_input(&mut app, prepared);
+            super::remote::handle_remote_key(
+                &mut app,
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                &mut remote,
+            )
+            .await
+            .unwrap();
+        });
+        let sent = app.rate_limit_pending_message.as_ref().unwrap();
+        assert_eq!(sent.content, text);
+        assert_eq!(sent.images.len(), 1);
+    }
+}
+
+#[test]
+fn provenance_review_queue_reload_preserves_routing_and_literal_markers() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        provenance_attach_image(&mut app);
+        super::input::insert_input_text(&mut app, "!echo [image 1]");
+        super::input::queue_message(&mut app);
+        app.save_input_for_reload("image-queue-routing");
+        let saved = App::restore_input_for_reload("image-queue-routing").unwrap();
+        let mut next = create_test_app();
+        next.apply_restored_reload_input(saved);
+        assert!(super::input::retrieve_pending_message_for_edit(&mut next));
+        let prepared = super::input::take_prepared_input(&mut next);
+        assert!(super::input::extract_input_shell_command(prepared.routing_input()).is_none());
+        assert_eq!(prepared.expanded, "!echo [image 1]");
+        assert_eq!(prepared.images.len(), 1);
+    });
+}

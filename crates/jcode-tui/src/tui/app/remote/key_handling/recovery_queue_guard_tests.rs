@@ -35,7 +35,11 @@ fn image_queue_recall_preserves_distinct_markers_and_payloads() {
     assert!(input::retrieve_pending_message_for_edit(&mut app));
     assert_eq!(
         app.input,
-        "inspect [image 1]\n\ninspect [image 1] [image 1] [image 2]"
+        "[image 1] [image 2]inspect [image 1]\n\ninspect [image 1]"
+    );
+    assert_eq!(
+        app.input_without_owned_image_markers(),
+        "inspect [image 1]\n\ninspect [image 1]"
     );
     assert_eq!(app.pending_images[0].1, "first");
     assert_eq!(app.pending_images[1].1, "second");
