@@ -1,16 +1,4 @@
-pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "Meanwhile, work on anything that does not depend on its result. Do not start a second copy or change inputs it is still using.";
-
-/// What a backgrounded task's reply tells the model about its completion.
-pub(crate) fn background_delivery_notice(wake: bool) -> &'static str {
-    if wake {
-        "You will be notified when it completes. Do not poll or sleep while waiting."
-    } else {
-        "You will not be notified when it completes; check on it with `bg` when you need its result."
-    }
-}
-
 mod agentgrep;
-pub(crate) mod handoff;
 pub mod ambient;
 mod apply_patch;
 mod bash;
@@ -36,6 +24,8 @@ mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
 mod gmail;
+pub(crate) mod handoff;
+pub(crate) use handoff::{BACKGROUND_WAIT_GUIDANCE, background_delivery_notice};
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 pub mod applet;
 #[allow(dead_code)]
