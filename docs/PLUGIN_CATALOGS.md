@@ -30,3 +30,11 @@ These commands manage catalog records and files. Plugin skill, command, hook, MC
 Runtime integrations use `plugin::data_path` for pure discovery and `plugin::prepare_data_dir` immediately before execution. Persistent data lives at `JCODE_HOME/plugin-data/<encoded-name-marketplace>`, separate from immutable cached code and external-provider bundles. The qualified plugin identity owns this directory across versions, workspaces and installation scopes. Updates and uninstall preserve it. Identity collisions, existing unowned contents and symlinked data paths are refused. On Unix, data directories are private to the current user and newly created identity markers use mode `0600`.
 
 Encoded identities up to 255 bytes retain their existing directory names. Longer identities use `sha256.<digest>` of the full qualified identity, while the ownership marker still records and validates the complete identity. The dotted namespace cannot overlap the ordinary encoding.
+
+Enabled plugins can expose language servers through `.lsp.json` or the manifest's `lspServers` object, config-file path or array. For example:
+
+```json
+{"lspServers":{"rust":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"}}}}
+```
+
+The `lsp` tool supports hover, definition, references, document symbols and diagnostics for files inside the current workspace. Positions use one-based lines and UTF-16 columns. Select `marketplace/plugin:server` when multiple servers match. Configuration supports plugin/workspace variables and host-owned `CLAUDE_PLUGIN_DATA`; discovering a server does not create its data directory. Calls use bounded stdio messages and a separate server process per invocation. Unix cancellation also terminates the inherited process group. Windows currently terminates only the direct server process; native Windows execution has not been validated.
