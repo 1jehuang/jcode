@@ -73,6 +73,8 @@ mod inline_interactive_ui;
 mod inline_ui;
 #[path = "ui_input.rs"]
 pub(crate) mod input_ui;
+#[path = "ui_interactive_state.rs"]
+pub(crate) mod interactive_state;
 #[path = "ui_memory_estimates.rs"]
 mod memory_estimates;
 #[path = "ui_memory.rs"]

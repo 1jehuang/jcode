@@ -615,3 +615,66 @@ fn test_input_composer_drag_then_release_copies_via_full_mouse_path() {
         app.status_notice()
     );
 }
+
+#[test]
+fn test_offscreen_benchmark_preserves_live_copy_geometry_without_redraw() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.input = "live composer".to_string();
+    app.cursor_pos = app.input.len();
+    app.display_messages = vec![DisplayMessage::assistant("live transcript\n".repeat(80))];
+    app.bump_display_messages_version();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let layout = format!("{:?}", crate::tui::ui::last_layout_snapshot());
+    let frame = crate::tui::ui::last_chat_frame().unwrap();
+    let lines = crate::tui::ui::copy_viewport_line_count();
+    let scroll = (
+        crate::tui::ui::last_max_scroll(),
+        crate::tui::ui::last_total_wrapped_lines(),
+    );
+    let points = input_pane_screen_points(80, 24);
+    let start = points.iter().find(|(_, _, p)| p.column == 0).unwrap();
+    let end = points.iter().max_by_key(|(_, _, p)| p.column).unwrap();
+
+    let result = app.handle_debug_command(
+        r#"side-panel-latency:{"iterations":8,"warmup_iterations":2,"include_samples":false}"#,
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&result).unwrap_or_else(|e| panic!("benchmark JSON: {e}: {result}"));
+    assert_eq!(value["ok"], true);
+    // No live draw here: queued input must still use the original terminal.
+    assert_eq!(
+        format!("{:?}", crate::tui::ui::last_layout_snapshot()),
+        layout
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        &frame,
+        &crate::tui::ui::last_chat_frame().unwrap()
+    ));
+    assert_eq!(crate::tui::ui::copy_viewport_line_count(), lines);
+    assert_eq!(
+        (
+            crate::tui::ui::last_max_scroll(),
+            crate::tui::ui::last_total_wrapped_lines()
+        ),
+        scroll
+    );
+    assert_eq!(
+        drag_copy(&mut app, (start.0, start.1), (end.0, end.1)),
+        "live composer"
+    );
+
+    let recovered = std::panic::catch_unwind(|| {
+        let _saved = crate::tui::ui::interactive_state::preserve_interactive_render_state();
+        crate::tui::ui::clear_copy_viewport_snapshot();
+        panic!("offscreen diagnostic failed");
+    });
+    assert!(recovered.is_err());
+    assert_eq!(crate::tui::ui::copy_viewport_line_count(), lines);
+    assert_eq!(
+        crate::tui::ui::input_pane_line_text(0).as_deref(),
+        Some("live composer")
+    );
+}
