@@ -22,6 +22,49 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+#[test]
+fn daily_prune_waits_for_manifest_repair() {
+    with_temp_jcode_home(|| {
+        let dir = builds_dir().unwrap();
+        let versions = dir.join("versions");
+        let mut directories = std::fs::OpenOptions::new();
+        directories.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            directories.custom_flags(0x02000000); // FILE_FLAG_BACKUP_SEMANTICS opens directories.
+        }
+        for (name, age) in [("rollback", 3), ("recent", 2)] {
+            let path = versions.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            directories
+                .open(&path)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(age * 86400),
+                )
+                .unwrap();
+        }
+        let previous = std::env::var_os(version_gc::KEEP_VERSIONS_ENV);
+        jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, "1");
+        let manifest = manifest_path().unwrap();
+        std::fs::write(&manifest, b"invalid manifest").unwrap();
+        version_gc::prune_old_versions();
+        let preserved_unknown_target = versions.join("rollback").exists();
+        let failed_pass_was_not_stamped = !dir.join("versions-prune.stamp").exists();
+        std::fs::write(&manifest, b"{}").unwrap();
+        version_gc::prune_old_versions();
+        match previous {
+            Some(value) => jcode_core::env::set_var(version_gc::KEEP_VERSIONS_ENV, value),
+            None => jcode_core::env::remove_var(version_gc::KEEP_VERSIONS_ENV),
+        }
+        assert!(preserved_unknown_target);
+        assert!(failed_pass_was_not_stamped);
+        assert!(dir.join("versions-prune.stamp").exists());
+        assert!(!versions.join("rollback").exists());
+    });
+}
+
 fn create_git_repo_fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(temp.path().join(".git")).expect("create .git dir");

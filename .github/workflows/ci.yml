@@ -216,6 +216,11 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
+      - name: Run build manifest retention regression
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo test --locked --target ${{ matrix.target }} -p jcode-build-support --lib daily_prune_waits_for_manifest_repair
+
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |

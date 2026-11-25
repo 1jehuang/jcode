@@ -43,7 +43,7 @@ fn keep_recent_from_env() -> Option<usize> {
 
 /// Versions that must never be removed: active channels, the build manifest's
 /// canary/stable/pending-activation rollback targets.
-fn protected_versions() -> HashSet<String> {
+fn protected_versions() -> Result<HashSet<String>> {
     let mut protected = HashSet::new();
     for version in [
         read_current_version(),
@@ -63,16 +63,15 @@ fn protected_versions() -> HashSet<String> {
             }
         }
     }
-    if let Ok(manifest) = BuildManifest::load() {
-        protected.extend(manifest.stable.clone());
-        protected.extend(manifest.canary.clone());
-        if let Some(pending) = manifest.pending_activation.as_ref() {
-            protected.insert(pending.new_version.clone());
-            protected.extend(pending.previous_current_version.clone());
-            protected.extend(pending.previous_shared_server_version.clone());
-        }
+    let manifest = BuildManifest::load()?;
+    protected.extend(manifest.stable.clone());
+    protected.extend(manifest.canary.clone());
+    if let Some(pending) = manifest.pending_activation.as_ref() {
+        protected.insert(pending.new_version.clone());
+        protected.extend(pending.previous_current_version.clone());
+        protected.extend(pending.previous_shared_server_version.clone());
     }
-    protected
+    Ok(protected)
 }
 
 /// Resolve `<channel>/jcode -> versions/<v>/jcode` to `<v>`.
@@ -131,7 +130,9 @@ pub fn prune_old_versions() {
     if !prune_due(&dir) {
         return;
     }
-    let mut protected = protected_versions();
+    let Ok(mut protected) = protected_versions() else {
+        return;
+    };
     protected.extend(running_versions());
     let _ = prune_old_versions_in(
         &dir.join("versions"),
