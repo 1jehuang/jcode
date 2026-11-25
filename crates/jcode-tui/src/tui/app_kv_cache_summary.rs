@@ -22,7 +22,7 @@ impl App {
         let session_optimal_read_pct = if self.token_accounting.total_cache_optimal_input_tokens > 0
         {
             Some(ratio_pct(
-                self.token_accounting.total_cache_read_tokens,
+                self.token_accounting.total_cache_optimal_read_tokens,
                 self.token_accounting.total_cache_optimal_input_tokens,
             ))
         } else {

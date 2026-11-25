@@ -1138,6 +1138,7 @@ fn format_cache_stats(app: &App) -> String {
     let read = remote_cache_read.saturating_add(app.token_accounting.total_cache_read_tokens);
     let write = remote_cache_write.saturating_add(app.token_accounting.total_cache_creation_tokens);
     let optimal = app.token_accounting.total_cache_optimal_input_tokens;
+    let yield_read = app.token_accounting.total_cache_optimal_read_tokens;
     // Preserve per-request accounting across providers. Legacy history without an
     // explicit denominator remains unknown rather than guessing from aggregate writes.
     let effective_reported = remote_usage
@@ -1151,8 +1152,7 @@ fn format_cache_stats(app: &App) -> String {
     };
     let read_pct = format_pct(read, effective_reported);
     let write_pct = format_pct(write, effective_reported);
-    let optimal_pct =
-        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
+    let optimal_pct = (optimal > 0).then(|| cache_ratio_pct(yield_read, optimal));
     let cache_totals_source = match (
         remote_usage.is_some(),
         app.token_accounting.total_cache_prompt_tokens > 0,
