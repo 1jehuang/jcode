@@ -314,7 +314,7 @@ pub fn touch_cloud_activity_marker() {
         return;
     }
     if let Some(path) = busy_marker()
-        && let Err(error) = std::fs::write(&path, b"")
+        && let Err(error) = jcode_storage::touch_stamp(&path)
     {
         crate::logging::warn(&format!("cloud activity marker update failed: {error}"));
     }

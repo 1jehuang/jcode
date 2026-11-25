@@ -797,6 +797,13 @@ mod windows_hardening_tests {
     }
 }
 
+/// Touch a throttle/activity stamp file with a non-empty payload so its mtime
+/// advances reliably on all filesystems (including Windows, where writing `b""`
+/// truncates without issuing a `WriteFile` call).
+pub fn touch_stamp(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, b"1")
+}
+
 #[cfg(test)]
 mod env_file_tests {
     use super::*;
@@ -817,6 +824,35 @@ mod env_file_tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
+        );
+    }
+
+    #[test]
+    fn touch_stamp_writes_non_empty_payload_and_updates_mtime() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let marker = temp.path().join("throttle.stamp");
+
+        touch_stamp(&marker).expect("touch stamp");
+        let data = std::fs::read(&marker).expect("read stamp");
+        assert!(!data.is_empty(), "stamp payload must be non-empty");
+
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .and_then(|file| file.set_modified(past))
+            .expect("backdate stamp");
+        let old_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("old mtime");
+
+        touch_stamp(&marker).expect("re-touch stamp");
+        let new_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("new mtime");
+        assert!(
+            new_mtime > old_mtime,
+            "expected mtime to advance after touch_stamp (old={old_mtime:?}, new={new_mtime:?})"
         );
     }
 }
