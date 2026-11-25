@@ -1508,7 +1508,7 @@ impl App {
         }
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
+            && crate::tui::ui::viewport::pinned_todo_card_area().is_some_and(|area| {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })
         {

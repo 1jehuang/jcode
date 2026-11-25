@@ -1,8 +1,9 @@
 use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
 mod todo_margins;
-pub(crate) use todo_margins::compute_visible_margins;
-pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
+pub(crate) use todo_margins::{
+    compute_visible_margins, pinned_todo_band_lines_for_payload, pinned_todo_card_area,
+};
 
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
@@ -355,23 +356,13 @@ pub(super) fn draw_messages(
         0u16
     };
     let pinned_todo_lines = pinned_todo_band.len() as u16;
-    publish_pinned_todo_scroll((pinned_todo_band_rows > 0).then(|| Rect {
-        x: text_render_area.x,
-        y: render_area.y.saturating_add(prompt_preview_lines),
-        width: text_render_area.width,
-        height: pinned_todo_band_rows,
-    }));
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
-        Rect {
-            x: text_render_area.x,
-            y: render_area
-                .y
-                .saturating_add(prompt_preview_lines)
-                .saturating_add(line as u16),
-            width: text_render_area.width,
-            height: 1,
-        }
-    }));
+    todo_margins::publish_pinned_todo_geometry(
+        text_render_area,
+        render_area,
+        prompt_preview_lines,
+        pinned_todo_band_rows,
+        pinned_todo_more_line,
+    );
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;

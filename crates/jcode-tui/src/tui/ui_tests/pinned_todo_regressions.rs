@@ -414,3 +414,42 @@ fn tiny_panes_draw_without_a_recovered_panic() {
         }
     });
 }
+
+#[test]
+fn pinned_todo_toggle_target_excludes_live_status_and_composer() {
+    with_pinned_todos_config(|| {
+        let state = TestState {
+            pinned_todos_payload: Some(
+                serde_json::json!({"todos": (0..24).map(|i| {
+                serde_json::json!({"id": i.to_string(), "content": format!("Todo {i}"),
+                    "status": "pending", "priority": "high"})
+            }).collect::<Vec<_>>()})
+                .to_string(),
+            ),
+            justrust_status: Some(crate::tui::justrust_status::StatusRow {
+                text: "justrust [remote/hosted] active test".into(),
+                tone: crate::tui::justrust_status::Tone::Active,
+                own_session: false,
+            }),
+            ..Default::default()
+        };
+        for height in [14, 30] {
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| crate::tui::ui::draw(frame, &state))
+                .unwrap();
+            let text = terminal_text(&terminal);
+            let card = viewport::pinned_todo_card_area().expect("expandable todo card");
+            let status_y = text
+                .lines()
+                .position(|line| line.contains("justrust [remote/hosted]"))
+                .expect("status row");
+            assert!(card.bottom() <= status_y as u16, "{card:?}\n{text}");
+            let layout = last_layout_snapshot().unwrap();
+            assert_eq!(card.intersection(layout.messages_area), card);
+            if let Some(input) = layout.input_area {
+                assert!(card.intersection(input).is_empty());
+            }
+        }
+    });
+}
