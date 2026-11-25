@@ -44,9 +44,11 @@ fn response() -> OAuthTokens {
 }
 
 fn snapshot(account: &OpenAiAccount) -> RefreshAccount {
+    let (workspace, email) = identity_claims(account);
     RefreshAccount {
         refresh_token: account.refresh_token.clone(),
-        identity: account_identity(account),
+        workspace,
+        email,
     }
 }
 
@@ -96,7 +98,7 @@ fn refresh_cas_rename_preserves_metadata_id_token_and_default() {
 }
 
 #[test]
-fn refresh_cas_without_claims_uses_original_refresh_fingerprint() {
+fn refresh_cas_without_claims_follows_original_refresh_generation() {
     let mut original = account();
     original.account_id = None;
     original.email = None;
@@ -213,4 +215,51 @@ fn refresh_cas_sidecar_lock_coordinates_cross_process_replacement() {
         auth.openai_accounts[0].account_id.as_deref(),
         Some("workspace-replacement")
     );
+}
+
+#[test]
+fn refresh_cas_accepts_profile_enrichment_but_rejects_conflicting_known_claims() {
+    let mut original = account();
+    original.account_id = None;
+    original.email = None;
+    original.id_token = None;
+    let expected = snapshot(&original);
+    original.account_id = Some("newly-discovered-workspace".into());
+    original.email = Some("hydrated@example.invalid".into());
+    let mut auth = JcodeOpenAiAuthFile {
+        openai_accounts: vec![original],
+        active_openai_account: None,
+    };
+    apply_refresh(&mut auth, &expected, &response()).unwrap();
+    assert_eq!(
+        auth.openai_accounts[0].email.as_deref(),
+        Some("hydrated@example.invalid")
+    );
+    assert_eq!(
+        auth.openai_accounts[0].account_id.as_deref(),
+        Some("newly-discovered-workspace")
+    );
+
+    let mut original = account();
+    original.account_id = None;
+    original.id_token = None;
+    let expected = snapshot(&original);
+    original.account_id = Some("newly-discovered-workspace".into());
+    auth.openai_accounts = vec![original];
+    apply_refresh(&mut auth, &expected, &response()).unwrap();
+
+    let expected = snapshot(&account());
+    auth.openai_accounts = vec![account()];
+    auth.openai_accounts[0].email = Some("updated-address@example.invalid".into());
+    apply_refresh(&mut auth, &expected, &response()).unwrap();
+
+    let mut original = account();
+    original.account_id = None;
+    original.id_token = None;
+    let expected = snapshot(&original);
+    original.email = Some("conflicting@example.invalid".into());
+    auth.openai_accounts = vec![original];
+    let before = serde_json::to_vec(&auth).unwrap();
+    assert!(apply_refresh(&mut auth, &expected, &response()).is_err());
+    assert_eq!(serde_json::to_vec(&auth).unwrap(), before);
 }

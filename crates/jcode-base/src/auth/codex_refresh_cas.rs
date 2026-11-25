@@ -8,7 +8,8 @@ pub(super) fn lock_auth_file() -> Result<crate::auth::account_store::StoreLockGu
 // Deliberately not Debug: this snapshot contains the original refresh secret.
 pub(in crate::auth) struct RefreshAccount {
     refresh_token: String,
-    identity: Option<String>,
+    workspace: Option<String>,
+    email: Option<String>,
 }
 
 pub(in crate::auth) fn capture_refresh_account(
@@ -22,9 +23,11 @@ pub(in crate::auth) fn capture_refresh_account(
         .find(|a| a.label == label)
         .filter(|a| !refresh_token.is_empty() && a.refresh_token == refresh_token)
         .context("OpenAI login changed before token refresh; retry with the current login")?;
+    let (workspace, email) = identity_claims(account);
     Ok(RefreshAccount {
         refresh_token: account.refresh_token.clone(),
-        identity: account_identity(account),
+        workspace,
+        email,
     })
 }
 
@@ -44,14 +47,13 @@ fn apply_refresh(
     tokens: &crate::auth::oauth::OAuthTokens,
 ) -> Result<()> {
     // A label is presentation, not identity. Follow a rename only when exactly
-    // one record still has BOTH the original login identity and refresh token.
+    // one record still has the original refresh token and no conflicting identity.
     let mut matches = auth
         .openai_accounts
         .iter()
         .enumerate()
         .filter(|(_, account)| {
-            account.refresh_token == expected.refresh_token
-                && account_identity(account) == expected.identity
+            account.refresh_token == expected.refresh_token && identity_matches(expected, account)
         });
     let index = matches.next().map(|(index, _)| index).context(
         "OpenAI login changed while token refresh was pending; refreshed tokens were not saved",
@@ -61,10 +63,7 @@ fn apply_refresh(
     }
     let account = &mut auth.openai_accounts[index];
     // Do not attach claims from a different workspace to the original login.
-    let original_account_id = account
-        .account_id
-        .clone()
-        .or_else(|| account.id_token.as_deref().and_then(extract_account_id));
+    let (original_account_id, _) = identity_claims(account);
     if let Some(id) = tokens.id_token.as_deref().and_then(extract_account_id)
         && original_account_id.as_deref().is_some_and(|old| old != id)
     {
@@ -81,6 +80,33 @@ fn apply_refresh(
         account.id_token = Some(id_token.clone());
     }
     Ok(())
+}
+
+fn identity_claims(account: &OpenAiAccount) -> (Option<String>, Option<String>) {
+    let nonempty = |value: Option<String>| {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let workspace = nonempty(account.account_id.clone())
+        .or_else(|| nonempty(account.id_token.as_deref().and_then(extract_account_id)));
+    let email = nonempty(account.email.clone())
+        .or_else(|| nonempty(account.id_token.as_deref().and_then(extract_email)))
+        .map(|email| email.to_ascii_lowercase());
+    (workspace, email)
+}
+
+fn identity_matches(expected: &RefreshAccount, account: &OpenAiAccount) -> bool {
+    let (workspace, email) = identity_claims(account);
+    // The exact refresh generation already matches. New profile details are
+    // enrichment; known workspace IDs remain authoritative over mutable email.
+    match (&expected.workspace, workspace) {
+        (Some(expected), Some(current)) => expected == &current,
+        _ => match (&expected.email, email) {
+            (Some(expected), Some(current)) => expected == &current,
+            _ => true,
+        },
+    }
 }
 
 #[cfg(test)]

@@ -237,3 +237,20 @@ async fn external_refresh_does_not_create_a_saved_login() {
             .exists()
     );
 }
+
+#[tokio::test]
+async fn background_profile_hydration_during_refresh_keeps_rotated_tokens() {
+    let _lock = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut account = login("work", "original", "original-refresh");
+    account.account_id = None;
+    account.email = None;
+    let label = codex::upsert_account(account).unwrap();
+    let (release, task) = delayed_refresh(label.clone()).await;
+    codex::update_account_profile(&label, Some("hydrated@example.invalid".into())).unwrap();
+    release.send(()).unwrap();
+    task.await.unwrap().unwrap();
+    let saved = codex::list_accounts().unwrap();
+    assert_eq!(saved[0].refresh_token, "rotated-refresh");
+    assert_eq!(saved[0].email.as_deref(), Some("hydrated@example.invalid"));
+}
