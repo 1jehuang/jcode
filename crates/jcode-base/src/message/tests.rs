@@ -923,6 +923,30 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
 }
 
 #[test]
+fn push_reasoning_blocks_claude_multiprovider_replays_signed_thinking_first() {
+    // MultiProvider reports its Anthropic route as "Claude", not "anthropic".
+    // Its signed thinking must still be stored for replay, and ahead of the
+    // turn's text: Anthropic expects thinking to lead the assistant content.
+    let store = crate::provider::stores_reasoning_content_for_context("Claude");
+    assert!(
+        store,
+        "Claude turns must keep their signed thinking for replay"
+    );
+    let mut blocks = vec![ContentBlock::Text {
+        text: "answer".to_string(),
+        cache_control: None,
+    }];
+    push_reasoning_blocks(&mut blocks, "Claude", "signed thought", Some("sig"), store);
+    assert_eq!(blocks.len(), 2);
+    assert!(
+        matches!(&blocks[0], ContentBlock::AnthropicThinking { signature, .. } if signature == "sig"),
+        "expected AnthropicThinking first, got {:?}",
+        blocks[0]
+    );
+    assert!(matches!(blocks[1], ContentBlock::Text { .. }));
+}
+
+#[test]
 fn push_reasoning_blocks_anthropic_unsigned_falls_back_to_trace() {
     let mut blocks = Vec::new();
     // Replay requested but no signature: cannot replay, must still keep history.
