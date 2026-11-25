@@ -148,6 +148,7 @@ pub(super) fn reuse_claude_code_file(
 }
 
 pub(super) fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
+    let expected_selection = auth::claude::native_import_selection()?;
     if !auth::claude::native_credentials_present() {
         return Ok(false);
     }
@@ -162,7 +163,13 @@ pub(super) fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
         _ => return Ok(false),
     };
 
-    reuse_claude_code_native_snapshot(file_path, was_native_trusted, credentials, || {})
+    reuse_claude_code_native_snapshot(
+        file_path,
+        was_native_trusted,
+        &expected_selection,
+        credentials,
+        || {},
+    )
 }
 
 pub(super) fn configured_claude_file_is_unambiguous(

@@ -3,10 +3,10 @@ use super::{Path, Result, auth};
 pub(super) fn reuse_claude_code_native_snapshot(
     file_path: &Path,
     was_native_trusted: bool,
+    expected_selection: &(Option<String>, Option<String>),
     credentials: auth::claude::ClaudeCredentials,
     before_validation: impl FnOnce(),
 ) -> Result<bool> {
-    let expected_selection = auth::claude::native_import_selection()?;
     let file_source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
     if crate::config::Config::external_auth_source_allowed_for_path(
         file_source.source_id(),
@@ -43,7 +43,7 @@ pub(super) fn reuse_claude_code_native_snapshot(
         );
     }
     anyhow::ensure!(
-        auth::claude::native_import_selection()? == expected_selection,
+        &auth::claude::native_import_selection()? == expected_selection,
         "The saved Claude account selection changed during login. Retry to use this native login."
     );
     anyhow::ensure!(
@@ -55,10 +55,8 @@ pub(super) fn reuse_claude_code_native_snapshot(
         auth::claude::trust_native_source()?;
     }
     if !credentials.refresh_token.trim().is_empty() {
-        let imported = auth::claude::activate_native_credentials_if_unchanged(
-            credentials,
-            &expected_selection,
-        );
+        let imported =
+            auth::claude::activate_native_credentials_if_unchanged(credentials, expected_selection);
         if let Err(err) = imported {
             // A failed login must not leave behind an approval it granted, or a
             // later CLAUDE_CODE_OAUTH_TOKEN would be used without a prompt.

@@ -92,6 +92,7 @@ impl NativeStageFixture {
         let error = reuse_claude_code_native_snapshot(
             &self.file,
             auth::claude::native_source_allowed(),
+            &auth::claude::native_import_selection().unwrap(),
             Self::snapshot(),
             || {
                 Self::write_file(&self.file, "fresh-file", 4102444800000);
@@ -148,6 +149,7 @@ fn native_stage_rejection_preserves_concurrent_account_choice() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {
             NativeStageFixture::save_account("account-c");
@@ -169,6 +171,7 @@ fn native_stage_success_imports_without_overwriting_previous_account() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -188,6 +191,7 @@ fn native_stage_success_selects_imported_snapshot() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -205,6 +209,7 @@ fn native_stage_success_records_native_trust() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -219,7 +224,8 @@ fn native_stage_rejects_changed_environment_token_without_store_changes() {
     let path = auth::claude::jcode_path().unwrap();
     let before = std::fs::read(&path).unwrap();
     reuse_claude_code_native_snapshot(&fixture.file,
-        auth::claude::native_source_allowed(), NativeStageFixture::snapshot(), || {
+        auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(), NativeStageFixture::snapshot(), || {
         crate::env::set_var(
             "CLAUDE_CODE_OAUTH_TOKEN",
             r#"{"claudeAiOauth":{"accessToken":"different-env-token","refreshToken":"different-refresh","expiresAt":4102444800000}}"#,
@@ -236,6 +242,7 @@ fn native_stage_rejection_preserves_concurrently_granted_trust() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {
             auth::claude::trust_native_source().unwrap();
@@ -253,6 +260,7 @@ fn native_stage_rejection_preserves_concurrently_revoked_trust() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {
             crate::config::Config::revoke_external_auth_source(
@@ -271,6 +279,7 @@ fn fail_import_with_corrupt_store(fixture: &NativeStageFixture) {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {
             // Staged validation does not read the store; the import does, and has no backup.
@@ -301,6 +310,7 @@ fn native_stage_repeated_import_matches_existing_snapshot() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -308,6 +318,7 @@ fn native_stage_repeated_import_matches_existing_snapshot() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -326,6 +337,7 @@ fn native_stage_missing_refresh_and_environment_leaves_store_unchanged() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         snapshot,
         || {},
     )
@@ -348,6 +360,7 @@ fn native_stage_environment_only_token_does_not_import_an_account() {
     reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         snapshot,
         || {},
     )
@@ -362,6 +375,7 @@ fn native_stage_successful_validation_does_not_override_a_new_manual_account_cho
     let error = reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || NativeStageFixture::save_account("manual-new"),
     )
@@ -384,6 +398,7 @@ fn native_stage_successful_validation_does_not_restore_revoked_native_approval()
     let error = reuse_claude_code_native_snapshot(
         &fixture.file,
         auth::claude::native_source_allowed(),
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {
             crate::config::Config::revoke_external_auth_source(
@@ -433,6 +448,7 @@ fn native_stage_snapshot_does_not_regrant_approval_revoked_during_acquisition() 
     let error = reuse_claude_code_native_snapshot(
         &fixture.file,
         true,
+        &auth::claude::native_import_selection().unwrap(),
         NativeStageFixture::snapshot(),
         || {},
     )
@@ -443,4 +459,25 @@ fn native_stage_snapshot_does_not_regrant_approval_revoked_during_acquisition() 
         std::fs::read(auth::claude::jcode_path().unwrap()).unwrap(),
         before
     );
+}
+
+#[test]
+fn native_stage_snapshot_preserves_account_choice_changed_during_acquisition() {
+    let _guard = crate::storage::lock_test_env();
+    let fixture = NativeStageFixture::new(false);
+    let expected_selection = auth::claude::native_import_selection().unwrap();
+    NativeStageFixture::save_account("manual-during-keychain");
+    let path = auth::claude::jcode_path().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let error = reuse_claude_code_native_snapshot(
+        &fixture.file,
+        false,
+        &expected_selection,
+        NativeStageFixture::snapshot(),
+        || {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("selection changed"));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(!auth::claude::native_source_allowed());
 }
