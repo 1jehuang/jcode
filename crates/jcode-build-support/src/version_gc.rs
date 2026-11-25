@@ -192,6 +192,7 @@ pub fn prune_old_versions_in(
 
     let mut report = VersionPruneReport::default();
     let mut recent_kept = 0usize;
+    let mut deletion_error = None;
     for (modified, name, path) in candidates {
         let too_new = now
             .duration_since(modified)
@@ -206,8 +207,16 @@ pub fn prune_old_versions_in(
             report.kept.push(name);
             continue;
         }
-        std::fs::remove_dir_all(&path)?;
-        report.removed.push(name);
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => report.removed.push(name),
+            Err(error) => {
+                report.kept.push(name);
+                deletion_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = deletion_error {
+        return Err(error.into());
     }
     Ok(report)
 }
@@ -216,6 +225,39 @@ pub fn prune_old_versions_in(
 mod tests {
     use super::*;
     use std::fs::{self, File};
+
+    #[test]
+    #[cfg(unix)]
+    fn failed_deletion_does_not_skip_other_candidates() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .unwrap()
+            .stdout
+            == b"0\n"
+        {
+            return; // Root bypasses the fixture's directory permissions.
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let versions = temp.path();
+        make_version(versions, "blocked", DAY * 3);
+        make_version(versions, "deletable", DAY * 4);
+        let blocked = versions.join("blocked");
+        let locked = blocked.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("file"), b"fixture").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        File::open(&blocked)
+            .unwrap()
+            .set_modified(SystemTime::now() - DAY * 3)
+            .unwrap();
+        let result = prune_old_versions_in(versions, &HashSet::new(), 0, SystemTime::now());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err());
+        assert!(blocked.exists());
+        assert!(!versions.join("deletable").exists());
+    }
 
     #[test]
     fn daily_prune_retries_after_failed_pass() {
