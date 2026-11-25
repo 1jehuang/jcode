@@ -15,6 +15,7 @@ pub struct SoftInterruptMessage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoftInterruptSource {
+    JarvisUser,
     User,
     System,
     BackgroundTask,

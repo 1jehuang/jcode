@@ -98,10 +98,12 @@ impl App {
         // do not also restore it to the input box.
         self.last_submitted_input = None;
         self.rate_limit_reset = Some(Instant::now() + wait);
-        let notice = self.rate_limit_notice_with_nudge(wait.as_secs());
+        let (notice, nudged) = self.rate_limit_notice_with_nudge(wait.as_secs());
         self.push_display_message(DisplayMessage::error(error.to_string()));
         self.push_display_message(DisplayMessage::system(notice));
-        self.set_status_notice("Usage limit; will retry at the reset");
+        if !nudged {
+            self.set_status_notice("Usage limit; will retry at the reset");
+        }
         true
     }
 

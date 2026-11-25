@@ -6,6 +6,7 @@ use crate::tui::backend::RemoteConnection;
 
 fn pending_turn() -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: "continue provider recovery".to_string(),
         images: vec![],
         is_system: false,

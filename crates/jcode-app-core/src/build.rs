@@ -10,9 +10,9 @@ pub use jcode_build_support::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
     current_source_state, current_version_file, ensure_source_state_matches, find_dev_binary,
     find_repo_in_ancestors, get_commit_message, get_repo_dir, install_binary_at_version,
-    install_local_release, install_version, is_jcode_repo, is_working_tree_dirty,
-    keep_versions_setting, launcher_binary_path, launcher_dir, load_migration_context,
-    manifest_path, migration_context_path, preferred_reload_candidate,
+    install_local_release, install_version, is_dynamic_loader_path, is_jcode_repo,
+    is_working_tree_dirty, keep_versions_setting, launcher_binary_path, launcher_dir,
+    load_migration_context, manifest_path, migration_context_path, preferred_reload_candidate,
     promote_version_to_shared_server, prune_old_versions, prune_old_versions_after_install,
     prune_old_versions_on_idle, publish_local_current_build,
     publish_local_current_build_for_source, publish_prepared_build, read_build_progress,
@@ -28,3 +28,4 @@ pub use jcode_build_support::{
     version_matches_installed_channel, worktree_scope_key, write_build_progress,
     write_current_dev_binary_source_metadata, write_dev_binary_source_metadata,
 };
+pub use jcode_build_support::{dispatch_linux_prerelease, linux_prerelease_candidate};

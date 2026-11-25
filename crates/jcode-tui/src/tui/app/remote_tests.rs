@@ -1275,6 +1275,51 @@ fn forward_pending_reasoning_effort_sends_effort_request_to_server() {
         Some("high"),
         "requested effort should be tracked optimistically for the UI"
     );
+    assert!(
+        app.suppress_next_reasoning_effort_message,
+        "picker-staged effort should suppress the duplicate Reasoning effort transcript line"
+    );
+
+    // The companion ReasoningEffortChanged event should update state without
+    // emitting a second transcript message after ModelChanged.
+    rt.block_on(async {
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        super::server_events::handle_server_event(
+            &mut app,
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 1,
+                effort: Some("high".to_string()),
+                model: Some("gpt-5.5".to_string()),
+                error: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|msg| msg.content.contains("Reasoning effort →")),
+            "picker-staged ReasoningEffortChanged should not duplicate the model switch message"
+        );
+
+        // A subsequent standalone ReasoningEffortChanged (e.g. from `/effort`)
+        // must still announce the change in the transcript.
+        super::server_events::handle_server_event(
+            &mut app,
+            crate::protocol::ServerEvent::ReasoningEffortChanged {
+                id: 2,
+                effort: Some("medium".to_string()),
+                model: None,
+                error: None,
+            },
+            &mut remote,
+        );
+    });
+    assert!(
+        app.display_messages
+            .iter()
+            .any(|msg| msg.content.contains("✓ Reasoning effort → Medium")),
+        "standalone ReasoningEffortChanged should still appear in the transcript"
+    );
 }
 
 #[test]
@@ -1300,6 +1345,7 @@ fn staged_effort_rejection_restores_last_confirmed_including_default() {
         }
         app.handle_server_event(
             ServerEvent::ReasoningEffortChanged {
+                model: None,
                 id: 1,
                 effort: None,
                 error: Some("unsupported effort".into()),
@@ -1318,6 +1364,7 @@ fn staged_effort_rejection_restores_last_confirmed_including_default() {
         ));
         app.handle_server_event(
             ServerEvent::ReasoningEffortChanged {
+                model: None,
                 id: 3,
                 effort: Some("medium".into()),
                 error: None,
@@ -1326,6 +1373,7 @@ fn staged_effort_rejection_restores_last_confirmed_including_default() {
         );
         app.handle_server_event(
             ServerEvent::ReasoningEffortChanged {
+                model: None,
                 id: 4,
                 effort: None,
                 error: Some("late failure".into()),
@@ -1371,6 +1419,7 @@ fn remote_effort_hotkey_restores_confirmed_state_on_rejection_and_send_failure()
             assert_eq!(app.remote_reasoning_effort.as_deref(), Some("max"));
             app.handle_server_event(
                 ServerEvent::ReasoningEffortChanged {
+                    model: None,
                     id: 1,
                     effort: None,
                     error: Some("unsupported effort".into()),
@@ -1416,6 +1465,7 @@ fn authoritative_effort_reports_clear_stale_picker_rollback() {
         assert_eq!(app.remote_reasoning_effort.as_deref(), authoritative);
         app.handle_server_event(
             ServerEvent::ReasoningEffortChanged {
+                model: None,
                 id: 1,
                 effort: None,
                 error: Some("stale rejection".into()),

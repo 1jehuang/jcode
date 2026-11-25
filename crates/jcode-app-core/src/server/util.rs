@@ -250,7 +250,16 @@ fn pin_launch_path(
     launch_path: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     cache
-        .get_or_init(|| launch_path().map(resolve_launch_path))
+        .get_or_init(|| {
+            launch_path().map(resolve_launch_path).filter(|resolved| {
+                if build::is_dynamic_loader_path(resolved) {
+                    crate::logging::warn(&format!("running server binary resolved to dynamic loader {resolved:?}; suppressing mtime-based update checks"));
+                    false
+                } else {
+                    true
+                }
+            })
+        })
         .clone()
 }
 

@@ -812,10 +812,11 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
     let text = render_and_snap(&app, &mut terminal);
 
     assert_eq!(app.display_messages().len(), 1);
-    assert!(!app
-        .display_messages()
-        .iter()
-        .any(|message| message.role == "background_task"));
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "background_task")
+    );
     let task_rows = app.background_task_rows_ref();
     assert_eq!(task_rows.len(), 1);
     assert_eq!(task_rows[0].task_id, "abc123");
@@ -825,9 +826,11 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
         crate::tui::BackgroundTaskRowStatus::Failed
     );
     // Session task rows are pinned compactly, not duplicated in the overview.
-    assert!(crate::tui::TuiState::info_widget_data(&app)
-        .background_info
-        .is_none());
+    assert!(
+        crate::tui::TuiState::info_widget_data(&app)
+            .background_info
+            .is_none()
+    );
     assert!(
         !text.contains("Background task failed") && !text.contains("[stderr] line one"),
         "unexpected expanded background task card:\n{text}"
@@ -973,6 +976,7 @@ fn test_handle_remote_disconnect_flushes_streaming_text_and_sets_reconnect_state
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(7);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

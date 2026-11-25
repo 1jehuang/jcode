@@ -532,8 +532,8 @@ fn user_history_message(content: &str) -> crate::protocol::HistoryMessage {
 
 fn history_event_for_session(session_id: &str) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
-messages_base_count: None,
-images_unchanged: false,
+        messages_base_count: None,
+        images_unchanged: false,
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![],
@@ -1688,6 +1688,7 @@ fn test_local_session_picker_switch_is_never_consumed_and_keeps_plan_graph_state
                     session_id: "session_target_456".to_string(),
                 },
                 external_path: None,
+                user_intention: None,
                 todo_statuses: Vec::new(),
             },
         ]),

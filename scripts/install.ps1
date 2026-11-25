@@ -146,6 +146,60 @@ function Get-LatestJcodeReleaseTag {
     Write-Err "Failed to determine latest version"
 }
 
+function Test-JcodeReleaseHasArtifact([string]$ReleaseTag, [string]$ArtifactName) {
+    try {
+        $sumsUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri $sumsUrl
+        $text = ConvertFrom-JcodeWebContent -Content $resp.Content
+        if (-not $text) { return $false }
+        $pattern = [regex]::Escape($ArtifactName) + '\.(zip|tar\.gz|exe)\b'
+        return [regex]::IsMatch($text, $pattern)
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-JcodeFallbackReleaseTag([string]$LatestTag, [string]$ArtifactName, [string]$ExistingVersion) {
+    if (Test-JcodeReleaseHasArtifact $LatestTag $ArtifactName) {
+        return $LatestTag
+    }
+    Write-Info "Release $LatestTag has no published $ArtifactName asset yet; looking for the newest release that does..."
+    $existingVer = $null
+    if ($ExistingVersion -and ($ExistingVersion -match '(\d+\.\d+\.\d+)')) {
+        try { $existingVer = [version]$Matches[1] } catch {}
+    }
+    for ($page = 1; $page -le 5; $page++) {
+        try {
+            $url = "https://api.github.com/repos/$Repo/releases?per_page=100&page=$page"
+            $releases = Invoke-RestMethod -UseBasicParsing -Uri $url -Headers @{ 'User-Agent' = 'jcode-installer' }
+        } catch {
+            break
+        }
+        if (-not $releases -or $releases.Count -eq 0) { break }
+        $reachedExisting = $false
+        foreach ($rel in $releases) {
+            if ($rel.draft -or $rel.prerelease) { continue }
+            $tag = [string]$rel.tag_name
+            if ($tag -eq $LatestTag) { continue }
+            if ($tag -notmatch '^v(\d+\.\d+\.\d+)$') { continue }
+            if ($existingVer) {
+                try {
+                    if ([version]$Matches[1] -le $existingVer) {
+                        $reachedExisting = $true
+                        break
+                    }
+                } catch {}
+            }
+            if (Test-JcodeReleaseHasArtifact $tag $ArtifactName) {
+                Write-Info "Using $tag (newest release with a published $ArtifactName asset)."
+                return $tag
+            }
+        }
+        if ($reachedExisting -or $releases.Count -lt 100) { break }
+    }
+    return $LatestTag
+}
+
 function Get-JcodeReleaseDownloadBases([string]$ReleaseTag) {
     $bases = New-Object System.Collections.Generic.List[string]
     try {
@@ -949,6 +1003,14 @@ if (-not $Version) {
     } else {
         Write-Info "Fetching latest release..."
         $Version = Get-LatestJcodeReleaseTag
+        if ($Version) {
+            $existingLauncher = Join-Path $InstallDir "jcode.exe"
+            $existingVerText = ""
+            if (Test-Path $existingLauncher) {
+                try { $existingVerText = & $existingLauncher --version 2>$null | Select-Object -First 1 } catch {}
+            }
+            $Version = Resolve-JcodeFallbackReleaseTag $Version $Artifact $existingVerText
+        }
     }
 }
 

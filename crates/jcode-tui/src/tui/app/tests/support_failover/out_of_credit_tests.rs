@@ -18,6 +18,7 @@ fn remote_app_with_failed_turn() -> App {
     app.is_remote = true;
     app.last_submitted_input = Some("say hi".to_string());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "say hi".to_string(),
         images: vec![],
         is_system: false,
@@ -53,7 +54,10 @@ fn remote_out_of_credit_prompt_runs_countdown_then_switches_and_resends() {
             .as_ref()
             .expect("remote session must arm the countdown");
         assert_eq!(pending.prompt.to_provider, "prof-b:glm-5.3");
-        assert!(app.pending_model_switch.is_none(), "nothing sent before the deadline");
+        assert!(
+            app.pending_model_switch.is_none(),
+            "nothing sent before the deadline"
+        );
         assert!(app.pending_fallback_resend.is_none());
         assert!(
             app.rate_limit_pending_message.is_none(),
@@ -100,7 +104,11 @@ fn remote_out_of_credit_countdown_esc_cancels_without_sending() {
         assert!(app.pending_fallback_resend.is_none());
         assert_eq!(app.input, "say hi", "the prompt goes back to the input box");
         let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("Auto-switch canceled"), "{}", last.content);
+        assert!(
+            last.content.contains("Auto-switch canceled"),
+            "{}",
+            last.content
+        );
 
         // The deadline passing later must not switch anything.
         app.maybe_progress_provider_failover_countdown();
@@ -129,7 +137,11 @@ fn remote_out_of_credit_prompt_in_manual_mode_only_explains() {
         assert!(app.pending_model_switch.is_none());
         assert!(app.pending_fallback_resend.is_none());
         let last = app.display_messages.last().expect("message");
-        assert!(last.content.contains("Use /model to switch"), "{}", last.content);
+        assert!(
+            last.content.contains("Use /model to switch"),
+            "{}",
+            last.content
+        );
     });
 }
 

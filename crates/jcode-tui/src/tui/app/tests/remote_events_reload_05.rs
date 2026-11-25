@@ -224,6 +224,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(12);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "queued follow-up in flight".to_string(),
         images: vec![],
         is_system: true,
@@ -258,6 +259,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
     // clear it rather than re-queueing as a system continuation.
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "user retry message".to_string(),
         images: vec![],
         is_system: false,
@@ -283,6 +285,7 @@ fn test_reload_keeps_overload_resend_budget() {
         let mut app = create_test_app();
         let session_id = format!("test-overload-budget-reload-{}", std::process::id());
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "explain the bug".to_string(),
             images: vec![],
             is_system: false,
@@ -317,6 +320,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
         // already dequeued into the in-flight pending slot.
         app.queued_messages.push("still queued".to_string());
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "dispatched but unfinished".to_string(),
             images: vec![],
             is_system: true,
@@ -330,7 +334,8 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
 
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert_eq!(
             restored.queued_messages,
             vec!["dispatched but unfinished", "still queued"],
@@ -354,6 +359,7 @@ fn test_quota_hold_survives_reload_without_immediate_submission() {
         let reset = Instant::now() + Duration::from_secs(3600);
         app.rate_limit_reset = Some(reset);
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "held user turn".to_string(),
             images: vec![("image/png".to_string(), "payload".to_string())],
             is_system: false,
@@ -365,19 +371,24 @@ fn test_quota_hold_survives_reload_without_immediate_submission() {
         });
         app.save_input_for_reload(&app.session.id);
         let restored = App::restore_input_for_reload(&app.session.id).unwrap();
-        assert!(!restored.submit_on_restore, "quota holds must not become startup sends");
+        assert!(
+            !restored.submit_on_restore,
+            "quota holds must not become startup sends"
+        );
         let mut reloaded = create_test_app();
         reloaded.apply_restored_reload_input(restored);
         assert!(reloaded.input.is_empty());
         assert!(reloaded.rate_limit_reset.unwrap() > Instant::now() + Duration::from_secs(3500));
         let pending = reloaded.rate_limit_pending_message.as_ref().unwrap();
         assert_eq!(pending.content, "held user turn");
-        assert_eq!(pending.images, [("image/png".to_string(), "payload".to_string())]);
+        assert_eq!(
+            pending.images,
+            [("image/png".to_string(), "payload".to_string())]
+        );
         assert!(!pending.auto_retry);
         assert_eq!(pending.retry_at, reloaded.rate_limit_reset);
     });
 }
-
 
 #[test]
 fn test_reload_preserves_completed_confidence_spike_challenge() {

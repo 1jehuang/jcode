@@ -226,6 +226,7 @@ fn test_inflight_image_only_reload_reaches_queued_provider_payload() {
     for message in ["", "  "] {
         let mut app = create_test_app();
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: message.to_string(),
             images: vec![("image/png".to_string(), "aGk=".to_string())],
             is_system: true,
@@ -254,6 +255,7 @@ fn test_inflight_image_only_reload_reaches_queued_provider_payload() {
 fn test_inflight_queued_image_reload_preserves_existing_queued_images() {
     let mut app = local_image_redirect_app();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "inflight image prompt".to_string(),
         images: vec![("image/jpeg".to_string(), "inflight".to_string())],
         is_system: true,
@@ -285,6 +287,7 @@ fn test_disconnect_recovers_inflight_image_with_queued_text() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "inflight image prompt".to_string(),
         images: vec![("image/png".to_string(), "aGk=".to_string())],
         is_system: true,
@@ -312,6 +315,7 @@ fn test_busy_rejection_recovers_image_only_followup() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: String::new(),
         images: vec![("image/png".to_string(), "aGk=".to_string())],
         is_system: false,

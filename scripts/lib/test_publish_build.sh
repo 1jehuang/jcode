@@ -14,7 +14,7 @@ while [ "$#" -gt 0 ]; do
 done
 : "${source_dir:?}" "${version:?}" "${channel:?}" "${launcher:?}"
 if [ "${TEST_UNAME_S:-${EVAL_UNAME_S:-Linux}}" = MINGW64_NT-10.0 ]; then
-  builds="$LOCALAPPDATA/jcode/builds"
+  builds="${JCODE_HOME:-$LOCALAPPDATA/jcode}/builds"
   binary=jcode.exe
 else
   builds="${JCODE_HOME:-$HOME/.jcode}/builds"
@@ -23,11 +23,18 @@ fi
 dest="$builds/versions/$version"
 mkdir -p "$dest" "$builds/stable" "$(dirname "$launcher")"
 cp "$source_dir/$binary" "$dest/$binary"
+previous_shared=$(cat "$builds/shared-server-version" 2>/dev/null || true)
+previous_stable=$(cat "$builds/stable-version" 2>/dev/null || true)
+if [ ! -e "$builds/shared-server/$binary" ] \
+  || { [ -n "$previous_shared" ] && [ "$previous_shared" = "$previous_stable" ]; } \
+  || printf '%s' "$previous_shared" | grep -Eq '^(v?[0-9]+\.[0-9]+\.[0-9]+([+.-][[:alnum:].-]+)?|selfdev-[a-z0-9]+-[0-9a-f]{40}|main-[[:alnum:].-]+)$'; then
+  mkdir -p "$builds/shared-server"
+  ln -sfn "$dest/$binary" "$builds/shared-server/$binary"
+  printf '%s\n' "$version" > "$builds/shared-server-version"
+fi
 ln -sfn "$dest/$binary" "$builds/stable/$binary"
 printf '%s\n' "$version" > "$builds/stable-version"
-if [ "$channel" = current ]; then
-  mkdir -p "$builds/current"
-  ln -sfn "$dest/$binary" "$builds/current/$binary"
-  printf '%s\n' "$version" > "$builds/current-version"
-fi
+mkdir -p "$builds/current"
+ln -sfn "$dest/$binary" "$builds/current/$binary"
+printf '%s\n' "$version" > "$builds/current-version"
 ln -sfn "$builds/$channel/$binary" "$launcher"

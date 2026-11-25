@@ -36,27 +36,36 @@ impl App {
         listener: tokio::net::TcpListener,
         target_snapshot: (bool, Option<String>),
         completion: &mut crate::bus::SavedAccountLoginCompleted,
-    ) -> Result<String, String> {
+    ) -> Option<Result<String, String>> {
         let port = crate::auth::oauth::openai::DEFAULT_PORT;
         let redirect_uri = crate::auth::oauth::openai::redirect_uri(port);
-        let code = tokio::time::timeout(
+        let code = match tokio::time::timeout(
             std::time::Duration::from_secs(300),
             crate::auth::oauth::wait_for_callback_async_on_listener(listener, &expected_state),
         )
         .await
-        .map_err(|_| "Login timed out after 5 minutes. Please try again.".to_string())?
-        .map_err(|e| format!("Callback failed: {}", e))?;
+        {
+            Ok(Ok(code)) => code,
+            result => {
+                crate::logging::info(&format!(
+                    "OpenAI automatic callback did not complete; device and manual login remain available: {result:?}"
+                ));
+                return None;
+            }
+        };
 
-        Self::openai_token_exchange(
-            verifier,
-            code,
-            label,
-            None,
-            &redirect_uri,
-            target_snapshot,
-            completion,
+        Some(
+            Self::openai_token_exchange(
+                verifier,
+                code,
+                label,
+                None,
+                &redirect_uri,
+                target_snapshot,
+                completion,
+            )
+            .await,
         )
-        .await
     }
 
     pub(super) async fn openai_token_exchange(

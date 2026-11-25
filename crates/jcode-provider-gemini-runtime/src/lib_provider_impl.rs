@@ -1,4 +1,184 @@
 use super::*;
+use jcode_provider_gemini::interactions::{
+    InteractionEvent, PROVIDER_NATIVE_GEMINI, interaction_events,
+};
+
+/// Deferred definitions need Interactions tool retrieval, and history holding
+/// replay-only Interactions steps must keep using it so their signatures are
+/// sent back unchanged.
+fn uses_interactions(messages: &[Message], tools: &[ToolDefinition]) -> bool {
+    tools.iter().any(|tool| tool.defer_loading)
+        || messages.iter().flat_map(|m| m.content.iter()).any(|block| {
+            matches!(
+                block,
+                jcode_message_types::ContentBlock::ProviderNative { provider, .. }
+                    if provider == PROVIDER_NATIVE_GEMINI
+            )
+        })
+}
+
+async fn stream_interaction(
+    provider: &GeminiProvider,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    api_key: &str,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    system: &str,
+) {
+    let response = match provider
+        .create_interaction(api_key, model, messages, tools, system)
+        .await
+    {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = tx.send(Err(err)).await;
+            return;
+        }
+    };
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::Streaming,
+        }))
+        .await;
+    if let Some(usage) = response.usage.as_ref() {
+        let _ = tx
+            .send(Ok(StreamEvent::TokenUsage {
+                input_tokens: usage.total_input_tokens,
+                output_tokens: usage.total_output_tokens,
+                cache_read_input_tokens: usage.total_cached_tokens,
+                cache_creation_input_tokens: None,
+            }))
+            .await;
+    }
+    let status = response.status.clone().unwrap_or_default();
+    if matches!(status.as_str(), "failed" | "cancelled") {
+        let detail = response
+            .errors
+            .as_ref()
+            .map(|errors| format!(": {errors}"))
+            .unwrap_or_default();
+        let _ = tx
+            .send(Err(anyhow::anyhow!("Gemini interaction {status}{detail}")))
+            .await;
+        return;
+    }
+    let events = interaction_events(&response);
+    let produced_output = events.iter().any(|event| {
+        matches!(
+            event,
+            InteractionEvent::Text(_) | InteractionEvent::FunctionCall { .. }
+        )
+    });
+    if !produced_output {
+        let _ = tx
+            .send(Err(anyhow::anyhow!(
+                "Gemini interaction returned no usable output (status={status})"
+            )))
+            .await;
+        return;
+    }
+    for event in events {
+        match event {
+            InteractionEvent::Text(text) => {
+                let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+            }
+            InteractionEvent::Thinking(text) => {
+                let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+                let _ = tx.send(Ok(StreamEvent::ThinkingDelta(text))).await;
+                let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+                let _ = tx
+                    .send(Ok(StreamEvent::ThinkingDone { duration_secs: 0.0 }))
+                    .await;
+            }
+            InteractionEvent::Native(item) => {
+                let _ = tx
+                    .send(Ok(StreamEvent::ProviderNative {
+                        provider: PROVIDER_NATIVE_GEMINI.to_string(),
+                        item,
+                    }))
+                    .await;
+            }
+            InteractionEvent::FunctionCall {
+                id,
+                name,
+                arguments,
+                signature,
+            } => {
+                let raw_id = if id.is_empty() {
+                    Uuid::new_v4().to_string()
+                } else {
+                    id
+                };
+                let _ = tx
+                    .send(Ok(StreamEvent::ToolUseStart {
+                        id: jcode_message_types::sanitize_tool_id(&raw_id),
+                        name,
+                    }))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::ToolInputDelta(arguments.to_string())))
+                    .await;
+                let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
+                if let Some(signature) = signature {
+                    let _ = tx.send(Ok(StreamEvent::ToolUseSignature(signature))).await;
+                }
+            }
+        }
+    }
+    let _ = tx
+        .send(Ok(StreamEvent::MessageEnd {
+            stop_reason: Some(status),
+        }))
+        .await;
+}
+
+async fn consume_gemini_sse_stream(
+    response: reqwest::Response,
+    envelope: GeminiSseEnvelope,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<GeminiStreamFinish> {
+    let mut byte_stream = response.bytes_stream();
+    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
+    let mut sse = GeminiSseParser::new();
+    let mut acc = GeminiStreamAccumulator::new("Gemini", true, false);
+    let mut next_call_id = || Uuid::new_v4().to_string();
+
+    while let Some(chunk_res) = byte_stream.next().await {
+        let bytes = chunk_res.context("Failed reading Gemini SSE stream")?;
+        let text = utf8.decode(&bytes);
+        for data in sse.push(&text) {
+            let Some(resp) =
+                decode_sse_chunk(envelope, &data).context("Failed to decode Gemini SSE chunk")?
+            else {
+                continue;
+            };
+            let result = acc.push_response(resp, &mut next_call_id);
+            for event in result.events {
+                if tx.send(Ok(event)).await.is_err() {
+                    return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+                }
+            }
+        }
+    }
+
+    let trailing = utf8.flush();
+    for data in sse.push(&trailing).into_iter().chain(sse.finish()) {
+        let Some(resp) = decode_sse_chunk(envelope, &data)
+            .context("Failed to decode trailing Gemini SSE chunk")?
+        else {
+            continue;
+        };
+        let result = acc.push_response(resp, &mut next_call_id);
+        for event in result.events {
+            if tx.send(Ok(event)).await.is_err() {
+                return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+            }
+        }
+    }
+
+    Ok(acc.finish())
+}
 
 #[async_trait]
 impl Provider for GeminiProvider {
@@ -64,82 +244,73 @@ impl Provider for GeminiProvider {
                 }))
                 .await;
 
-            let response = match provider
-                .generate_content(
-                    &state,
-                    &model,
-                    &messages,
-                    &tools,
-                    &system,
-                    resume_session_id.as_deref(),
-                )
-                .await
+            if let GeminiAuthMode::ApiKey(api_key) = GeminiProvider::auth_mode()
+                && GeminiProvider::native_deferred_route(&model)
+                && uses_interactions(&messages, &tools)
             {
-                Ok(response) => response,
-                Err(err) if is_gemini_model_not_found_error(&err) => {
-                    let mut fallback_response = None;
-                    let mut last_err = err;
-                    for fallback_model in gemini_fallback_models(&model) {
-                        jcode_base::logging::warn(&format!(
-                            "Gemini model '{}' was not found; retrying with fallback '{}'",
-                            model, fallback_model
-                        ));
+                stream_interaction(&provider, &tx, &api_key, &model, &messages, &tools, &system)
+                    .await;
+                return;
+            }
+
+            let mut thinking_mode = GeminiThinkingRequestMode::Full;
+            let (response, envelope) = loop {
+                match provider
+                    .stream_generate_content(
+                        &state,
+                        &model,
+                        &messages,
+                        &tools,
+                        &system,
+                        resume_session_id.as_deref(),
+                        thinking_mode,
+                    )
+                    .await
+                {
+                    Ok(pair) => break pair,
+                    Err(err) if is_gemini_model_not_found_error(&err) => {
+                        let _ = tx.send(Err(err.context(format!(
+                            "Gemini could not serve selected model '{model}' for this account. Choose an available model with /model"
+                        )))).await;
+                        return;
+                    }
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        if let Some(next_mode) = thinking_mode.downgrade_for_error(&model, &err_str)
+                        {
+                            jcode_base::logging::warn(&format!(
+                                "Gemini rejected thinkingConfig ({thinking_mode:?}); retrying with {next_mode:?}"
+                            ));
+                            thinking_mode = next_mode;
+                            continue;
+                        }
+                        // A tool schema `streamGenerateContent` rejects 400s
+                        // every turn, so the provider is unusable until jcode
+                        // ships a new keyword. Learn the rejected construct
+                        // from the error, persist it, and retry this turn
+                        // without it. See `jcode-schema-dialect`.
                         match provider
-                            .generate_content(
+                            .retry_after_schema_rejection(
+                                &err_str,
                                 &state,
-                                fallback_model,
+                                &model,
                                 &messages,
                                 &tools,
                                 &system,
                                 resume_session_id.as_deref(),
+                                thinking_mode,
                             )
                             .await
                         {
-                            Ok(response) => {
-                                let _ = provider.set_model(fallback_model);
-                                fallback_response = Some(response);
-                                break;
+                            Some(Ok(pair)) => break pair,
+                            Some(Err(retry_err)) => {
+                                let _ = tx.send(Err(retry_err)).await;
+                                return;
                             }
-                            Err(err) => {
-                                last_err = err;
+                            None => {
+                                let _ = tx.send(Err(err)).await;
+                                return;
                             }
-                        }
-                    }
-
-                    match fallback_response {
-                        Some(response) => response,
-                        None => {
-                            let _ = tx.send(Err(last_err)).await;
-                            return;
-                        }
-                    }
-                }
-                Err(err) => {
-                    // A tool schema `generateContent` rejects 400s every turn,
-                    // so the provider is unusable until jcode ships a new
-                    // keyword. Learn the rejected construct from the error,
-                    // persist it, and retry this turn without it. See
-                    // `jcode-schema-dialect`.
-                    match provider
-                        .retry_after_schema_rejection(
-                            &err.to_string(),
-                            &state,
-                            &model,
-                            &messages,
-                            &tools,
-                            &system,
-                            resume_session_id.as_deref(),
-                        )
-                        .await
-                    {
-                        Some(Ok(response)) => response,
-                        Some(Err(retry_err)) => {
-                            let _ = tx.send(Err(retry_err)).await;
-                            return;
-                        }
-                        None => {
-                            let _ = tx.send(Err(err)).await;
-                            return;
                         }
                     }
                 }
@@ -151,194 +322,56 @@ impl Provider for GeminiProvider {
                 }))
                 .await;
 
-            if let Some(event) = response.resolved_model_event() {
-                let _ = tx.send(Ok(event)).await;
-            }
+            let finish = match consume_gemini_sse_stream(response, envelope, &tx).await {
+                Ok(finish) => finish,
+                Err(err) => {
+                    let _ = tx.send(Err(err)).await;
+                    return;
+                }
+            };
 
-            if let Some(usage) = response
-                .response
-                .as_ref()
-                .and_then(|response| response.usage_metadata.as_ref())
-            {
-                let _ = tx
-                    .send(Ok(StreamEvent::TokenUsage {
-                        input_tokens: usage.input_token_count(),
-                        output_tokens: usage.output_token_count(),
-                        cache_read_input_tokens: usage.cached_content_token_count,
-                        cache_creation_input_tokens: None,
-                    }))
-                    .await;
-            }
-
-            let response_body = response.response;
-
-            let candidate = response_body
-                .as_ref()
-                .and_then(|response| response.candidates.as_ref())
-                .and_then(|candidates| candidates.first())
-                .cloned();
-
-            if candidate.is_none() {
-                if let Some(feedback) = response_body
-                    .as_ref()
-                    .and_then(|response| response.prompt_feedback.as_ref())
-                {
-                    let block_reason = feedback.block_reason.as_deref().unwrap_or("unspecified");
-                    let detail = feedback
-                        .block_reason_message
+            match finish {
+                GeminiStreamFinish::Completed { events } => {
+                    for event in events {
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                }
+                GeminiStreamFinish::RetryableEmpty {
+                    finish_reason,
+                    finish_message,
+                    events,
+                } => {
+                    for event in events {
+                        let _ = tx.send(Ok(event)).await;
+                    }
+                    let detail = finish_message
                         .as_deref()
                         .filter(|msg| !msg.trim().is_empty())
-                        .map(|msg| format!(": {}", msg.trim()))
+                        .map(|msg| format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300)))
                         .unwrap_or_default();
                     let _ = tx
                         .send(Err(anyhow::anyhow!(
-                            "Gemini blocked the prompt ({}){}",
-                            block_reason,
-                            detail
+                            "Gemini returned no usable output (finish_reason={finish_reason}){detail}"
                         )))
                         .await;
-                    return;
                 }
-
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "Gemini returned no candidates for generateContent"
-                    )))
-                    .await;
-                return;
-            }
-
-            let mut stop_reason = None;
-            if let Some(candidate) = candidate {
-                stop_reason = candidate
-                    .finish_reason
-                    .clone()
-                    .map(|reason| reason.to_lowercase());
-                if candidate.content.is_none()
-                    && matches!(
-                        candidate.finish_reason.as_deref(),
-                        Some("SAFETY" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "RECITATION")
-                    )
-                {
-                    let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
-                    let detail = candidate
-                        .finish_message
-                        .as_deref()
-                        .filter(|msg| !msg.trim().is_empty())
-                        .map(|msg| format!(": {}", msg.trim()))
-                        .unwrap_or_default();
+                GeminiStreamFinish::PseudoToolCall { events } => {
+                    for event in events {
+                        let _ = tx.send(Ok(event)).await;
+                    }
                     let _ = tx
                         .send(Err(anyhow::anyhow!(
-                            "Gemini stopped without content ({}){}",
-                            reason,
-                            detail
+                            "Gemini returned an invalid pseudo-tool call"
                         )))
                         .await;
-                    return;
                 }
-                // Track whether this candidate produced any usable output (text or
-                // a tool call). Gemini-3 thinking models intermittently emit
-                // Python-style pseudo-code instead of a clean functionCall and
-                // finish with `MALFORMED_FUNCTION_CALL` and empty content; surface
-                // that as a retryable error below rather than a silent empty turn.
-                let mut produced_output = false;
-                if let Some(content) = candidate.content {
-                    // Gemini 3 attaches a `thoughtSignature` to function-call
-                    // parts (and occasionally to a standalone preceding part).
-                    // Replay it via a ToolUseSignature event so it is persisted
-                    // on the ToolUse block and resent on later turns; the API
-                    // rejects follow-up turns whose functionCall omits it
-                    // ("Function call is missing a thought_signature").
-                    let mut pending_signature: Option<String> = None;
-                    for part in content.parts {
-                        let part_signature = part
-                            .thought_signature
-                            .as_ref()
-                            .filter(|sig| !sig.is_empty())
-                            .cloned();
-                        if let Some(text) = part.text
-                            && !text.is_empty()
-                        {
-                            produced_output = true;
-                            let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
-                        }
-                        if let Some(function_call) = part.function_call {
-                            produced_output = true;
-                            let signature =
-                                part_signature.clone().or_else(|| pending_signature.take());
-                            let raw_call_id = function_call
-                                .id
-                                .clone()
-                                .unwrap_or_else(|| Uuid::new_v4().to_string());
-                            let call_id = jcode_message_types::sanitize_tool_id(&raw_call_id);
-                            let _ = tx
-                                .send(Ok(StreamEvent::ToolUseStart {
-                                    id: call_id,
-                                    name: function_call.name,
-                                }))
-                                .await;
-                            let _ = tx
-                                .send(Ok(StreamEvent::ToolInputDelta(
-                                    function_call.args.to_string(),
-                                )))
-                                .await;
-                            let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                            if let Some(signature) = signature {
-                                let _ = tx.send(Ok(StreamEvent::ToolUseSignature(signature))).await;
-                            }
-                        } else if let Some(signature) = part_signature {
-                            // Standalone signature part; remember it for the next
-                            // function call in this candidate.
-                            pending_signature = Some(signature);
-                        }
+                GeminiStreamFinish::Error { message, events } => {
+                    for event in events {
+                        let _ = tx.send(Ok(event)).await;
                     }
-                    // A thought signature not consumed by a following function
-                    // call (e.g. a pure-text reasoning turn) is still an opaque
-                    // reasoning signal. Surface it as a ThinkingSignatureDelta
-                    // instead of dropping it.
-                    if let Some(signature) = pending_signature.take() {
-                        let _ = tx
-                            .send(Ok(StreamEvent::ThinkingSignatureDelta(signature)))
-                            .await;
-                    }
-                }
-
-                // An abnormal finish (typically Gemini-3's intermittent
-                // `MALFORMED_FUNCTION_CALL`) that yielded no text and no tool call
-                // is a dead turn: surface it as a retryable error instead of a
-                // silent empty `MessageEnd`. `STOP`/`MAX_TOKENS` are normal.
-                if !produced_output {
-                    let abnormal = candidate
-                        .finish_reason
-                        .as_deref()
-                        .map(|reason| {
-                            !matches!(
-                                reason.to_ascii_uppercase().as_str(),
-                                "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED" | ""
-                            )
-                        })
-                        .unwrap_or(false);
-                    if abnormal {
-                        let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
-                        let detail = candidate
-                            .finish_message
-                            .as_deref()
-                            .filter(|msg| !msg.trim().is_empty())
-                            .map(|msg| {
-                                format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300))
-                            })
-                            .unwrap_or_default();
-                        let _ = tx
-                            .send(Err(anyhow::anyhow!(
-                                "Gemini returned no usable output (finish_reason={reason}){detail}"
-                            )))
-                            .await;
-                        return;
-                    }
+                    let _ = tx.send(Err(anyhow::anyhow!(message))).await;
                 }
             }
-
-            let _ = tx.send(Ok(StreamEvent::MessageEnd { stop_reason })).await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -357,6 +390,10 @@ impl Provider for GeminiProvider {
 
     fn supports_image_input(&self) -> bool {
         true
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        Self::native_deferred_route(&self.model())
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

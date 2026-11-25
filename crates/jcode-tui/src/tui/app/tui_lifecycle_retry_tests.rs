@@ -48,6 +48,7 @@ fn terminal_remote_retry_stops_preserve_user_attachments() {
         let image = ("image/png".to_string(), "original-image".to_string());
         app.last_submitted_input = Some("Inspect this screenshot".to_string());
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "Expanded screenshot instructions".to_string(),
             images: vec![image.clone()],
             is_system: false,
@@ -82,6 +83,7 @@ fn terminal_remote_retry_preserves_draft_and_deduplicates_images() {
     app.pending_images.push(image.clone());
     app.ensure_input_image_markers();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "Expanded failed prompt".to_string(),
         images: vec![image.clone()],
         is_system: false,

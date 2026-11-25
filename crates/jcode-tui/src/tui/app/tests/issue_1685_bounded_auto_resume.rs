@@ -7,6 +7,7 @@ fn issue_1685_user_turn(
     retry_attempts: u8,
 ) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: content.to_string(),
         images: vec![],
         is_system: false,
@@ -228,9 +229,12 @@ fn accepted_stream_timeouts_do_not_restart_provider_retry_budget() {
             assert!(!app.auto_poke_incomplete_todos, "{error}");
             assert!(!app.auto_poke_default_on, "{error}");
             assert_eq!(app.input, "keep going", "{error}");
-            assert!(app.display_messages().iter().any(|message| {
-                message.content.contains("provider stream stalled")
-            }), "{error}");
+            assert!(
+                app.display_messages()
+                    .iter()
+                    .any(|message| { message.content.contains("provider stream stalled") }),
+                "{error}"
+            );
         }
     }
 }

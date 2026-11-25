@@ -26,7 +26,7 @@ pub(super) fn normalize_containers(input: &mut Value) {
             *phases = parsed;
         }
     }
-    for key in ["update", "add", "remove"] {
+    for key in ["update", "add", "remove", "cancel"] {
         let Some(value) = input.get_mut(key) else {
             continue;
         };
@@ -73,7 +73,7 @@ fn task_name(todo: &Value) -> Option<&str> {
     todo.get("content").and_then(Value::as_str)
 }
 
-fn resolve_name(todos: &[Value], name: &str) -> Result<String> {
+pub(super) fn resolve_name(todos: &[Value], name: &str) -> Result<String> {
     let mut matches = todos.iter().filter(|todo| task_name(todo) == Some(name));
     let todo = matches
         .next()

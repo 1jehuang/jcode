@@ -1226,6 +1226,16 @@ impl Registry {
         }
     }
 
+    /// Original `(server, tool)` for a registered MCP alias.
+    pub(crate) fn mcp_identity_for_alias(&self, alias: &str) -> Option<(String, String)> {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .get(alias)
+            .cloned()
+    }
+
     fn mcp_alias(&self, server: &str, raw: &str) -> Option<String> {
         self.mcp_policy
             .read()

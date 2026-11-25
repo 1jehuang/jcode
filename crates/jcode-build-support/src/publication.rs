@@ -4,8 +4,7 @@ use crate::{acquire_build_store_lock, binary_name, builds_dir};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// `Current` preserves the local release install's stable + current behavior.
-/// `Stable` preserves the downloaded release install's stable-only behavior.
+/// Both install paths publish stable and current. The channel selects the launcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreparedBuildChannel {
     Stable,
@@ -102,13 +101,22 @@ pub fn publish_prepared_build(
     let binary = destination.join(binary_name());
     #[cfg(all(test, unix))]
     publication_barrier()?;
+    let previous_shared = crate::read_shared_server_version()?;
+    let previous_stable = crate::read_stable_version()?;
+    if !crate::shared_server_binary_path()?.exists()
+        || previous_shared.as_deref().is_some_and(|shared| {
+            !shared.trim().is_empty()
+                && (previous_stable.as_deref().map(str::trim) == Some(shared.trim())
+                    || crate::is_release_channel_marker(shared))
+        })
+    {
+        crate::update_shared_server_symlink(version)?;
+    }
     crate::update_stable_symlink(version)?;
+    crate::update_current_symlink(version)?;
     let channel_binary = match channel {
         PreparedBuildChannel::Stable => crate::stable_binary_path()?,
-        PreparedBuildChannel::Current => {
-            crate::update_current_symlink(version)?;
-            crate::current_binary_path()?
-        }
+        PreparedBuildChannel::Current => crate::current_binary_path()?,
     };
     if let Some(parent) = launcher.parent() {
         std::fs::create_dir_all(parent)?;

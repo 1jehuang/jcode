@@ -1,5 +1,5 @@
 {
-  "total": 189,
+  "total": 187,
   "tracked_files": {
     "crates/jcode-app-core/examples/tool_projection_probe.rs": 1,
     "crates/jcode-app-core/src/agent/conversation_reset.rs": 1,
@@ -59,7 +59,7 @@
     "crates/jcode-tui-mermaid/src/mermaid_kitty_classic.rs": 1,
     "crates/jcode-tui-style/examples/light_bench.rs": 1,
     "crates/jcode-tui-style/src/theme_mode.rs": 1,
-    "crates/jcode-tui/src/tui/app/auth.rs": 3,
+    "crates/jcode-tui/src/tui/app/auth.rs": 2,
     "crates/jcode-tui/src/tui/app/auth_remote.rs": 12,
     "crates/jcode-tui/src/tui/app/auth_remote/onboarding.rs": 1,
     "crates/jcode-tui/src/tui/app/auth_remote/picker.rs": 1,
@@ -71,7 +71,6 @@
     "crates/jcode-tui/src/tui/app/usage_reset.rs": 1,
     "crates/jcode-tui/src/tui/jarvis.rs": 1,
     "crates/jcode-tui/src/tui/ui_inline_interactive.rs": 1,
-    "crates/jcode-voice/src/continuous.rs": 1,
     "crates/jcode-voice/src/speech.rs": 1,
     "src/bin/memory_recall_bench.rs": 14,
     "src/cli/acp.rs": 2,

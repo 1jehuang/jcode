@@ -40,6 +40,7 @@ impl Provider for ResetRecordingProvider {
 
 fn arm_stale_continuation(app: &mut App) {
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "removed continuation".to_string(),
         images: Vec::new(),
         is_system: false,

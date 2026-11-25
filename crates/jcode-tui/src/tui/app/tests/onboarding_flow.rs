@@ -114,7 +114,9 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
         .last()
         .expect("missing OpenAI API key prompt")
         .content;
-    assert!(openai_prompt.contains("Endpoint: https://api.openai.com/v1"));
+    assert!(openai_prompt.contains("OpenAI API Key"));
+    assert!(openai_prompt.contains("Paste your API key below"));
+    assert!(!openai_prompt.contains("Default model:"));
     assert!(!openai_prompt.contains("Suggested default model:"));
 
     app.start_login_provider(
@@ -126,7 +128,9 @@ fn direct_api_key_login_does_not_advertise_a_static_model_default() {
         .last()
         .expect("missing Anthropic API key prompt")
         .content;
-    assert!(anthropic_prompt.contains("Endpoint: https://api.anthropic.com"));
+    assert!(anthropic_prompt.contains("Anthropic API Key"));
+    assert!(anthropic_prompt.contains("Paste your API key below"));
+    assert!(!anthropic_prompt.contains("Default model:"));
     assert!(!anthropic_prompt.contains("Suggested default model:"));
 }
 
@@ -262,7 +266,10 @@ fn import_review_collects_checked_logins() {
     // The default is the summary screen with Import preselected.
     assert!(!review.choosing);
     assert!(review.continue_focused);
-    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Continue);
+    assert_eq!(
+        review.summary_pill,
+        crate::tui::app::onboarding_flow::SummaryPill::Continue
+    );
     assert_eq!(review.total(), 3);
     // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
@@ -351,23 +358,23 @@ fn login_phase_advances_to_model_select_without_telemetry_prompt() {
 
 #[test]
 fn login_openai_phase_is_default_when_no_imports() {
-    use crate::tui::OnboardingWelcomeKind;
+    use crate::tui::{OnboardingLoginChoice, OnboardingWelcomeKind};
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         // Fresh temp home has no importable logins, so begin_at_login lands on
-        // the "Log in to OpenAI?" Yes/No prompt (not the bare provider picker).
+        // the 4-option login choice screen defaulting to OpenAI.
         app.begin_onboarding_flow_at_login();
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
+                choice: OnboardingLoginChoice::OpenAi
             })
         ));
         assert!(matches!(
             app.onboarding_welcome_kind(),
             OnboardingWelcomeKind::LoginOpenAi {
-                yes_highlighted: true
+                choice: OnboardingLoginChoice::OpenAi
             }
         ));
     });
@@ -375,27 +382,24 @@ fn login_openai_phase_is_default_when_no_imports() {
 
 #[test]
 fn login_openai_no_finishes_onboarding_with_login_hint() {
+    use crate::tui::OnboardingLoginChoice;
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true,
+                choice: OnboardingLoginChoice::OpenAi,
             };
         }
         assert!(app.inline_interactive_state.is_none());
         let before = app.display_messages().len();
-        // 'n' exits onboarding straight to the normal screen (no flaky inline
-        // provider picker) and tells the user to run /login when ready.
+        // 'n' (or 's' / Skip) exits onboarding straight to the normal screen
+        // and tells the user to run /login when ready.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
-        // No inline picker is opened.
         assert!(app.inline_interactive_state.is_none());
-        // Onboarding is finished (Done phase is inactive, so the accessor
-        // reports no active phase).
         assert!(app.onboarding_phase().is_none());
         assert!(!app.onboarding_flow_active());
-        // A system message guides the user to /login.
         let messages = app.display_messages();
         assert_eq!(messages.len(), before + 1, "exactly one guidance message");
         assert!(
@@ -407,32 +411,57 @@ fn login_openai_no_finishes_onboarding_with_login_hint() {
 }
 
 #[test]
-fn login_openai_arrows_toggle_highlight() {
+fn login_openai_arrows_cycle_four_choices_and_api_key_launches_auto_detect() {
+    use crate::tui::OnboardingLoginChoice;
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true,
+                choice: OnboardingLoginChoice::OpenAi,
             };
         }
-        // Right highlights No, Left highlights Yes; nothing commits yet.
+        // Right steps OpenAI -> Claude -> API key -> Skip -> OpenAI.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: false
+                choice: OnboardingLoginChoice::Claude
+            })
+        ));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        assert!(matches!(
+            app.onboarding_phase(),
+            Some(OnboardingPhase::LoginOpenAi {
+                choice: OnboardingLoginChoice::ApiKey
+            })
+        ));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        assert!(matches!(
+            app.onboarding_phase(),
+            Some(OnboardingPhase::LoginOpenAi {
+                choice: OnboardingLoginChoice::Skip
             })
         ));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Left));
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::LoginOpenAi {
-                yes_highlighted: true
+                choice: OnboardingLoginChoice::ApiKey
             })
         ));
         assert!(app.inline_interactive_state.is_none());
+
+        // Pressing Enter on API key launches the paste-any-API-key flow and
+        // yields the welcome screen takeover so the prompt + masked input show.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        assert!(matches!(
+            app.pending_login,
+            Some(crate::tui::app::PendingLogin::AutoApiKey)
+        ));
+        assert!(app.login_input_is_secret());
+        assert!(!app.onboarding_welcome_active());
     });
 }
 
@@ -1125,7 +1154,7 @@ fn liveness_every_login_phase_has_a_single_keypress_exit() {
             (
                 "LoginOpenAi",
                 OnboardingPhase::LoginOpenAi {
-                    yes_highlighted: true,
+                    choice: crate::tui::OnboardingLoginChoice::OpenAi,
                 },
                 KeyCode::Char('n'),
             ),
@@ -1271,7 +1300,7 @@ fn liveness_esc_always_exits_onboarding_from_every_guided_phase() {
             (
                 "LoginOpenAi",
                 OnboardingPhase::LoginOpenAi {
-                    yes_highlighted: true,
+                    choice: crate::tui::OnboardingLoginChoice::OpenAi,
                 },
                 false,
             ),
@@ -1558,9 +1587,8 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
             ));
             // The bus is process-global: only this app's activation counts.
             let own_session = app.session.id.clone();
-            let (model, provider_key) = tokio::time::timeout(
-                std::time::Duration::from_secs(4),
-                async {
+            let (model, provider_key) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), async {
                     loop {
                         match bus_rx.recv().await {
                             Ok(crate::bus::BusEvent::ProviderModelActivated {
@@ -1636,10 +1664,6 @@ fn import_summary_choose_pill_opens_checkbox_list() {
 
 include!("onboarding_recent_project_tests.rs");
 
-
-
-
-
 #[test]
 fn starting_recent_project_review_queues_remote_turn_without_stuck_sending() {
     let mut app = onboarding_test_app();
@@ -1675,9 +1699,11 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     assert!(!app.pending_turn);
     assert!(app.queued_messages.is_empty());
     assert!(!app.onboarding_flow_active());
-    assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
-        notice.contains("No active Git repository found")
-    }));
+    assert!(
+        app.status_notice
+            .as_ref()
+            .is_some_and(|(notice, _)| { notice.contains("No active Git repository found") })
+    );
 }
 
 include!("onboarding_flow_telemetry.rs");

@@ -143,6 +143,9 @@ pub struct SessionInfo {
     pub estimated_tokens: usize,
     /// First visible user prompt in the session, shown in compact list rows.
     pub first_user_prompt: Option<String>,
+    /// Persisted todo-plan user intention for local Jcode sessions, used by picker search.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub user_intention: Option<String>,
     pub messages_preview: Vec<PreviewMessage>,
     /// Lowercased searchable text used by picker filtering.
     pub search_index: String,

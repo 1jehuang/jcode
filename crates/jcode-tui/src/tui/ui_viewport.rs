@@ -1461,34 +1461,31 @@ fn pinned_todo_band_for_payload(
     // Card content lives inside the border plus one column of padding per side.
     let inner_width = width.saturating_sub(4);
     let mut title = String::from(" Todos ");
-    let mut card_lines = if crate::config::config().display.pin_todos {
-        payload.map_or_else(Vec::new, |payload| {
-            if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
-                title = format!(" Todos {}/{} ", done, total);
-            }
-            // Unboxed body: the band draws its own border below. Go through
-            // the shared message-line cache so an unchanged list is not
-            // re-rendered on every frame. The distinct title keeps this
-            // entry apart from the boxed, width-capped inline card.
-            let msg = crate::tui::DisplayMessage::todos(payload.to_string())
-                .with_title("Todos (pinned body)");
-            super::messages::get_cached_message_lines(
-                &msg,
-                inner_width,
-                diff_mode,
-                super::messages::render_pinned_todos_message,
-            )
-        })
-    } else {
-        Vec::new()
-    };
+    if let Some((done, total)) = payload.and_then(super::messages::todo_payload_counts) {
+        title = format!(" Todos {}/{} ", done, total);
+    }
+    // Include the border and task rows in the collapsed card's budget.
+    let budget = ((viewport_height as usize) / 3).clamp(2, 12);
+    let content_budget = budget.saturating_sub(tasks.len()).saturating_sub(2).max(2);
+    let mut card_lines = todo_margins::project_pinned_todo_card(
+        payload,
+        diff_mode,
+        inner_width,
+        false,
+        <[Line<'static>]>::to_vec,
+    );
+    if !expanded && card_lines.len() > content_budget {
+        card_lines = todo_margins::project_pinned_todo_card(
+            payload,
+            diff_mode,
+            inner_width,
+            true,
+            <[Line<'static>]>::to_vec,
+        );
+    }
     PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
     super::messages::animate_lane_spinners(&mut card_lines);
 
-    // Band budget: about a third of the viewport, including the two border
-    // rows around the card and the task rows below it.
-    let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget.saturating_sub(tasks.len()).saturating_sub(2).max(2);
     let mut card: Vec<Line<'static>> = Vec::new();
     let mut more_line = None;
     if expanded && !card_lines.is_empty() {

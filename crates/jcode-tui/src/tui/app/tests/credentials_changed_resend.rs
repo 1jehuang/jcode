@@ -9,6 +9,7 @@ fn held_on_rate_limit_app(hold: Duration) -> App {
     let retry_at = Instant::now() + hold;
     app.rate_limit_reset = Some(retry_at);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "finish the refactor".to_string(),
         images: vec![],
         is_system: false,
@@ -156,6 +157,7 @@ fn test_rate_limit_error_for_turn_started_before_account_change_retries_promptly
 
     // Turn in flight on the old account (possibly sleeping in a provider retry).
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,
@@ -209,6 +211,7 @@ fn test_rate_limit_error_without_account_change_keeps_full_hold() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,

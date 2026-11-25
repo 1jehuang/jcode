@@ -27,7 +27,7 @@ fn accepts_supported_version_labels() {
 }
 
 #[test]
-fn stable_publication_preserves_current_channel() {
+fn stable_publication_advances_current_and_preserves_deliberate_server_pin() {
     with_temp_jcode_home(|| {
         let payload = tempfile::tempdir().unwrap();
         std::fs::write(payload.path().join(binary_name()), b"release").unwrap();
@@ -35,6 +35,7 @@ fn stable_publication_preserves_current_channel() {
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join(binary_name()), b"old").unwrap();
         crate::update_current_symlink("old").unwrap();
+        crate::update_shared_server_symlink("old").unwrap();
         publish_prepared_build(
             payload.path(),
             "new",
@@ -45,9 +46,51 @@ fn stable_publication_preserves_current_channel() {
         .unwrap();
         assert_eq!(
             crate::read_current_version().unwrap().as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            crate::read_shared_server_version().unwrap().as_deref(),
             Some("old")
         );
     });
+}
+
+#[test]
+fn stable_publication_advances_missing_tracking_and_public_release_server_channels() {
+    for previous_shared in [
+        None,
+        Some("1.0.0"),
+        Some("1.0.0-preview.2"),
+        Some("1.0.0+build"),
+    ] {
+        with_temp_jcode_home(|| {
+            let payload = tempfile::tempdir().unwrap();
+            std::fs::write(payload.path().join(binary_name()), b"release").unwrap();
+            let old = builds_dir().unwrap().join("versions/1.0.0");
+            std::fs::create_dir_all(&old).unwrap();
+            std::fs::write(old.join(binary_name()), b"old").unwrap();
+            crate::update_stable_symlink("1.0.0").unwrap();
+            if let Some(previous) = previous_shared {
+                let shared = builds_dir().unwrap().join("versions").join(previous);
+                std::fs::create_dir_all(&shared).unwrap();
+                std::fs::write(shared.join(binary_name()), b"old").unwrap();
+                crate::update_shared_server_symlink(previous).unwrap();
+            }
+            publish_prepared_build(
+                payload.path(),
+                "1.1.0",
+                PreparedBuildChannel::Stable,
+                &payload.path().join("launcher"),
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::read_shared_server_version().unwrap().as_deref(),
+                Some("1.1.0"),
+                "previous shared-server marker {previous_shared:?}"
+            );
+        });
+    }
 }
 
 #[test]

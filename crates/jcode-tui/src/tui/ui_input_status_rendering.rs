@@ -128,7 +128,16 @@ pub(in super::super) fn draw_status(
             ProcessingStatus::Streaming => {
                 let mut snapshot = live_status_snapshot(app, elapsed);
                 snapshot.phase = "streaming".into();
-                let mut spans = live_processing_status_line(&snapshot, stale_secs, spinner).spans;
+                if app.stream_reveal_pending() {
+                    snapshot.stream_message_ended = false;
+                }
+                let effective_stale_secs = if app.stream_message_ended() {
+                    None
+                } else {
+                    stale_secs
+                };
+                let mut spans =
+                    live_processing_status_line(&snapshot, effective_stale_secs, spinner).spans;
                 if let Some(upstream) = app.upstream_provider() {
                     spans.push(Span::styled(
                         format!(" · via {upstream}"),
@@ -318,6 +327,26 @@ pub(in super::super) fn draw_status(
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// Mask an API key being typed or pasted into the login composer while
+/// keeping cursor byte alignment valid for UTF-8 rendering.
+pub(crate) fn mask_secret_input_for_display(input: &str, cursor_pos: usize) -> (String, usize) {
+    let clamped = cursor_pos.min(input.len());
+    let mut masked = String::with_capacity(input.len() * 3);
+    let mut new_cursor = None;
+    for (byte_idx, ch) in input.char_indices() {
+        if new_cursor.is_none() && byte_idx >= clamped {
+            new_cursor = Some(masked.len());
+        }
+        if ch == '\n' {
+            masked.push('\n');
+        } else {
+            masked.push('•');
+        }
+    }
+    let cursor = new_cursor.unwrap_or(masked.len());
+    (masked, cursor)
+}
+
 pub(in super::super) fn draw_input(
     frame: &mut Frame,
     app: &dyn TuiState,
@@ -345,9 +374,21 @@ pub(in super::super) fn draw_input(
     }
 
     let voice_preview = app.voice_composer_preview();
+    let masked_secret = if app.login_input_is_secret()
+        && !input_text.is_empty()
+        && !input_text.trim_start().starts_with('/')
+    {
+        Some(mask_secret_input_for_display(input_text, cursor_pos))
+    } else {
+        None
+    };
+    let (display_input_text, display_cursor_pos) = match masked_secret.as_ref() {
+        Some((masked, pos)) => (masked.as_str(), *pos),
+        None => (input_text, cursor_pos),
+    };
     let (all_lines, cursor_line, cursor_col) = wrap_input_text_with_ghost(
-        input_text,
-        cursor_pos,
+        display_input_text,
+        display_cursor_pos,
         line_width,
         &num_str,
         prompt_char,
@@ -405,14 +446,14 @@ pub(in super::super) fn draw_input(
     }
 
     if let Some(capture) = debug_capture {
-        capture.rendered_text.input_area = input_text.to_string();
+        capture.rendered_text.input_area = display_input_text.to_string();
         if let Some(hint) = &hint_line {
             capture.rendered_text.input_hint = Some(hint.clone());
         }
         visual_debug::check_shift_enter_anomaly(
             capture,
             app.is_processing(),
-            input_text,
+            display_input_text,
             hint_shown,
         );
     }

@@ -22,12 +22,10 @@ use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT, MIN_SESSION_SCAN_LIMIT, PreviewMessage,
-    SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
+    ResumeTarget, SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo, SessionSource,
 };
 
 mod mobile_inventory;
-
-use super::{ResumeTarget, SessionSource};
 
 #[cfg(test)]
 const TRANSCRIPT_SEARCH_CHUNK_BYTES: usize = 64 * 1024;
@@ -69,7 +67,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 4;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 5;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -1543,20 +1541,22 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
                                 .starts_with("This session was forked (split) from session ")
                         })
                 });
+        let conversational_role =
+            matches!(display_role, None | Some(StoredDisplayRole::JarvisUser));
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
-        let content_search = if display_role.is_none() && !content_starts_with_system_reminder {
-            content
-                .and_then(|raw| classified_search_excerpt(raw, &role, self.content_excerpt_budget))
-        } else {
-            None
-        };
-        let content_text = if display_role.is_none() && !content_starts_with_system_reminder {
-            content.and_then(raw_value_display_text)
-        } else {
-            None
-        };
+        let (content_search, content_text) =
+            if conversational_role && !content_starts_with_system_reminder {
+                (
+                    content.and_then(|raw| {
+                        classified_search_excerpt(raw, &role, self.content_excerpt_budget)
+                    }),
+                    content.and_then(raw_value_display_text),
+                )
+            } else {
+                (None, None)
+            };
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
@@ -1571,13 +1571,10 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
 }
 
 fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    if message.display_role.is_some() {
-        return false;
-    }
-    if message.content_starts_with_system_reminder {
-        return false;
-    }
-    true
+    matches!(
+        message.display_role,
+        None | Some(StoredDisplayRole::JarvisUser)
+    ) && !message.content_starts_with_system_reminder
 }
 
 fn raw_content_starts_with_system_reminder(raw: &RawValue) -> bool {
@@ -1851,14 +1848,17 @@ fn parse_jcode_session_info(
         session.model.as_deref(),
     );
 
+    let todo_summary = crate::todo::load_session_todo_summary(stem);
     let title = session
         .custom_title
         .or_else(|| {
-            crate::todo::load_session_title(stem).map(|title| truncate_title_text(&title, 72))
+            todo_summary
+                .title
+                .map(|title| truncate_title_text(&title, 72))
         })
         .or(session.title)
         .unwrap_or_else(|| short_name.clone());
-    let search_index = build_search_index_from_summary(
+    let mut search_index = build_search_index_from_summary(
         stem,
         &short_name,
         &title,
@@ -1870,6 +1870,10 @@ fn parse_jcode_session_info(
             text
         },
     );
+    if let Some(intention) = todo_summary.user_intention.as_deref() {
+        search_index.push(' ');
+        search_index.push_str(&intention.to_lowercase());
+    }
 
     Some(SessionInfo {
         id: stem.to_string(),
@@ -1899,6 +1903,7 @@ fn parse_jcode_session_info(
         needs_catchup,
         estimated_tokens,
         first_user_prompt: session.messages.first_user_prompt,
+        user_intention: todo_summary.user_intention,
         messages_preview: Vec::new(),
         search_index,
         server_name: None,
@@ -1908,11 +1913,7 @@ fn parse_jcode_session_info(
             session_id: stem.to_string(),
         },
         external_path: None,
-        todo_statuses: crate::todo::load_todos(stem)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|todo| todo.status)
-            .collect(),
+        todo_statuses: todo_summary.todo_statuses,
     })
 }
 
@@ -2188,6 +2189,7 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                     session_path: session.full_path.clone(),
                 },
                 external_path: Some(session.full_path),
+                user_intention: None,
                 todo_statuses: Vec::new(),
             }
         })
@@ -2362,6 +2364,7 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -2560,6 +2563,7 @@ fn opencode_db_session_info(
         server_name: None,
         server_icon: None,
         source: SessionSource::OpenCode,
+        user_intention: None,
         resume_target: ResumeTarget::OpenCodeSession {
             session_id,
             session_path: db_path.clone(),
@@ -2712,6 +2716,7 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -2885,6 +2890,7 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }))
 }
@@ -3019,6 +3025,7 @@ fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
             session_id: id.clone(),
         },
         external_path: None,
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }

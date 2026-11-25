@@ -68,6 +68,38 @@ async fn adopted_task_cancellation_drops_actual_owner() -> Result<()> {
 }
 
 #[tokio::test]
+async fn cancel_publishes_background_task_completed_event() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut rx = Bus::global().subscribe();
+    let handle = tokio::spawn(async move {
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("bash", "cancel-bus-event", handle).await;
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for BackgroundTaskCompleted"
+        );
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(BusEvent::BackgroundTaskCompleted(ev))) if ev.task_id == info.task_id => {
+                assert_eq!(ev.status, BackgroundTaskStatus::Failed);
+                assert_eq!(ev.output_preview, "Cancelled by user");
+                break;
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            other => panic!("unexpected bus recv result: {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn adopted_task_reload_drops_owner() -> Result<()> {
     assert_adopted_owner_cancelled(true).await
 }

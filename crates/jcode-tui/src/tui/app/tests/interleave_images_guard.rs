@@ -63,11 +63,7 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
         app.input = "Compare [pasted 2 lines]".to_string();
         app.pasted_contents = vec!["detail one\ndetail two".to_string()];
         app.cursor_pos = app.input.len();
-        // The guard restores expanded text; the attachment gets an owned marker.
-        let expected = format!(
-            "{} [image 1]",
-            input::expand_paste_placeholders(&app, &app.input)
-        );
+        let expected = input::expand_paste_placeholders(&app, &app.input);
         let image = ("image/png".to_string(), "queued-image".to_string());
         app.pending_images = vec![image.clone()];
         let mut connection = crate::tui::backend::RemoteConnection::dummy();
@@ -79,26 +75,22 @@ fn remote_image_queue_keeps_complete_draft_for_both_enter_shortcuts() {
             &mut connection,
         ))
         .unwrap();
-        assert!(
-            app.queued_messages.is_empty(),
-            "no image-less prompt may be queued"
+        assert_eq!(
+            app.queued_messages.as_slice(),
+            std::slice::from_ref(&expected)
         );
-        assert_eq!(app.input, expected);
-        assert_eq!(app.cursor_pos, expected.len());
-        app.sync_model_picker_preview_from_input();
-        assert_eq!(app.pending_images, vec![image]);
+        assert_eq!(
+            app.queued_message_images.as_slice(),
+            std::slice::from_ref(&image)
+        );
+        assert!(app.input.is_empty());
+        assert!(app.pending_images.is_empty());
         assert_eq!(connection.next_request_id_for_test(), next_id);
-        assert!(
-            app.status_notice
-                .as_ref()
-                .is_some_and(|(notice, _)| { notice.contains("Images cannot be queued") })
-        );
-        assert!(app.display_messages().iter().any(|message| {
-            message.content.contains("Message not queued")
-                && message
-                    .content
-                    .contains("text and images are still in the input")
-        }));
+        assert!(input::retrieve_pending_message_for_edit(&mut app));
+        assert_eq!(app.input, format!("{expected} [image 1]"));
+        assert_eq!(app.cursor_pos, expected.len());
+        assert_eq!(app.pending_images, vec![image]);
+        assert!(app.queued_message_images.is_empty());
     }
 }
 

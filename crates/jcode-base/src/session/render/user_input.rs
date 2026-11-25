@@ -46,7 +46,7 @@ pub fn is_authentic_user_input(prompt: &str, has_images: bool) -> bool {
 /// Admission, rewind and response statistics must agree after resume.
 pub fn is_authentic_user_prompt(message: &StoredMessage) -> bool {
     matches!(message.role, Role::User)
-        && message.display_role.is_none()
+        && !message.has_context_display_role()
         && authentic_content(
             message.content.iter().filter_map(|block| match block {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),
@@ -131,6 +131,8 @@ mod tests {
     #[test]
     fn stored_provenance_and_tool_results_remain_strict() {
         let mut input = message("ordinary prompt", true);
+        input.display_role = Some(crate::session::StoredDisplayRole::JarvisUser);
+        assert!(is_authentic_user_prompt(&input));
         input.display_role = Some(crate::session::StoredDisplayRole::System);
         assert!(!is_authentic_user_prompt(&input));
         input.display_role = None;

@@ -135,7 +135,7 @@ fn hierarchy_rejects_malformed_structures() {
                 .is_err()
         );
     }
-    for key in ["todos", "update", "add", "remove"] {
+    for key in ["todos", "update", "add", "remove", "cancel"] {
         let mut input = json!({"phases":[]});
         input[key] = json!([]);
         assert!(apply_todo_patch(input, || json!([])).is_err());
@@ -417,7 +417,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(!props.contains_key("todos"));
     assert!(props.contains_key("plan"));
     assert!(props.contains_key("goals"));
-    for patch in ["update", "add", "remove"] {
+    for patch in ["update", "add", "cancel"] {
         assert!(
             props.contains_key(patch),
             "{patch} patch mode should be offered"
@@ -698,7 +698,7 @@ fn rejects_unknown_todo_statuses_with_valid_vocabulary() {
     .expect("unknown status should be rejected");
     let message = error.to_string();
     assert!(message.contains("invalid todo status \"blocked\""));
-    assert!(message.contains("pending, in_progress, completed, cancelled"));
+    assert!(message.contains("pending, in_progress, completed; use cancel"));
 }
 
 #[test]

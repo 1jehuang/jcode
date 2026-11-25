@@ -26,6 +26,16 @@ struct Inventory {
     logins: Vec<OAuthLogin>,
     pool: AccountPool,
     expired: Vec<(&'static str, String)>,
+    /// Antigravity quota pools from the persisted model catalog, read on the
+    /// inventory worker so rendering never touches disk.
+    antigravity: Option<AntigravityQuota>,
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Debug)]
+struct AntigravityQuota {
+    email: Option<String>,
+    /// (pool label, used per-mille, reset time) per quota pool.
+    pools: Vec<(String, u16, Option<String>)>,
 }
 
 #[derive(Default)]

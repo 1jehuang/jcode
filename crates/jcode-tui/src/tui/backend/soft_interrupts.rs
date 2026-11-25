@@ -14,8 +14,20 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         urgent: bool,
     ) -> Result<u64> {
+        self.soft_interrupt_with_origin(content, images, urgent, false)
+            .await
+    }
+
+    pub(crate) async fn soft_interrupt_with_origin(
+        &mut self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        jarvis_voice: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         let request = Request::SoftInterrupt {
+            jarvis_voice,
             id,
             content,
             images,

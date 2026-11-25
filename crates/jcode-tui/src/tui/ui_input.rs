@@ -710,11 +710,16 @@ pub(super) fn live_processing_status_line(
 ) -> Line<'static> {
     let single_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let elapsed = format_elapsed(status.elapsed_ms as f32 / 1000.0);
+    let normalized_detail = status
+        .status_detail
+        .as_deref()
+        .and_then(normalize_status_detail)
+        .filter(|detail| {
+            !(status.phase == "streaming"
+                && matches!(detail.as_str(), "opening websocket" | "verifying websocket"))
+        });
     let transport = collect_transport_context_labels(
-        status
-            .status_detail
-            .as_deref()
-            .and_then(normalize_status_detail),
+        normalized_detail,
         status
             .connection_type
             .as_deref()
@@ -757,12 +762,19 @@ pub(super) fn live_processing_status_line(
             ai_color(),
         ),
         "streaming" => {
-            let mut label =
+            let phase_label = if status.stream_message_ended {
+                "finalizing…"
+            } else {
+                "streaming…"
+            };
+            let liveness =
                 streaming_liveness_label(elapsed.clone(), stale_secs, status.stream_message_ended);
+            let mut label = format!("{phase_label} {liveness}");
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            streaming_status_spans(spinner, label, status.stream_message_ended, false, "")
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
             let label = if status.phase == "connecting" {
@@ -992,14 +1004,68 @@ pub(crate) fn openai_reset_status_hint(
     Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
+fn caption_line(row: &crate::tui::JarvisCaption, width: u16) -> Line<'static> {
+    let (prefix, color) = match row.score {
+        None => ("Heard: ".to_owned(), Color::DarkGray),
+        Some((p, accepted)) => {
+            let label = if accepted { "Trigger" } else { "Heard" };
+            let color = if accepted {
+                Color::Green
+            } else if p >= 0.5 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            (format!("{:.0}% {label}: ", p * 100.0), color)
+        }
+    };
+    Line::styled(
+        truncate_cells(&format!("{prefix}{}", row.text), width as usize),
+        Style::default().fg(color),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn caption_cells_show_score_and_do_not_wrap() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
+    for (score, expected, prefix) in [
+        (None, Color::DarkGray, "Heard:"),
+        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
+        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
+        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
+        (Some((0.95, true)), Color::Green, "95% Trigger:"),
+    ] {
+        let row = crate::tui::JarvisCaption {
+            id: 1,
+            text: "界".repeat(40),
+            score,
+        };
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (x, c) in prefix.chars().enumerate() {
+            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
+            assert_eq!(buffer[(x as u16, 0)].fg, expected);
+        }
+        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
+    }
+}
+
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let spans = build_notification_spans(app);
-    if spans.is_empty() || width == 0 {
+    if width == 0 {
         return Vec::new();
     }
-    let line = Line::from(spans);
-    // Notifications must never occupy a second row on narrow terminals.
-    let lines = vec![line];
+    let mut lines = Vec::new();
+    for row in app.jarvis_transcript().into_iter().flatten() {
+        lines.push(caption_line(row, width));
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
     lines
         .into_iter()
         .map(|line| {
@@ -1020,6 +1086,7 @@ pub(super) fn notification_height(app: &dyn TuiState, width: u16) -> u16 {
             .unwrap_or(u16::MAX)
     } else {
         u16::from(app.has_notification())
+            + app.jarvis_transcript().map_or(0, |rows| rows.len() as u16)
     }
 }
 
@@ -1326,6 +1393,7 @@ fn overscroll_fact_spans(
         )];
         if levels.model == 0
             && let Some(effort) = &facts.effort
+            && !overscroll_model_already_includes_effort(model, effort)
         {
             group.push(Span::styled(format!(" {effort}"), muted));
         }
@@ -1338,6 +1406,32 @@ fn overscroll_fact_spans(
     }
 
     out
+}
+
+fn overscroll_is_standard_effort_word(word: &str) -> bool {
+    let trimmed = word.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+fn overscroll_model_already_includes_effort(model: &str, effort: &str) -> bool {
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return false;
+    }
+    let Some(last_word) = model.split_whitespace().last() else {
+        return false;
+    };
+    if last_word.eq_ignore_ascii_case(effort) {
+        return true;
+    }
+    // Models that encode their own thinking/effort level in their name (e.g.
+    // "Gemini 4 Neon Low") should never render a second standard effort suffix
+    // like "Gemini 4 Neon Low medium". Non-standard sentinels like "swarm"
+    // remain visible.
+    overscroll_is_standard_effort_word(last_word) && overscroll_is_standard_effort_word(effort)
 }
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns
@@ -2093,133 +2187,9 @@ fn wrap_input_text_with_ghost<'a>(
 
 /// Ghost text for the live voice transcript: italic and dim while
 /// recording, accent colored while the final pass runs.
-fn voice_ghost(preview: Option<&crate::tui::VoiceComposerPreview>) -> Option<(&str, Style)> {
-    let preview = preview?;
-    let color = if preview.recording {
-        rgb(200, 200, 210)
-    } else {
-        rgb(140, 200, 255)
-    };
-    Some((
-        preview.live.as_str(),
-        Style::default().fg(dim_color_of(color)).italic(),
-    ))
-}
-
-fn dim_color_of(color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => rgb(
-            (r as u16 * 3 / 4) as u8,
-            (g as u16 * 3 / 4) as u8,
-            (b as u16 * 3 / 4) as u8,
-        ),
-        other => other,
-    }
-}
-
-/// Truncate to `width` terminal cells, ending in `…` when cut.
-fn truncate_cells(text: &str, width: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if text.width() <= width {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w + 1 > width {
-            break;
-        }
-        used += w;
-        out.push(ch);
-    }
-    if width > 0 {
-        out.push('…');
-    }
-    out
-}
-
-/// Smooth level to a 0..=1 bar height. Speech RMS sits around 0.02 to 0.2,
-/// so the curve is compressed to keep normal speech visibly moving.
-fn voice_level_height(level: f32) -> f32 {
-    (level.max(0.0) * 4.0).sqrt().min(1.0)
-}
-
-/// Header row above the composer while voice input is active:
-/// `● 0:07 ▁▂▅▇▆▃▂▁▂▄… · Ctrl+Space send · Esc cancel`. The waveform fills the
-/// width left after the label and hint, newest sample on the right, colored
-/// by loudness. Never wraps: the hint is dropped first, then the waveform
-/// shrinks.
-fn voice_waveform_line(preview: &crate::tui::VoiceComposerPreview, width: usize) -> Line<'static> {
-    use unicode_width::UnicodeWidthStr;
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if !preview.recording {
-        let dots = ["◌", "◍", "●", "◍"];
-        let phase = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() / 250)
-            .unwrap_or(0)
-            % dots.len() as u128) as usize;
-        let mut text = format!("  {} Transcribing…", dots[phase]);
-        if !preview.hint.is_empty() {
-            text.push_str(" · ");
-            text.push_str(&preview.hint);
-        }
-        let text = truncate_cells(&text, width);
-        spans.push(Span::styled(
-            text,
-            Style::default().fg(rgb(140, 200, 255)).bold(),
-        ));
-        return Line::from(spans);
-    }
-    let label = format!(
-        "  ● {}:{:02} ",
-        preview.elapsed_secs / 60,
-        preview.elapsed_secs % 60
-    );
-    let hint = if preview.hint.is_empty() {
-        String::new()
-    } else {
-        format!("  {}", preview.hint)
-    };
-    let label_w = label.width();
-    let mut hint_w = hint.width();
-    if label_w + hint_w + 8 > width {
-        hint_w = 0;
-    }
-    let wave_w = width.saturating_sub(label_w + hint_w).min(48);
-    spans.push(Span::styled(
-        truncate_cells(&label, width),
-        Style::default().fg(rgb(255, 110, 110)).bold(),
-    ));
-    if wave_w > 0 {
-        let levels = &preview.levels;
-        let start = levels.len().saturating_sub(wave_w);
-        let pad = wave_w.saturating_sub(levels.len() - start);
-        if pad > 0 {
-            spans.push(Span::styled(
-                "·".repeat(pad),
-                Style::default().fg(rgb(70, 70, 80)),
-            ));
-        }
-        for level in &levels[start..] {
-            let h = voice_level_height(*level);
-            let glyph = BARS[(h * 7.0).round() as usize];
-            // Quiet bars recede, loud bars glow warm.
-            let color = rgb(
-                (110.0 + 145.0 * h) as u8,
-                (150.0 - 40.0 * h) as u8,
-                (190.0 - 80.0 * h) as u8,
-            );
-            spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
-        }
-    }
-    if hint_w > 0 {
-        spans.push(Span::styled(hint, Style::default().fg(dim_color())));
-    }
-    Line::from(spans)
-}
+#[path = "ui_input/voice_preview.rs"]
+mod voice_preview;
+use voice_preview::{truncate_cells, voice_ghost, voice_waveform_line};
 
 fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
     let mode = composer_mode(app.input(), app.is_remote_mode());

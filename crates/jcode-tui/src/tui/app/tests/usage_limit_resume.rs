@@ -155,6 +155,7 @@ fn test_server_initiated_usage_limit_keeps_the_users_own_held_turn() {
     let held_until = Instant::now() + Duration::from_secs(600);
     app.rate_limit_reset = Some(held_until);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "my own turn".to_string(),
         images: vec![],
         is_system: false,
@@ -195,6 +196,7 @@ fn test_user_typed_remote_turn_with_usage_limit_is_held_until_the_reset() {
         let _guard = rt.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "finish the refactor".to_string(),
             images: vec![],
             is_system: false,
@@ -331,6 +333,7 @@ fn test_server_owned_resume_notice_during_users_turn_does_not_spend_its_retries(
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "my own turn".to_string(),
         images: vec![],
         is_system: false,
@@ -359,7 +362,10 @@ fn test_server_owned_resume_notice_during_users_turn_does_not_spend_its_retries(
 
     assert!(app.is_processing, "the user's turn keeps running");
     assert_eq!(app.current_message_id, Some(7));
-    assert!(app.rate_limit_reset.is_none(), "no client resend is scheduled");
+    assert!(
+        app.rate_limit_reset.is_none(),
+        "no client resend is scheduled"
+    );
     assert_eq!(
         app.rate_limit_pending_message
             .as_ref()

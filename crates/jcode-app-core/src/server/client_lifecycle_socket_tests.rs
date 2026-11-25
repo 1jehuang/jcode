@@ -403,7 +403,7 @@ async fn sdk_socket_cancel_workflow(
         .await;
         send(
             &mut client_writer,
-            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn"}),
+            json!({"type":if idle_soft_interrupt { "soft_interrupt" } else { "message" },"id":2,"content":"one shared turn", "jarvis_voice":idle_soft_interrupt}),
         )
         .await;
         tokio::time::timeout(
@@ -414,8 +414,8 @@ async fn sdk_socket_cancel_workflow(
         .unwrap();
         if idle_soft_interrupt {
             until(&mut client_reader, |event| {
-                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, .. }
-                    if content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
+                matches!(event, ServerEvent::SoftInterruptInjected { content, point, client_ids, display_role, .. }
+                    if display_role.as_deref() == Some("jarvis_user") && content == "one shared turn" && point == "turn_start" && client_ids.is_empty())
             })
             .await;
         }

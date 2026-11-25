@@ -150,8 +150,7 @@ fn gzip_allocation_benchmark() {
         }
     }
     for (input, (name, _)) in inputs.iter().enumerate() {
-        for policy in 0..5 {
-            let values = &mut timings[input][policy];
+        for (policy, values) in timings[input].iter_mut().enumerate() {
             values.sort_by(f64::total_cmp);
             eprintln!(
                 "{name} policy={policy} median_ms={:.3} min_ms={:.3} max_ms={:.3} n={}",
@@ -165,6 +164,10 @@ fn gzip_allocation_benchmark() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "Serialize process-global uplink sampler state against synchronous tests on separate test runtimes"
+)]
 async fn json_uploads_match_original_wire_bytes_and_headers() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let _guard = UPLINK_TEST_LOCK

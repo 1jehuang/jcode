@@ -16,7 +16,27 @@
 use super::*;
 #[path = "ui_todo_stages_stage_lines.rs"]
 mod stage_lines;
+pub(crate) use stage_lines::push_ordered_stage_lines;
+#[cfg(test)]
 pub(crate) use stage_lines::push_stage_lines;
+
+pub(super) fn work_rank(items: &[&crate::todo::TodoItem], agents: &[TodoCardAgent]) -> u8 {
+    let statuses = lane_item_statuses(items, agents);
+    if statuses
+        .iter()
+        .any(|(s, live)| *live && *s == "in_progress")
+        || lane_live_agent(items, agents).is_some()
+    {
+        0
+    } else if statuses
+        .iter()
+        .any(|(s, _)| matches!(*s, "in_progress" | "self_in_progress"))
+    {
+        1
+    } else {
+        2
+    }
+}
 
 use unicode_width::UnicodeWidthStr;
 
@@ -108,10 +128,17 @@ impl TodoCardAgent {
                 member
                     .todo_items
                     .iter()
+                    .filter(|item| !crate::todo::todo_status_is_cancelled(&item.status))
                     .map(|item| item.status.clone())
                     .collect()
             } else {
-                member.runtime.todo_statuses.clone()
+                member
+                    .runtime
+                    .todo_statuses
+                    .iter()
+                    .filter(|status| !crate::todo::todo_status_is_cancelled(status))
+                    .cloned()
+                    .collect()
             },
         }
     }

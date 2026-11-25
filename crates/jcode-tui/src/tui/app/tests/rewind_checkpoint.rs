@@ -161,6 +161,7 @@ fn checkpoint_rewind_completion_restores_exact_prompt_without_submission_and_fil
     assert!(app.dialog.is_none());
     app.rate_limit_reset = Some(Instant::now());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "removed pending prompt".to_string(),
         images: Vec::new(),
         is_system: false,

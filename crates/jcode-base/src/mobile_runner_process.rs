@@ -9,7 +9,7 @@ struct BusyMarker(Option<PathBuf>);
 impl BusyMarker {
     fn touch(&self) {
         if let Some(path) = &self.0
-            && let Err(error) = std::fs::write(path, b"")
+            && let Err(error) = jcode_storage::touch_stamp(path)
         {
             crate::logging::warn(&format!("mobile runner busy marker update failed: {error}"));
         }

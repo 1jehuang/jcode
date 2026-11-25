@@ -11,6 +11,7 @@ pub(super) struct Entry {
     pub(super) save_label: Option<String>,
     pub(super) has_prompt: bool,
     pub(super) opening_prompt: String,
+    pub(super) user_intention: String,
     pub(super) intent_text: String,
     pub(super) working_dir: Option<String>,
     pub(super) server_name: Option<String>,
@@ -38,10 +39,12 @@ impl Entry {
                 .as_deref()
                 .unwrap_or("")
                 .to_owned(),
+            user_intention: session.user_intention.as_deref().unwrap_or("").to_owned(),
             intent_text: format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 session.title,
                 session.save_label.as_deref().unwrap_or(""),
+                session.user_intention.as_deref().unwrap_or(""),
                 session.first_user_prompt.as_deref().unwrap_or(""),
             ),
         }
@@ -67,12 +70,18 @@ impl Entry {
             && self.cloud == (session.server_icon.as_deref() == Some("☁"))
             && self.has_prompt == session.first_user_prompt.is_some()
             && self.opening_prompt == session.first_user_prompt.as_deref().unwrap_or("")
+            && self.user_intention == session.user_intention.as_deref().unwrap_or("")
     }
 
     pub(super) fn exact_field(&self, query: &str) -> bool {
-        [&self.title, &self.short_name, &self.id]
-            .iter()
-            .any(|field| normalized_equals(field, query))
+        [
+            &self.title,
+            &self.short_name,
+            &self.id,
+            &self.user_intention,
+        ]
+        .iter()
+        .any(|field| normalized_equals(field, query))
             || self
                 .save_label
                 .as_ref()

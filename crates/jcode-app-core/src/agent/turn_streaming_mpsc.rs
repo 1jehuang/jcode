@@ -13,15 +13,131 @@ use tool_handoff::{
 #[path = "stream_request_preparation.rs"]
 mod stream_request_preparation;
 
+pub(super) enum NetworkRecoveryAction {
+    Retry,
+    Cancelled,
+    GiveUp,
+}
+
 impl Agent {
-    /// Detect a provider route change made during the request (a transparent
-    /// model fallback such as Anthropic's retired `claude-fable-5` ->
-    /// `claude-opus-4-8`, or a switch to another OpenAI-compatible profile
-    /// serving the same model) and resync the session and clients with a
-    /// `ModelChanged`, so the header, picker, and context budget reflect the
-    /// route the provider will use next. Runs on success and on every stream
-    /// error exit, because a failed turn still leaves the provider on the new
-    /// route.
+    async fn wait_for_network_recovery_mpsc(
+        &mut self,
+        tracker: &mut crate::network_retry::NetworkRecoveryTracker,
+        reason: &str,
+        error_detail: &str,
+        offline_only: bool,
+        has_partial_output: bool,
+        event_tx: &crate::stream_batching::BatchingSender,
+    ) -> NetworkRecoveryAction {
+        use crate::network_retry::{NetworkRecoveryOutcome, NetworkWaitNotice};
+
+        let cancel_signal = self.graceful_shutdown.clone();
+        let cancel_fut = async move {
+            cancel_signal.notified().await;
+        };
+        tokio::pin!(cancel_fut);
+
+        let raw_tx = event_tx.raw().clone();
+        let mut rollback_emitted = false;
+        let session_id = self.session.id.clone();
+
+        let outcome = tracker
+            .wait_for_recovery(
+                offline_only,
+                cancel_fut,
+                |notice| {
+                    if has_partial_output && !rollback_emitted {
+                        rollback_emitted = true;
+                        let (attempt, max) = match &notice {
+                            NetworkWaitNotice::Offline { .. } => (1, 1),
+                            NetworkWaitNotice::OnlineRetry { attempt, max, .. } => (*attempt, *max),
+                        };
+                        let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
+                    }
+                    match notice {
+                        NetworkWaitNotice::Offline { listener_summary } => {
+                            logging::warn(&format!(
+                                "Network disconnect during turn for {}: {} ({}). Waiting for connectivity ({}).",
+                                session_id, reason, error_detail, listener_summary
+                            ));
+                            let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                                phase: crate::network_retry::waiting_for_network_connection_phase(
+                                    &listener_summary,
+                                ),
+                            });
+                            let _ = event_tx.send(ServerEvent::StatusDetail {
+                                detail: format!(
+                                    "Network disconnected; waiting to reconnect ({})",
+                                    listener_summary
+                                ),
+                            });
+                        }
+                        NetworkWaitNotice::OnlineRetry {
+                            attempt,
+                            max,
+                            delay_secs,
+                        } => {
+                            logging::warn(&format!(
+                                "Transient network error during turn for {}: {} ({}). Retrying in {}s ({}/{}).",
+                                session_id, reason, error_detail, delay_secs, attempt, max
+                            ));
+                            let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                                phase: crate::message::ConnectionPhase::Retrying { attempt, max }
+                                    .to_string(),
+                            });
+                            let _ = event_tx.send(ServerEvent::StatusDetail {
+                                detail: format!(
+                                    "Connection interrupted; retrying in {}s ({}/{})",
+                                    delay_secs, attempt, max
+                                ),
+                            });
+                        }
+                    }
+                },
+                std::time::Duration::from_secs(20),
+                || {
+                    send_stream_keepalive_mpsc(&raw_tx);
+                },
+            )
+            .await;
+
+        match outcome {
+            NetworkRecoveryOutcome::RestoredAfterOffline => {
+                logging::info(&format!(
+                    "Network connectivity restored for {}; automatically resuming turn",
+                    self.session.id
+                ));
+                let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                    phase: crate::message::ConnectionPhase::Connecting.to_string(),
+                });
+                let _ = event_tx.send(ServerEvent::StatusDetail {
+                    detail: "Network restored; resuming...".to_string(),
+                });
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::RetryingWhileOnline { attempt, max } => {
+                logging::info(&format!(
+                    "Retrying turn for {} after transient network error ({}/{})",
+                    self.session.id, attempt, max
+                ));
+                let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                    phase: crate::message::ConnectionPhase::Retrying { attempt, max }.to_string(),
+                });
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::Cancelled => {
+                logging::info(&format!(
+                    "Turn cancelled while waiting for network recovery in {}",
+                    self.session.id
+                ));
+                NetworkRecoveryAction::Cancelled
+            }
+            NetworkRecoveryOutcome::OnlineRetryBudgetExhausted { .. } => {
+                NetworkRecoveryAction::GiveUp
+            }
+        }
+    }
+
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         raw_event_tx: mpsc::UnboundedSender<ServerEvent>,
@@ -60,7 +176,9 @@ impl Agent {
         // Return to the preferred account after its reset, at turn start only.
         self.return_account_home_at_turn_start(Some(event_tx.raw()));
 
-        'turn: loop {
+        let mut network_recovery = crate::network_retry::NetworkRecoveryTracker::new();
+
+        'turn_loop: loop {
             // Never open a new provider request after a cancel. Several paths
             // `continue` this loop (compaction retry, incomplete/stranded
             // continuation, empty-response recovery, soft-interrupt injection),
@@ -245,8 +363,9 @@ impl Agent {
                             match result {
                                 Ok(stream) => break stream,
                                 Err(e) => {
-                                    self.record_failed_account_route(&e.to_string());
-                                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                                    let err_chain = crate::util::format_error_chain(&e);
+                                    if self.try_auto_compact_after_context_limit(&err_chain) {
+                                        self.record_failed_account_route(&err_chain);
                                         context_limit_retries += 1;
                                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                             logging::warn(
@@ -263,7 +382,7 @@ impl Agent {
                                             ));
                                         }
                                         let _ = event_tx.send(self.take_recovery_compaction_event());
-                                        continue 'turn;
+                                        continue 'turn_loop;
                                     }
                                     event_tx.flush();
                                     self.sync_route_change_after_stream(
@@ -274,6 +393,28 @@ impl Agent {
                                         &oauth_email_at_request_start,
                             &oauth_account_label_at_request_start,
                                     );
+                                    if let Some(reason) =
+                                        crate::network_retry::classify_network_interruption(
+                                            e.as_ref(),
+                                        )
+                                    {
+                                        match self
+                                            .wait_for_network_recovery_mpsc(
+                                                &mut network_recovery,
+                                                &reason,
+                                                &err_chain,
+                                                false,
+                                                false,
+                                                &event_tx,
+                                            )
+                                            .await
+                                        {
+                                            NetworkRecoveryAction::Retry => continue 'turn_loop,
+                                            NetworkRecoveryAction::Cancelled => return Ok(()),
+                                            NetworkRecoveryAction::GiveUp => {}
+                                        }
+                                    }
+                                    self.record_failed_account_route(&err_chain);
                                     return Err(e);
                                 }
                             }
@@ -330,6 +471,8 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
+            let mut executed_native_tool = false;
+            let mut retry_after_network_recovery = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -413,15 +556,45 @@ impl Agent {
                             ("saw_message_end", saw_message_end.to_string()),
                         ],
                     );
+                    let has_partial_output = !text_content.is_empty()
+                        || !tool_calls.is_empty()
+                        || !streaming_tools.is_empty()
+                        || reasoning_open
+                        || !reasoning_content.is_empty()
+                        || !provider_native_items.is_empty();
+                    if !saw_message_end
+                        && !executed_native_tool
+                        && !has_partial_output
+                        && !self.is_graceful_shutdown()
+                    {
+                        match self
+                            .wait_for_network_recovery_mpsc(
+                                &mut network_recovery,
+                                "stream ended unexpectedly without message completion",
+                                "stream EOF before message_end",
+                                true,
+                                false,
+                                &event_tx,
+                            )
+                            .await
+                        {
+                            NetworkRecoveryAction::Retry => {
+                                retry_after_network_recovery = true;
+                                break;
+                            }
+                            NetworkRecoveryAction::Cancelled => return Ok(()),
+                            NetworkRecoveryAction::GiveUp => {}
+                        }
+                    }
                     break;
                 };
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
-                        self.record_failed_account_route(&e.to_string());
                         usage_recorder.finish();
-                        let err_str = e.to_string();
+                        let err_str = crate::util::format_error_chain(&e);
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            self.record_failed_account_route(&err_str);
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
@@ -458,6 +631,37 @@ impl Agent {
                             let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
+                        if !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) =
+                                crate::network_retry::classify_network_interruption(e.as_ref())
+                        {
+                            let has_partial_output = !text_content.is_empty()
+                                || !tool_calls.is_empty()
+                                || !streaming_tools.is_empty()
+                                || reasoning_open
+                                || !reasoning_content.is_empty()
+                                || !provider_native_items.is_empty();
+                            match self
+                                .wait_for_network_recovery_mpsc(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &err_str,
+                                    false,
+                                    has_partial_output,
+                                    &event_tx,
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(()),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
+                        self.record_failed_account_route(&err_str);
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
@@ -748,6 +952,7 @@ impl Agent {
                         content,
                         is_error,
                     } => {
+                        executed_native_tool = true;
                         let tool_name = tool_id_to_name
                             .get(&tool_use_id)
                             .cloned()
@@ -1007,6 +1212,7 @@ impl Agent {
                         tool_name,
                         input,
                     } => {
+                        executed_native_tool = true;
                         // Execute native tool and send result back to SDK bridge
                         let ctx = ToolContext {
                             session_id: self.session.id.clone(),
@@ -1088,6 +1294,36 @@ impl Agent {
                             let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
+                        if retry_after_secs.is_none()
+                            && !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) = crate::network_retry::classify_message(&message)
+                        {
+                            let has_partial_output = !text_content.is_empty()
+                                || !tool_calls.is_empty()
+                                || !streaming_tools.is_empty()
+                                || reasoning_open
+                                || !reasoning_content.is_empty()
+                                || !provider_native_items.is_empty();
+                            match self
+                                .wait_for_network_recovery_mpsc(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &message,
+                                    false,
+                                    has_partial_output,
+                                    &event_tx,
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(()),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
@@ -1121,6 +1357,14 @@ impl Agent {
             // The stream is over, so no timer will flush what is still held.
             event_tx.flush();
             usage_recorder.finish();
+            self.sync_route_change_after_stream(
+                event_tx.raw(),
+                &model_at_request_start,
+                &provider_at_request_start,
+                &credential_at_request_start,
+                &oauth_email_at_request_start,
+                &oauth_account_label_at_request_start,
+            );
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
                     logging::LogLevel::Info,
@@ -1129,8 +1373,19 @@ impl Agent {
                     api_start,
                     vec![("mode", "mpsc".to_string())],
                 );
-                continue;
+                continue 'turn_loop;
             }
+            if retry_after_network_recovery {
+                log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Info,
+                    self,
+                    "retry_after_network_recovery",
+                    api_start,
+                    vec![("mode", "mpsc".to_string())],
+                );
+                continue 'turn_loop;
+            }
+            network_recovery.record_success();
 
             let api_elapsed = api_start.elapsed();
             logging::info(&format!(
@@ -1230,23 +1485,6 @@ impl Agent {
                 cache_read_input_tokens: usage_cache_read,
                 cache_creation_input_tokens: usage_cache_creation,
             };
-
-            // Detect a transparent mid-request model switch (e.g. Anthropic's
-            // retired `claude-fable-5` falling back to `claude-opus-4-8`). The
-            // provider mutates its own model state during the stream, so the
-            // session and clients would otherwise keep showing the originally
-            // requested model with a stale context-limit. Resync the session and
-            // notify clients with a `ModelChanged` so the header, picker, and
-            // context budget all reflect the model that actually served.
-            event_tx.flush();
-            self.sync_route_change_after_stream(
-                event_tx.raw(),
-                &model_at_request_start,
-                &provider_at_request_start,
-                &credential_at_request_start,
-                &oauth_email_at_request_start,
-                &oauth_account_label_at_request_start,
-            );
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
@@ -1365,7 +1603,7 @@ impl Agent {
                 // non-streaming loop's recovery behavior (issue #672).
                 if saw_message_end
                     && !self.is_graceful_shutdown()
-                    && self.maybe_continue_empty_post_tool_response(
+                    && self.maybe_retry_streaming_empty_post_tool_response(
                         text_content.trim().is_empty(),
                         prompt_has_recent_tool_result,
                         stop_reason.as_deref(),

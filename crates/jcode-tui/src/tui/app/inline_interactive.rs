@@ -4215,6 +4215,24 @@ impl App {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
                     }
+                    PickerAction::AutoApiKey => {
+                        self.inline_interactive_state = None;
+                        self.start_auto_api_key_login();
+                    }
+                    PickerAction::ExpandLoginProviders => {
+                        if let Some(picker) = self.inline_interactive_state.as_mut() {
+                            let target_row = picker.selected;
+                            picker.entries.retain(|entry| {
+                                !matches!(entry.action, PickerAction::ExpandLoginProviders)
+                            });
+                            picker.preview = false;
+                            picker.column = 0;
+                            Self::apply_inline_interactive_filter(picker);
+                            if !picker.filtered.is_empty() {
+                                picker.selected = target_row.min(picker.filtered.len() - 1);
+                            }
+                        }
+                    }
                     PickerAction::RemoteLogin { provider, import } => {
                         self.inline_interactive_state = None;
                         self.select_ssh_login_action(provider, import);
@@ -4373,133 +4391,6 @@ impl App {
             _ => {}
         }
         Ok(())
-    }
-
-    pub(super) fn picker_fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
-        jcode_fuzzy::fuzzy_score_tokens(pattern, text)
-    }
-
-    pub(super) fn apply_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        // Runtime model pickers accept `@provider` scopes next to the search
-        // text. Scope each entry to its first matching route so the row shows
-        // (and Enter selects) that provider's route.
-        let (scopes, search) = if picker_is_runtime_model_picker(picker) {
-            split_model_picker_filter(&picker.filter)
-        } else {
-            (Vec::new(), picker.filter.clone())
-        };
-        // Put back routes an earlier scope switched, so each pass starts from
-        // the user's own route choices. Entries still in scope are switched
-        // again below; the rest keep the route the user had before.
-        for (index, original) in std::mem::take(&mut picker.scoped_route_restore) {
-            if let Some(entry) = picker.entries.get_mut(index)
-                && original < entry.options.len()
-            {
-                entry.selected_option = original;
-            }
-        }
-        let mut scoped: Option<Vec<usize>> = None;
-        if !scopes.is_empty() {
-            let mut keep = Vec::new();
-            for (index, entry) in picker.entries.iter_mut().enumerate() {
-                if let Some(option_index) = entry
-                    .options
-                    .iter()
-                    .position(|option| model_route_matches_scopes(option, &scopes))
-                {
-                    if !entry
-                        .active_option()
-                        .is_some_and(|option| model_route_matches_scopes(option, &scopes))
-                    {
-                        picker
-                            .scoped_route_restore
-                            .push((index, entry.selected_option));
-                        entry.selected_option = option_index;
-                    }
-                    keep.push(index);
-                }
-            }
-            scoped = Some(keep);
-        }
-        let candidates: Vec<usize> = scoped.unwrap_or_else(|| (0..picker.entries.len()).collect());
-        if search.trim().is_empty() {
-            picker.filtered = candidates;
-        } else {
-            let query = search.trim();
-            // Prepare the query once per keystroke instead of re-parsing and
-            // re-lowercasing it for every entry.
-            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&search);
-            let mut scored: Vec<(usize, bool, i32)> = candidates
-                .into_iter()
-                .filter_map(|i| {
-                    let m = &picker.entries[i];
-                    let filter_text = picker.filter_text(m);
-                    prepared.score(&filter_text).map(|s| {
-                        let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
-                        let bonus = usage_bonus + if m.recommended { 5 } else { 0 };
-                        (
-                            i,
-                            m.name.eq_ignore_ascii_case(query),
-                            s.saturating_add(bonus),
-                        )
-                    })
-                })
-                .collect();
-            scored.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then(b.2.cmp(&a.2))
-                    .then(
-                        picker.entries[a.0]
-                            .recommendation_rank
-                            .cmp(&picker.entries[b.0].recommendation_rank),
-                    )
-                    .then(picker.entries[a.0].name.cmp(&picker.entries[b.0].name))
-            });
-            picker.filtered = scored.into_iter().map(|(i, _, _)| i).collect();
-        }
-        if picker.filtered.is_empty() {
-            picker.selected = 0;
-        } else {
-            picker.selected = picker.selected.min(picker.filtered.len() - 1);
-        }
-    }
-
-    pub(super) fn tab_complete_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        if picker.filtered.is_empty() {
-            return;
-        }
-        if picker.filtered.len() == 1 {
-            let name = picker.entries[picker.filtered[0]].name.clone();
-            picker.filter = name;
-            Self::apply_inline_interactive_filter(picker);
-            return;
-        }
-        let names: Vec<&str> = picker
-            .filtered
-            .iter()
-            .map(|&i| picker.entries[i].name.as_str())
-            .collect();
-        let first = names[0].to_lowercase();
-        let first_chars: Vec<char> = first.chars().collect();
-        let mut prefix_len = first_chars.len();
-        for name in names.iter().skip(1) {
-            let lower = (*name).to_lowercase();
-            let chars: Vec<char> = lower.chars().collect();
-            let mut common = 0;
-            for (a, b) in first_chars.iter().zip(chars.iter()) {
-                if a == b {
-                    common += 1;
-                } else {
-                    break;
-                }
-            }
-            prefix_len = prefix_len.min(common);
-        }
-        if prefix_len > picker.filter.len() {
-            let first_original = &picker.entries[picker.filtered[0]].name;
-            picker.filter = first_original[..prefix_len].to_string();
-            Self::apply_inline_interactive_filter(picker);
-        }
     }
 }
 

@@ -129,6 +129,60 @@ async fn automatic_input_does_not_fail_checkpoint_binding() {
 
 struct ContinuationProvider(Arc<std::sync::atomic::AtomicUsize>);
 
+#[tokio::test]
+async fn jarvis_input_keeps_rewind_boundaries_for_direct_and_queued_turns() {
+    let _env = crate::storage::lock_test_env();
+    let _home = TestHome::new();
+    let mut agent = Agent::new(
+        Arc::new(ContinuationProvider(Arc::new(
+            std::sync::atomic::AtomicUsize::new(0),
+        ))),
+        Registry::empty(),
+    );
+    agent
+        .run_once_capture_with_display_role(
+            "spoken request",
+            Some(crate::session::StoredDisplayRole::JarvisUser),
+        )
+        .await
+        .unwrap();
+    agent.queue_soft_interrupt(
+        "spoken follow-up".into(),
+        vec![],
+        false,
+        SoftInterruptSource::JarvisUser,
+    );
+    agent.inject_soft_interrupts();
+    let (tx, _rx) = tokio_mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc_with_display_role(
+            "spoken streaming request",
+            vec![],
+            None,
+            tx,
+            Some(crate::session::StoredDisplayRole::JarvisUser),
+        )
+        .await
+        .unwrap();
+    let prompts = agent
+        .rewind_checkpoints()
+        .unwrap()
+        .into_iter()
+        .filter(|checkpoint| {
+            checkpoint.target_kind == jcode_session_types::RewindTargetKind::UserPrompt
+        })
+        .map(|checkpoint| checkpoint.prompt)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        prompts,
+        [
+            "spoken request",
+            "spoken follow-up",
+            "spoken streaming request"
+        ]
+    );
+}
+
 #[async_trait]
 impl Provider for ContinuationProvider {
     async fn complete(

@@ -213,7 +213,36 @@ fn snapshot_fixture() -> Inventory {
             ..Default::default()
         },
         expired: vec![("openai", "old".into())],
+        antigravity: None,
     }
+}
+
+#[test]
+fn antigravity_quota_groups_models_into_shared_pools() {
+    let model = |id: &str, remaining: Option<u16>, reset: &str| {
+        crate::provider::antigravity::CatalogModel {
+            id: id.into(),
+            display_name: None,
+            reset_time: Some(reset.into()),
+            tag_title: None,
+            model_provider: None,
+            max_tokens: None,
+            max_output_tokens: None,
+            recommended: false,
+            available: true,
+            remaining_fraction_milli: remaining,
+        }
+    };
+    let pools = inventory::antigravity_quota_pools(&[
+        model("claude-opus-5-5-high", Some(1000), "b"),
+        model("gemini-4-neon-high", Some(984), "a"),
+        model("gemini-3.8-flash-low", Some(984), "a"),
+        model("gemini-4-argon-low", Some(500), "c"),
+        model("tab_flash_lite_preview", Some(1000), "a"),
+        model("gemini-4-carbon-disabled", None, "a"),
+    ]);
+    let labels: Vec<_> = pools.iter().map(|(l, u, _)| (l.as_str(), *u)).collect();
+    assert_eq!(labels, [("Gemini", 16), ("Argon", 500), ("Claude", 0)]);
 }
 
 #[test]
@@ -227,6 +256,7 @@ fn inventory_snapshots_share_storage_instead_of_deep_copying() {
             logins: original.logins.clone(),
             pool: original.pool.clone(),
             expired: original.expired.clone(),
+            antigravity: original.antigravity.clone(),
         };
         legacy_copies += usize::from(legacy.logins.as_ptr() != original.logins.as_ptr());
         let shared = cache.snapshot();

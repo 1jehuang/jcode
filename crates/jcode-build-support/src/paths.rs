@@ -90,6 +90,24 @@ pub const SELFDEV_CARGO_PROFILE: &str = "selfdev";
 /// Returns the canonicalized payload path when `path` resolves to a wrapper
 /// script with a unique sibling `<stem>-*.bin` payload; otherwise returns the
 /// canonicalized input path.
+/// True when `path` is a system dynamic linker (e.g. `ld-linux-aarch64.so.1`,
+/// `ld-musl-aarch64.so.1`, `linker64`) rather than the jcode executable itself.
+///
+/// On Android/Termux, launching a glibc binary through the dynamic loader
+/// (`ld-linux-aarch64.so.1 /path/to/jcode` or `grun`) makes `/proc/self/exe`
+/// (`std::env::current_exe()`) point at the system loader. Its mtime is the
+/// package install time, so comparing it against the installed `jcode` binary
+/// makes freshness checks report a phantom update forever.
+pub fn is_dynamic_loader_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    name.starts_with("ld-linux")
+        || name.starts_with("ld-musl")
+        || name == "linker"
+        || name == "linker64"
+}
+
 pub fn resolve_binary_payload(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     wrapper_payload_sibling(&canonical).unwrap_or(canonical)

@@ -325,6 +325,13 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
             Some(prompt)
         );
 
+        // Background catalog refreshes may still briefly own an idle agent.
+        let parent = sessions.read().await[&parent_id].clone();
+        drop(
+            tokio::time::timeout(Duration::from_secs(5), parent.lock())
+                .await
+                .expect("parent agent should become idle"),
+        );
         send(&mut owner_writer, json!({"type":"clear","id":109})).await;
         until(&mut owner_reader, |e| {
             matches!(e, ServerEvent::Done { id: 109 })

@@ -140,6 +140,7 @@ fn global_recency_budget_merges_sources_without_counting_test_sessions() {
                 session_id: id.into(),
             },
             external_path: None,
+            user_intention: None,
             todo_statuses: Vec::new(),
         }
     };
@@ -788,13 +789,7 @@ fn load_sessions_prefers_todo_group_over_generated_title() {
         .expect("session with mixed todo statuses");
     assert_eq!(
         loaded.todo_statuses,
-        [
-            "in_progress",
-            "pending",
-            "completed",
-            "cancelled",
-            "future_status"
-        ]
+        ["in_progress", "pending", "completed", "future_status"]
     );
 }
 

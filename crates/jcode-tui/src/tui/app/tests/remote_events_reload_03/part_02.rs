@@ -442,6 +442,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: false,
@@ -487,6 +488,7 @@ fn test_remote_openference_window_quota_holds_turn_until_resets_at() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "keep going".to_string(),
         images: vec![],
         is_system: false,
@@ -542,11 +544,11 @@ fn test_remote_openference_window_quota_holds_turn_until_resets_at() {
 fn test_rate_limit_notice_survives_out_of_range_reset_secs() {
     let mut app = create_test_app();
     for secs in [u64::MAX, i64::MAX as u64 + 1, i64::MAX as u64] {
-        let line = app.rate_limit_notice_with_nudge(secs);
+        let (line, _) = app.rate_limit_notice_with_nudge(secs);
         assert!(line.contains("auto-resuming in"), "{line}");
         assert!(!line.contains("(at "), "{line}");
     }
-    let line = app.rate_limit_notice_with_nudge(2 * 3600);
+    let (line, _) = app.rate_limit_notice_with_nudge(2 * 3600);
     assert!(line.contains("auto-resuming in 2h 00m (at "), "{line}");
 }
 
@@ -566,6 +568,7 @@ fn test_remote_provider_overload_529_holds_user_turn_and_retries() {
     for attempt in 1..=App::OVERLOAD_RETRY_MAX_ATTEMPTS {
         if attempt == 1 {
             app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                jarvis_voice: false,
                 content: "fix the flaky test".to_string(),
                 images: vec![],
                 is_system: false,
@@ -659,6 +662,7 @@ fn test_provider_overload_classifier() {
 fn test_held_user_turn_resend_notice_wording() {
     use crate::tui::app::remote::held_user_turn_resend_notice as notice;
     let mut pending = PendingRemoteMessage {
+        jarvis_voice: false,
         content: "fix the flaky test".to_string(),
         images: vec![],
         is_system: false,
@@ -694,6 +698,7 @@ const OPENFERENCE_529: &str = "OpenAI-compatible chat request failed\n  endpoint
 
 fn held_user_turn(content: &str, auto_retry: bool, retry_attempts: u8) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: content.to_string(),
         images: vec![],
         is_system: false,
@@ -1023,7 +1028,10 @@ fn test_remote_provider_overload_after_partial_output_continues_turn() {
         Some(App::PROVIDER_ERROR_CONTINUATION)
     );
     assert_eq!(pending.overload_attempts, 1);
-    assert!(app.rate_limit_reset.is_some(), "a continuation is scheduled");
+    assert!(
+        app.rate_limit_reset.is_some(),
+        "a continuation is scheduled"
+    );
     assert!(
         app.streaming.streaming_text.is_empty(),
         "the partial reply the model never saw is dropped"
@@ -1052,6 +1060,7 @@ fn test_remote_unavailable_429_after_tool_run_continues_auto_poked_turn() {
 
     let poke = crate::todo::build_auto_poke_message(1);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: poke,
         images: vec![],
         is_system: true,
@@ -1181,7 +1190,9 @@ fn test_remote_exhausted_overload_budget_pauses_without_generic_retry() {
     assert!(!app.is_processing);
     assert_eq!(app.input, prompt);
     assert!(app.display_messages().iter().any(|message| {
-        message.content.contains("Provider overload retry limit reached")
+        message
+            .content
+            .contains("Provider overload retry limit reached")
     }));
 }
 
@@ -1304,7 +1315,6 @@ fn test_overload_attempts_survive_tick_resend() {
     );
 }
 
-
 #[test]
 fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     use crate::tui::TuiState;
@@ -1364,7 +1374,6 @@ fn test_service_tier_reported_deduplicates_and_does_not_confirm_old_request() {
     );
 }
 
-
 #[test]
 fn test_service_tier_reported_match_notification_is_only_a_report() {
     let mut app = create_test_app();
@@ -1387,7 +1396,6 @@ fn test_service_tier_reported_match_notification_is_only_a_report() {
     assert!(!message.contains("applied"));
 }
 
-
 #[test]
 fn test_service_tier_reported_default_is_quiet_without_explicit_change() {
     let mut app = create_test_app();
@@ -1404,7 +1412,6 @@ fn test_service_tier_reported_default_is_quiet_without_explicit_change() {
     );
     assert_eq!(app.display_messages().len(), before);
 }
-
 
 #[test]
 fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
@@ -1454,7 +1461,6 @@ fn test_service_tier_reported_fast_alias_matches_and_badge_tracks_reports() {
     );
     assert_eq!(app.info_widget_data().service_tier, None);
 }
-
 
 fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
     let mut app = create_test_app();
@@ -1523,24 +1529,20 @@ fn check_history_panel_snapshot(authoritative: bool, session_changed: bool) {
     }
 }
 
-
 #[test]
 fn test_catalog_history_preserves_restored_panels_and_images() {
     check_history_panel_snapshot(false, false);
 }
-
 
 #[test]
 fn test_authoritative_same_session_history_clears_panels_and_images() {
     check_history_panel_snapshot(true, false);
 }
 
-
 #[test]
 fn test_session_switch_history_clears_panels_and_images() {
     check_history_panel_snapshot(false, true);
 }
-
 
 fn delta_history_event(
     session_id: &str,
@@ -1548,7 +1550,7 @@ fn delta_history_event(
     messages_base_count: Option<usize>,
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::History {
-account_labels: Vec::new(),
+        account_labels: Vec::new(),
         messages_base_count,
         images_unchanged: false,
         id: 1,
@@ -1591,7 +1593,6 @@ account_labels: Vec::new(),
         applets: Default::default(),
     }
 }
-
 
 #[test]
 fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
@@ -1648,7 +1649,6 @@ fn test_delta_history_rebuilds_transcript_from_advertised_prefix() {
     assert!(app.advertised_history_base.is_none());
     assert!(remote.has_loaded_history());
 }
-
 
 #[test]
 fn test_delta_history_without_prefix_requests_full_history() {

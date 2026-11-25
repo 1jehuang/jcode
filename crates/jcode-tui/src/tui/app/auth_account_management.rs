@@ -20,7 +20,7 @@ impl App {
         }
     }
 
-    pub(super) fn saved_login_request_id(verifier: &str) -> String {
+    pub(in crate::tui::app) fn saved_login_request_id(verifier: &str) -> String {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(verifier.as_bytes()))
     }
@@ -477,6 +477,50 @@ mod tests {
             "cannot claim cancellation after commit won"
         );
         assert!(pending.is_exchanging());
+    }
+
+    #[tokio::test]
+    async fn saved_login_callback_error_keeps_device_attempt_available() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (_, mut completion) = attempt();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let failed_callback = async {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(
+                    b"GET /auth/callback?error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+        };
+        let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                failed_callback,
+                super::App::openai_login_callback(
+                    "verifier".into(),
+                    "state".into(),
+                    Some("default".into()),
+                    listener,
+                    (false, None),
+                    &mut completion,
+                )
+            )
+        })
+        .await
+        .expect("local callback should fail promptly");
+        assert!(result.is_none());
+        assert_eq!(
+            completion
+                .attempt
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        super::App::begin_saved_login_exchange(&mut completion).unwrap();
+        super::App::claim_saved_login_commit(&mut completion).unwrap();
     }
 
     #[test]

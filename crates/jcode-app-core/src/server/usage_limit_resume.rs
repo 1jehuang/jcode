@@ -208,7 +208,8 @@ pub(super) fn error_retry_after_secs(error: &anyhow::Error) -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
-static PENDING: LazyLock<Mutex<HashMap<String, (u64, CancellationToken, Arc<Notify>)>>> =
+type PendingResume = (u64, CancellationToken, Arc<Notify>);
+static PENDING: LazyLock<Mutex<HashMap<String, PendingResume>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A registered pending resume. Dropping it unregisters it (if it is still

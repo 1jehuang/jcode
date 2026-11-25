@@ -11,9 +11,11 @@ fn test_fast_release_command_starts_synthetic_user_turn() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + fast local release")
+    );
 }
 
 #[test]
@@ -38,6 +40,8 @@ fn test_fast_release_prompt_uses_selfdev_cache() {
     assert!(fast_prompt.contains("quick-release.sh --fast-local"));
     assert!(fast_prompt.contains("warm target/selfdev cache"));
     assert!(fast_prompt.contains("Do not run the separate local macOS cross-build"));
+    assert!(fast_prompt.contains("last published release tag"));
+    assert!(fast_prompt.contains("changelog/discord/v<version>.json"));
     let prepare = fast_prompt.find("--prepare-fast").unwrap();
     let bump = fast_prompt.find("Bump the version").unwrap();
     assert!(prepare < bump);
@@ -96,9 +100,11 @@ fn test_remote_release_command_uses_tag_only_ci_path() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + remote release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + remote release")
+    );
 
     let prompt = super::commands::build_remote_release_prompt();
     assert!(prompt.contains("quick-release.sh --remote"));
@@ -123,9 +129,11 @@ fn test_commit_push_release_alias_starts_synthetic_user_turn() {
         .last()
         .expect("missing launch notice");
     assert_eq!(notice.role, "system");
-    assert!(notice
-        .content
-        .contains("Starting logical commits + push + fast local release"));
+    assert!(
+        notice
+            .content
+            .contains("Starting logical commits + push + fast local release")
+    );
 }
 
 #[test]
@@ -181,8 +189,13 @@ fn test_release_prompts_require_green_metadata_ci_before_tagging_or_staging() {
         assert!(prompt.contains("installer smoke checks"));
         assert!(!prompt.contains("push the tag immediately"));
         assert!(!prompt.contains("publish that Linux asset and the GitHub release immediately"));
-        assert!(!prompt.contains("publish the prepared macOS arm64 asset and GitHub release immediately"));
-        let gate = prompt.find("Before invoking a tagging or staging release helper").unwrap();
+        assert!(
+            !prompt
+                .contains("publish the prepared macOS arm64 asset and GitHub release immediately")
+        );
+        let gate = prompt
+            .find("Before invoking a tagging or staging release helper")
+            .unwrap();
         let helper = prompt.find("Then run scripts/quick-release.sh").unwrap();
         assert!(gate < helper, "metadata CI must precede tagging or staging");
     }
@@ -190,13 +203,21 @@ fn test_release_prompts_require_green_metadata_ci_before_tagging_or_staging() {
 
 #[test]
 fn test_release_help_requires_ci_and_verified_publication() {
-    for command in ["fast-release", "fast-macos-release", "remote-release", "cut-release"] {
+    for command in [
+        "fast-release",
+        "fast-macos-release",
+        "remote-release",
+        "cut-release",
+    ] {
         let mut app = create_test_app();
         app.input = format!("/help {command}");
         app.submit_input();
         let message = app.display_messages().last().unwrap();
         assert!(message.content.contains("successful exact-SHA CI"));
-        assert!(message.content.contains("release-metadata commit") || message.content.contains("release metadata"));
+        assert!(
+            message.content.contains("release-metadata commit")
+                || message.content.contains("release metadata")
+        );
         assert!(message.content.contains("installer smoke checks"));
         assert!(message.content.contains("Never bypass CI prerequisites"));
         if command != "remote-release" {

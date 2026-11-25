@@ -292,14 +292,27 @@ impl Agent {
         split
     }
 
+    pub(super) fn is_jarvis_root(&self, config: &crate::protocol::SessionToolConfig) -> bool {
+        self.session.parent_id.is_none()
+            && config.custom.iter().any(|tool| tool.name == "speak")
+            && config
+                .system_prompt_append
+                .as_deref()
+                .is_some_and(|p| p.lines().any(|line| line == "## Jarvis voice interaction"))
+    }
+
     fn append_session_system_prompt(&self, mut prompt: String) -> String {
-        if let Some(append) = crate::tool::sdk::config(self.session_id())
-            .and_then(|config| config.system_prompt_append)
+        if let Some(config) = crate::tool::sdk::config(self.session_id())
+            && let Some(append) = &config.system_prompt_append
         {
             if !prompt.is_empty() {
                 prompt.push_str("\n\n");
             }
-            prompt.push_str(&append);
+            prompt.push_str(append);
+            if self.is_jarvis_root(&config) {
+                prompt.push_str("\n\n");
+                prompt.push_str(include_str!("jarvis_coordinator.md").trim());
+            }
         }
         prompt
     }

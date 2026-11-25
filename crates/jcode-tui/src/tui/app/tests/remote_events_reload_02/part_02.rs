@@ -71,7 +71,9 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         id: "tool-1".to_string(),
         name: "read".to_string(),
         input: serde_json::json!({"file_path": "src/main.rs"}),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
 
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
@@ -267,6 +269,7 @@ fn test_handle_remote_disconnect_retryable_pending_schedules_retry() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(7);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![],
         is_system: true,
@@ -454,11 +457,7 @@ fn test_tool_done_preserves_sibling_streaming_tool_inputs_and_intents() {
         .display_messages()
         .iter()
         .rev()
-        .find(|dm| {
-            dm.tool_data
-                .as_ref()
-                .is_some_and(|td| td.id == "tool_b")
-        })
+        .find(|dm| dm.tool_data.as_ref().is_some_and(|td| td.id == "tool_b"))
         .expect("missing tool_b display message");
     let tool_b = tool_b_msg.tool_data.as_ref().unwrap();
     assert_eq!(tool_b.intent.as_deref(), Some("Fetch page B"));
@@ -616,7 +615,10 @@ fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
         &mut remote,
     );
     assert_eq!(native_search_rows(&app), 1);
-    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+    app.handle_server_event(
+        ServerEvent::RetryRollback { attempt: 1, max: 3 },
+        &mut remote,
+    );
 
     assert_eq!(
         native_search_rows(&app),
@@ -676,6 +678,9 @@ fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
         },
         &mut remote,
     );
-    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+    app.handle_server_event(
+        ServerEvent::RetryRollback { attempt: 1, max: 3 },
+        &mut remote,
+    );
     assert_eq!(native_search_rows(&app), 1);
 }

@@ -22,6 +22,7 @@ base64 = "0.22"
 futures = "0.3"
 libc = { version = "0.2", optional = true }
 regex = "1"
+rand = { version = "0.9.3", optional = true }
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "rustls-tls-native-roots"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = "1"
@@ -42,7 +43,7 @@ async-io = { version = "2.6", optional = true }
 [features]
 default = ["desktop-config"]
 # Desktop settings, subscriptions, hotkeys, and recorder-process integration.
-desktop-config = ["dep:jcode-base", "dep:reqwest", "dep:serde", "dep:anyhow", "dep:libc", "dep:zbus", "dep:async-io", "tokio/process", "tokio/rt-multi-thread"]
+desktop-config = ["dep:rand", "dep:jcode-base", "dep:reqwest", "dep:serde", "dep:anyhow", "dep:libc", "dep:zbus", "dep:async-io", "tokio/process", "tokio/rt-multi-thread"]
 # Auth sandbox coverage is opt-in so lightweight tests never pull in jcode-base.
 desktop-test-support = ["desktop-config", "jcode-base/test-support"]
 voice-capture = ["desktop-config", "dep:cpal"]

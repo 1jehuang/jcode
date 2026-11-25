@@ -148,15 +148,20 @@ jobs:
           python3 tests/test_bash_platform_guards.py
           python3 scripts/test_quick_release.py
           python3 scripts/test_preview_release.py
+          python3 tests/test_selfdev_linux_workflow.py
+          python3 scripts/test_generate_release_notes.py
+          python3 scripts/test_selfdev_release_highlights.py
+          python3 scripts/test_refresh_selfdev_discord.py
+          python3 scripts/test_compose_before_after.py
           python3 scripts/test_reconcile_preview_release.py
           python3 tests/test_preview_linux_hosted.py
           python3 tests/test_package_preview_linux_hosted.py
           python3 tests/test_verify_public_release.py
           python3 tests/test_watch_release_run.py
-          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh
+          bash -n scripts/install_justrust_ci.sh scripts/build_linux_compat.sh scripts/quick-release.sh scripts/generate_release_notes.sh
 
       - name: Compile release automation scripts
-        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py
+        run: python3 -m py_compile scripts/post_discord_release.py scripts/test_post_discord_release.py scripts/compose_before_after.py scripts/test_compose_before_after.py
 
   build:
     name: Build & Test (${{ matrix.os }})

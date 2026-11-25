@@ -3,6 +3,7 @@
 use jcode_message_types::ContentBlock;
 use jcode_session_types::StoredMessage;
 #[path = "../src/tool/session_search/searchable_text_fixtures.rs"]
+#[allow(dead_code)] // The probe uses only the tool-message fixture.
 mod fixtures;
 #[path = "../src/tool/session_search/searchable_text.rs"]
 mod projection;

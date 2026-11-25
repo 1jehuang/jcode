@@ -41,9 +41,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -174,6 +173,7 @@ use tui_lifecycle_runtime::active_runtime_provider_key;
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
+    jarvis_voice: bool,
     content: String,
     images: Vec<(String, String)>,
     is_system: bool,
@@ -847,6 +847,8 @@ struct KvCacheState {
     kv_cache_turn_number: Option<usize>,
     kv_cache_turn_call_index: u16,
     kv_cache_miss_samples: Vec<KvCacheMissSample>,
+    /// Learned normal tail gap for implicit-cache providers.
+    kv_cache_tail: crate::kv_cache_monitor::TailGapModel,
     /// Baseline completion time the cold-cache warning was last pushed for.
     ///
     /// The warning fires at most once per cache write: the idle tick warns as
@@ -1685,6 +1687,10 @@ pub struct App {
     // Carry the picker's reasoning effort through remote model switches so
     // the server does not fall back to its configured default (#427).
     pending_reasoning_effort: Option<String>,
+    // Companion SetReasoningEffort forwarded right after a model-picker switch:
+    // suppress the separate "✓ Reasoning effort → ..." transcript line since
+    // the model switch already confirmed the selection.
+    suppress_next_reasoning_effort_message: bool,
     // Remote SetModel has been sent but ModelChanged has not arrived yet. User
     // prompts submitted in this window are held so the first request cannot race
     // the model switch and use stale provider/model state.
@@ -2073,6 +2079,7 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
+    #[cfg(test)]
     fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
         crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
     }
@@ -2447,7 +2454,17 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
+        let is_miss =
+            self.kv_cache
+                .kv_cache_tail
+                .is_miss(&request.provider, expected_tokens, read_tokens);
+        self.kv_cache.kv_cache_tail.observe(
+            &request.provider,
+            expected_tokens,
+            read_tokens,
+            is_miss,
+        );
+        if !is_miss {
             return;
         }
 
@@ -2706,7 +2723,7 @@ impl App {
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
             || baseline.input_tokens.saturating_sub(read_tokens)
-                >= Self::kv_cache_min_missed_tokens(&request.provider)
+                > self.kv_cache.kv_cache_tail.tolerance(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }
@@ -2768,72 +2785,6 @@ impl App {
         } else {
             self.provider.model()
         }
-    }
-
-    fn kv_cache_request_signature(
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system_static: &str,
-        system_dynamic: &str,
-    ) -> KvCacheRequestSignature {
-        let dynamic_trimmed = system_dynamic.trim();
-        // The dynamic block precedes the transcript, so it is part of the
-        // cached prefix. Hash it with the static block so a change is
-        // attributed to the harness rather than reported as a plain low read.
-        let system_hash = if dynamic_trimmed.is_empty() {
-            stable_hash_str(system_static)
-        } else {
-            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
-        };
-        KvCacheRequestSignature {
-            system_static_hash: system_hash,
-            tools_hash: stable_hash_json(tools),
-            messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
-            message_hashes: message_hashes(messages),
-            message_count: messages.len(),
-            tool_count: tools.len(),
-            system_static_chars: system_static.chars().count(),
-            tools_json_chars: stable_json_len(tools),
-            messages_json_chars: stable_json_len(messages),
-            ephemeral_hash: if dynamic_trimmed.is_empty() {
-                None
-            } else {
-                Some(stable_hash_str(dynamic_trimmed))
-            },
-            ephemeral_chars: dynamic_trimmed.chars().count(),
-            ephemeral_message_count: usize::from(!dynamic_trimmed.is_empty()),
-        }
-    }
-
-    fn kv_cache_signatures_prefix_match(
-        current: &KvCacheRequestSignature,
-        previous: &KvCacheRequestSignature,
-    ) -> bool {
-        if previous.message_count > current.message_count {
-            return false;
-        }
-        if !previous.message_hashes.is_empty() && !current.message_hashes.is_empty() {
-            return current.message_hashes.len() >= previous.message_hashes.len()
-                && current.message_hashes[..previous.message_hashes.len()]
-                    == previous.message_hashes;
-        }
-        if previous.message_count == current.message_count {
-            current.messages_hash == previous.messages_hash
-        } else {
-            false
-        }
-    }
-
-    fn kv_cache_common_prefix_messages(
-        current: &KvCacheRequestSignature,
-        previous: &KvCacheRequestSignature,
-    ) -> usize {
-        current
-            .message_hashes
-            .iter()
-            .zip(previous.message_hashes.iter())
-            .take_while(|(current, previous)| current == previous)
-            .count()
     }
 }
 

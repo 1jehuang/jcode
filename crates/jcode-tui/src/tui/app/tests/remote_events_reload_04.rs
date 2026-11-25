@@ -1,5 +1,25 @@
 #[path = "remote_events_reload_04/debug_frames.rs"]
 mod debug_frames;
+
+fn test_pending_remote_message(
+    content: &str,
+    is_system: bool,
+    auto_retry: bool,
+    retry_attempts: u8,
+) -> PendingRemoteMessage {
+    PendingRemoteMessage {
+        jarvis_voice: false,
+        content: content.to_string(),
+        images: vec![],
+        is_system,
+        system_reminder: None,
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+        overload_attempts: 0,
+    }
+}
+
 #[test]
 fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut app = create_test_app();
@@ -8,16 +28,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     remote.mark_history_loaded();
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("retry me", false, false, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(10);
@@ -76,16 +87,7 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("retry me", true, true, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -132,17 +134,12 @@ fn test_remote_non_retryable_error_gets_short_auto_poke_retry() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -202,17 +199,12 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 2,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        2,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -250,16 +242,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "continue".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message("continue", true, true, 0));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -306,17 +289,12 @@ fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() 
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "You have 1 incomplete todo. Continue working, or update the todo tool."
-            .to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "You have 1 incomplete todo. Continue working, or update the todo tool.",
+        true,
+        true,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -371,16 +349,12 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
         .push("You have 1 incomplete todo. Continue working, or update the todo tool.".to_string());
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "Continue working on the task.".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "Continue working on the task.",
+        true,
+        false,
+        0,
+    ));
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
 
@@ -422,16 +396,12 @@ include!("remote_failover_routes.rs");
 #[test]
 fn test_schedule_pending_remote_retry_respects_retry_limit() {
     let mut app = create_test_app();
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "retry me".to_string(),
-        images: vec![],
-        is_system: true,
-        system_reminder: None,
-        auto_retry: true,
-        retry_attempts: App::AUTO_RETRY_MAX_ATTEMPTS,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message = Some(test_pending_remote_message(
+        "retry me",
+        true,
+        true,
+        App::AUTO_RETRY_MAX_ATTEMPTS,
+    ));
 
     assert!(!app.schedule_pending_remote_retry("⚠ failed."));
     assert!(app.rate_limit_pending_message.is_none());
@@ -461,16 +431,8 @@ fn test_provider_guardrail_event_offers_opus_reroute_with_resend_payload() {
         claude_oauth_route("claude-sonnet-4"),
         claude_oauth_route("claude-opus-4-8"),
     ];
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content: "please help".to_string(),
-        images: vec![],
-        is_system: false,
-        system_reminder: None,
-        auto_retry: false,
-        retry_attempts: 0,
-        retry_at: None,
-        overload_attempts: 0,
-    });
+    app.rate_limit_pending_message =
+        Some(test_pending_remote_message("please help", false, false, 0));
     app.last_submitted_input = Some("please help".to_string());
 
     app.handle_server_event(
@@ -1011,8 +973,8 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("xAI sign-in URL and device code"));
-    assert!(rendered.contains("You do not need to install the Grok CLI"));
+    assert!(rendered.contains("Grok Build login: requesting xAI device code"));
+    assert!(rendered.contains("Type /cancel to abort."));
     assert!(!rendered.contains("run `jcode login"));
 }
 
@@ -2241,16 +2203,7 @@ fn test_credential_failure_breaker_trips_after_consecutive_auth_errors() {
     app.auto_poke_incomplete_todos = true;
 
     for attempt in 0..App::CREDENTIAL_FAILURE_BREAKER_THRESHOLD {
-        app.rate_limit_pending_message = Some(PendingRemoteMessage {
-            content: "poke".to_string(),
-            images: vec![],
-            is_system: true,
-            system_reminder: None,
-            auto_retry: true,
-            retry_attempts: 0,
-            retry_at: None,
-            overload_attempts: 0,
-        });
+        app.rate_limit_pending_message = Some(test_pending_remote_message("poke", true, true, 0));
         app.is_processing = true;
         app.status = ProcessingStatus::Streaming;
         app.handle_server_event(
@@ -2321,6 +2274,7 @@ fn test_rejected_refresh_token_stops_all_automatic_resends_immediately() {
                 app.queued_messages
                     .push("Keep my queued prompt".to_string());
                 app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                    jarvis_voice: false,
                     content: "keep going".to_string(),
                     images: vec![],
                     is_system: false,
@@ -2461,7 +2415,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
-route_selection: None,
+            route_selection: None,
             context_window: None,
             id: 0,
             model: "claude-opus-5-5".to_string(),
@@ -2544,7 +2498,7 @@ fn test_remote_model_changed_for_same_model_adopts_window_silently() {
     };
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
-route_selection: None,
+            route_selection: None,
             id,
             model,
             provider_name,
@@ -2607,6 +2561,58 @@ fn test_remote_model_changed_updates_reasoning_effort() {
         app.remote_reasoning_effort.as_deref(),
         Some("low"),
         "a failed switch keeps the running model's effort"
+    );
+}
+
+#[test]
+fn test_server_waiting_for_network_connection_phase_sets_status_and_exempts_stall_guard() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    let waiting_phase =
+        crate::network_retry::waiting_for_network_connection_phase("listening via ip monitor");
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ConnectionPhase {
+            phase: waiting_phase,
+        },
+        &mut remote,
+    );
+
+    assert!(
+        app.is_processing,
+        "ConnectionPhase from a server-initiated turn should adopt processing state"
+    );
+    assert!(
+        matches!(
+            &app.status,
+            ProcessingStatus::WaitingForNetwork { listener } if listener == "listening via ip monitor"
+        ),
+        "expected ProcessingStatus::WaitingForNetwork, got {:?}",
+        app.status
+    );
+
+    // Simulate a long offline period exceeding the stream stall timeout.
+    app.last_stream_activity = Some(
+        Instant::now()
+            .checked_sub(Duration::from_secs(3600))
+            .unwrap_or_else(Instant::now),
+    );
+    rt.block_on(crate::tui::app::remote::detect_and_cancel_stall(
+        &mut app,
+        &mut remote,
+    ));
+
+    assert!(
+        app.is_processing,
+        "stall guard must NOT cancel a turn while WaitingForNetwork"
+    );
+    assert!(
+        matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }),
+        "status must remain WaitingForNetwork after stall guard tick, got {:?}",
+        app.status
     );
 }
 

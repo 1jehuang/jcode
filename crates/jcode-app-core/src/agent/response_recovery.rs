@@ -163,6 +163,26 @@ impl Agent {
     pub(crate) const EMPTY_POST_TOOL_CONTINUATION_PREFIX: &str =
         "<system-reminder>The previous provider response was empty after tool results.";
 
+    /// At a no-tool streaming boundary, let Point B drain real user input
+    /// before spending another provider round trip requesting a final answer.
+    pub(super) fn maybe_retry_streaming_empty_post_tool_response(
+        &mut self,
+        visible_text_empty: bool,
+        prompt_has_recent_tool_result: bool,
+        stop_reason: Option<&str>,
+        attempts: &mut u32,
+    ) -> Result<bool> {
+        if self.has_soft_interrupts() {
+            return Ok(false);
+        }
+        self.maybe_continue_empty_post_tool_response(
+            visible_text_empty,
+            prompt_has_recent_tool_result,
+            stop_reason,
+            attempts,
+        )
+    }
+
     /// Retry a whitespace-only final response that arrived right after tool
     /// results, by asking the model to produce the final answer. Shared by the
     /// non-streaming and streaming (mpsc) turn loops so their recovery

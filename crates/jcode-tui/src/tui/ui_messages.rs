@@ -15,9 +15,7 @@ mod todo_completion;
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
 pub(crate) use todo_stages::animate_lane_spinners;
-use todo_stages::{
-    agent_roster_spans, push_stage_lines, push_stage_pips, render_todo_item_line_with_background,
-};
+use todo_stages::{agent_roster_spans, push_stage_pips, render_todo_item_line_with_background};
 
 use super::*;
 #[path = "ui_messages_cache.rs"]
@@ -360,6 +358,8 @@ fn render_agentgrep_output_body(content: &str, row_width: usize) -> Vec<Line<'st
 
 #[path = "ui_messages/kv_cache_footer.rs"]
 mod kv_cache_footer;
+#[cfg(test)]
+use kv_cache_footer::kv_cache_footer_summary;
 use kv_cache_footer::{kv_cache_footer_body, render_kv_cache_footer};
 
 /// Cache diagnostics belong to the preceding message, not a new transcript block.
@@ -377,6 +377,33 @@ pub(super) fn needs_message_separator(msg: &DisplayMessage) -> bool {
         && !is_kv_cache_footer(msg)
 }
 
+pub(crate) fn is_routine_swarm_await_result(msg: &DisplayMessage) -> bool {
+    if !matches!(msg.effective_role(), "system" | "background_task" | "swarm") {
+        return false;
+    }
+    let summary = if msg
+        .content
+        .trim_start()
+        .starts_with("🐝 **Swarm await finished**")
+    {
+        compact_swarm_await_summary(&msg.content)
+    } else if msg.title.as_deref() == Some("🐝 Swarm await") {
+        msg.content.to_string()
+    } else {
+        return false;
+    };
+    let Some((_, statuses)) = summary.split_once(" matched · ") else {
+        return false;
+    };
+    !summary.starts_with("recovered")
+        && !summary.starts_with("timed out")
+        && statuses.split(", ").all(|status| {
+            status.split_once(' ').is_some_and(|(count, state)| {
+                count.parse::<usize>().is_ok() && matches!(state, "ready" | "completed" | "running")
+            })
+        })
+}
+
 pub(crate) fn is_swarm_await_started(msg: &DisplayMessage) -> bool {
     matches!(msg.effective_role(), "system" | "background_task" | "swarm")
         && msg
@@ -392,6 +419,29 @@ pub(super) fn starts_with_reasoning(content: &str) -> bool {
     content.trim_start().starts_with("*\u{2063}")
 }
 
+pub(crate) const OAUTH_LOGIN_DETAILS_MARKER: &str = "\n\n<!-- oauth-details -->\n\n";
+
+/// Parse a compact OAuth/device sign-in markdown link line such as
+/// `[Open Claude sign-in](https://...)` into `(label, url)`.
+pub(crate) fn parse_oauth_sign_in_link(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix('[')?;
+    let (label, url_part) = rest.split_once("](")?;
+    let url = url_part.strip_suffix(')')?;
+    if label.starts_with("Open ") && label.ends_with(" sign-in") && !url.is_empty() {
+        Some((label, url))
+    } else {
+        None
+    }
+}
+
+/// Whether `msg` is a collapsible OAuth or device-code login progress card.
+pub(crate) fn is_oauth_login_progress_card(msg: &DisplayMessage) -> bool {
+    msg.role == "system"
+        && msg.title.is_some()
+        && jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+            .is_some_and(|parsed| parsed.body.contains(OAUTH_LOGIN_DETAILS_MARKER))
+}
+
 pub(crate) fn render_system_message(
     msg: &DisplayMessage,
     width: u16,
@@ -403,25 +453,40 @@ pub(crate) fn render_system_message(
     if let Some(lines) = todo_completion::render(msg, width, _diff_mode) {
         return lines;
     }
-    if msg.title.as_deref() == Some("OpenAI login")
+    if let Some(title) = msg.title.as_deref()
         && let Some(parsed) = jcode_tui_messages::parse_collapsible_swarm_content(&msg.content)
+        && let Some((summary, details)) = parsed.body.split_once(OAUTH_LOGIN_DETAILS_MARKER)
     {
-        let (summary, details) = parsed
-            .body
-            .split_once("\n\n<!-- oauth-details -->\n\n")
-            .unwrap_or((parsed.body, ""));
         let mut lines = vec![Line::from(Span::styled(
-            "OpenAI login",
+            title.to_string(),
             Style::default().fg(system_message_color()).bold(),
         ))];
         // Generic markdown links append the full destination visibly. Keep this
         // label short, and resolve its click from the owning message instead.
         for line in summary.lines() {
-            if line.starts_with("[Open OpenAI sign-in](") {
+            if let Some((label, _url)) = parse_oauth_sign_in_link(line) {
                 lines.push(Line::from(Span::styled(
-                    "Open OpenAI sign-in",
+                    label.to_string(),
                     Style::default().fg(super::accent_color()).underlined(),
                 )));
+            } else if let Some(rest) = line.strip_prefix("Code: ") {
+                let mut parts = rest.splitn(2, "  ");
+                let code = parts.next().unwrap_or(rest);
+                let suffix = parts.next();
+                let mut spans = vec![
+                    Span::styled("Code: ", Style::default().fg(system_message_color())),
+                    Span::styled(
+                        code.to_string(),
+                        Style::default().fg(super::accent_color()).bold(),
+                    ),
+                ];
+                if let Some(extra) = suffix {
+                    spans.push(Span::styled(
+                        format!("  {extra}"),
+                        Style::default().fg(system_message_color()),
+                    ));
+                }
+                lines.push(Line::from(spans));
             } else {
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
@@ -1054,12 +1119,26 @@ pub(super) fn todo_blocker_notes(payload: Option<&str>) -> Vec<Line<'static>> {
 /// Todo card for the pinned band at the top of the viewport. The band owns
 /// its full rows (info widgets never dock beside it), so the card spans the
 /// whole available width instead of the transcript's readability cap.
+#[cfg(test)]
 pub(crate) fn render_pinned_todos_message(
     msg: &DisplayMessage,
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     render_todo_card_body(&msg.content, width, false).unwrap_or_default()
+}
+
+pub(super) fn pinned_todo_rows(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    active_first: bool,
+) -> Vec<Line<'static>> {
+    render_todo_card_body_with_order(&msg.content, width, false, active_first)
+        .unwrap_or_else(|| render_system_message(msg, width, diff_mode))
+        .into_iter()
+        .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
+        .collect()
 }
 
 /// Unboxed todo card rows for `content` at `width` columns. Returns `None`
@@ -1069,6 +1148,15 @@ pub(crate) fn render_todo_card_body(
     content: &str,
     width: u16,
     cap_width: bool,
+) -> Option<Vec<Line<'static>>> {
+    render_todo_card_body_with_order(content, width, cap_width, false)
+}
+
+fn render_todo_card_body_with_order(
+    content: &str,
+    width: u16,
+    cap_width: bool,
+    active_first: bool,
 ) -> Option<Vec<Line<'static>>> {
     if width == 0 {
         return Some(Vec::new());
@@ -1134,7 +1222,7 @@ pub(crate) fn render_todo_card_body(
                 .map(str::to_string)
         };
         let has_groups = todos.iter().any(|t| group_of(t).is_some());
-        let all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
+        let mut all_refs: Vec<&crate::todo::TodoItem> = todos.iter().collect();
         if crate::todo::stages::has_stages(todos.iter()) {
             // Stage grid: groups become lanes inside each stage, so they are
             // drawn as column headers instead of goal sections.
@@ -1146,13 +1234,14 @@ pub(crate) fn render_todo_card_body(
             ));
             let goal = todo_card_goal_for_group(&goals, None);
             push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
-            push_stage_lines(
+            todo_stages::push_ordered_stage_lines(
                 &mut lines,
                 &all_refs,
                 &agents,
                 &background_tasks,
                 base_indent,
                 inner_width,
+                active_first,
             );
         } else if has_groups {
             lines.push(render_todo_stage_status_header(
@@ -1171,6 +1260,12 @@ pub(crate) fn render_todo_card_body(
                 }
             }
             groups.sort_by_key(|(key, _)| key.is_none());
+            if active_first {
+                for (_, items) in &mut groups {
+                    items.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
+                }
+                groups.sort_by_key(|(_, items)| todo_stages::work_rank(items, &agents));
+            }
             for (group, items) in &groups {
                 let label = group.as_deref().unwrap_or("other");
                 let goal = todo_card_goal_for_group(&goals, group.as_deref());
@@ -1201,6 +1296,9 @@ pub(crate) fn render_todo_card_body(
             ));
             if goal.is_some() {
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
+            }
+            if active_first {
+                all_refs.sort_by_key(|t| todo_stages::work_rank(&[t], &agents));
             }
             push_todo_item_lines(
                 &mut lines,
@@ -2684,6 +2782,9 @@ pub(crate) fn render_background_task_message(
         .unwrap_or_default();
     }
     if let Some(progress) = parse_background_task_progress_notification_markdown(&msg.content) {
+        if progress.tool_name == "selfdev-build" {
+            return render_selfdev_status("◌", &progress.summary, width);
+        }
         if progress.tool_name == "swarm" {
             return render_compact_swarm_background_progress(&progress, width);
         }
@@ -2699,6 +2800,16 @@ pub(crate) fn render_background_task_message(
         &parsed.tool_name,
         parsed.display_name.as_deref(),
     );
+    if parsed.tool_name == "selfdev-build" {
+        let state = match parsed.status.as_str() {
+            "running" => Some(("◌", "running")),
+            "↻ superseded" => Some(("↻", "superseded")),
+            _ => None,
+        };
+        if let Some((icon, state)) = state {
+            return render_selfdev_status(icon, &format!("{state} · {}", parsed.duration), width);
+        }
+    }
     let is_swarm = parsed.tool_name == "swarm";
     if is_swarm && !parsed.status.starts_with('✗') {
         return render_compact_swarm_background_completion(&parsed, width);
@@ -2917,6 +3028,29 @@ pub(crate) fn render_background_task_message(
     let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+fn render_selfdev_status(icon: &str, detail: &str, width: u16) -> Vec<Line<'static>> {
+    let centered = markdown::center_code_blocks();
+    let block_width = if centered {
+        super::centered_content_block_width(width, 96)
+    } else {
+        width as usize
+    };
+    let muted = Style::default().fg(dim_color());
+    let row = Line::from(vec![
+        Span::styled(format!("  {icon} "), muted),
+        Span::styled("selfdev build", Style::default().fg(tool_color())),
+        Span::styled(format!(" · {detail}"), muted),
+    ]);
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &row,
+        block_width.saturating_sub(1),
+    )];
+    if centered {
+        super::left_pad_lines_to_block_width(&mut lines, width, block_width);
     }
     lines
 }
@@ -4204,3 +4338,7 @@ pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
     let done = todos.iter().filter(|t| t.status == "completed").count();
     Some((done, todos.len()))
 }
+
+#[cfg(test)]
+#[path = "ui_messages/kv_cache_footer_tests.rs"]
+mod kv_cache_footer_tests;

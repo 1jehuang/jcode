@@ -3,13 +3,14 @@
 use super::*;
 
 /// Use the exact pinned-card identity and context for both drawing and queries.
-fn project_pinned_todo_card<R>(
+pub(super) fn project_pinned_todo_card<R>(
     payload: Option<&str>,
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
+    active_first: bool,
     project: impl FnOnce(&[Line<'static>]) -> R,
 ) -> R {
-    if width < 16 || !crate::config::config().display.pin_todos {
+    if width == 0 || !crate::config::config().display.pin_todos {
         return project(&[]);
     }
     let Some(payload) = payload else {
@@ -17,12 +18,19 @@ fn project_pinned_todo_card<R>(
     };
     // Distinct title avoids sharing the width-capped transcript card's entry.
     let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
-    msg.title = Some("Pinned todos".to_string());
+    msg.title = Some(
+        if active_first {
+            "Pinned todos (overflow)"
+        } else {
+            "Pinned todos"
+        }
+        .to_string(),
+    );
     super::super::messages::project_cached_message_lines(
         &msg,
         width,
         diff_mode,
-        super::super::messages::render_pinned_todos_message,
+        |msg, width, mode| super::super::messages::pinned_todo_rows(msg, width, mode, active_first),
         project,
     )
 }
@@ -36,7 +44,8 @@ pub(super) fn pinned_todo_card_has_lines(
     diff_mode: crate::config::DiffDisplayMode,
     width: u16,
 ) -> bool {
-    project_pinned_todo_card(payload, diff_mode, width, |lines| !lines.is_empty())
+    width >= 16
+        && project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
 }
 
 pub(crate) fn compute_visible_margins(

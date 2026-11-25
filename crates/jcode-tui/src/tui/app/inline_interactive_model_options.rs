@@ -65,6 +65,11 @@ impl App {
             (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::ApiKey)) => {
                 Some("openai-api".to_string())
             }
+            (Some(ActiveProvider::Antigravity), _) => Some("https".to_string()),
+            (Some(ActiveProvider::Copilot), _) => Some("copilot".to_string()),
+            (Some(ActiveProvider::Cursor), _) => Some("cursor".to_string()),
+            (Some(ActiveProvider::Bedrock), _) => Some("bedrock".to_string()),
+            (Some(ActiveProvider::Gemini), _) => Some("code-assist-oauth".to_string()),
             _ => self.session.route_api_method.clone(),
         }
     }

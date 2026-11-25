@@ -18,6 +18,7 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
+mod elapsed_review;
 mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
@@ -195,8 +196,7 @@ impl BackgroundTaskManager {
 
     /// Create a new background task manager
     pub fn new() -> Self {
-        let output_dir = task_dir();
-        Self::with_output_dir(output_dir)
+        Self::with_output_dir(task_dir())
     }
 
     /// Generate a short, unique task ID
@@ -207,27 +207,24 @@ impl BackgroundTaskManager {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
-        // Use last 6 digits of timestamp + 4 random chars
+            .as_millis()
+            .to_string();
         let rand_part: String = (0..4)
             .map(|_| {
                 let idx = (rand::random::<u8>() as usize) % TASK_ID_ALPHABET.len();
                 TASK_ID_ALPHABET[idx] as char
             })
             .collect();
-        format!(
-            "{}{}",
-            &timestamp.to_string()[timestamp.to_string().len().saturating_sub(6)..],
-            rand_part
-        )
+        let suffix = &timestamp[timestamp.len().saturating_sub(6)..];
+        format!("{suffix}{rand_part}")
     }
 
     pub fn output_path_for(&self, task_id: &str) -> PathBuf {
-        self.output_dir.join(format!("{}.output", task_id))
+        self.output_dir.join(format!("{task_id}.output"))
     }
 
     pub fn status_path_for(&self, task_id: &str) -> PathBuf {
-        self.output_dir.join(format!("{}.status.json", task_id))
+        self.output_dir.join(format!("{task_id}.status.json"))
     }
 
     fn publish_task_started_activity(
@@ -503,6 +500,7 @@ impl BackgroundTaskManager {
             stall_wake_seconds: None,
         };
         self.write_status_file(&info.status_file, &status).await;
+        self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
             tool_name,
@@ -728,6 +726,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
@@ -1011,6 +1010,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
@@ -1620,10 +1620,15 @@ impl BackgroundTaskManager {
     async fn publish_completion(&self, status: &TaskStatusFile, wake: bool) {
         let output_file = self.output_path_for(&status.task_id);
         let output = fs::read_to_string(&output_file).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
+        let output = if output.is_empty() {
+            status.error.as_deref().unwrap_or_default()
         } else {
-            output
+            &output
+        };
+        let output_preview = if output.len() > 500 {
+            format!("{}...", crate::util::truncate_str(output, 500))
+        } else {
+            output.to_string()
         };
         Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
             task_id: status.task_id.clone(),

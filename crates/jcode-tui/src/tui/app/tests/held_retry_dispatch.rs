@@ -46,6 +46,7 @@ fn recovery_log_snapshot_correlates_state_without_payloads() {
 
 fn held_retry_message(attempts: u8, auto_retry: bool) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         // Transport text excludes owned attachment markers.
         content: "finish the interrupted task".into(),
         images: vec![("image/png".into(), "aW1hZ2U=".into())],

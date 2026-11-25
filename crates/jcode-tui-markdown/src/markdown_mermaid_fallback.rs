@@ -120,3 +120,16 @@ pub fn parse_inline_image_placeholder(line: &Line<'_>) -> Option<(u64, u16, u16)
 pub fn register_external_image(_path: &std::path::Path, _width: u32, _height: u32) -> u64 {
     0
 }
+
+pub fn register_markdown_image_with_dims(_path: &std::path::Path) -> Option<(u64, u32, u32)> {
+    None
+}
+
+pub fn inline_fit_geometry(
+    _width: u32,
+    _height: u32,
+    chat_width: u16,
+    cap_rows: u16,
+) -> (u16, u16) {
+    (cap_rows.max(1), chat_width.max(1))
+}

@@ -68,6 +68,7 @@ fn test_cancel_and_stop_clear_pending_rate_limit_retry() {
         let retry_at = Instant::now() + Duration::from_secs(30);
         app.rate_limit_reset = Some(retry_at);
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "retry me".to_string(),
             images: vec![],
             is_system: false,

@@ -51,6 +51,14 @@
 curl -fsSL https://jcode.sh/install | bash
 ```
 
+Want to switch to prereleases (Linux x86_64) and live-update running sessions? Run:
+
+```bash
+curl -fsSL https://jcode.sh/install | bash -s -- --prerelease
+```
+
+Already on a recent build? You can also run `jcode update --prerelease` (or `/update prerelease` inside jcode), and switch back anytime with `jcode update --stable` (or `/update stable`). See [Update channels](docs/UPDATE_CHANNELS.md) and [Linux self-dev prereleases](RELEASING.md#linux-self-dev-prereleases).
+
 <div align="center">
 
 ## Benches

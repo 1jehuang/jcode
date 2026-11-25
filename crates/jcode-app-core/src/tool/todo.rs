@@ -202,7 +202,7 @@ fn todo_write_mode(input: &Value) -> &'static str {
     let has = |key: &str| input.get(key).is_some_and(|value| !value.is_null());
     match (
         has("todos") || has("phases"),
-        has("update") || has("add") || has("remove"),
+        has("update") || has("add") || has("remove") || has("cancel"),
     ) {
         (true, _) => "full",
         (false, true) => "patch",
@@ -273,9 +273,18 @@ const UPDATE_FIELDS: &[&str] = &[
 /// one path. `update` changes only the given fields of todos matched by `id`;
 /// `add` appends new todos (or inserts each after its `after` id); `remove`
 /// drops ids. Full replacements and incremental edits are mutually exclusive.
-fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+#[cfg(test)]
+fn apply_todo_patch(input: Value, stored: impl FnOnce() -> Value) -> Result<Value> {
+    prepare_todo_patch(input, stored, &mut Vec::new())
+}
+
+fn prepare_todo_patch(
+    mut input: Value,
+    stored: impl FnOnce() -> Value,
+    cancellations: &mut Vec<crate::todo::store::TodoCancellation>,
+) -> Result<Value> {
     names::normalize_containers(&mut input);
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| input.get(*key).is_some_and(|value| !value.is_null()));
     let named_replacement = ["phases", "todos"]
@@ -295,14 +304,14 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     let Some(obj) = input.as_object_mut() else {
         return Ok(input);
     };
-    let patching = ["update", "add", "remove"]
+    let patching = ["update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|value| !value.is_null()));
     if !patching {
         return Ok(input);
     }
     if obj.get("todos").is_some_and(|value| !value.is_null()) {
-        bail!("send either a full `todos` list or `update`/`add`/`remove` edits, not both");
+        bail!("send either a full `todos` list or `update`/`add`/`cancel` edits, not both");
     }
     let parse_list = |value: Option<Value>| -> Result<Vec<Value>> {
         match value {
@@ -318,6 +327,7 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
             Some(other) => bail!("expected a list, got {other}"),
         }
     };
+    let cancels = parse_list(obj.remove("cancel"))?;
     let updates = parse_list(obj.remove("update"))?;
     let adds = parse_list(obj.remove("add"))?;
     let removes: Vec<String> = parse_list(obj.remove("remove"))?
@@ -333,6 +343,35 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
     };
     let id_of = |todo: &Value| todo.get("id").and_then(Value::as_str).map(str::to_string);
 
+    let mut cancelled_ids = std::collections::HashSet::new();
+    for cancel in cancels {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            name: String,
+            reason: String,
+        }
+        let Cancel { name, reason } = serde_json::from_value(cancel)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            bail!("cancel requires a nonempty reason");
+        }
+        let id = names::resolve_name(&todos, &name)?;
+        if !cancelled_ids.insert(id.clone())
+            || removes.contains(&id)
+            || updates.iter().any(|u| u["id"].as_str() == Some(&id))
+        {
+            bail!("conflicting edits for cancelled todo {name:?}");
+        }
+        let original = todos
+            .iter()
+            .find(|t| t["id"].as_str() == Some(&id))
+            .ok_or_else(|| anyhow::anyhow!("resolved todo {name:?} no longer exists"))?;
+        cancellations.push(crate::todo::store::TodoCancellation::new(
+            serde_json::from_value(original.clone())?,
+            reason.to_owned(),
+        ));
+    }
     for update in updates {
         let Some(fields) = update.as_object() else {
             bail!("each update must be an object with an id");
@@ -457,6 +496,26 @@ fn apply_todo_patch(mut input: Value, stored: impl FnOnce() -> Value) -> Result<
         todos.retain(|todo| !id_of(todo).is_some_and(|id| removes.contains(&id)));
     }
 
+    if !cancelled_ids.is_empty() {
+        todos.retain(|todo| !id_of(todo).is_some_and(|id| cancelled_ids.contains(&id)));
+        for todo in &todos {
+            for (field, public_field) in [
+                ("lane_after", "lane_dependencies"),
+                ("blocked_by", "blocked_by"),
+            ] {
+                if todo[field].as_array().is_some_and(|deps| {
+                    deps.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| cancelled_ids.contains(id))
+                }) {
+                    bail!(
+                        "cannot cancel a prerequisite of {}; redirect or clear its {public_field} in the same edit",
+                        todo["content"]
+                    );
+                }
+            }
+        }
+    }
     obj.insert("todos".to_string(), Value::Array(todos));
     Ok(input)
 }
@@ -488,7 +547,7 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
             .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
     }) {
         bail!(
-            "invalid todo status {:?}; expected one of: pending, in_progress, completed, cancelled",
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed; use cancel to withdraw work",
             todo.status
         );
     }
@@ -535,7 +594,7 @@ fn flatten_phases(input: &mut Value) -> Result<()> {
     let Some(phases) = obj.get("phases").filter(|value| !value.is_null()) else {
         return Ok(());
     };
-    if ["todos", "update", "add", "remove"]
+    if ["todos", "update", "add", "remove", "cancel"]
         .iter()
         .any(|key| obj.get(*key).is_some_and(|v| !v.is_null()))
     {
@@ -1115,113 +1174,9 @@ fn build_todo_output(
         .with_metadata(metadata))
 }
 
-/// Leniently normalize raw todo-tool arguments before strict deserialization.
-///
-/// Some providers (notably Claude tool calling) intermittently emit tool
-/// arguments as JSON *strings* instead of native types: the whole `todos`
-/// array as one stringified JSON blob, individual items as stringified
-/// objects, or numeric fields like `confidence` as `"90"`. Strict
-/// `serde_json::from_value` rejects these with `invalid type: string ...`,
-/// failing the entire call (issue #357; same provider quirk as #106).
-fn normalize_todo_input(mut input: Value) -> Value {
-    let Some(obj) = input.as_object_mut() else {
-        return input;
-    };
-    if let Some(plan) = obj.get_mut("plan") {
-        if let Value::String(raw) = plan {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *plan = Value::Null;
-            } else if let Ok(parsed @ (Value::Object(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *plan = parsed;
-            }
-        }
-        if let Some(fields) = plan.as_object_mut() {
-            for key in [
-                "alignment_score",
-                "user_intention_alignment",
-                "understands_user_intent",
-            ] {
-                if let Some(value) = fields.get_mut(key) {
-                    coerce_empty_string_to_null(value);
-                }
-            }
-        }
-    }
-    for key in ["todos", "goals"] {
-        let Some(entries) = obj.get_mut(key) else {
-            continue;
-        };
-
-        // Whole array sent as a stringified JSON blob.
-        if let Value::String(raw) = entries {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                *entries = Value::Null;
-            } else if let Ok(parsed @ (Value::Array(_) | Value::Null)) =
-                serde_json::from_str::<Value>(trimmed)
-            {
-                *entries = parsed;
-            }
-        }
-
-        if let Value::Array(items) = entries {
-            for item in items.iter_mut() {
-                // Individual item sent as a stringified JSON object.
-                if let Value::String(raw) = item
-                    && let Ok(parsed @ Value::Object(_)) = serde_json::from_str::<Value>(raw.trim())
-                {
-                    *item = parsed;
-                }
-                let Some(fields) = item.as_object_mut() else {
-                    continue;
-                };
-                if key == "todos"
-                    && let Some(Value::String(status)) = fields.get_mut("status")
-                    && let Some(canonical) = crate::todo::canonical_todo_status(status)
-                {
-                    *status = canonical.to_string();
-                }
-                for key in [
-                    "confidence",
-                    "completion_confidence",
-                    "alignment_score",
-                    "user_intention_alignment",
-                    "closed_feedback_loop",
-                    // Pre-rename aliases; some prompts and replayed transcripts
-                    // still carry the old keys.
-                    "hill_climbability",
-                    "end_to_end_ownership",
-                    "delivery_state",
-                    "feedback_loop_relevance",
-                    "feedback_loop_coverage",
-                    "feedback_loop_traceability",
-                    "difficulty",
-                    "autonomy",
-                ] {
-                    if let Some(value) = fields.get_mut(key) {
-                        coerce_empty_string_to_null(value);
-                    }
-                }
-            }
-        }
-    }
-    input
-}
-
-/// Coerce an empty or whitespace-only string to `null` so an omitted-but-sent
-/// assessment reads as absent. Numeric legacy scores (ints, floats, numeric
-/// strings) are handled by the semantic-state deserializers themselves, so no
-/// numeric coercion is needed here anymore.
-fn coerce_empty_string_to_null(value: &mut Value) {
-    if let Value::String(raw) = value
-        && raw.trim().is_empty()
-    {
-        *value = Value::Null;
-    }
-}
+#[path = "todo_normalize.rs"]
+mod normalize;
+use normalize::normalize_todo_input;
 
 #[async_trait]
 impl Tool for TodoTool {
@@ -1261,10 +1216,9 @@ impl Tool for TodoTool {
                         "additionalProperties": true
                     }
                 },
-                "remove": {
-                    "type": "array",
-                    "description": "Delete by name; prefer cancelling.",
-                    "items": {"type": "string"}
+                "cancel": {
+                    "type": "array", "description": "Withdraw and archive why.",
+                    "items": {"type": "object", "additionalProperties": false, "required": ["name", "reason"], "properties": {"name": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}}
                 },
                 "todos": {
                     "type": "array",
@@ -1301,7 +1255,7 @@ impl Tool for TodoTool {
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "cancelled"]
+                                "enum": ["pending", "in_progress", "completed"]
                             },
                             "priority": {
                                 "type": "string"
@@ -1452,7 +1406,7 @@ impl Tool for TodoTool {
         }
         schema["properties"]["phases"] = json!({
             "type": "array",
-            "description": "Creates or replaces the whole plan; [] clears. Use once, then change items with update/add/remove. Phases are sequential, lanes parallel, items ordered.",
+            "description": "Replace plan ([] clears). Then use update/add/cancel. Phases are sequential, lanes parallel, items ordered.",
             "items": {"type": "object", "required": ["phase", "lanes"], "additionalProperties": false,
                 "properties": {"phase": {"type": "integer", "minimum": 1}, "lanes": {
                     "type": "array", "minItems": 1, "items": {"type": "object", "required": ["lane", "items"], "additionalProperties": false,
@@ -1482,10 +1436,15 @@ impl Tool for TodoTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let write_mode_input = input.clone();
-        let input = apply_todo_patch(input, || {
-            serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
-                .unwrap_or(Value::Array(Vec::new()))
-        })?;
+        let mut cancellations = Vec::new();
+        let input = prepare_todo_patch(
+            input,
+            || {
+                serde_json::to_value(load_todos(&ctx.session_id).unwrap_or_default())
+                    .unwrap_or(Value::Array(Vec::new()))
+            },
+            &mut cancellations,
+        )?;
         let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
@@ -1493,6 +1452,17 @@ impl Tool for TodoTool {
             // Goals/plan-only writes keep the stored todo list.
             let previous = load_todos(&ctx.session_id).unwrap_or_default();
             let mut todos = params.todos.unwrap_or_else(|| previous.clone());
+            if let Some(todo) = todos.iter().find(|todo| {
+                crate::todo::todo_status_is_cancelled(&todo.status)
+                    && !previous.iter().any(|old| {
+                        old.id == todo.id && crate::todo::todo_status_is_cancelled(&old.status)
+                    })
+            }) {
+                bail!(
+                    "use cancel with a name and reason to withdraw {:?}, not a cancelled status",
+                    todo.content
+                );
+            }
             crate::todo::stages::normalize_lane_owners(&mut todos);
             crate::todo::store::validate_session_lane_dependencies(
                 &crate::storage::jcode_dir()?,
@@ -1566,6 +1536,13 @@ impl Tool for TodoTool {
                 let concise_plan_change = assessment_only
                     .then(|| plan_change(&stored_plan, &plan))
                     .flatten();
+                if !cancellations.is_empty() {
+                    crate::todo::store::append_cancellations(
+                        &crate::storage::jcode_dir()?,
+                        &ctx.session_id,
+                        &cancellations,
+                    )?;
+                }
                 save_todos(&ctx.session_id, &todos)?;
                 save_goals(&ctx.session_id, &goals)?;
                 save_plan(&ctx.session_id, &plan)?;

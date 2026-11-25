@@ -29,6 +29,7 @@ class HostedLinuxPreviewTests(unittest.TestCase):
                     if not key.startswith(("CARGO_", "JUSTRUST_", "JCODE_", "RUST"))}
         self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}",
                         JCODE_BUILD_SEMVER="v1.0.0-preview.42", RECORD=str(self.root / "record"))
+        self.install("uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
         self.command("git", "init", "-q")
         (self.root / ".gitignore").write_text("/bin/\n/record\n/target/\n")
         # Fixture repository identity only, never used for the source checkout.
@@ -124,6 +125,13 @@ else:
         path = Path(self.env["RECORD"])
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_rejects_non_linux_caller(self):
+        self.install("uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires a Linux caller", result.stderr)
+        self.assertEqual(self.records(), [])
+
     def test_portable_x86_command_and_release_metadata(self):
         result = self.run_script(JUSTRUST_TOOLCHAIN="system", CARGO_PROFILE_RELEASE_OPT_LEVEL="1",
                                  JCODE_BUILD_GIT_HASH="stale", JCODE_BUILD_GIT_DIRTY="true")
@@ -147,6 +155,15 @@ else:
         self.assertNotIn("--no-default-features", build["args"])
         self.assertNotIn("RUSTUP_TOOLCHAIN", build["env"])
         self.assertFalse(Path(self.env["RECORD"] + ".rustup").exists())
+
+    def test_selfdev_identity_forwarded_only_with_valid_run_number(self):
+        for suffix in ['0', '01', '18446744073709551616', '4-dev']:
+            self.assertNotEqual(self.run_script(JCODE_BUILD_SEMVER=f'v1.2.3-selfdev.{suffix}').returncode, 0)
+        self.assertEqual(self.records(), [])
+        version = 'v1.2.3-selfdev.444827'
+        result = self.run_script(JCODE_BUILD_SEMVER=version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.records()[-1]['env']['JCODE_BUILD_SEMVER'], version)
 
     def test_arm_rebuilds_std_with_target_only_tls(self):
         result = self.run_script(ARM, RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="",
@@ -196,11 +213,19 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.records()[-1]["env"]["JCODE_BUILD_GIT_DIRTY"], "true")
 
+    def test_stable_release_semver_is_accepted(self):
+        for value in ("v1.0.1", "v2.13.0", "v0.99.1"):
+            with self.subTest(value=value):
+                result = self.run_script(JCODE_BUILD_SEMVER=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_invalid_inputs_fail_before_hosted_dispatch(self):
         for key, value in [("JCODE_BUILD_SEMVER", ""), ("JCODE_BUILD_SEMVER", "v1.0.0-preview.0"),
                            ("JCODE_BUILD_SEMVER", "v1.0.0-preview.01"),
                            ("JCODE_BUILD_SEMVER", "v1.0.0-preview.18446744073709551616"),
                            ("JCODE_BUILD_SEMVER", "v1.1.0-preview.2"),
+                           ("JCODE_BUILD_SEMVER", "v1.0"), ("JCODE_BUILD_SEMVER", "v01.0.1"),
+                           ("JCODE_BUILD_SEMVER", "1.0.1"), ("JCODE_BUILD_SEMVER", "v1.0.1-rc.1"),
                            ("RUSTFLAGS", "-Ztls-model=emulated"),
                            ("CARGO_ENCODED_RUSTFLAGS", "-Clinker=mold"), ("RUSTC_BOOTSTRAP", "1"),
                            ("CARGO_TARGET_DIR", "other"), ("CARGO_BUILD_TARGET_DIR", "other"),

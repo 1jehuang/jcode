@@ -25,7 +25,7 @@ pub(super) fn is_internal_system_reminder_message(message: &StoredMessage) -> bo
 }
 
 pub(super) fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none()
+    !message.has_context_display_role()
         && !is_internal_system_reminder_message(message)
         && !is_scheduled_task_message(message)
 }

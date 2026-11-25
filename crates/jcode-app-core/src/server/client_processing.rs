@@ -201,6 +201,7 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        jarvis_voice,
         id,
         content,
         images,
@@ -388,6 +389,7 @@ pub(super) async fn start_processing_message(
                             system_reminder,
                             event_tx,
                             server_failover,
+                            jarvis_voice.then_some(crate::session::StoredDisplayRole::JarvisUser),
                         ),
                     )
                     .await
@@ -857,16 +859,22 @@ pub(super) fn send_pending_account_notices(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn queue_soft_interrupt(
     id: u64,
     content: String,
     images: Vec<(String, String)>,
     urgent: bool,
+    jarvis_voice: bool,
     client_id: Option<String>,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let source = SoftInterruptSource::User;
+    let source = if jarvis_voice {
+        SoftInterruptSource::JarvisUser
+    } else {
+        SoftInterruptSource::User
+    };
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     crate::logging::info(&format!(

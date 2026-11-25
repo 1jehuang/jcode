@@ -155,6 +155,28 @@ mod tests {
     }
 
     #[test]
+    fn jarvis_user_starts_a_separate_historical_turn() {
+        let mut messages = vec![
+            text(Role::User, "typed", None),
+            text(Role::Assistant, "first", usage(10)),
+            text(Role::User, "voice", None),
+            text(Role::Assistant, "second", usage(20)),
+        ];
+        messages[2].display_role = Some(jcode_session_types::StoredDisplayRole::JarvisUser);
+        assert!(super::super::stored_message_is_user_turn(&messages[2]));
+        let mut rows = vec![row(1), row(3)];
+        attach(&messages, &mut rows);
+        assert_eq!(
+            rows[0].response_stats.as_ref().unwrap().input_tokens,
+            Some(10)
+        );
+        assert_eq!(
+            rows[1].response_stats.as_ref().unwrap().input_tokens,
+            Some(20)
+        );
+    }
+
+    #[test]
     fn response_stats_unknown_cache_and_old_usage_are_not_zero() {
         let mut messages = vec![
             text(Role::Assistant, "round", usage(10)),

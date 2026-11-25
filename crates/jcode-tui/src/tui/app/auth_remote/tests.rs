@@ -586,10 +586,11 @@ fn ssh_inline_picker_filter_and_escape_match_local_navigation() {
         }
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.filter, "claude");
-        // The Claude-named login entries: the OAuth subscription login, the
-        // Claude Code CLI login, and the import-local-Claude flow. The Anthropic
-        // API-key entry is named "Anthropic API", so it does not match "claude".
-        assert_eq!(picker.filtered.len(), 3);
+        assert_eq!(picker.filtered.len(), 4);
+        assert!(picker.filtered.iter().all(|&index| {
+            let entry = &picker.entries[index];
+            App::picker_fuzzy_score("claude", &picker.filter_text(entry)).is_some()
+        }));
         app.handle_ssh_login_key(KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(
             app.inline_interactive_state
@@ -646,7 +647,7 @@ fn ssh_inline_picker_status_is_remote_only_and_failure_stays_unknown() {
                 "attention"
             );
             assert_eq!(
-                picker_provider(picker, "gemini").options[0].api_method,
+                picker_provider(picker, "antigravity").options[0].api_method,
                 "status unknown"
             );
             let api = picker_provider(picker, "openai-api");

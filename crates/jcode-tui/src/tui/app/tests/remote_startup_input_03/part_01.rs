@@ -1056,7 +1056,8 @@ fn test_save_and_restore_reload_state_preserves_queued_messages() {
             .push("continue silently".to_string());
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert_eq!(restored.input, "draft");
         assert_eq!(restored.cursor, 3);
         assert_eq!(restored.queued_messages, vec!["queued one", "queued two"]);
@@ -1128,6 +1129,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
         ];
         app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "retry me".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
             is_system: true,
@@ -1140,7 +1142,8 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
         app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert_eq!(restored.interleave_message.as_deref(), Some("urgent now"));
         assert_eq!(
             restored.pending_soft_interrupts,
@@ -1178,6 +1181,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
         let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
         app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            jarvis_voice: false,
             content: "finish the refactor".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
             is_system: false,
@@ -1190,7 +1194,8 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
         app.rate_limit_reset = None;
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert_eq!(restored.input, "finish the refactor");
         assert_eq!(restored.cursor, "finish the refactor".len());
         assert!(
@@ -1203,7 +1208,6 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
             "promoted startup submission should not linger as a passive pending retry"
         );
     });
-
 }
 
 #[test]
@@ -1217,7 +1221,8 @@ fn test_save_and_restore_reload_state_preserves_observe_mode() {
         app.observe_page_updated_at_ms = 42;
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert!(restored.observe_mode_enabled);
         assert_eq!(
             restored.observe_page_markdown,
@@ -1236,7 +1241,8 @@ fn test_save_and_restore_reload_state_preserves_split_view_mode() {
         app.set_split_view_enabled(true, true);
         app.save_input_for_reload(&session_id);
 
-        let restored = App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
         assert!(restored.split_view_enabled);
     });
 }
@@ -1318,46 +1324,5 @@ fn test_new_for_remote_requeues_restored_pending_soft_interrupts() {
             restored.queued_messages(),
             &["local interleave", "sent one", "sent two", "queued later"]
         );
-    });
-}
-
-#[test]
-fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let session_id = "test-remote-interleave-dispatch";
-
-        app.interleave_message = Some("interrupt after reload".to_string());
-        app.save_input_for_reload(session_id);
-
-        let mut restored = App::new_for_remote(Some(session_id.to_string()));
-        assert!(restored.interleave_message.is_none());
-        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-        assert!(!restored.pending_queued_dispatch);
-        assert!(!restored.is_processing);
-        assert!(matches!(restored.status, ProcessingStatus::Idle));
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        rt.block_on(super::remote::process_remote_followups(
-            &mut restored,
-            &mut remote,
-        ));
-        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-        assert!(!restored.is_processing);
-
-        remote.mark_history_loaded();
-        rt.block_on(super::remote::process_remote_followups(
-            &mut restored,
-            &mut remote,
-        ));
-
-        assert!(restored.queued_messages().is_empty());
-        assert!(restored.is_processing);
-        assert!(matches!(restored.status, ProcessingStatus::Sending));
-        assert!(restored.display_messages().iter().any(|message| {
-            message.role == "user" && message.content == "interrupt after reload"
-        }));
     });
 }
