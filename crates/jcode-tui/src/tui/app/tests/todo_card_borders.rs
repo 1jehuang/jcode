@@ -129,3 +129,48 @@ fn pinned_todo_more_row_click_rect_matches_rendered_row() {
     );
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
 }
+
+#[test]
+fn todo_frame_leaves_transcript_rows_below_a_sticky_prompt() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    assert!(crate::config::config().display.prompt_preview);
+    let mut app = create_test_app();
+    app.pinned_todos_payload = Some(
+        serde_json::json!({"todos": (0..12)
+        .map(|i| pinned_band_todo(&format!("t{i}"), &format!("Pending task {i}"), "pending"))
+        .collect::<Vec<_>>()})
+        .to_string(),
+    );
+    app.display_messages = vec![
+        DisplayMessage::user("a long sticky prompt ".repeat(20)),
+        DisplayMessage::assistant(format!(
+            "```text\n{}```",
+            "VISIBLE_TRANSCRIPT\n".repeat(100)
+        )),
+    ];
+    app.bump_display_messages_version();
+    app.auto_scroll_paused = true;
+    app.scroll_offset = usize::MAX;
+    let mut checked_six_rows = false;
+    for height in 8..20 {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, height)).unwrap();
+        let text = render_and_snap(&app, &mut terminal);
+        let layout = crate::tui::ui::last_layout_snapshot().unwrap();
+        let chat_height = layout.messages_area.height;
+        if (6..=9).contains(&chat_height) {
+            checked_six_rows |= chat_height == 6;
+            assert!(
+                text.contains("VISIBLE_TRANSCRIPT"),
+                "chat_height={chat_height}\n{text}"
+            );
+            assert!(text.contains("sticky prompt"), "{text}");
+        }
+    }
+    assert!(
+        checked_six_rows,
+        "fixture must exercise the reviewed six-row viewport"
+    );
+}

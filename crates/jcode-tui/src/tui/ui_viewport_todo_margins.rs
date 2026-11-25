@@ -48,6 +48,22 @@ pub(super) fn pinned_todo_card_has_lines(
         && project_pinned_todo_card(payload, diff_mode, width, false, |lines| !lines.is_empty())
 }
 
+// The sticky prompt is resolved later; reserving its configured maximum
+// leaves two transcript rows even when a framed band is expanded.
+fn framed_todo_body_height(viewport_height: u16) -> Option<u16> {
+    let preview_rows = if crate::config::config().display.prompt_preview {
+        if prompt_history_expanded() {
+            EXPANDED_PROMPT_PREVIEW_COUNT as u16
+        } else {
+            2
+        }
+    } else {
+        0
+    };
+    let available = viewport_height.saturating_sub(preview_rows);
+    (available >= 6).then(|| available - 2)
+}
+
 /// Pinned todo band for an arbitrary todo payload. Shared by the live chat
 /// viewport and the `/resume` preview so both render the band identically.
 pub(crate) fn pinned_todo_band_lines_for_payload(
@@ -63,9 +79,9 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
 
     PINNED_TODO_LAST_MAX.store(0, std::sync::atomic::Ordering::Relaxed);
 
-    // Short viewports keep the unboxed band rather than losing their todos.
-    let framed = viewport_height >= 6;
-    let viewport_height = viewport_height.saturating_sub(if framed { 2 } else { 0 });
+    let framed_height = framed_todo_body_height(viewport_height);
+    let framed = framed_height.is_some();
+    let viewport_height = framed_height.unwrap_or(viewport_height);
     let card_width = width.saturating_sub(if framed { 4 } else { 0 });
     // Band budget: about a third of the usable viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
@@ -154,7 +170,12 @@ pub(super) fn pinned_todo_more_rect(
     row: usize,
 ) -> Rect {
     let inset = u16::from(
-        viewport.height >= 6
+        framed_todo_body_height(
+            viewport
+                .height
+                .saturating_sub(u16::from(app.justrust_status().is_some())),
+        )
+        .is_some()
             && app
                 .pinned_todos_payload()
                 .and_then(super::super::messages::todo_payload_counts)
@@ -460,4 +481,44 @@ mod pinned_todo_projection_tests {
             }
         }
     }
+}
+
+pub(crate) fn pinned_todo_band_lines(
+    app: &dyn TuiState,
+    width: u16,
+    viewport_height: u16,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let (mut lines, more) = pinned_todo_band_lines_for_payload(
+        app.pinned_todos_payload(),
+        app.pinned_todos_expanded(),
+        app.diff_mode(),
+        width,
+        viewport_height.saturating_sub(u16::from(app.justrust_status().is_some())),
+    );
+    if width > 0
+        && viewport_height >= 3
+        && let Some(status) = app.justrust_status()
+    {
+        let color = match status.tone {
+            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
+            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
+            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
+        };
+        let label_color = if status.own_session {
+            ratatui::style::Color::Cyan
+        } else {
+            ratatui::style::Color::Magenta
+        };
+        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
+        let line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(label.to_owned(), Style::default().fg(label_color)),
+            Span::styled(format!(" {rest}"), Style::default().fg(color)),
+        ]);
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &line,
+            width as usize,
+        ));
+    }
+    (lines, more)
 }
