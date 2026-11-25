@@ -195,3 +195,84 @@ async fn assign_task_marks_completed_worker_queued_before_returning() {
         "queued member should include the assigned task in its detail"
     );
 }
+
+#[tokio::test]
+async fn assigned_turn_with_open_lane_todo_does_not_publish_completion() {
+    check_assigned_lane_outcome("in_progress", "failed", "failed").await;
+}
+
+#[tokio::test]
+async fn assigned_turn_with_finished_lane_todo_completes() {
+    check_assigned_lane_outcome("completed", "done", "completed").await;
+}
+
+async fn check_assigned_lane_outcome(todo_status: &str, plan_status: &str, member_status: &str) {
+    let (_guard, _runtime) = RuntimeEnvGuard::new();
+    let worker = format!("lane_worker_{}", uuid::Uuid::new_v4().simple());
+    let coordinator = format!("lane_owner_{}", uuid::Uuid::new_v4().simple());
+    let swarm = "open-lane-at-turn-end";
+    let lane = "lane:1:parser";
+    let todo = crate::todo::TodoItem {
+        id: "parse".into(),
+        content: "Finish the parser".into(),
+        status: todo_status.into(),
+        stage: Some(1),
+        group: Some("parser".into()),
+        ..Default::default()
+    };
+    crate::todo::save_todos(&coordinator, &[todo]).unwrap();
+    crate::todo::link_worker_lane(&coordinator, &worker, lane).unwrap();
+    let mut item = plan_item(lane, "queued", "high", &[]);
+    item.assigned_to = Some(worker.clone());
+    let (_, members, swarms, plans, coordinators) = double_assign_fixture(
+        swarm,
+        &coordinator,
+        &worker,
+        "idle",
+        item,
+        Default::default(),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    members.write().await.get_mut(&worker).unwrap().event_tx = tx;
+    let (events, _) = broadcast::channel(32);
+    super::spawn_assigned_task_run(
+        named_assignment_test_agent(&worker).await,
+        worker.clone(),
+        swarm.into(),
+        lane.into(),
+        "Finish the parser".into(),
+        members.clone(),
+        swarms,
+        plans.clone(),
+        coordinators,
+        Arc::new(RwLock::new(VecDeque::new())),
+        Arc::new(AtomicU64::new(0)),
+        events,
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let ServerEvent::TurnEvent { event, .. } = rx.recv().await.expect("worker event") {
+                match *event {
+                    ServerEvent::Done { .. } => {
+                        assert_eq!(member_status, "completed");
+                        break;
+                    }
+                    ServerEvent::Error { message, .. } => {
+                        assert_eq!(member_status, "failed");
+                        assert!(message.contains("Finish the parser"), "{message}");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })
+    .await
+    .expect("worker should publish a terminal event");
+    assert_eq!(plans.read().await[swarm].items[0].status, plan_status);
+    assert_eq!(members.read().await[&worker].status, member_status);
+    assert_eq!(
+        crate::todo::load_todos(&coordinator).unwrap()[0].status,
+        todo_status
+    );
+}

@@ -30,6 +30,8 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 use super::SessionAgents;
 
+#[path = "assignment_completion.rs"]
+mod assignment_completion;
 #[path = "assignment_targets.rs"]
 mod assignment_targets;
 use assignment_targets::{
@@ -95,12 +97,6 @@ fn active_assignment_error(task_id: &str, conflict: &ActiveAssignmentConflict) -
         conflict.assignee,
         conflict.active_ago_ms / 1000
     )
-}
-
-/// A worker turn that ends while its task is still running auto-completes the
-/// task. Anything already terminal or re-queued mid-turn is left alone.
-fn turn_end_should_auto_complete(status: &str) -> bool {
-    matches!(status, "running" | "running_stale")
 }
 
 #[derive(Clone, Debug)]
@@ -572,34 +568,29 @@ fn spawn_assigned_task_run(
 
         match result {
             Ok(_) => {
-                let previous_items = {
-                    let plans = swarm_plans.read().await;
-                    plans
-                        .get(&swarm_id)
-                        .map(|plan| plan.items.clone())
-                        .unwrap_or_default()
-                };
-                let mut auto_completed = false;
-                {
-                    let now_ms = now_unix_ms();
+                let open_todo =
+                    super::swarm_todo_link::first_open_assignment_todo(&target_session, &task_id);
+                let (previous_items, outcome) = {
                     let mut plans = swarm_plans.write().await;
-                    if let Some(plan) = plans.get_mut(&swarm_id)
-                        && let Some(item) = plan.items.iter_mut().find(|item| item.id == task_id)
-                        && turn_end_should_auto_complete(&item.status)
-                    {
-                        auto_completed = true;
-                        item.status = "done".to_string();
-                        let progress = plan.task_progress.entry(task_id.clone()).or_default();
-                        progress.last_heartbeat_unix_ms = Some(now_ms);
-                        progress.last_checkpoint_unix_ms = Some(now_ms);
-                        progress.checkpoint_summary = Some("task completed".to_string());
-                        progress.completed_at_unix_ms = Some(now_ms);
-                        progress.stale_since_unix_ms = None;
-                        progress.checkpoint_count =
-                            Some(progress.checkpoint_count.unwrap_or(0) + 1);
-                        plan.version += 1;
+                    match plans.get_mut(&swarm_id) {
+                        Some(plan) => (
+                            plan.items.clone(),
+                            assignment_completion::finish_running_task(
+                                plan,
+                                &task_id,
+                                &target_session,
+                                open_todo,
+                            ),
+                        ),
+                        None => (Vec::new(), Ok(false)),
                     }
-                }
+                };
+                let plan_reason = match &outcome {
+                    Ok(true) => "task_completed",
+                    Ok(false) => "task_turn_ended",
+                    Err(_) => "task_failed",
+                };
+                let failure = outcome.err();
                 let swarm_state = SwarmState {
                     members: Arc::clone(&swarm_members),
                     swarms_by_id: Arc::clone(&swarms_by_id),
@@ -607,11 +598,6 @@ fn spawn_assigned_task_run(
                     coordinators: Arc::clone(&swarm_coordinators),
                 };
                 persist_swarm_state_for(&swarm_id, &swarm_state).await;
-                let plan_reason = if auto_completed {
-                    "task_completed"
-                } else {
-                    "task_turn_ended"
-                };
                 broadcast_swarm_plan_with_previous(
                     &swarm_id,
                     Some(plan_reason.to_string()),
@@ -623,8 +609,14 @@ fn spawn_assigned_task_run(
                 .await;
                 update_member_status_with_report(
                     &target_session,
-                    "completed",
-                    None,
+                    if failure.is_some() {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                    failure
+                        .as_deref()
+                        .map(|message| truncate_detail(message, 120)),
                     completion_report,
                     &swarm_members,
                     &swarms_by_id,
@@ -633,7 +625,15 @@ fn spawn_assigned_task_run(
                     Some(&swarm_event_tx),
                 )
                 .await;
-                let _ = events.sender().send(ServerEvent::Done { id: 0 });
+                let terminal = match failure {
+                    Some(message) => ServerEvent::Error {
+                        id: 0,
+                        message,
+                        retry_after_secs: None,
+                    },
+                    None => ServerEvent::Done { id: 0 },
+                };
+                let _ = events.sender().send(terminal);
             }
             Err(error) => {
                 {
