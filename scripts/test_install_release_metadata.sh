@@ -34,7 +34,7 @@ chmod +x "$TEST_REPO/target/release/jcode"
 EOF
 chmod +x "$fake_bin/git" "$fake_bin/cargo"
 run_install() {
-  HOME="$tmp/home" JCODE_HOME="$tmp/selected home" PATH="$fake_bin:/usr/bin:/bin" TEST_REPO="$fixture" JCODE_RELEASE_PROFILE=release \
+  HOME="$tmp/home" JCODE_HOME="${TEST_JCODE_HOME:-$tmp/selected home}" PATH="$fake_bin:/usr/bin:/bin" TEST_REPO="$fixture" JCODE_RELEASE_PROFILE=release \
     JCODE_INSTALL_DIR="$tmp/launcher" JCODE_SKIP_SERVER_RELOAD=1 "$fixture/scripts/install_release.sh"
 }
 TEST_DIRTY=1 run_install >/dev/null
@@ -47,4 +47,11 @@ if TEST_BINARY_HASH=stale999 TEST_DIRTY=0 run_install >"$tmp/out" 2>"$tmp/err"; 
 fi
 grep -Fq 'does not report expected git identity: (abc123def)' "$tmp/err"
 test ! -e "$tmp/selected home/builds/current-version"
+(
+  cd "$tmp"
+  TEST_DIRTY=1 TEST_JCODE_HOME='./relative home' run_install >/dev/null
+  "$tmp/launcher/jcode" --version | grep -Fq 'jcode v0.0.0-dev (abc123def, dirty)'
+  test -x "$tmp/relative home/builds/stable/jcode"
+  test -x "$tmp/relative home/builds/current/jcode"
+)
 echo "install_release metadata regression test passed"
