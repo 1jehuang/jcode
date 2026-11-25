@@ -43,14 +43,10 @@ impl OpenAIProvider {
         {
             return;
         }
-        let request = self.response_request_for_model(
-            model,
-            &[],
-            tools,
-            system,
-            Self::is_chatgpt_mode(&credentials),
-        );
+        let is_chatgpt_mode = Self::is_chatgpt_mode(&credentials);
         drop(credentials);
+        self.reload_cached_reasoning_efforts();
+        let request = self.response_request_for_model(model, &[], tools, system, is_chatgpt_mode);
         if matches!(mode, OpenAITransportMode::Auto)
             && websocket_cooldown_remaining(
                 &self.websocket_cooldowns,
