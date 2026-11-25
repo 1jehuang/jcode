@@ -555,3 +555,70 @@ async fn installed_plugin_runs_through_registry_and_respects_project_disablement
     manager.disable("demo", PluginScope::Project).unwrap();
     assert!(registry.execute("lsp", input, context).await.is_err());
 }
+
+#[test]
+fn invalid_sibling_server_does_not_block_matching_plugin_server() {
+    for broken in [
+        json!({"command":"${JCODE_LSP_TEST_MISSING_SIBLING_994315}","extensionToLanguage":{".py":"python"}}),
+        json!({"command":42,"extensionToLanguage":{".py":"python"}}),
+    ] {
+        let dir = fixture_plugin(json!({"lspServers":{
+            "broken":broken,
+            "rust":{"command":"must-not-start-rust-fixture","extensionToLanguage":{".rs":"rust"}}
+        }}));
+        let root = dir.path().canonicalize().unwrap();
+        let plugin = jcode_base::plugin::PluginRoot {
+            name: "same".into(),
+            marketplace: "market".into(),
+            root: root.clone(),
+            version: None,
+            scope: jcode_base::plugin::PluginScope::User,
+        };
+        for selected in [None, Some("market/same:rust")] {
+            let server = matching_plugin_server(&root, ".rs", selected, [plugin.clone()]).unwrap();
+            assert_eq!(server.name, "market/same:rust");
+        }
+        assert!(
+            matching_plugin_server(&root, ".py", Some("market/same:broken"), [plugin]).is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn transport_retains_only_opened_document_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    let config: ServerConfig = serde_json::from_value(json!({
+        "command":"python3","args":["-u","-c",include_str!("lsp_fixture.py")],
+        "env":{"FIXTURE_DIAGNOSTIC_FLOOD":"1"},"extensionToLanguage":{".rs":"rust"}
+    }))
+    .unwrap();
+    let server = PluginServer {
+        name: "fixture/diagnostics:server".into(),
+        root: dir.path().into(),
+        config,
+        plugin: None,
+    };
+    let mut client = Client::spawn(&server, dir.path()).unwrap();
+    client.request("initialize", json!({})).await.unwrap();
+    client.notify("initialized", json!({})).await.unwrap();
+    for uri in ["file:///first.rs", "file:///second.rs"] {
+        client
+            .notify("textDocument/didOpen", json!({"textDocument":{"uri":uri}}))
+            .await
+            .unwrap();
+        client
+            .request("textDocument/hover", json!({"textDocument":{"uri":uri}}))
+            .await
+            .unwrap();
+        assert_eq!(
+            client
+                .diagnostics
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![uri]
+        );
+        assert_eq!(client.diagnostics[uri][0]["message"], "fixture diagnostic");
+    }
+    client.shutdown().await;
+}

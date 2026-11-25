@@ -35,6 +35,10 @@ while True:
     if method == "textDocument/didOpen":
         assert initialized
         opened = True
+        if os.environ.get("FIXTURE_DIAGNOSTIC_FLOOD"):
+            for index in range(64):
+                send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                    "uri": f"file:///unrelated-{index}.rs", "diagnostics": [{"message": "unrelated"}]}})
         send({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
             "uri": message["params"]["textDocument"]["uri"], "diagnostics": [{"message": "fixture diagnostic"}]}})
     if "id" not in message:

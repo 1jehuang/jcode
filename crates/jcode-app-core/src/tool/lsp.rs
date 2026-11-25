@@ -166,10 +166,20 @@ fn matching_plugin_server(
             continue;
         }
         match load_servers_with_plugin(&plugin.root, &namespace, workspace, Some(&plugin)) {
-            Ok(servers) => matches.extend(servers.into_iter().filter(|server| {
-                server.config.extension_to_language.contains_key(extension)
-                    && selected.is_none_or(|name| name == server.name)
-            })),
+            Ok(servers) => {
+                for server in servers {
+                    match server {
+                        Ok(server)
+                            if server.config.extension_to_language.contains_key(extension)
+                                && selected.is_none_or(|name| name == server.name) =>
+                        {
+                            matches.push(server)
+                        }
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!("{error:#}")),
+                    }
+                }
+            }
             Err(error) => errors.push(format!("{namespace}: {error:#}")),
         }
     }
@@ -203,11 +213,21 @@ fn matching_server(
         if selected.is_some_and(|name| !name.starts_with(&format!("{namespace}:"))) {
             continue;
         }
-        match load_servers(&root, &namespace, workspace) {
-            Ok(servers) => matches.extend(servers.into_iter().filter(|server| {
-                server.config.extension_to_language.contains_key(extension)
-                    && selected.is_none_or(|name| name == server.name)
-            })),
+        match load_servers_with_plugin(&root, &namespace, workspace, None) {
+            Ok(servers) => {
+                for server in servers {
+                    match server {
+                        Ok(server)
+                            if server.config.extension_to_language.contains_key(extension)
+                                && selected.is_none_or(|name| name == server.name) =>
+                        {
+                            matches.push(server)
+                        }
+                        Ok(_) => {}
+                        Err(error) => errors.push(format!("{error:#}")),
+                    }
+                }
+            }
             Err(error) => errors.push(format!("{namespace}: {error:#}")),
         }
     }
@@ -230,7 +250,9 @@ fn matching_server(
 
 #[cfg(test)]
 fn load_servers(root: &Path, namespace: &str, workspace: &Path) -> Result<Vec<PluginServer>> {
-    load_servers_with_plugin(root, namespace, workspace, None)
+    load_servers_with_plugin(root, namespace, workspace, None)?
+        .into_iter()
+        .collect()
 }
 
 fn load_servers_with_plugin(
@@ -238,7 +260,7 @@ fn load_servers_with_plugin(
     namespace: &str,
     workspace: &Path,
     plugin: Option<&jcode_base::plugin::PluginRoot>,
-) -> Result<Vec<PluginServer>> {
+) -> Result<Vec<Result<PluginServer>>> {
     let manifest = read_config_file(root, ".claude-plugin/plugin.json")?;
     let mut sources = Vec::new();
     if root.join(".lsp.json").exists() {
@@ -270,54 +292,63 @@ fn load_servers_with_plugin(
             configs.insert(key.clone(), value.clone());
         }
     }
-    configs
+    Ok(configs
         .into_iter()
         .map(|(key, value)| {
-            let data = plugin.map(jcode_base::plugin::data_path).transpose()?;
-            let config: ServerConfig = serde_json::from_value(value)?;
-            let mut config = config;
-            config.command =
-                expand_string_with_data(&config.command, root, workspace, false, data.as_deref())?;
-            for arg in &mut config.args {
-                *arg = expand_string_with_data(arg, root, workspace, false, data.as_deref())?;
-            }
-            for (key, value) in &mut config.env {
-                // The reserved value is host-owned, including when the manifest
-                // tries to supply unresolved environment syntax in its place.
-                if key == "CLAUDE_PLUGIN_DATA" && data.is_some() {
-                    continue;
+            let result = (|| -> Result<PluginServer> {
+                let data = plugin.map(jcode_base::plugin::data_path).transpose()?;
+                let config: ServerConfig = serde_json::from_value(value)?;
+                let mut config = config;
+                config.command = expand_string_with_data(
+                    &config.command,
+                    root,
+                    workspace,
+                    false,
+                    data.as_deref(),
+                )?;
+                for arg in &mut config.args {
+                    *arg = expand_string_with_data(arg, root, workspace, false, data.as_deref())?;
                 }
-                *value = expand_string_with_data(value, root, workspace, false, data.as_deref())?;
-            }
-            if let Some(value) = &mut config.initialization_options {
-                expand_json_with_data(value, root, workspace, data.as_deref())?;
-            }
-            if let Some(value) = &mut config.settings {
-                expand_json_with_data(value, root, workspace, data.as_deref())?;
-            }
-            if let Some(data) = data {
-                config.env.insert(
-                    "CLAUDE_PLUGIN_DATA".into(),
-                    data.to_string_lossy().into_owned(),
+                for (key, value) in &mut config.env {
+                    // The reserved value is host-owned, including when the manifest
+                    // tries to supply unresolved environment syntax in its place.
+                    if key == "CLAUDE_PLUGIN_DATA" && data.is_some() {
+                        continue;
+                    }
+                    *value =
+                        expand_string_with_data(value, root, workspace, false, data.as_deref())?;
+                }
+                if let Some(value) = &mut config.initialization_options {
+                    expand_json_with_data(value, root, workspace, data.as_deref())?;
+                }
+                if let Some(value) = &mut config.settings {
+                    expand_json_with_data(value, root, workspace, data.as_deref())?;
+                }
+                if let Some(data) = data {
+                    config.env.insert(
+                        "CLAUDE_PLUGIN_DATA".into(),
+                        data.to_string_lossy().into_owned(),
+                    );
+                }
+                ensure!(!config.command.trim().is_empty(), "Empty LSP command");
+                ensure!(
+                    config.transport.as_deref().is_none_or(|t| t == "stdio"),
+                    "Only stdio plugin LSP transport is supported"
                 );
-            }
-            ensure!(!config.command.trim().is_empty(), "Empty LSP command");
-            ensure!(
-                config.transport.as_deref().is_none_or(|t| t == "stdio"),
-                "Only stdio plugin LSP transport is supported"
-            );
-            ensure!(
-                !config.extension_to_language.is_empty(),
-                "LSP extensionToLanguage is required"
-            );
-            Ok(PluginServer {
-                name: format!("{namespace}:{key}"),
-                root: root.into(),
-                config,
-                plugin: plugin.cloned(),
-            })
+                ensure!(
+                    !config.extension_to_language.is_empty(),
+                    "LSP extensionToLanguage is required"
+                );
+                Ok(PluginServer {
+                    name: format!("{namespace}:{key}"),
+                    root: root.into(),
+                    config,
+                    plugin: plugin.cloned(),
+                })
+            })();
+            result.with_context(|| format!("Plugin LSP {namespace}:{key}"))
         })
-        .collect()
+        .collect())
 }
 
 struct Client {
@@ -327,6 +358,7 @@ struct Client {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     id: u64,
+    diagnostic_uri: Option<String>,
     diagnostics: BTreeMap<String, Value>,
     settings: Value,
 }
@@ -370,6 +402,7 @@ impl Client {
             input,
             output,
             id: 0,
+            diagnostic_uri: None,
             diagnostics: BTreeMap::new(),
             settings: server.config.settings.clone().unwrap_or(Value::Null),
         })
@@ -389,6 +422,13 @@ impl Client {
         .context("LSP write timed out")?
     }
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        if method == "textDocument/didOpen" {
+            self.diagnostic_uri = params
+                .pointer("/textDocument/uri")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            self.diagnostics.clear();
+        }
         self.send(json!({"jsonrpc":"2.0", "method":method, "params":params}))
             .await
     }
@@ -419,6 +459,7 @@ impl Client {
     async fn handle(&mut self, message: &Value) -> Result<()> {
         if message.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
             && let Some(uri) = message.pointer("/params/uri").and_then(Value::as_str)
+            && self.diagnostic_uri.as_deref() == Some(uri)
         {
             self.diagnostics.insert(
                 uri.into(),
