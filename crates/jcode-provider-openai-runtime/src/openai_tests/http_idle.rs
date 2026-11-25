@@ -53,13 +53,16 @@ async fn http_transport_idle_case(heartbeats: bool, complete: bool) {
         // No EOF or final HTTP chunk until the provider has returned.
         let _ = release_rx.await;
     });
-    let creds = Arc::new(RwLock::new(CodexCredentials {
-        access_token: "fixture-key".into(),
-        refresh_token: String::new(),
-        id_token: None,
-        account_id: None,
-        expires_at: None,
-    }));
+    let creds = Arc::new(RwLock::new(
+        CodexCredentials {
+            access_token: "fixture-key".into(),
+            refresh_token: String::new(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+        }
+        .into(),
+    ));
     let (tx, mut rx) = mpsc::channel(64);
     let started = Instant::now();
     let result = tokio::time::timeout(

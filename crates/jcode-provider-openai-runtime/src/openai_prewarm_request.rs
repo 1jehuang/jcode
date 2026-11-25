@@ -2,11 +2,6 @@ use super::*;
 
 impl OpenAIProvider {
     pub(super) async fn prewarm_request(&self, tools: &[ToolDefinition], system: &str) {
-        if self.oauth_account_label().is_some_and(|label| {
-            jcode_base::auth::codex::load_credentials_for_account(&label).is_err()
-        }) {
-            return;
-        }
         if self.is_browser_only()
             || is_chatgpt_web_model(&self.model())
             || std::env::var("JCODE_OPENAI_PREWARM").is_ok_and(|value| {
@@ -37,9 +32,17 @@ impl OpenAIProvider {
         // this speculative request incompatible at adoption time.
         let model = self.model();
         let model = model.strip_suffix("[1m]").unwrap_or(&model);
-        let Ok(credentials) = self.credentials.try_read() else {
+        let Ok(mut credentials) = self.credentials.try_write() else {
             return;
         };
+        if super::openai_credentials::sync_locked(
+            self.oauth_account_label().as_deref(),
+            &mut credentials,
+        )
+        .is_err()
+        {
+            return;
+        }
         let request = self.response_request_for_model(
             model,
             &[],
