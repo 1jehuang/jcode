@@ -1591,7 +1591,7 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 /// plain Enter, so it behaves exactly as if the user typed it now. One per
 /// call: if it starts a turn, the rest wait for that turn to end.
 async fn run_next_queued_remote_command(app: &mut App, remote: &mut RemoteConnection) {
-    if app.queued_commands.is_empty() {
+    if app.queued_commands.is_empty() || app.wait_for_prompt_history_switch() {
         return;
     }
     let command = app.queued_commands.remove(0);

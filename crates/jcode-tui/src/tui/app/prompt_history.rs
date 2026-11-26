@@ -518,10 +518,9 @@ impl App {
         }
         if !cfg!(test)
             && let Some(path) = history_file_path(&self.prompt_history_session_id())
+            && let Some(saved) = append_snapshot_to_path(&path, &merged)
         {
-            if let Some(saved) = append_snapshot_to_path(&path, &merged) {
-                merged = saved;
-            }
+            merged = saved;
         }
         self.persisted_prompt_history = Some(merged);
     }

@@ -235,6 +235,9 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             );
             return Ok(());
         }
+        if command == "/clear" && app.wait_for_prompt_history_switch() {
+            return Ok(());
+        }
         let prepared = input::take_prepared_input(app);
         return submit_prepared_remote_enter_input(app, remote, prepared).await;
     }
@@ -280,10 +283,8 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
             );
             return Ok(());
         }
-        if prepared.expanded.trim() == "/clear" && app.prompt_history_scope.switch_request.is_some()
-        {
+        if prepared.expanded.trim() == "/clear" && app.wait_for_prompt_history_switch() {
             super::input_dispatch::restore_prepared_remote_input(app, prepared);
-            app.wait_for_prompt_history_switch();
             return Ok(());
         }
         let trimmed = prepared.expanded.trim();
