@@ -199,3 +199,5 @@ include!("clear_attachment_draft.rs");
 include!("attachment_routing.rs");
 
 include!("retry_draft_correlation.rs");
+
+include!("skill_reload_wire_payload.rs");

@@ -3,6 +3,54 @@
 use super::*;
 
 impl App {
+    /// Replaying a proven skill must retain its original payload and activation.
+    pub(in super::super) fn restore_remote_replay_skill(&mut self) -> bool {
+        let Some((id, draft)) = self.last_submitted_draft.as_ref() else {
+            return true;
+        };
+        let matches_payload = if let Some(pending) = self.rate_limit_pending_message.as_ref() {
+            !pending.is_system
+                && draft.expanded == pending.content
+                && draft.images == pending.images
+        } else {
+            self.submit_input_on_startup
+                && draft.raw_input == self.input
+                && draft.images == self.pending_images
+                && draft.image_markers == self.input_image_markers
+                && draft.pasted_contents == self.pasted_contents
+        };
+        if *id != self.current_message_id || !matches_payload {
+            return true;
+        }
+        let expanded_raw = draft.expanded_raw_input();
+        if expanded_raw == draft.expanded {
+            // Ordinary slash text stays ordinary even if a skill was added.
+            return true;
+        }
+        let snapshot = self.current_skills_snapshot();
+        let skill = snapshot
+            .resolve_invocation(draft.routing_input())
+            .zip(snapshot.resolve_invocation(&expanded_raw))
+            .filter(|(routing, wire)| {
+                routing.name == wire.name
+                    && snapshot.get(routing.name).is_some()
+                    && wire.prompt.unwrap_or("") == draft.expanded
+            })
+            .map(|(routing, _)| routing.name.to_string());
+        if let Some(skill) = skill {
+            self.active_skill = Some(skill);
+            return true;
+        }
+        if self.rate_limit_pending_message.is_some() {
+            self.restore_terminal_remote_retry_input();
+        }
+        self.clear_pending_remote_retry();
+        self.last_submitted_input = None;
+        self.submit_input_on_startup = false;
+        self.set_status_notice("Restored skill prompt needs review; its original skill or payload no longer matches the available skills");
+        false
+    }
+
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
         let new_start = Instant::now();
         let mut lap = Instant::now();
