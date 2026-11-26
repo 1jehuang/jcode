@@ -146,11 +146,20 @@ impl BackgroundTaskManager {
     }
 
     fn persist_status_file(path: &std::path::Path, status: &impl serde::Serialize) -> Result<()> {
+        use std::io::Write;
+
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Background status path has no parent"))?;
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(&mut file, status)?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".jcode-status-")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        {
+            let mut writer = std::io::BufWriter::new(file.as_file_mut());
+            serde_json::to_writer_pretty(&mut writer, status)?;
+            writer.flush()?;
+        }
         file.persist(path)?;
         Ok(())
     }
