@@ -10,6 +10,51 @@
 // reload snapshot must therefore fold it back into the queue.
 
 #[test]
+fn test_reload_soft_interrupt_recovery_preserves_order_across_verdict_groups() {
+    use crate::protocol::ServerEvent;
+    use crate::tui::backend::soft_interrupt_client_id;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for duplicate_content in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        let first = "original request";
+        let second = if duplicate_content {
+            first
+        } else {
+            "correction"
+        };
+        app.track_pending_soft_interrupt(41, first.into());
+        app.track_pending_soft_interrupt(42, second.into());
+        app.track_pending_soft_interrupt(43, "final correction".into());
+        app.queued_messages.push("later queued request".into());
+
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        app.handle_server_event(
+            ServerEvent::SoftInterruptsCancelled {
+                id: cancel_id,
+                // Deliberately reversed within the group, with the first send
+                // in the other group because its receipt was lost on reload.
+                cancelled: vec![soft_interrupt_client_id(43), soft_interrupt_client_id(42)],
+                not_queued: vec![soft_interrupt_client_id(41)],
+            },
+            &mut remote,
+        );
+        assert_eq!(
+            app.queued_messages,
+            [first, second, "final correction", "later queued request"]
+        );
+        assert!(app.pending_soft_interrupts.is_empty());
+        assert!(app.pending_soft_interrupt_requests.is_empty());
+        assert!(app.sent_soft_interrupts.is_empty());
+    }
+}
+
+#[test]
 fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
     for auto_retry in [false, true] {
         let mut app = create_test_app();
@@ -31,6 +76,15 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         ))
         .unwrap();
         let rejected_id = app.current_message_id.unwrap();
+        let retry_reminder = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap()
+            .system_reminder
+            .clone()
+            .unwrap();
+        assert!(retry_reminder.contains("Retry the interrupted execution"));
+        assert!(retry_reminder.ends_with("Continue the pending task"));
         app.handle_server_event(
             crate::protocol::ServerEvent::Error {
                 id: rejected_id,
@@ -44,10 +98,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         assert!(app.current_message_id.is_none());
         assert!(app.rate_limit_pending_message.is_none());
         assert!(app.rate_limit_reset.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
         assert!(!app.display_messages().iter().any(|m| m.role == "error"));
         assert!(app.pending_fallback_offer.is_none());
 
@@ -64,10 +115,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
         rt.block_on(remote::handle_tick(&mut app, &mut remote));
         assert!(app.is_processing);
         assert!(app.current_message_id.is_none());
-        assert_eq!(
-            app.hidden_queued_system_messages,
-            ["Continue the pending task"]
-        );
+        assert_eq!(app.hidden_queued_system_messages, [retry_reminder.clone()]);
 
         app.handle_server_event(
             crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
@@ -89,7 +137,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 .unwrap()
                 .system_reminder
                 .as_deref(),
-            Some("Continue the pending task")
+            Some(retry_reminder.as_str())
         );
     }
 }
@@ -130,6 +178,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(12);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "queued follow-up in flight".to_string(),
         images: vec![],
         is_system: true,
@@ -163,6 +212,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
     // clear it rather than re-queueing as a system continuation.
     app.is_processing = true;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "user retry message".to_string(),
         images: vec![],
         is_system: false,
@@ -190,6 +240,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
     // already dequeued into the in-flight pending slot.
     app.queued_messages.push("still queued".to_string());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "dispatched but unfinished".to_string(),
         images: vec![],
         is_system: true,
@@ -404,7 +455,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
 }
 
 #[test]
-fn remote_ownership_gate_reads_the_remote_goal_assessment() {
+fn remote_ownership_gate_is_not_evaluated_by_client() {
     with_temp_jcode_home(|| {
         write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
@@ -446,14 +497,10 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
         )
         .expect("save remote goal assessment");
 
-        assert!(app.schedule_auto_poke_followup_if_needed());
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-        );
-        app.queued_messages.clear();
-        app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages.is_empty());
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.auto_poke_incomplete_todos);
     });
 }
 
@@ -634,7 +681,7 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                     } else {
                         assert_eq!(app.schedule_auto_poke_followup_if_needed(), id == 42);
                     }
-                    if id == 42 {
+                    if id == 42 && !remote_done {
                         assert_eq!(
                             app.queued_messages,
                             vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
@@ -647,7 +694,7 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                     app.queued_messages.clear();
                     app.pending_queued_dispatch = false;
                 }
-                assert!(!app.auto_poke_incomplete_todos);
+                assert_eq!(app.auto_poke_incomplete_todos, remote_done);
                 assert!(!app.todo_confidence_spike_challenged);
                 assert!(app.hidden_queued_system_messages.is_empty());
                 assert!(!app.display_messages().iter().any(|message| {
@@ -723,7 +770,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
             app.status = ProcessingStatus::Streaming;
             app.current_message_id = Some(id);
             app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
-            assert_eq!(app.queued_messages.len(), usize::from(id == 42));
+            assert!(app.queued_messages.is_empty());
             app.queued_messages.clear();
             app.pending_queued_dispatch = false;
         }
@@ -736,7 +783,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
                         .contains("Checking end-to-end ownership before finishing")
                 })
                 .count(),
-            1
+            0
         );
     });
 }

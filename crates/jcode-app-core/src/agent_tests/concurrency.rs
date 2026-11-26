@@ -131,7 +131,8 @@ async fn deferred_restore_save_persists_when_called() {
         content: vec![crate::message::ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,

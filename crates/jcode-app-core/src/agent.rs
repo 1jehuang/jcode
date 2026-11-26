@@ -371,6 +371,10 @@ pub struct Agent {
     /// it never begins or ends one (that was a phantom zero-turn session plus
     /// sync file I/O on every reconnect's accept path).
     telemetry_session_deferred: bool,
+    /// Whether reasoning effort was explicitly chosen by the user or restored from a saved session.
+    reasoning_effort_user_override: bool,
+    /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
+    jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
@@ -501,6 +505,8 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
+            reasoning_effort_user_override: false,
+            jarvis_default_effort_applied: false,
             concurrency_session: None,
         };
         let t = Instant::now();
@@ -709,7 +715,7 @@ impl Agent {
         manager.reset();
         manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
-        manager.set_budget(budget);
+        manager.set_budget_for_provider(budget, self.provider.name());
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {
@@ -726,7 +732,7 @@ impl Agent {
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.compaction = state;
+            self.session.compaction = state.map(Arc::new);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
@@ -866,9 +872,8 @@ impl Agent {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
+            self.session.compaction = manager.persisted_state().map(Arc::new);
             if let Err(err) = self.session.save() {
                 logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -911,16 +916,16 @@ impl Agent {
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
@@ -1141,7 +1146,7 @@ impl Agent {
                 let stored_message = StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,

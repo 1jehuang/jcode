@@ -919,87 +919,9 @@ pub fn record_todo_update(update: TodoTelemetryUpdate) {
     }
 }
 
-fn update_active_days(id: &str) -> (u32, u32) {
-    let Some(path) = active_days_path(id) else {
-        return (0, 0);
-    };
-    let today = Utc::now().date_naive();
-    let mut days = std::fs::read_to_string(&path)
-        .ok()
-        .into_iter()
-        .flat_map(|text| {
-            text.lines()
-                .map(str::trim)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|line| NaiveDate::parse_from_str(&line, "%Y-%m-%d").ok())
-        .collect::<Vec<_>>();
-    days.push(today);
-    days.sort_unstable();
-    days.dedup();
-    let rendered = days
-        .iter()
-        .map(NaiveDate::to_string)
-        .collect::<Vec<_>>()
-        .join("\n");
-    write_private_file(&path, &rendered);
-    let days_7 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 7)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    let days_30 = days
-        .iter()
-        .filter(|day| (today.signed_duration_since(**day).num_days()) < 30)
-        .count()
-        .min(u32::MAX as usize) as u32;
-    (days_7, days_30)
-}
-
-fn detect_project_profile() -> ProjectProfile {
-    fn keep_project_entry(entry: &walkdir::DirEntry) -> bool {
-        if !entry.file_type().is_dir() {
-            return true;
-        }
-        let name = entry.file_name().to_str().unwrap_or_default();
-        !matches!(
-            name,
-            ".git" | "target" | "node_modules" | "dist" | "build" | ".next"
-        )
-    }
-
-    let cwd = std::env::current_dir().ok();
-    let mut profile = ProjectProfile::default();
-    let Some(root) = cwd.as_deref() else {
-        return profile;
-    };
-    profile.repo_present = root.join(".git").exists() || is_jcode_repo_dir(root);
-    let mut scanned_files = 0usize;
-    for entry in walkdir::WalkDir::new(root)
-        .max_depth(3)
-        .into_iter()
-        .filter_entry(keep_project_entry)
-        .filter_map(Result::ok)
-    {
-        if scanned_files >= 400 {
-            break;
-        }
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        scanned_files += 1;
-        profile.note_extension(
-            entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or_default(),
-        );
-    }
-    profile
-}
-
+#[path = "lib_project_profile.rs"]
+mod project_profile;
+use project_profile::*;
 fn now_ms_since(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -2375,7 +2297,8 @@ impl ProviderUsage {
 }
 
 /// Emit a `usage_report` for one provider response, attributed to the calling
-/// session and the model that actually served it.
+/// session and supplied model label. This legacy API does not claim the label
+/// was resolved by the provider. Use the attribution API for observed IDs.
 ///
 /// This is the authoritative spend signal. Unlike `session_end`, it does not
 /// depend on the session ending cleanly and does not read the process-global
@@ -2387,6 +2310,20 @@ pub fn record_provider_usage(
     session_id: Option<&str>,
     provider: &str,
     model: &str,
+    source: UsageSource,
+    usage: ProviderUsage,
+) {
+    record_provider_usage_with_model_attribution(session_id, provider, model, None, source, usage);
+}
+
+/// Record request attribution separately from the actual provider response ID.
+/// Only response-observed IDs belong in `resolved_model`. Unknown resolution
+/// leaves the requested label effective without claiming it was resolved.
+pub fn record_provider_usage_with_model_attribution(
+    session_id: Option<&str>,
+    provider: &str,
+    requested_model: &str,
+    resolved_model: Option<&str>,
     source: UsageSource,
     usage: ProviderUsage,
 ) {
@@ -2409,6 +2346,13 @@ pub fn record_provider_usage(
     let usage = usage.normalized(provider);
     let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    let requested_model = sanitize_telemetry_label(requested_model);
+    let resolved_model = resolved_model
+        .map(sanitize_telemetry_label)
+        // The ingestion contract bounds metadata by UTF-8 bytes. An oversized
+        // response label is unknown, not a truncated ID and not a poison event
+        // that would permanently block this response's durable usage delivery.
+        .filter(|value| !value.is_empty() && value.len() <= 120);
     let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
     let event = UsageReportEvent {
         usage_contract_version: 2,
@@ -2422,7 +2366,10 @@ pub fn record_provider_usage(
         arch: std::env::consts::ARCH,
         source: source.as_str(),
         provider: sanitize_telemetry_label(provider),
-        model: sanitize_telemetry_label(model),
+        model: resolved_model.as_ref().unwrap_or(&requested_model).clone(),
+        requested_model: (!requested_model.is_empty() && requested_model.len() <= 120)
+            .then_some(requested_model),
+        resolved_model,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
         cache_read_input_tokens: cache_read,
@@ -2456,10 +2403,11 @@ pub fn record_simple_completion_usage(
     if usage.is_empty() {
         return;
     }
-    record_provider_usage(
+    record_provider_usage_with_model_attribution(
         session_id,
         provider,
-        model,
+        usage.requested_model.as_deref().unwrap_or(model),
+        usage.resolved_model.as_deref(),
         source,
         ProviderUsage {
             input_tokens: usage.input_tokens.unwrap_or(0),
@@ -2483,7 +2431,7 @@ pub fn record_simple_completion_failure_usage(
             &failure.provider,
             &failure.model,
             source,
-            failure.usage,
+            failure.usage.clone(),
         );
     }
 }

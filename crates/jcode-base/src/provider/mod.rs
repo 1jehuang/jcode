@@ -48,6 +48,7 @@ use jcode_provider_core::FailoverDecision;
 use registry::ProviderRegistry;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::Instant;
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
@@ -181,143 +182,21 @@ pub fn stores_reasoning_content_for_context(provider_name: &str) -> bool {
     }
     matches!(
         provider_name.to_ascii_lowercase().as_str(),
-        "openrouter" | "anthropic" | "openai"
+        "openrouter" | "anthropic" | "claude" | "openai"
     )
 }
 
-// Keep inactive direct profiles on the same 15-minute soft-refresh cadence as
-// the active OpenRouter/OpenAI-compatible runtime. We continue serving the
-// cached routes immediately while a background refresh updates the catalog.
-pub(crate) const OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS: u64 = 15 * 60;
-
-fn openai_compatible_profile_catalog_cache_is_stale(cached_at: u64, now: u64) -> bool {
-    now.saturating_sub(cached_at) >= OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS
-}
-
-pub(crate) fn cached_live_models_for_openai_compatible_profile(
-    resolved: &crate::provider_catalog::ResolvedOpenAiCompatibleProfile,
-) -> Option<(Vec<String>, bool)> {
-    let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&resolved.id)?;
-    let cache_is_stale = jcode_provider_openrouter::current_unix_secs()
-        .map(|now| openai_compatible_profile_catalog_cache_is_stale(cache.cached_at, now))
-        .unwrap_or(false);
-    let source_api_base = cache
-        .source_api_base
-        .as_deref()
-        .and_then(crate::provider_catalog::normalize_api_base)?;
-    let expected_api_base = crate::provider_catalog::normalize_api_base(&resolved.api_base)?;
-    if source_api_base != expected_api_base {
-        return None;
-    }
-
-    let models = cache
-        .models
-        .into_iter()
-        .map(|model| model.id.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        None
-    } else {
-        Some((models, cache_is_stale))
-    }
-}
-
-fn direct_openai_compatible_profile_routes(
-    profile: crate::provider_catalog::OpenAiCompatibleProfile,
-) -> Vec<ModelRoute> {
-    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
-    let static_models = crate::provider_catalog::openai_compatible_profile_static_models(profile);
-    // Pure read: the catalog scheduler owns refresh cadence, so rendering
-    // routes cannot fan out HTTP requests.
-    let (mut models, from_live_catalog) = if let Some((models, _cache_is_stale)) =
-        cached_live_models_for_openai_compatible_profile(&resolved)
-    {
-        (models, true)
-    } else {
-        let mut models = static_models;
-        if models.is_empty()
-            && let Some(default_model) = resolved.default_model.as_ref()
-            && !default_model.trim().is_empty()
-        {
-            models.push(default_model.trim().to_string());
-        }
-        (models, false)
-    };
-
-    let provider = resolved.display_name.clone();
-    let api_method = format!("openai-compatible:{}", resolved.id);
-    let detail = if from_live_catalog {
-        resolved.api_base.clone()
-    } else if resolved.api_base.trim().is_empty() {
-        "fallback: static provider model list".to_string()
-    } else {
-        format!(
-            "{}; fallback: static provider model list",
-            resolved.api_base
-        )
-    };
-
-    let mut routes = Vec::new();
-    for model in models.drain(..) {
-        if !is_listable_model_name(&model)
-            || !crate::provider_catalog::openai_compatible_profile_model_supports_chat(
-                &resolved.id,
-                &model,
-            )
-            || routes.iter().any(|route: &ModelRoute| route.model == model)
-        {
-            continue;
-        }
-
-        routes.push(ModelRoute {
-            model,
-            provider: provider.clone(),
-            api_method: api_method.clone(),
-            available: true,
-            detail: detail.clone(),
-            usage: None,
-            cheapness: None,
-        });
-    }
-
-    routes
-}
-
-fn standard_openrouter_profile_configured() -> bool {
-    crate::provider_catalog::load_env_value_from_env_or_config(
-        "OPENROUTER_API_KEY",
-        "openrouter.env",
-    )
-    .is_some()
-}
-
-fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
-    let Some(cache) = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("openrouter")
-    else {
-        return Vec::new();
-    };
-
-    let source_matches_openrouter = cache
-        .source_api_base
-        .as_deref()
-        .and_then(crate::provider_catalog::normalize_api_base)
-        .map(|base| base.contains("openrouter.ai"))
-        .unwrap_or(false);
-    if !source_matches_openrouter {
-        return Vec::new();
-    }
-
-    let available = standard_openrouter_profile_configured();
-    cache
-        .models
-        .into_iter()
-        .map(|model| model.id.trim().to_string())
-        .filter(|model| is_listable_model_name(model))
-        .map(|model| build_openrouter_auto_route(&model, available, String::new()))
-        .collect()
-}
-
+#[path = "direct_profile_routes.rs"]
+mod direct_profile_routes;
+#[cfg(test)]
+pub(crate) use direct_profile_routes::OPENAI_COMPATIBLE_PROFILE_CATALOG_SOFT_REFRESH_SECS;
+pub(crate) use direct_profile_routes::cached_live_models_for_openai_compatible_profile;
+#[cfg(test)]
+use direct_profile_routes::openai_compatible_profile_catalog_cache_is_stale;
+use direct_profile_routes::{
+    configured_standard_openrouter_profile_routes, direct_openai_compatible_profile_routes,
+    standard_openrouter_profile_configured,
+};
 /// Strip an explicit Jcode subscription prefix (`jcode:` or
 /// `jcode-subscription:`) from a model spec.
 pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
@@ -655,6 +534,13 @@ impl MultiProvider {
             }
             if let Some(reason) =
                 models::provider_unavailability_detail_for_account_label(key, Some(&bound_label))
+                    .or_else(|| {
+                        account_failover::multi_account_provider_kind(active)
+                            .filter(|kind| {
+                                crate::usage::account_known_exhausted(*kind, &bound_label)
+                            })
+                            .map(|_| "OAuth usage exhausted".to_string())
+                    })
                 && !self
                     .try_auto_banked_reset(active, &reason, messages, tools, mode)
                     .await?
@@ -675,24 +561,17 @@ impl MultiProvider {
                     reason
                 );
             }
+            let attempt_started = Instant::now();
             let attempt = self
                 .complete_with_auto_reset(active, messages, tools, mode, resume_session_id)
                 .await;
             match attempt {
                 Ok(stream) => {
-                    match active {
-                        ActiveProvider::OpenAI => {
-                            models::clear_openai_provider_unavailability_for_account_label(Some(
-                                &bound_label,
-                            ))
-                        }
-                        ActiveProvider::Claude => {
-                            models::clear_claude_provider_unavailability_for_account_label(Some(
-                                &bound_label,
-                            ))
-                        }
-                        _ => {}
-                    }
+                    models::clear_provider_unavailability_after_request(
+                        key,
+                        Some(&bound_label),
+                        attempt_started,
+                    );
                     return Ok(stream);
                 }
                 Err(err) => {
@@ -804,13 +683,14 @@ impl MultiProvider {
                 continue;
             }
 
+            let attempt_started = Instant::now();
             let attempt = self
                 .complete_with_auto_reset(candidate, messages, tools, mode, resume_session_id)
                 .await;
 
             match attempt {
                 Ok(stream) => {
-                    clear_provider_unavailable_for_account(key);
+                    models::clear_provider_unavailability_after_request(key, None, attempt_started);
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);
@@ -2146,15 +2026,19 @@ impl Provider for MultiProvider {
     }
 
     fn supports_deferred_tools(&self) -> bool {
-        // Only first-party Anthropic and OpenAI Responses paths implement
-        // provider-native deferred loading. Every other route receives an
-        // eager-only tool list (see `complete_with_failover`).
+        // Anthropic, OpenAI Responses, and the Gemini Developer API
+        // Interactions path (tool retrieval) implement provider-native
+        // deferred loading. Every other route receives an eager-only tool
+        // list (see `complete_with_failover`).
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
                 .is_some_and(|provider| provider.supports_deferred_tools()),
             ActiveProvider::OpenAI => self
                 .openai_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            ActiveProvider::Gemini => self
+                .gemini_provider()
                 .is_some_and(|provider| provider.supports_deferred_tools()),
             _ => false,
         }
@@ -2522,6 +2406,9 @@ impl Provider for MultiProvider {
                 .anthropic_provider()
                 .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .and_then(|a| a.reasoning_effort()),
             ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
@@ -2540,6 +2427,10 @@ impl Provider for MultiProvider {
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
                 .set_reasoning_effort(effort),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .ok_or_else(|| anyhow::anyhow!("Antigravity provider not available"))?
+                .set_reasoning_effort(effort),
             ActiveProvider::Copilot => self
                 .copilot_provider()
                 .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
@@ -2549,7 +2440,7 @@ impl Provider for MultiProvider {
                 .ok_or_else(|| anyhow::anyhow!("OpenAI-compatible provider not available"))?
                 .set_reasoning_effort(effort),
             _ => Err(anyhow::anyhow!(
-                "Reasoning effort is only supported for OpenAI, Anthropic, and compatible reasoning models"
+                "Reasoning effort is only supported for OpenAI, Anthropic, Antigravity, and compatible reasoning models"
             )),
         }
     }
@@ -2563,6 +2454,10 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .map(|o| o.available_efforts())
+                .unwrap_or_default(),
+            ActiveProvider::Antigravity => self
+                .antigravity_provider()
+                .map(|a| a.available_efforts())
                 .unwrap_or_default(),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()

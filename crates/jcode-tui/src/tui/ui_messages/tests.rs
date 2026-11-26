@@ -1,48 +1,6 @@
 use super::*;
 
 #[test]
-fn pinned_dependency_label_uses_available_width_and_palette() {
-    let task = TodoCardBackgroundTask {
-        task_id: "resume".into(),
-        label: "Resume lint validation".into(),
-        percent: Some(38.0),
-    };
-    let line = todo_dependency_progress(&[&task], 60);
-    assert!(line.to_string().contains(&task.label));
-    assert_eq!(line.spans[0].style.fg, Some(todo_meta_color()));
-    for width in 0..100 {
-        assert!(todo_dependency_progress(&[&task], width).width() <= width);
-    }
-}
-
-#[test]
-fn expanded_diff_rows_preserve_source_and_align_continuations() {
-    let source = "    let result = compute(\"界界 e\u{301}\", argument);";
-    let parsed = ParsedDiffLine {
-        kind: DiffLineKind::Add,
-        prefix: "9+ ".into(),
-        content: source.into(),
-        file_path: None,
-    };
-    let rows = expanded_diff_row(&parsed, Some("rs"), 3, 24);
-    assert!(rows.len() > 1);
-    assert!(extract_line_text(&rows[0]).starts_with("│   9 +     let"));
-    let mut reconstructed = String::new();
-    for (index, row) in rows.iter().enumerate() {
-        assert!(row.width() <= 24, "{row:?}");
-        assert_eq!(row.alignment, Some(Alignment::Left));
-        if index > 0 {
-            assert!(extract_line_text(row).starts_with("│     ↪ "));
-        }
-        for span in row.spans.iter().skip(if index == 0 { 2 } else { 1 }) {
-            reconstructed.push_str(&span.content);
-        }
-    }
-    assert_eq!(reconstructed, source);
-    assert_eq!(rows[0].spans[1].style.fg, Some(diff_add_color()));
-}
-
-#[test]
 fn expanded_diff_rows_fit_narrow_widths_and_expand_tabs() {
     let parsed = ParsedDiffLine {
         kind: DiffLineKind::Del,
@@ -982,6 +940,27 @@ fn render_background_task_failure_without_diagnostic_is_honest() {
         .join("\n");
     assert!(plain.contains("✗ bash · took 7.1s"), "{plain}");
     assert!(plain.contains("╰─exit 1 · no diagnostic captured"));
+}
+
+#[test]
+fn selfdev_build_status_uses_one_tool_row() {
+    for (status, label) in [
+        ("running", "◌ selfdev build · running"),
+        ("↻ superseded", "↻ selfdev build · superseded"),
+    ] {
+        let msg = DisplayMessage::background_task(format!(
+            "**Background task** `bg123` · `selfdev-build` · {status} · 84.0s · exit 0\n\n```text\ncompiler output\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`"
+        ));
+        for width in [20, 80] {
+            let lines =
+                render_background_task_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].width() <= width as usize);
+            if width == 80 {
+                assert!(lines[0].to_string().contains(label));
+            }
+        }
+    }
 }
 
 #[test]
@@ -3013,14 +2992,14 @@ fn render_swarm_message_collapsed_shows_tldr_and_expand_badge_only() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("fixed the flaky test"), "{plain}");
-    assert!(plain.contains(super::SWARM_EXPAND_BADGE), "{plain}");
+    assert!(!plain.contains("fixed the flaky test"), "{plain}");
+    assert!(plain.contains("tok"), "{plain}");
     let preview = lines
         .iter()
         .flat_map(|line| &line.spans)
-        .find(|span| span.content.contains("fixed the flaky test"))
-        .expect("DM preview span");
-    assert_eq!(preview.style.fg, Some(rgb(130, 130, 140)));
+        .find(|span| span.content.contains("tok"))
+        .expect("DM token count span");
+    assert_eq!(preview.style.fg, Some(rgb(118, 118, 118)));
     assert!(
         !plain.contains("race in the setup helper"),
         "collapsed card must hide the full body: {plain}"
@@ -3604,145 +3583,8 @@ mod discovery_cards;
 #[path = "tool_render_tests.rs"]
 mod tool_render;
 
-fn provider_card_message() -> DisplayMessage {
-    let mut msg = DisplayMessage::usage(
-        "*%\t91\n= 5-hour window\t34%\t2h 6m\n= 7-day Opus window\t91%\t4d 2h\n\n+ Session resets\t1 available\n: Account\tje***@gmail.com\n- Run `/usage claude` for this account only."
-            .to_string(),
-    );
-    msg.title = Some("Anthropic (Claude)".into());
-    msg
-}
+#[path = "provider_card_tests.rs"]
+mod provider_card_tests;
 
-#[test]
-fn provider_card_never_overflows_and_keeps_a_straight_frame() {
-    let msg = provider_card_message();
-    for width in 0..=160u16 {
-        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
-        assert_eq!(lines.is_empty(), width == 0, "width {width}");
-        for line in &lines {
-            assert!(
-                line.width() <= usize::from(width),
-                "width {width}: {line:?}"
-            );
-        }
-        let text: Vec<_> = lines.iter().map(extract_line_text).collect();
-        if text.first().is_some_and(|row| row.starts_with('╭')) {
-            assert!(
-                lines.iter().all(|line| line.width() == lines[0].width()),
-                "width {width}: {text:#?}"
-            );
-            assert!(text.last().unwrap().starts_with('╰'), "width {width}");
-        }
-    }
-    // Wide terminals cap the card instead of stretching it.
-    let render = |width| render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
-    assert_eq!(render(100), render(200));
-    assert_eq!(render(200)[0].width(), 64);
-}
-
-#[test]
-fn provider_card_aligns_gauge_and_detail_columns() {
-    let msg = provider_card_message();
-    let lines = render_usage_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-    let text: Vec<_> = lines.iter().map(extract_line_text).collect();
-    assert!(text[0].contains("Anthropic (Claude)"), "{text:#?}");
-    let gauges: Vec<_> = text.iter().filter(|row| row.contains('▰')).collect();
-    assert_eq!(gauges.len(), 2, "{text:#?}");
-    let column = |row: &str, needle: &str| row[..row.find(needle).unwrap()].width();
-    // Bars, percentages and countdowns each start in one column.
-    assert_eq!(column(gauges[0], "▰"), column(gauges[1], "▰"));
-    assert_eq!(column(gauges[0], "%"), column(gauges[1], "%"));
-    assert_eq!(column(gauges[0], "↻"), column(gauges[1], "↻"));
-    // Detail values line up with the bars.
-    let account = text
-        .iter()
-        .find(|row| row.contains("je***@gmail.com"))
-        .unwrap();
-    assert_eq!(column(account, "je***"), column(gauges[0], "▰"));
-    // Notes drop the backticks and keep the command readable.
-    assert!(
-        text.iter().any(|row| row.contains("Run /usage claude")),
-        "{text:#?}"
-    );
-    assert!(text.iter().all(|row| !row.contains('`')));
-}
-
-#[test]
-fn provider_card_stacks_labels_instead_of_clipping_when_narrow() {
-    let msg = provider_card_message();
-    let lines = render_usage_message(&msg, 38, crate::config::DiffDisplayMode::Off);
-    let text: Vec<_> = lines.iter().map(extract_line_text).collect();
-    // Brand stays in the border, the dim qualifier gives way to the status.
-    assert!(
-        text[0].contains("Anthropic") && text[0].contains('●'),
-        "{text:#?}"
-    );
-    for expected in [
-        "5-hour window",
-        "2h 6m",
-        "4d 2h",
-        "Session resets",
-        "1 available",
-    ] {
-        assert!(
-            text.iter().any(|row| row.contains(expected)),
-            "missing {expected}: {text:#?}"
-        );
-    }
-    let gauges = text.iter().filter(|row| row.contains('▰')).count();
-    assert_eq!(gauges, 2, "{text:#?}");
-    // Every framed width keeps whole gauge labels and countdowns: they wrap,
-    // they are never clipped with an ellipsis.
-    for width in 22..=80u16 {
-        let lines = render_usage_message(&msg, width, crate::config::DiffDisplayMode::Off);
-        let body: String = lines[1..]
-            .iter()
-            .map(extract_line_text)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let body = without_whitespace(&body).replace('│', "");
-        for expected in ["5-hourwindow", "7-dayOpuswindow", "↻2h6m", "↻4d2h"] {
-            assert!(
-                body.contains(expected),
-                "width {width}: missing {expected}: {body}"
-            );
-        }
-        assert!(!body.contains('…'), "width {width}: {body}");
-        // The status pill stays visible, in the border or as the first row.
-        let header: String = lines[..2].iter().map(extract_line_text).collect();
-        assert!(header.contains('●'), "width {width}: {header}");
-    }
-}
-
-#[test]
-fn provider_card_status_uses_shared_limit_colors() {
-    use crate::tui::info_widget::usage_limit_color;
-    let display_used = crate::config::config().display.usage_display_used();
-    let status_span = |content: &str, title: &str| {
-        let mut msg = DisplayMessage::usage(content.to_string());
-        msg.title = Some(title.into());
-        render_usage_message(&msg, 100, crate::config::DiffDisplayMode::Off)[0]
-            .spans
-            .iter()
-            .find(|span| span.content.starts_with('●') || span.content.starts_with('◌'))
-            .map(|span| span.style.fg)
-            .unwrap()
-    };
-    assert_eq!(status_span("*%\t91", "A"), Some(usage_limit_color(9)));
-    assert_eq!(status_span("*%\t10", "A"), Some(usage_limit_color(90)));
-    assert_eq!(
-        status_span("*crit\terror\n! boom", "A"),
-        Some(usage_limit_color(0))
-    );
-    let wording = render_usage_message(
-        &provider_card_message(),
-        100,
-        crate::config::DiffDisplayMode::Off,
-    );
-    let header = extract_line_text(&wording[0]);
-    if display_used {
-        assert!(header.contains("91% used"), "{header}");
-    } else {
-        assert!(header.contains("9% left"), "{header}");
-    }
-}
+#[path = "tests_additional_tests.rs"]
+mod additional_pinned_dependency_label_uses_available_width_and_palette;

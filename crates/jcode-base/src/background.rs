@@ -19,7 +19,10 @@ use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
+mod elapsed_review;
 mod model;
+#[path = "background/stall_watchdog.rs"]
+mod stall_watchdog;
 
 pub use model::{
     BackgroundCleanupResult, BackgroundTaskEventKind, BackgroundTaskEventRecord,
@@ -70,8 +73,7 @@ impl BackgroundTaskManager {
 
     /// Create a new background task manager
     pub fn new() -> Self {
-        let output_dir = task_dir();
-        Self::with_output_dir(output_dir)
+        Self::with_output_dir(task_dir())
     }
 
     /// Generate a short, unique task ID
@@ -82,27 +84,24 @@ impl BackgroundTaskManager {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis();
-        // Use last 6 digits of timestamp + 4 random chars
+            .as_millis()
+            .to_string();
         let rand_part: String = (0..4)
             .map(|_| {
                 let idx = (rand::random::<u8>() as usize) % TASK_ID_ALPHABET.len();
                 TASK_ID_ALPHABET[idx] as char
             })
             .collect();
-        format!(
-            "{}{}",
-            &timestamp.to_string()[timestamp.to_string().len().saturating_sub(6)..],
-            rand_part
-        )
+        let suffix = &timestamp[timestamp.len().saturating_sub(6)..];
+        format!("{suffix}{rand_part}")
     }
 
     pub fn output_path_for(&self, task_id: &str) -> PathBuf {
-        self.output_dir.join(format!("{}.output", task_id))
+        self.output_dir.join(format!("{task_id}.output"))
     }
 
     pub fn status_path_for(&self, task_id: &str) -> PathBuf {
-        self.output_dir.join(format!("{}.status.json", task_id))
+        self.output_dir.join(format!("{task_id}.status.json"))
     }
 
     fn publish_task_started_activity(
@@ -406,6 +405,7 @@ impl BackgroundTaskManager {
             stall_wake_seconds: None,
         };
         self.write_status_file(&info.status_file, &status).await;
+        self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
             tool_name,
@@ -573,7 +573,11 @@ impl BackgroundTaskManager {
             // instantly cannot race the insert below and leave a permanent
             // phantom entry in the map.
             drop(status_guard);
-            let _ = registered_rx.await;
+            if let Err(error) = registered_rx.await {
+                crate::logging::debug(&format!(
+                    "Background task registration ended before completion: {error}"
+                ));
+            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             // Read output preview for notification
@@ -624,6 +628,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
@@ -794,7 +799,11 @@ impl BackgroundTaskManager {
             // persisted (and after registration below, so instant completions
             // cannot race the insert and leave a phantom entry).
             drop(status_guard);
-            let _ = registered_rx.await;
+            if let Err(error) = registered_rx.await {
+                crate::logging::debug(&format!(
+                    "Background task registration ended before completion: {error}"
+                ));
+            }
             tasks_for_prune.write().await.remove(&task_id_clone);
 
             let output_preview = if output_text.len() > 500 {
@@ -841,6 +850,7 @@ impl BackgroundTaskManager {
             .await
             .insert(task_id.clone(), running_task);
         let _ = registered_tx.send(());
+        self.arm_elapsed_review(tool_name, &task_id);
 
         BackgroundTaskInfo {
             task_id,
@@ -1202,161 +1212,6 @@ impl BackgroundTaskManager {
     /// Minimum accepted stall window, to keep watchdogs from spamming wakes.
     pub const MIN_STALL_WAKE_SECONDS: u64 = 30;
 
-    /// Arm (or re-arm) a stall watchdog for a running task.
-    ///
-    /// The watchdog fires a [`BusEvent::BackgroundTaskStalled`] after the task
-    /// produces no new output bytes and no new progress/checkpoint events for
-    /// `stall_wake_seconds`. Any activity resets the countdown. It fires at
-    /// most once per silence episode and re-arms itself when activity resumes,
-    /// so a task that stalls, recovers, and stalls again produces one wake per
-    /// stall. The watchdog exits when the task leaves `Running`.
-    ///
-    /// Returns the effective (clamped) window, or `None` when the task does
-    /// not exist or is no longer running.
-    pub async fn arm_stall_watchdog(&self, task_id: &str, stall_wake_seconds: u64) -> Option<u64> {
-        let status_guard = self.progress_updates.lock().await;
-        let stall_wake_seconds = stall_wake_seconds.max(Self::MIN_STALL_WAKE_SECONDS);
-        let status_path = self.status_path_for(task_id);
-        let mut status = self.read_status_file(&status_path).await?;
-        if status.status != BackgroundTaskStatus::Running {
-            return None;
-        }
-        status.stall_wake_seconds = Some(stall_wake_seconds);
-        self.write_status_file(&status_path, &status).await;
-        drop(status_guard);
-
-        let task_id_owned = task_id.to_string();
-        let output_path = self.output_path_for(task_id);
-        let status_path_clone = status_path.clone();
-        let started_at = status.started_at.clone();
-        let watchdogs = Arc::clone(&self.stall_watchdogs);
-
-        let handle = tokio::spawn(async move {
-            let mut last_len = fs::metadata(&output_path)
-                .await
-                .map(|meta| meta.len())
-                .unwrap_or(0);
-            let mut last_event_count: Option<usize> = None;
-            let mut quiet_since = TokioInstant::now();
-            let mut fired_this_episode = false;
-            let window = Duration::from_secs(stall_wake_seconds);
-            let mut poll = tokio::time::interval(Self::STALL_POLL_INTERVAL);
-            poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            // interval fires immediately on first tick; consume it.
-            poll.tick().await;
-
-            loop {
-                poll.tick().await;
-
-                let Ok(content) = fs::read_to_string(&status_path_clone).await else {
-                    break;
-                };
-                let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content) else {
-                    break;
-                };
-                if status.status != BackgroundTaskStatus::Running {
-                    break;
-                }
-                // Disarmed externally (e.g. re-armed with a new window by a
-                // newer watchdog that overwrote this one's registry entry and
-                // cleared the field first): keep it simple, exit if cleared.
-                if status.stall_wake_seconds != Some(stall_wake_seconds) {
-                    break;
-                }
-
-                let output_len = fs::metadata(&output_path)
-                    .await
-                    .map(|meta| meta.len())
-                    .unwrap_or(0);
-                let event_count = status.event_history.len();
-                let activity = output_len != last_len
-                    || last_event_count.is_some_and(|prior| prior != event_count);
-                last_len = output_len;
-                last_event_count = Some(event_count);
-
-                if activity {
-                    quiet_since = TokioInstant::now();
-                    fired_this_episode = false;
-                    continue;
-                }
-
-                if fired_this_episode || quiet_since.elapsed() < window {
-                    continue;
-                }
-                fired_this_episode = true;
-
-                let running_secs = DateTime::parse_from_rfc3339(&started_at)
-                    .ok()
-                    .and_then(|started| (Utc::now() - started.with_timezone(&Utc)).to_std().ok())
-                    .map(|duration| duration.as_secs_f64())
-                    .unwrap_or_default();
-                let output_tail = fs::read_to_string(&output_path)
-                    .await
-                    .map(|output| {
-                        let tail: Vec<&str> = output.lines().rev().take(20).collect();
-                        tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-                    })
-                    .unwrap_or_default();
-                let output_tail = if output_tail.len() > 2000 {
-                    crate::util::truncate_str(&output_tail, 2000).to_string()
-                } else {
-                    output_tail
-                };
-
-                Bus::global().publish(BusEvent::BackgroundTaskStalled(
-                    crate::bus::BackgroundTaskStalled {
-                        task_id: status.task_id.clone(),
-                        tool_name: status.tool_name.clone(),
-                        display_name: status.display_name.clone(),
-                        session_id: status.session_id.clone(),
-                        stall_wake_seconds,
-                        running_secs,
-                        output_tail,
-                        output_file: output_path.clone(),
-                        // Arming a stall watchdog is an explicit "wake me if
-                        // this goes quiet" request, independent of the task's
-                        // completion-delivery flags.
-                        notify: true,
-                        wake: true,
-                    },
-                ));
-            }
-
-            watchdogs.write().await.remove(&task_id_owned);
-        });
-
-        // Replace any existing watchdog for this task.
-        if let Some(prior) = self
-            .stall_watchdogs
-            .write()
-            .await
-            .insert(task_id.to_string(), handle)
-        {
-            prior.abort();
-        }
-
-        Some(stall_wake_seconds)
-    }
-
-    /// Disarm the stall watchdog for a task, if one is armed.
-    pub async fn disarm_stall_watchdog(&self, task_id: &str) -> bool {
-        let removed = self.stall_watchdogs.write().await.remove(task_id);
-        let disarmed = removed.is_some();
-        if let Some(handle) = removed {
-            handle.abort();
-        }
-        let _status_guard = self.progress_updates.lock().await;
-        let status_path = self.status_path_for(task_id);
-        if let Some(mut status) = self.read_status_file(&status_path).await
-            && status.stall_wake_seconds.is_some()
-        {
-            status.stall_wake_seconds = None;
-            self.write_status_file(&status_path, &status).await;
-            return true;
-        }
-        disarmed
-    }
-
     /// Update delivery behavior for an existing background task.
     ///
     /// This supports retroactively enabling notify/wake after the task was already started.
@@ -1451,6 +1306,22 @@ impl BackgroundTaskManager {
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
                 let _ = fs::write(&task.status_path, json).await;
             }
+            let output_path = self.output_path_for(&final_status.task_id);
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
+                BackgroundTaskCompleted {
+                    task_id: final_status.task_id,
+                    tool_name: final_status.tool_name,
+                    display_name: final_status.display_name,
+                    session_id: final_status.session_id,
+                    status: final_status.status,
+                    exit_code: final_status.exit_code,
+                    output_preview: "Cancelled by user".to_string(),
+                    output_file: output_path,
+                    duration_secs: final_status.duration_secs.unwrap_or_default(),
+                    notify: notify_flag,
+                    wake: wake_flag,
+                },
+            ));
 
             Ok(true)
         } else {
@@ -1498,6 +1369,22 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             self.write_status_file(&status_path, &status).await;
+            let output_path = self.output_path_for(&status.task_id);
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
+                BackgroundTaskCompleted {
+                    task_id: status.task_id,
+                    tool_name: status.tool_name,
+                    display_name: status.display_name,
+                    session_id: status.session_id,
+                    status: status.status,
+                    exit_code: status.exit_code,
+                    output_preview: "Cancelled by user".to_string(),
+                    output_file: output_path,
+                    duration_secs: status.duration_secs.unwrap_or_default(),
+                    notify: status.notify,
+                    wake: status.wake,
+                },
+            ));
             Ok(true)
         }
     }

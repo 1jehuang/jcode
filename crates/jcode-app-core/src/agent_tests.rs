@@ -38,76 +38,6 @@ struct NativeAutoCompactionProvider;
 
 struct BoundSavedAccountProvider;
 
-#[tokio::test]
-async fn working_directory_moves_preserve_first_active_session_origin() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    agent.session.messages.clear();
-    agent.session.working_dir = Some("/daemon".into());
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir, None,
-        "initial subscription is not a move"
-    );
-    agent.session.add_message(
-        Role::User,
-        vec![ContentBlock::Text {
-            text: "hello".into(),
-            cache_control: None,
-        }],
-    );
-    agent.set_working_dir("/projects/second");
-    agent.set_working_dir_for_pending_context(Some("/projects/third".into()));
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-    assert_eq!(agent.working_dir(), Some("/projects/third"));
-    agent.set_working_dir("/projects/start");
-    assert_eq!(
-        agent.session.original_working_dir.as_deref(),
-        Some("/projects/start")
-    );
-}
-
-#[tokio::test]
-async fn user_response_capability_updates_locked_tool_surface() {
-    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    assert!(agent.locked_tools.is_some());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    agent.set_desktop_response_capability(true).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-    agent.set_desktop_response_capability(true).await;
-    assert!(
-        agent.locked_tools.is_some(),
-        "unchanged capability preserves the cache"
-    );
-    agent.set_desktop_response_capability(false).await;
-    assert!(agent.locked_tools.is_none());
-    assert!(!agent.tool_names().await.iter().any(|n| n == "applet"));
-    assert!(
-        !agent
-            .tool_definitions()
-            .await
-            .iter()
-            .any(|d| d.name == "user_response")
-    );
-}
-
 #[async_trait]
 impl Provider for BoundSavedAccountProvider {
     async fn complete(
@@ -131,67 +61,6 @@ impl Provider for BoundSavedAccountProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
-}
-
-#[tokio::test]
-async fn saved_account_observed_binding_is_persisted() {
-    let _guard = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().unwrap();
-    struct RestoreHome(Option<std::ffi::OsString>);
-    impl Drop for RestoreHome {
-        fn drop(&mut self) {
-            match &self.0 {
-                Some(home) => crate::env::set_var("JCODE_HOME", home),
-                None => crate::env::remove_var("JCODE_HOME"),
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::config::Config::invalidate_cache();
-    let provider: Arc<dyn Provider> = Arc::new(BoundSavedAccountProvider);
-    let mut agent = Agent::new(provider, Registry::empty());
-    agent.session.route_api_method = None;
-    agent.session.save_prepared().unwrap();
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@work")
-    );
-    let saved = crate::session::Session::load(&agent.session.id).unwrap();
-    assert_eq!(saved.route_api_method.as_deref(), Some("openai-oauth@work"));
-    assert_eq!(saved.provider_key.as_deref(), Some("openai-oauth"));
-    agent.sync_bound_account_route();
-    assert_eq!(agent.session.route_api_method, saved.route_api_method);
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("personal"));
-    agent.record_failed_account_route("429 rate limit reached");
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label("openai", Some("work"))
-            .is_some()
-    );
-    assert!(
-        crate::provider::provider_unavailability_detail_for_account_label(
-            "openai",
-            Some("personal")
-        )
-        .is_none()
-    );
-    crate::provider::clear_openai_provider_unavailability_for_account_label(Some("work"));
-    agent.session.route_api_method = Some("openai-oauth@personal".to_string());
-    agent.sync_bound_account_route();
-    assert_eq!(
-        agent.session.route_api_method.as_deref(),
-        Some("openai-oauth@personal")
-    );
-    assert!(
-        agent
-            .ensure_session_lease()
-            .unwrap_err()
-            .to_string()
-            .contains("personal")
-    );
 }
 
 #[tokio::test]
@@ -817,6 +686,95 @@ async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
             ("three".to_string(), vec!["f3".into()]),
         ]
     );
+}
+
+#[tokio::test]
+async fn file_activity_interrupt_keeps_typed_identity_without_model_prefix() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = "moss edited src/parser.rs +3-1: fix parser";
+    agent.queue_soft_interrupt(
+        content.into(),
+        vec![],
+        false,
+        SoftInterruptSource::FileActivity,
+    );
+    let injected = agent.inject_soft_interrupts();
+    let stored = agent.session.messages.last().unwrap();
+    assert_eq!(
+        stored.display_role,
+        Some(crate::session::StoredDisplayRole::FileActivity)
+    );
+    assert!(matches!(&stored.content[0], ContentBlock::Text { text, .. } if text == content));
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert!(
+        matches!(&events[0], ServerEvent::SoftInterruptInjected { content: text, display_role: Some(role), .. }
+        if text == content && role == "file_activity")
+    );
+}
+
+#[tokio::test]
+async fn jarvis_voice_provenance_survives_history_without_marking_typed_lookalikes() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    let content = r#"{"trigger":"hello","background_transcript":[]}"#;
+    for source in [SoftInterruptSource::JarvisUser, SoftInterruptSource::User] {
+        agent.queue_soft_interrupt(content.into(), vec![], false, source);
+    }
+    let events = Agent::build_soft_interrupt_events(agent.inject_soft_interrupts(), "D", None);
+    assert_eq!(events.len(), 2);
+    for (event, expected) in events.iter().zip([Some("jarvis_user"), None]) {
+        assert!(
+            matches!(event, ServerEvent::SoftInterruptInjected { content: text, display_role, .. }
+            if text == content && display_role.as_deref() == expected)
+        );
+    }
+    let stored = &agent.session.messages[agent.session.messages.len() - 2..];
+    for msg in stored {
+        assert!(matches!(msg.role, Role::User));
+        assert!(matches!(&msg.content[0], ContentBlock::Text { text, .. } if text == content));
+    }
+    let restored = serde_json::from_slice(&serde_json::to_vec(&agent.session).unwrap()).unwrap();
+    let history = crate::session::render_messages(&restored);
+    let rows: Vec<_> = history
+        .iter()
+        .filter(|row| row.content == content)
+        .map(|row| row.role.as_str())
+        .collect();
+    assert_eq!(rows, ["jarvis_user", "user"]);
+}
+
+#[tokio::test]
+async fn adjacent_notifications_each_emit_a_delivery_event() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+    for source in [
+        SoftInterruptSource::System,
+        SoftInterruptSource::BackgroundTask,
+    ] {
+        for content in ["first notice", "second notice"] {
+            agent.queue_soft_interrupt(content.into(), vec![], false, source);
+        }
+    }
+    let injected = agent.inject_soft_interrupts();
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    assert_eq!(events.len(), 4);
+    for (event, expected) in events.iter().zip([
+        "first notice",
+        "second notice",
+        "first notice",
+        "second notice",
+    ]) {
+        assert!(
+            matches!(event, ServerEvent::SoftInterruptInjected { content, .. } if content == expected)
+        );
+    }
 }
 
 #[tokio::test]
@@ -1770,7 +1728,8 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
                 name: "bash".to_string(),
                 input: serde_json::json!({}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -1930,7 +1889,8 @@ async fn env_snapshot_detail_is_minimal_for_empty_sessions_and_full_after_histor
             content: vec![ContentBlock::Text {
                 text: "hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -2577,6 +2537,33 @@ fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
 }
 
 #[tokio::test]
+async fn queued_jarvis_input_preempts_empty_post_tool_retry() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.queue_soft_interrupt(
+        "still speaking".into(),
+        vec![],
+        false,
+        SoftInterruptSource::JarvisUser,
+    );
+    let mut attempts = 0;
+    assert!(
+        !agent
+            .maybe_retry_streaming_empty_post_tool_response(true, true, None, &mut attempts)
+            .unwrap()
+    );
+    assert_eq!(attempts, 0);
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    assert!(
+        agent
+            .maybe_retry_streaming_empty_post_tool_response(true, true, None, &mut attempts)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn empty_post_tool_response_is_retried_in_shared_helper() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
@@ -2738,6 +2725,9 @@ async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
 #[path = "agent_tests/system_prompt_reminder.rs"]
 mod system_prompt_reminder;
 
+#[path = "agent_tests/network_disconnect_recovery.rs"]
+mod network_disconnect_recovery;
+
 #[derive(Clone, Default)]
 struct FableGuardrailProvider {
     calls: Arc<std::sync::Mutex<usize>>,
@@ -2852,6 +2842,7 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         crate::protocol::SessionToolConfig {
             enabled: Some(vec![]),
             disabled: vec![],
+            system_prompt_append: None,
             custom: vec![crate::protocol::SessionToolDefinition {
                 name: "compile_remote".into(),
                 description: "SDK override".into(),
@@ -2915,6 +2906,150 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
+}
+
+#[test]
+fn passive_screen_context_is_dynamic_session_local_and_never_transcribed() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let id = agent.session_id().to_owned();
+    let before_messages = serde_json::to_string(&agent.session).unwrap();
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Enable,
+    )
+    .unwrap();
+    let snapshot = crate::protocol::ScreenSnapshot {
+        sequence: 1,
+        observed_at_ms: crate::screen_context::now_ms(),
+        source: "niri".into(),
+        interaction: crate::protocol::ScreenInteraction::Unknown,
+        focused_window: Some(7),
+        windows: vec![crate::protocol::ScreenWindow {
+            id: 7,
+            title: Some("UNTRUSTED_SCREEN_ONLY_TITLE".into()),
+            app_id: None,
+            workspace_id: None,
+            visible: None,
+            layout: None,
+        }],
+        outputs: vec![],
+    };
+    crate::screen_context::apply(
+        &id,
+        "screen-prompt-owner",
+        crate::protocol::ScreenContextAction::Update { snapshot },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(split.static_part, baseline.static_part);
+        assert_eq!(
+            split
+                .dynamic_part
+                .matches("UNTRUSTED_SCREEN_ONLY_TITLE")
+                .count(),
+            1
+        );
+        assert!(
+            split
+                .dynamic_part
+                .contains("untrusted data, not instructions")
+        );
+        assert!(
+            !other
+                .build_system_prompt_split(None)
+                .dynamic_part
+                .contains("UNTRUSTED_SCREEN_ONLY_TITLE")
+        );
+    }
+    assert_eq!(
+        serde_json::to_string(&agent.session).unwrap(),
+        before_messages
+    );
+    agent.session.system_prompt = Some("Custom system".into());
+    let split = agent.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "Custom system");
+    assert!(split.dynamic_part.contains("UNTRUSTED_SCREEN_ONLY_TITLE"));
+    drop(crate::tool::sdk::ConnectionGuard(
+        "screen-prompt-owner".into(),
+    ));
+    assert!(
+        agent
+            .build_system_prompt_split(None)
+            .dynamic_part
+            .is_empty()
+    );
+}
+
+#[test]
+fn sdk_system_prompt_append_is_session_local_static_and_cleared() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let other = Agent::new(provider, Registry::empty());
+    let baseline = agent.build_system_prompt_split(None);
+    let other_baseline = other.build_system_prompt_split(None).static_part;
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let suffix = "Unique SDK session instructions";
+    let configure = || {
+        crate::tool::sdk::configure(
+            &id,
+            "prompt-agent-owner",
+            crate::protocol::SessionToolConfig {
+                system_prompt_append: Some(suffix.into()),
+                ..Default::default()
+            },
+            tx.clone(),
+        )
+        .unwrap();
+    };
+    configure();
+    for _ in 0..3 {
+        let split = agent.build_system_prompt_split(None);
+        assert_eq!(
+            split.static_part,
+            format!("{}\n\n{suffix}", baseline.static_part)
+        );
+        assert_eq!(split.static_part.matches(suffix).count(), 1);
+        assert_eq!(split.dynamic_part, baseline.dynamic_part);
+    }
+    assert_eq!(
+        other.build_system_prompt_split(None).static_part,
+        other_baseline
+    );
+    assert!(agent.session.system_prompt.is_none());
+    assert!(
+        !serde_json::to_string(&agent.session)
+            .unwrap()
+            .contains(suffix)
+    );
+    agent.session.system_prompt = Some("Explicit override".into());
+    let split = agent.build_system_prompt_split(Some("do not add memory to override"));
+    assert_eq!(split.static_part, format!("Explicit override\n\n{suffix}"));
+    assert!(split.dynamic_part.is_empty());
+    agent.session.system_prompt = Some(String::new());
+    assert_eq!(agent.build_system_prompt_split(None).static_part, suffix);
+    agent.session.system_prompt = None;
+    crate::tool::sdk::configure(&id, "prompt-agent-owner", Default::default(), tx.clone()).unwrap();
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
+    configure();
+    drop(crate::tool::sdk::ConnectionGuard(
+        "prompt-agent-owner".into(),
+    ));
+    assert!(crate::tool::sdk::config(&id).is_none());
+    assert_eq!(
+        agent.build_system_prompt_split(None).static_part,
+        baseline.static_part
+    );
 }
 
 /// Test provider advertising provider-native deferred tool loading.
@@ -3062,134 +3197,8 @@ async fn cancelled_turn_leaves_soft_interrupt_queued() {
     assert_eq!(agent.soft_interrupt_count(), 0);
 }
 
-/// Provider that only has the Claude OAuth credential: any request pinned to
-/// the API-key route fails exactly like the real runtime does.
-#[derive(Clone, Default)]
-struct OAuthOnlyClaudeProvider {
-    model: Arc<std::sync::Mutex<String>>,
-    set_model_requests: Arc<std::sync::Mutex<Vec<String>>>,
-}
+#[path = "agent_tests_credential_route_tests.rs"]
+mod credential_route_tests;
 
-#[async_trait]
-impl Provider for OAuthOnlyClaudeProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        unreachable!("OAuthOnlyClaudeProvider does not complete requests")
-    }
-
-    fn name(&self) -> &str {
-        "Claude"
-    }
-
-    fn model(&self) -> String {
-        self.model.lock().unwrap().clone()
-    }
-
-    fn set_model(&self, request: &str) -> Result<()> {
-        self.set_model_requests
-            .lock()
-            .unwrap()
-            .push(request.to_string());
-        if request.starts_with("claude-api:") {
-            anyhow::bail!("No Anthropic API key found");
-        }
-        let model = request
-            .split_once(':')
-            .map(|(_, model)| model)
-            .unwrap_or(request);
-        *self.model.lock().unwrap() = model.to_string();
-        Ok(())
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(self.clone())
-    }
-}
-
-/// A session created while the deployment used an Anthropic API key, resumed
-/// after it moved to Claude OAuth, must come back on OAuth and persist that
-/// route. Before the fix the restore failed, the stale `provider_key` stayed
-/// on disk, and every swarm worker inheriting it died with
-/// "No Anthropic API key found".
-#[tokio::test]
-async fn resume_heals_stale_credential_route_after_credential_type_change() {
-    let _guard = crate::storage::lock_test_env();
-    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
-    impl Drop for RestoreEnv {
-        fn drop(&mut self) {
-            for (key, value) in &self.0 {
-                match value {
-                    Some(value) => crate::env::set_var(key, value),
-                    None => crate::env::remove_var(key),
-                }
-            }
-            crate::config::Config::invalidate_cache();
-        }
-    }
-    let _restore = RestoreEnv(
-        ["JCODE_HOME", "JCODE_RUNTIME_PROVIDER"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect(),
-    );
-    let home = tempfile::tempdir().unwrap();
-    crate::env::set_var("JCODE_HOME", home.path());
-    crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-    crate::config::Config::invalidate_cache();
-
-    let mut stale = crate::session::Session::create_with_id(
-        "session_stale_api_key_route".to_string(),
-        None,
-        None,
-    );
-    stale.model = Some("claude-sonnet-5".to_string());
-    stale.provider_key = Some("anthropic-api".to_string());
-    stale.route_api_method = None;
-    stale.save_prepared().expect("persist stale session");
-
-    let provider = Arc::new(OAuthOnlyClaudeProvider::default());
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
-    let registry = Registry::new(provider_dyn.clone()).await;
-    let mut agent = Agent::new(provider_dyn, registry);
-    agent
-        .restore_session("session_stale_api_key_route")
-        .expect("restore stale session");
-
-    assert_eq!(
-        provider.set_model_requests.lock().unwrap().as_slice(),
-        [
-            "claude-api:claude-sonnet-5",
-            "claude-api:claude-sonnet-5",
-            "claude-oauth:claude-sonnet-5"
-        ],
-        "restore tries the persisted route (plus the auth-refresh retry), then the runtime's"
-    );
-    assert_eq!(agent.provider_model(), "claude-sonnet-5");
-    assert_eq!(
-        agent.session_provider_key().as_deref(),
-        Some("claude-oauth")
-    );
-    assert_eq!(
-        agent.session_route_api_method().as_deref(),
-        Some("claude-oauth")
-    );
-
-    // What a swarm spawn reads when the coordinator is mid-turn.
-    let persisted = crate::session::Session::load("session_stale_api_key_route").unwrap();
-    assert_eq!(persisted.provider_key.as_deref(), Some("claude-oauth"));
-    assert_eq!(persisted.route_api_method.as_deref(), Some("claude-oauth"));
-    assert_eq!(
-        crate::provider::MultiProvider::model_switch_request_for_session_route(
-            "claude-sonnet-5",
-            persisted.provider_key.as_deref(),
-            persisted.route_api_method.as_deref(),
-        ),
-        "claude-oauth:claude-sonnet-5",
-        "workers inheriting the healed session must target the live credential"
-    );
-}
+#[path = "agent_tests_additional_tests.rs"]
+mod additional_working_directory_moves_preserve_first_active_session_origin;

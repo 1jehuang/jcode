@@ -38,6 +38,7 @@ fn session(id: &str, title: &str, age: i64, path: &Path) -> SessionInfo {
             session_path: path.to_string_lossy().into_owned(),
         },
         external_path: Some(path.to_string_lossy().into_owned()),
+        user_intention: None,
         todo_statuses: Vec::new(),
     }
 }
@@ -350,7 +351,8 @@ fn opening_prompt_evidence_requires_a_local_multiword_match() {
         ),
         0
     );
-    assert_eq!(opening_prompt_rank("logs about wake", "logs wake"), 0);
+    assert_eq!(opening_prompt_rank("logs about wake", "wake logs"), 2);
+    assert_eq!(opening_prompt_rank("logs about wake", "logs logs"), 0);
     assert_eq!(
         opening_prompt_rank(
             "unrelated discussion about caches",
@@ -385,7 +387,7 @@ fn mxabox_literal_transcript_hit_beats_recent_fuzzy_metadata_and_transcripts() {
 }
 
 #[test]
-fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
+fn fuzzy_transcript_search_rejects_distant_spellings_regardless_of_recency() {
     let temp = tempfile::tempdir().unwrap();
     let close = temp.path().join("close.json");
     let loose = temp.path().join("loose.json");
@@ -394,8 +396,8 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     let tokens = search_query_tokens("mxabox");
     let cancel = AtomicBool::new(false);
     let close_score = paths_match_scored(&[close.clone()], &tokens, &cancel).unwrap();
-    let loose_score = paths_match_scored(&[loose.clone()], &tokens, &cancel).unwrap();
-    assert!(close_score > loose_score, "{close_score} <= {loose_score}");
+    assert!(close_score > 0);
+    assert!(paths_match_scored(&[loose.clone()], &tokens, &cancel).is_none());
     let mut picker = SessionPicker::new(vec![
         session("loose", "unrelated", 0, &loose),
         session("close", "unrelated", 1000, &close),
@@ -403,7 +405,46 @@ fn fuzzy_transcript_ranking_uses_matched_words_not_only_recency() {
     picker.search_query = "mxabox".into();
     picker.rebuild_items();
     wait(&mut picker);
-    assert_eq!(ids(&picker), ["close", "loose"]);
+    assert_eq!(ids(&picker), ["close"]);
+}
+
+#[test]
+fn fork_basten_does_not_find_an_incidental_tuning_fork_essay() {
+    let temp = tempfile::tempdir().unwrap();
+    let essay = temp.path().join("essay.json");
+    let target = temp.path().join("target.json");
+    std::fs::write(&essay, r#"{"messages":[{"role":"user","content":"Write a 4000 word essay on the history of timekeeping. Use no tools."},{"role":"assistant","content":"The tuning fork vibrates. A clock based on atoms. Laser cooling slowed atoms almost to a standstill. The basement laboratory kept time."}]}"#).unwrap();
+    std::fs::write(
+        &target,
+        r#"{"messages":[{"role":"user","content":"fork basten and fix the integration"}]}"#,
+    )
+    .unwrap();
+    let cancel = AtomicBool::new(false);
+    let tokens = search_query_tokens("fork basten");
+    let mut scores = WordScores::default();
+    let mut streaming = Scan::new(&tokens, &[], &cancel, ScanMode::Fuzzy, &mut scores);
+    scan_file_streaming(&essay, &mut streaming);
+    assert!(streaming.evidence().is_none());
+    scan_file_streaming(&target, &mut streaming);
+    assert!(streaming.evidence().is_some());
+    let mut picker = SessionPicker::new(vec![
+        session(
+            "essay",
+            "Write a 4000 word essay on the history of timekeeping",
+            0,
+            &essay,
+        ),
+        session("target", "Integration", 1000, &target),
+    ]);
+    picker.search_query = "fork basten".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["target"]);
+    // Repeat against resident token and decoded-text caches as well.
+    picker.search_query = "fork bastem".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["target"]);
 }
 
 #[test]
@@ -437,6 +478,47 @@ fn user_prompt_transcript_hit_beats_recent_tool_output_hit() {
 }
 
 #[test]
+fn repeated_rendering_requests_outrank_recent_rendering_bug_title() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+    let mut bug = session("bug", "Desktop rendering bug", 0, &path);
+    push_mark(&mut bug.search_index, Source::User);
+    bug.search_index.push_str("fix this rendering bug");
+    push_mark(&mut bug.search_index, Source::ToolOutput);
+    bug.search_index.push_str(&" render".repeat(500));
+    let mut video = session("video", "Jcode v1 announcement", 3600, &path);
+    video.parent_id = Some("announcement".into());
+    video.first_user_prompt = Some("make faithful renders for a launch video".into());
+    push_mark(&mut video.search_index, Source::User);
+    video.search_index.push_str(
+        "make faithful renders for a launch video. wire in headless rendering. \
+         you should implement direct rendering code",
+    );
+    let mut picker = SessionPicker::new(vec![bug, video]);
+    picker.search_query = "render".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["video", "bug"]);
+}
+
+#[test]
+fn user_mention_frequency_is_bounded_and_ignores_generated_text() {
+    use super::source::{Source, push_mark, user_mentions};
+    let tokens = search_query_tokens("render video");
+    let mut index = "render video ".repeat(100);
+    assert_eq!(user_mentions(&index, &tokens), 0);
+    push_mark(&mut index, Source::User);
+    index.push_str("render render video");
+    push_mark(&mut index, Source::Assistant);
+    index.push_str(&"render video ".repeat(100));
+    assert_eq!(user_mentions(&index, &tokens), 3);
+    push_mark(&mut index, Source::User);
+    index.push_str(&"render video ".repeat(100));
+    assert_eq!(user_mentions(&index, &tokens), 8);
+}
+
+#[test]
 fn retyped_later_user_prompt_beats_scattered_literal_hits() {
     let temp = tempfile::tempdir().unwrap();
     let target_path = temp.path().join("target.jsonl");
@@ -457,7 +539,12 @@ fn retyped_later_user_prompt_beats_scattered_literal_hits() {
         user("okay great") + &user("oaky is a typo") + &user("ltes test") + &user("do that later"),
     )
     .unwrap();
-    for query in ["oaky ltes do that", "okay ltes do that"] {
+    for query in [
+        "oaky ltes do that",
+        "okay ltes do that",
+        "that okay",
+        "that okay ltes",
+    ] {
         let target = session("target", "resume search", 500, &target_path);
         let noise = session("noise", "unrelated", 0, &noise_path);
         let mut picker = SessionPicker::new(vec![noise, target]);
@@ -506,4 +593,84 @@ fn typo_in_user_prompt_beats_literal_words_scattered_in_tool_output() {
     picker.rebuild_items();
     wait(&mut picker);
     assert_eq!(ids(&picker).first().map(String::as_str), Some("rare"));
+}
+
+#[test]
+fn todo_plan_user_intention_phrase_outranks_scattered_user_prompts() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut scattered = session("ship-v1", "Ship jcode v1", 5 * 86_400, &path);
+    push_mark(&mut scattered.search_index, Source::User);
+    scattered.search_index.push_str(
+        "release jcode v1 now. please fix the build. check all tests. what is remaining?",
+    );
+
+    let mut intent_match = session(
+        "release-bugs",
+        "Fix All Release/Discord Pipeline Bugs & Refresh Messages",
+        45 * 60,
+        &path,
+    );
+    intent_match.first_user_prompt =
+        Some("Make interactive, logical commits for the current uncommitted work.".into());
+    intent_match.user_intention =
+        Some("Fix all remaining release-notes and Discord pipeline bugs found in the audit".into());
+    intent_match
+        .search_index
+        .push_str(" fix all remaining release-notes and discord pipeline bugs found in the audit");
+
+    let mut picker = SessionPicker::new(vec![scattered, intent_match]);
+    picker.search_query = "fix all remaining release".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["release-bugs", "ship-v1"]);
+}
+
+#[test]
+fn mid_word_prefix_phrase_keeps_intent_match_ranked_first() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut scattered = session("scattered", "Ship jcode v1", 10, &path);
+    push_mark(&mut scattered.search_index, Source::User);
+    scattered
+        .search_index
+        .push_str("fix one thing, check all logs, release later");
+
+    let mut intent_match = session("intent-hit", "Pipeline work", 500, &path);
+    intent_match.user_intention = Some("Fix all release bugs".into());
+    intent_match.search_index.push_str(" fix all release bugs");
+
+    let mut picker = SessionPicker::new(vec![scattered, intent_match]);
+    picker.search_query = "fix all rel".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["intent-hit", "scattered"]);
+}
+
+#[test]
+fn single_word_intent_match_outranks_chatty_incidental_session() {
+    use super::source::{Source, push_mark};
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("absent.json");
+
+    let mut chatty = session("chatty", "General cleanup", 0, &path);
+    push_mark(&mut chatty.search_index, Source::User);
+    chatty
+        .search_index
+        .push_str("discord discord discord discord discord");
+
+    let mut focused = session("focused", "Discord pipeline", 3600, &path);
+    focused.user_intention = Some("Fix Discord webhook delivery".into());
+    push_mark(&mut focused.search_index, Source::User);
+    focused.search_index.push_str("fix discord webhook");
+
+    let mut picker = SessionPicker::new(vec![chatty, focused]);
+    picker.search_query = "discord".into();
+    picker.rebuild_items();
+    wait(&mut picker);
+    assert_eq!(ids(&picker), ["focused", "chatty"]);
 }

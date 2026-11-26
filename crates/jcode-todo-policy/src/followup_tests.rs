@@ -748,3 +748,60 @@ fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
     policy.disable();
     assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
 }
+
+/// Field report: "Validate further: <todo>" kept firing every few seconds for
+/// a todo whose goal was already marked `constraints_exhausted` with stopping
+/// evidence. More turns cannot lift an exhausted constraint.
+#[test]
+fn documented_stop_exempts_its_todos_from_validation_nudges() {
+    let mut blocked = done("ship", ConfidenceState::Plausible);
+    blocked.group = Some("release".into());
+    let mut other = done("docs", ConfidenceState::Plausible);
+    other.group = Some("docs".into());
+    let stop = |evidence: Option<&str>| crate::TodoGoal {
+        group: Some("release".into()),
+        iteration_maturity: Some(crate::IterationMaturity::ConstraintsExhausted),
+        stopping_evidence: evidence.map(str::to_string),
+        ..Default::default()
+    };
+
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    let mut state = snapshot(vec![blocked.clone()]);
+    state.goals = vec![stop(Some(
+        "staging access was revoked; cannot run the smoke test",
+    ))];
+    for _ in 0..(MAX_GATE_ATTEMPTS as usize + 2) {
+        let decision = policy.decide(&state);
+        assert_ne!(kind(&decision), Some(FollowUpKind::CompletionValidation));
+        assert!(decision.notice.is_none(), "must not trip the stall breaker");
+    }
+
+    // Without evidence the stop is unsupported, so a nudge still applies.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.goals = vec![stop(None)];
+    assert!(policy.decide(&state).follow_up.is_some());
+    assert_eq!(
+        crate::todos_needing_validation(&state.todos, &state.goals).len(),
+        1
+    );
+
+    // Other groups are still validated, and only they are named.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.todos = vec![blocked, other];
+    state.goals = vec![stop(Some("staging access was revoked"))];
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert_eq!(followup.kind, FollowUpKind::CompletionValidation);
+    assert!(
+        followup.message.contains("\"docs\""),
+        "{}",
+        followup.message
+    );
+    assert!(
+        !followup.message.contains("\"ship\""),
+        "{}",
+        followup.message
+    );
+}

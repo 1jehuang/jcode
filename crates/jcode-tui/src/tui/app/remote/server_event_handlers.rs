@@ -38,6 +38,12 @@ pub(super) fn handle_tool_done(
     let is_batch = tool_call.name == "batch";
     app.observe_tool_result(&tool_call, &output, error.is_some(), None);
     app.note_tool_completed(&tool_call, error.is_some());
+    app.note_tool_completed_for_subscribe_nudge(
+        &tool_call,
+        duration_secs,
+        &output,
+        error.is_some(),
+    );
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
         content: display_output,
@@ -55,6 +61,7 @@ pub(super) fn handle_tool_done(
     // input/intent are still waiting for their own ToolDone; clearing the
     // whole list here made their rows render with no intent or summary.
     app.streaming_tool_calls.retain(|tc| tc.id != id);
+    app.stream_message_ended = false;
     app.status = ProcessingStatus::Streaming;
     true
 }
@@ -98,4 +105,26 @@ pub(super) fn handle_generated_image(
     });
     app.status = ProcessingStatus::Streaming;
     true
+}
+
+pub(super) fn handle_compact_result(app: &mut App, message: String, success: bool) -> bool {
+    app.push_display_message(DisplayMessage::system(message));
+    if success {
+        app.set_status_notice("Compacting context");
+    } else {
+        app.set_status_notice("Compaction failed");
+    }
+    false
+}
+
+pub(super) fn handle_resume_all_result(app: &mut App, resumed: usize, message: String) -> bool {
+    app.push_display_message(DisplayMessage::system(message));
+    if resumed == 0 {
+        app.set_status_notice("No sessions to resume");
+    } else if resumed == 1 {
+        app.set_status_notice("Resuming 1 session");
+    } else {
+        app.set_status_notice(format!("Resuming {} sessions", resumed));
+    }
+    false
 }

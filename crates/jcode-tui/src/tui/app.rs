@@ -2,6 +2,8 @@
 mod cache_fingerprints;
 mod cache_request;
 use cache_fingerprints::*;
+#[path = "app_kv_cache_summary.rs"]
+mod kv_cache_summary;
 
 use super::DisplayMessageRoleExt;
 use super::keybind::{
@@ -39,9 +41,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -87,6 +88,9 @@ mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod jarvis;
+mod jarvis_listen;
+mod jarvis_status;
 mod local;
 mod misc_ui;
 mod model_context;
@@ -104,6 +108,7 @@ mod remote;
 mod remote_header_hint;
 mod remote_notifications;
 mod replay;
+mod replay_export;
 mod response_output;
 pub(crate) mod run_shell;
 mod runtime_memory;
@@ -164,6 +169,7 @@ fn active_runtime_provider_key() -> Option<String> {
 
 #[derive(Debug, Clone)]
 struct PendingRemoteMessage {
+    jarvis_voice: bool,
     content: String,
     images: Vec<(String, String)>,
     is_system: bool,
@@ -828,6 +834,8 @@ struct KvCacheState {
     kv_cache_turn_number: Option<usize>,
     kv_cache_turn_call_index: u16,
     kv_cache_miss_samples: Vec<KvCacheMissSample>,
+    /// Learned normal tail gap for implicit-cache providers.
+    kv_cache_tail: crate::kv_cache_monitor::TailGapModel,
     /// Baseline completion time the cold-cache warning was last pushed for.
     ///
     /// The warning fires at most once per cache write: the idle tick warns as
@@ -849,14 +857,38 @@ enum ColdCacheWarningTrigger {
     RequestStart,
 }
 
-/// Live streaming/turn progress: streamed text, per-turn token counts, and the
-/// tokens-per-second tracking state.
-///
-/// Grouped out of [`App`]. These fields are reset/updated as a unit each turn,
-/// so keeping them together clarifies the streaming lifecycle.
+impl StreamingProgress {
+    fn text_hash(&self) -> u64 {
+        if let Some(hash) = self.streaming_text_hash.get() {
+            return hash;
+        }
+        let hash = super::ui::hash_text_for_cache(&self.streaming_text);
+        self.streaming_text_hash.set(Some(hash));
+        #[cfg(test)]
+        {
+            let (calls, bytes) = self.streaming_hash_work.get();
+            self.streaming_hash_work
+                .set((calls + 1, bytes + self.streaming_text.len()));
+        }
+        hash
+    }
+
+    /// Invalidate before mutable access, including take, split_off and replacement.
+    fn streaming_text_mut(&mut self) -> &mut String {
+        self.streaming_text_hash.set(None);
+        &mut self.streaming_text
+    }
+}
+
+/// Live streaming/turn progress, grouped because these fields reset together.
 #[derive(Clone, Debug, Default)]
 struct StreamingProgress {
     streaming_text: String,
+    /// Content hash reused between frames. All production writes to the text
+    /// must go through `streaming_text_mut`, including reasoning tail edits.
+    streaming_text_hash: std::cell::Cell<Option<u64>>,
+    #[cfg(test)]
+    streaming_hash_work: std::cell::Cell<(usize, usize)>,
     response_output: response_output::ResponseOutput,
     // Live token usage (per turn)
     streaming_input_tokens: u64,
@@ -980,6 +1012,7 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    queued_images: Vec<(String, String)>,
     /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
     /// a turn was running. They run as real commands once the turn ends.
     queued_commands: Vec<String>,
@@ -1107,6 +1140,10 @@ pub struct App {
     overnight_auto_poke: Option<OvernightAutoPokeState>,
     // Pending cross-provider resend after a failover warning/countdown.
     pending_provider_failover: Option<PendingProviderFailover>,
+    /// Automatic targets attempted for the logical user turn, including held
+    /// resends. Never reset this merely because a retry starts a new API call.
+    automatic_failover_targets: Vec<String>,
+    automatic_failover_stopped: bool,
     // Interactive "switch to next best model/method and resend" offer surfaced
     // after a provider turn error; accepted with a keypress.
     pending_fallback_offer: Option<PendingFallbackOffer>,
@@ -1211,6 +1248,12 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
+    // Payloads of images whose `[image N]` marker left the composer, keyed by
+    // slot index, so restoring the marker (Ctrl+Z after Esc) reattaches them.
+    detached_images: std::collections::HashMap<usize, (String, String)>,
+    // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
+    // older-history load was requested, loads requested since the toggle).
+    prompt_history_backfill: (Option<usize>, u8),
     // One-shot flag: the next submitted prompt is routed to a new headed session.
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
@@ -1326,6 +1369,9 @@ pub struct App {
     /// the conversation appears without waiting for the server's History.
     /// Send GetModelCatalog once bootstrap History has arrived.
     model_catalog_after_history: bool,
+    /// CLI-requested `--provider`/`--model` spec to apply once after connecting
+    /// to an already-running shared server.
+    pending_initial_model_spec: Option<String>,
     pending_startup_transcript: Option<std::sync::mpsc::Receiver<StartupTranscript>>,
     /// Fingerprint of the locally rendered startup transcript, delivered by
     /// the startup transcript thread before display conversion so the
@@ -1421,6 +1467,8 @@ pub struct App {
     // Current session ID (from server in remote mode)
     remote_session_id: Option<String>,
     cloud_environment: cloud_environment::CloudEnvironment,
+    jarvis_speech: Option<jcode_voice::speech::SpeechPlayer>,
+    jarvis_listener: jarvis_listen::AlwaysListening,
     // All sessions on the server (remote mode only)
     remote_sessions: Vec<String>,
     remote_side_pane_images: Vec<crate::session::RenderedImage>,
@@ -1435,6 +1483,9 @@ pub struct App {
     /// When each swarm agent last sent us a notification, keyed by sender, so
     /// notifications can show time since that agent's previous message.
     swarm_last_message_at: std::collections::HashMap<String, std::time::Instant>,
+    /// Transcript index and contents of the newest file-activity row, so
+    /// consecutive peer edits stack into it instead of adding rows.
+    file_activity_stack: Option<(usize, Vec<remote_notifications::FileActivityEdit>)>,
     // Latest swarm plan snapshot (local or remote server event stream)
     swarm_plan_items: Vec<crate::plan::PlanItem>,
     swarm_plan_version: Option<u64>,
@@ -1529,7 +1580,12 @@ pub struct App {
     /// Remote todo snapshot paired with its owning session. Never read SSH
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
+    remote_todos_cache: std::cell::RefCell<Option<todos_view::remote_cache::RemoteTodoCache>>,
     remote_todos_requested_at: Option<Instant>,
+    /// The connected server sends a todo snapshot on every change, so no
+    /// periodic poll is needed. Learned from the snapshots themselves and
+    /// cleared on reconnect, since the next server may be an older build.
+    remote_todos_pushed: bool,
     /// Hash of the todo payload rendered into the inline chat todo card, used
     /// to keep the card live-updating while it stays in the transcript.
     todo_card_rendered_hash: u64,
@@ -1617,6 +1673,10 @@ pub struct App {
     // default effort (low by default) and silently runs the newly selected
     // model at the wrong effort (issue #427).
     pending_reasoning_effort: Option<String>,
+    // Companion SetReasoningEffort forwarded right after a model-picker switch:
+    // suppress the separate "✓ Reasoning effort → ..." transcript line since
+    // the model switch already confirmed the selection.
+    suppress_next_reasoning_effort_message: bool,
     // Remote SetModel has been sent but ModelChanged has not arrived yet. User
     // prompts submitted in this window are held so the first request cannot race
     // the model switch and use stale provider/model state.
@@ -1958,6 +2018,7 @@ impl App {
     const INPUT_UNDO_LIMIT: usize = 128;
     const CLIENT_FOCUS_RECORD_DEBOUNCE: Duration = Duration::from_secs(2);
     const KV_CACHE_OPTIMAL_OK_PCT: u8 = 85;
+    #[cfg(test)]
     fn kv_cache_min_missed_tokens(provider: &str) -> u64 {
         crate::kv_cache_monitor::min_missed_tokens_for_provider(provider)
     }
@@ -2283,197 +2344,6 @@ impl App {
         true
     }
 
-    fn log_kv_cache_usage_summary(
-        &self,
-        request: &PendingKvCacheRequest,
-        optimal_input_tokens: Option<u64>,
-        prompt_tokens: u64,
-    ) {
-        let input_tokens = self.streaming.streaming_input_tokens;
-        let read_tokens = self.streaming.streaming_cache_read_tokens.unwrap_or(0);
-        let creation_tokens = self.streaming.streaming_cache_creation_tokens.unwrap_or(0);
-        let read_pct = ratio_pct(read_tokens, prompt_tokens);
-        let creation_pct = ratio_pct(creation_tokens, prompt_tokens);
-        let optimal_read_pct = optimal_input_tokens.map(|optimal| ratio_pct(read_tokens, optimal));
-        let session_read_pct = ratio_pct(
-            self.token_accounting.total_cache_read_tokens,
-            self.token_accounting.total_cache_prompt_tokens,
-        );
-        let session_optimal_read_pct = if self.token_accounting.total_cache_optimal_input_tokens > 0
-        {
-            Some(ratio_pct(
-                self.token_accounting.total_cache_read_tokens,
-                self.token_accounting.total_cache_optimal_input_tokens,
-            ))
-        } else {
-            None
-        };
-        let miss = self
-            .kv_cache
-            .kv_cache_miss_samples
-            .last()
-            .filter(|sample| {
-                sample.turn_number == request.turn_number && sample.call_index == request.call_index
-            })
-            .map(|sample| {
-                format!(
-                    "{}:{}",
-                    sample.missed_tokens,
-                    sample.reason.label().replace(' ', "_")
-                )
-            })
-            .unwrap_or_else(|| {
-                if request.baseline.is_none() {
-                    "warmup:no_baseline".to_string()
-                } else {
-                    "none".to_string()
-                }
-            });
-        let baseline_age_secs = request
-            .baseline
-            .as_ref()
-            .map(|baseline| baseline.completed_at.elapsed().as_secs());
-        let baseline_input_tokens = request
-            .baseline
-            .as_ref()
-            .map(|baseline| baseline.input_tokens);
-        let missed_tokens =
-            baseline_input_tokens.map(|baseline| baseline.saturating_sub(read_tokens));
-        let ttl_secs = request
-            .baseline
-            .as_ref()
-            .and_then(|baseline| baseline.cache_ttl_secs);
-        let ttl_remaining_secs = ttl_secs
-            .zip(baseline_age_secs)
-            .map(|(ttl, age)| ttl.saturating_sub(age));
-        let current_signature = request.signature.as_ref();
-        let baseline_signature = request
-            .baseline
-            .as_ref()
-            .and_then(|baseline| baseline.signature.as_ref());
-        let system_static_hash_changed = current_signature
-            .zip(baseline_signature)
-            .map(|(current, baseline)| current.system_static_hash != baseline.system_static_hash);
-        let tools_hash_changed = current_signature
-            .zip(baseline_signature)
-            .map(|(current, baseline)| current.tools_hash != baseline.tools_hash);
-        let message_full_hash_changed = current_signature
-            .zip(baseline_signature)
-            .map(|(current, baseline)| current.messages_hash != baseline.messages_hash);
-        let message_prefix_changed = request
-            .baseline_messages_prefix_matches
-            .map(|matches| !matches);
-        let common_prefix_messages = current_signature
-            .zip(baseline_signature)
-            .map(|(current, baseline)| Self::kv_cache_common_prefix_messages(current, baseline));
-        let first_changed_message_index = common_prefix_messages
-            .zip(baseline_signature.map(|signature| signature.message_count))
-            .and_then(|(common, baseline_count)| (common < baseline_count).then_some(common));
-        let dynamic_hash_changed = current_signature
-            .zip(baseline_signature)
-            .map(|(current, baseline)| current.ephemeral_hash != baseline.ephemeral_hash);
-        let current_message_count = current_signature.map(|signature| signature.message_count);
-        let baseline_message_count = baseline_signature.map(|signature| signature.message_count);
-        let current_tool_count = current_signature.map(|signature| signature.tool_count);
-        let baseline_tool_count = baseline_signature.map(|signature| signature.tool_count);
-        let current_system_chars = current_signature.map(|signature| signature.system_static_chars);
-        let baseline_system_chars =
-            baseline_signature.map(|signature| signature.system_static_chars);
-        let current_tools_json_chars =
-            current_signature.map(|signature| signature.tools_json_chars);
-        let baseline_tools_json_chars =
-            baseline_signature.map(|signature| signature.tools_json_chars);
-        let current_messages_json_chars =
-            current_signature.map(|signature| signature.messages_json_chars);
-        let baseline_messages_json_chars =
-            baseline_signature.map(|signature| signature.messages_json_chars);
-        let current_ephemeral_chars = current_signature.map(|signature| signature.ephemeral_chars);
-        let baseline_ephemeral_chars =
-            baseline_signature.map(|signature| signature.ephemeral_chars);
-        let current_ephemeral_message_count =
-            current_signature.map(|signature| signature.ephemeral_message_count);
-        let baseline_ephemeral_message_count =
-            baseline_signature.map(|signature| signature.ephemeral_message_count);
-        let current_hashes_present = current_signature
-            .map(|signature| !signature.message_hashes.is_empty())
-            .unwrap_or(false);
-        let baseline_hashes_present = baseline_signature
-            .map(|signature| !signature.message_hashes.is_empty())
-            .unwrap_or(false);
-
-        crate::logging::info(&format!(
-            "KV_CACHE_USAGE: turn={} call={} provider={} label={} upstream={:?} model={} \
-             input={} cache_read={} cache_write={} read_pct={} write_pct={} \
-             optimal_input={:?} optimal_read_pct={:?} missed_tokens={:?} miss={} \
-             session_input={} session_read={} session_write={} session_read_pct={} \
-             session_optimal_input={} session_optimal_read_pct={:?} \
-             baseline_input={:?} baseline_age_secs={:?} ttl_secs={:?} ttl_remaining_secs={:?} ttl_is_estimate={} \
-             prefix_matches={:?} common_prefix_messages={:?} first_changed_message_index={:?} \
-             system_changed={:?} tools_changed={:?} message_prefix_changed={:?} message_full_hash_changed={:?} dynamic_changed={:?} \
-             message_count={:?} baseline_message_count={:?} tool_count={:?} baseline_tool_count={:?} \
-             system_chars={:?} baseline_system_chars={:?} tools_json_chars={:?} baseline_tools_json_chars={:?} \
-             messages_json_chars={:?} baseline_messages_json_chars={:?} ephemeral_chars={:?} baseline_ephemeral_chars={:?} \
-             ephemeral_message_count={:?} baseline_ephemeral_message_count={:?} message_hashes_present={} baseline_message_hashes_present={} \
-             connection={:?} status_detail={:?} {}",
-            request.turn_number,
-            request.call_index,
-            request.provider,
-            self.kv_cache_provider_label(),
-            request.upstream_provider,
-            request.model,
-            input_tokens,
-            read_tokens,
-            creation_tokens,
-            read_pct,
-            creation_pct,
-            optimal_input_tokens,
-            optimal_read_pct,
-            missed_tokens,
-            miss,
-            self.token_accounting.total_cache_reported_input_tokens,
-            self.token_accounting.total_cache_read_tokens,
-            self.token_accounting.total_cache_creation_tokens,
-            session_read_pct,
-            self.token_accounting.total_cache_optimal_input_tokens,
-            session_optimal_read_pct,
-            baseline_input_tokens,
-            baseline_age_secs,
-            ttl_secs,
-            ttl_remaining_secs,
-            request
-                .baseline
-                .as_ref()
-                .is_some_and(|baseline| crate::provider::cache_ttl_is_estimate(&baseline.provider)),
-            request.baseline_messages_prefix_matches,
-            common_prefix_messages,
-            first_changed_message_index,
-            system_static_hash_changed,
-            tools_hash_changed,
-            message_prefix_changed,
-            message_full_hash_changed,
-            dynamic_hash_changed,
-            current_message_count,
-            baseline_message_count,
-            current_tool_count,
-            baseline_tool_count,
-            current_system_chars,
-            baseline_system_chars,
-            current_tools_json_chars,
-            baseline_tools_json_chars,
-            current_messages_json_chars,
-            baseline_messages_json_chars,
-            current_ephemeral_chars,
-            baseline_ephemeral_chars,
-            current_ephemeral_message_count,
-            baseline_ephemeral_message_count,
-            current_hashes_present,
-            baseline_hashes_present,
-            self.connection_type.as_deref(),
-            self.status_detail.as_deref(),
-            self.kv_cache_diagnostic_fields(request, prompt_tokens),
-        ));
-    }
-
     fn fallback_pending_kv_cache_request(&self) -> PendingKvCacheRequest {
         PendingKvCacheRequest {
             started_at: None,
@@ -2517,7 +2387,17 @@ impl App {
             return;
         };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
-        if missed_tokens < Self::kv_cache_min_missed_tokens(&request.provider) {
+        let is_miss =
+            self.kv_cache
+                .kv_cache_tail
+                .is_miss(&request.provider, expected_tokens, read_tokens);
+        self.kv_cache.kv_cache_tail.observe(
+            &request.provider,
+            expected_tokens,
+            read_tokens,
+            is_miss,
+        );
+        if !is_miss {
             return;
         }
 
@@ -2776,7 +2656,7 @@ impl App {
         }
         if optimal_pct < Self::KV_CACHE_OPTIMAL_OK_PCT
             || baseline.input_tokens.saturating_sub(read_tokens)
-                >= Self::kv_cache_min_missed_tokens(&request.provider)
+                > self.kv_cache.kv_cache_tail.tolerance(&request.provider)
         {
             return KvCacheMissReason::LowRead;
         }
@@ -2838,72 +2718,6 @@ impl App {
         } else {
             self.provider.model()
         }
-    }
-
-    fn kv_cache_request_signature(
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system_static: &str,
-        system_dynamic: &str,
-    ) -> KvCacheRequestSignature {
-        let dynamic_trimmed = system_dynamic.trim();
-        // The dynamic block precedes the transcript, so it is part of the
-        // cached prefix. Hash it with the static block so a change is
-        // attributed to the harness rather than reported as a plain low read.
-        let system_hash = if dynamic_trimmed.is_empty() {
-            stable_hash_str(system_static)
-        } else {
-            stable_hash_str(&format!("{system_static}\n\n{dynamic_trimmed}"))
-        };
-        KvCacheRequestSignature {
-            system_static_hash: system_hash,
-            tools_hash: stable_hash_json(tools),
-            messages_hash: stable_hash_json(&cache_relevant_messages(messages)),
-            message_hashes: message_hashes(messages),
-            message_count: messages.len(),
-            tool_count: tools.len(),
-            system_static_chars: system_static.chars().count(),
-            tools_json_chars: stable_json_len(tools),
-            messages_json_chars: stable_json_len(messages),
-            ephemeral_hash: if dynamic_trimmed.is_empty() {
-                None
-            } else {
-                Some(stable_hash_str(dynamic_trimmed))
-            },
-            ephemeral_chars: dynamic_trimmed.chars().count(),
-            ephemeral_message_count: usize::from(!dynamic_trimmed.is_empty()),
-        }
-    }
-
-    fn kv_cache_signatures_prefix_match(
-        current: &KvCacheRequestSignature,
-        previous: &KvCacheRequestSignature,
-    ) -> bool {
-        if previous.message_count > current.message_count {
-            return false;
-        }
-        if !previous.message_hashes.is_empty() && !current.message_hashes.is_empty() {
-            return current.message_hashes.len() >= previous.message_hashes.len()
-                && current.message_hashes[..previous.message_hashes.len()]
-                    == previous.message_hashes;
-        }
-        if previous.message_count == current.message_count {
-            current.messages_hash == previous.messages_hash
-        } else {
-            false
-        }
-    }
-
-    fn kv_cache_common_prefix_messages(
-        current: &KvCacheRequestSignature,
-        previous: &KvCacheRequestSignature,
-    ) -> usize {
-        current
-            .message_hashes
-            .iter()
-            .zip(previous.message_hashes.iter())
-            .take_while(|(current, previous)| current == previous)
-            .count()
     }
 }
 

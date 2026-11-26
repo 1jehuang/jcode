@@ -1146,9 +1146,9 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
         "NO_PROXY",
         "no_proxy",
     ]);
-    // 0.0.0.0 is accepted as an insecure HTTP test host but is not treated as
-    // localhost by resolve_openai_compatible_profile, so this exercises the
-    // hosted/API-key code path while still serving the response locally.
+    // Since #2018 a bare IP host is treated like loopback, so the profile
+    // needs no API key by default. A configured key must still be sent, so
+    // this checks model discovery with a key against a bare-IP endpoint.
     let api_base = spawn_single_response_http_server_on_host(
         "0.0.0.0",
         200,
@@ -1165,7 +1165,7 @@ async fn auth_test_choice_plan_discovers_model_for_hosted_custom_compat_endpoint
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
         crate::provider_catalog::OPENAI_COMPAT_PROFILE,
     );
-    assert!(resolved.requires_api_key);
+    assert!(!resolved.requires_api_key);
 
     let plan = auth_test_choice_plan(
         &super::super::provider_init::ProviderChoice::OpenaiCompatible,
@@ -1339,19 +1339,18 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                 &[test_todo("open", "pending", "high", None, None)],
             )
             .unwrap();
-            match mode {
-                "plain" => run_single_message_command_plain_with_auto_poke(&mut agent, "go")
-                    .await
-                    .unwrap(),
-                "capture" => {
-                    run_single_message_command_capture_with_auto_poke(&mut agent, "go")
-                        .await
-                        .unwrap();
-                }
-                _ => run_single_message_command_ndjson(&mut agent, provider, "go")
-                    .await
-                    .unwrap(),
-            }
+            // Exercise the actual CLI output dispatcher, not only the local
+            // loop helpers. Daemon-owned continuation must not accidentally
+            // disable this standalone Agent's follow-ups in any output mode.
+            run_single_message_with_agent(
+                &mut agent,
+                provider,
+                "go",
+                mode == "capture",
+                mode == "ndjson",
+            )
+            .await
+            .unwrap();
             let session = crate::session::Session::load(agent.session_id()).unwrap();
             let followups = session
                 .messages

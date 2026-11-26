@@ -20,7 +20,18 @@ REQUIRED = {f"jcode-{platform}.tar.gz" for platform in PLATFORMS} | {
 }
 
 
-def verify_metadata(metadata, tag, allow_draft=False):
+def required_assets(allow_missing=()):
+    """Required asset names, minus platforms that publish asynchronously."""
+    unknown = set(allow_missing) - set(PLATFORMS)
+    if unknown:
+        raise ValueError(f"Unknown platforms: {sorted(unknown)}")
+    skipped = set()
+    for platform in allow_missing:
+        skipped |= {f"jcode-{platform}.tar.gz", f"jcode-{platform}.exe"}
+    return REQUIRED - skipped
+
+
+def verify_metadata(metadata, tag, allow_draft=False, allow_missing=()):
     if (metadata.get("tag_name") != tag or type(metadata.get("draft")) is not bool
             or (metadata["draft"] and not allow_draft)):
         raise ValueError("Release must be public and match the requested tag")
@@ -30,7 +41,7 @@ def verify_metadata(metadata, tag, allow_draft=False):
     names = [asset.get("name") for asset in assets]
     if any(not isinstance(name, str) for name in names) or len(names) != len(set(names)):
         raise ValueError("Invalid or duplicate release asset names")
-    missing = REQUIRED - set(names)
+    missing = required_assets(allow_missing) - set(names)
     if missing:
         raise ValueError(f"Missing required release assets: {sorted(missing)}")
     for asset in assets:
@@ -41,7 +52,7 @@ def verify_metadata(metadata, tag, allow_draft=False):
     return set(names)
 
 
-def verify_downloads(directory, names, tag, expected_sha):
+def verify_downloads(directory, names, tag, expected_sha, allow_missing=()):
     directory = Path(directory)
     checksums = {}
     for line in (directory / "SHA256SUMS").read_text().splitlines():
@@ -49,8 +60,12 @@ def verify_downloads(directory, names, tag, expected_sha):
         if not match or match[2] in checksums:
             raise ValueError("Malformed or duplicate checksum entry")
         checksums[match[2]] = match[1].lower()
-    if set(checksums) != names - {"SHA256SUMS"}:
+    # An async platform may attach its asset between our manifest read and
+    # download. It refreshes SHA256SUMS itself, so tolerate only those.
+    late = (names - {"SHA256SUMS"}) - set(checksums)
+    if late - (REQUIRED - required_assets(allow_missing)) or set(checksums) - names:
         raise ValueError("Checksum manifest must cover exactly the published assets")
+    names = names - late
     for name in names:
         path = directory / name
         if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
@@ -98,6 +113,8 @@ def main():
     parser.add_argument("--sha", required=True, help="Validated exact tag commit")
     parser.add_argument("--allow-draft", action="store_true",
                         help="Validate staged draft assets before publication")
+    parser.add_argument("--allow-missing", action="append", default=[], choices=PLATFORMS,
+                        help="Platform whose asset may still be pending (async publish)")
     parser.add_argument("--directory", help="Keep downloads in this new directory")
     args = parser.parse_args()
     if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", args.tag):
@@ -107,12 +124,13 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", args.repo):
         parser.error("repo must be OWNER/REPO")
     metadata = fetch_release_metadata(args.repo, args.tag, allow_draft=args.allow_draft)
-    names = verify_metadata(metadata, args.tag, allow_draft=args.allow_draft)
+    names = verify_metadata(metadata, args.tag, allow_draft=args.allow_draft,
+                            allow_missing=args.allow_missing)
 
     def download_and_verify(directory):
         subprocess.run(["gh", "release", "download", args.tag, "--repo", args.repo,
                         "--dir", str(directory)], check=True)
-        verify_downloads(directory, names, args.tag, args.sha)
+        verify_downloads(directory, names, args.tag, args.sha, args.allow_missing)
         state = "draft" if metadata["draft"] else "public"
         print(f"VERIFIED: {args.tag}, {len(names)} {state} assets, exact provenance and SHA256 hashes")
 

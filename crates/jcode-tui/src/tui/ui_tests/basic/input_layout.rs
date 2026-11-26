@@ -418,6 +418,36 @@ fn test_expand_badge_reserves_right_margin_for_info_widgets() {
 }
 
 #[test]
+fn streaming_code_blocks_have_visible_copy_shortcuts_before_turn_finishes() {
+    let _env = crate::storage::lock_test_env();
+    let _lock = viewport_snapshot_test_lock();
+    for centered in [false, true] {
+        for width in [40, 100] {
+            crate::tui::ui::clear_test_render_state_for_tests();
+            let mut state = TestState {
+                status: ProcessingStatus::Streaming,
+                streaming_text: "Here is the command:\n\n```sh\nprintf 'hello'\n```\n\nThe explanation is still streaming".into(),
+                centered_mode: centered,
+                suppress_info_widgets: true,
+                ..Default::default()
+            };
+            for suffix in ["", " and continues with more words"] {
+                state.streaming_text.push_str(suffix);
+                let frame = buffer_to_text(&render_full(&state, width, 40));
+                let target = visible_copy_target_for_key('s')
+                    .unwrap_or_else(|| panic!("missing streaming copy shortcut: {frame}"));
+                assert_eq!(target.content, "printf 'hello'");
+                assert!(frame.contains(&format!("[{}⇧S]", viewport::copy_badge_alt_label())), "{frame}");
+                assert!(state.is_processing());
+            }
+            let preview = super::prepare::prepare_body(&state, width, true);
+            assert_eq!(preview.copy_targets.len(), 1);
+            assert_eq!(preview.copy_targets[0].content, "printf 'hello'");
+        }
+    }
+}
+
+#[test]
 fn test_copy_badge_truncates_full_width_line_before_appending_shortcut() {
     let _env = crate::storage::lock_test_env();
     let _lock = viewport_snapshot_test_lock();

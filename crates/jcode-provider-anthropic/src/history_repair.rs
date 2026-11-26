@@ -5,6 +5,48 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "repair_efficiency_tests.rs"]
+mod repair_efficiency_tests;
+
+#[cfg(test)]
+#[path = "repair_cow_tests.rs"]
+mod repair_cow_tests;
+
+/// Preserve the shared payload unless a block is actually removed. The predicate
+/// runs exactly once per block, retaining its original traversal order.
+fn filter_message_content<'a>(
+    message: &'a Message,
+    mut keep: impl FnMut(&'a ContentBlock) -> bool,
+) -> Message {
+    let mut content: Option<Vec<ContentBlock>> = None;
+    for (index, block) in message.content.iter().enumerate() {
+        if keep(block) {
+            if let Some(content) = &mut content {
+                if content.capacity() == 0 {
+                    content.reserve_exact(message.content.len() - index);
+                }
+                content.push(block.clone());
+            }
+        } else if content.is_none() {
+            let mut kept = Vec::with_capacity(if index == 0 {
+                0
+            } else {
+                message.content.len() - 1
+            });
+            kept.extend_from_slice(&message.content[..index]);
+            content = Some(kept);
+        }
+    }
+    match content {
+        Some(content) => Message {
+            content: content.into(),
+            ..message.clone()
+        },
+        None => message.clone(),
+    }
+}
+
 /// Move each `tool_result` that is not in the message directly after its
 /// `tool_use` up into a user message placed directly after the assistant
 /// message that made the call. Results already in the right place are left
@@ -79,25 +121,23 @@ pub(crate) fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
 
     let mut out: Vec<Message> = Vec::with_capacity(messages.len() + moved.len());
     for (mi, msg) in messages.iter().enumerate() {
-        let content: Vec<ContentBlock> = msg
-            .content
-            .iter()
-            .enumerate()
-            .filter(|(bi, _)| !late.contains(&(mi, *bi)))
-            .map(|(_, b)| b.clone())
-            .collect();
-        if !content.is_empty() {
-            out.push(Message {
-                content,
-                ..msg.clone()
+        if !msg.content.is_empty() {
+            let mut bi = 0;
+            let message = filter_message_content(msg, |_| {
+                let keep = !late.contains(&(mi, bi));
+                bi += 1;
+                keep
             });
+            if !message.content.is_empty() {
+                out.push(message);
+            }
         }
         if let Some(results) = moved.remove(&mi) {
             // Same-role merging later folds this into the next user message
             // when there is one, keeping the results first.
             out.push(Message {
                 role: Role::User,
-                content: results,
+                content: results.into(),
                 timestamp: msg.timestamp,
                 tool_duration_ms: None,
             });
@@ -456,12 +496,12 @@ pub(crate) fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Ve
             match item.get("type").and_then(Value::as_str) {
                 Some("server_tool_use") => {
                     if let Some(id) = item.get("id").and_then(Value::as_str) {
-                        starts.insert(id.to_string());
+                        starts.insert(id);
                     }
                 }
                 Some("web_search_tool_result") => {
                     if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
-                        results.insert(id.to_string());
+                        results.insert(id);
                     }
                 }
                 _ => {}
@@ -482,48 +522,62 @@ pub(crate) fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Ve
         (item.get("type").and_then(Value::as_str) == Some("server_tool_use"))
             .then(|| item.get("id").and_then(Value::as_str))
             .flatten()
-            .map(str::to_string)
     });
 
     let mut repaired = Vec::with_capacity(messages.len());
     for message in messages {
-        let mut content = Vec::with_capacity(message.content.len());
-        for block in &message.content {
-            let ContentBlock::ProviderNative { provider, item } = block else {
-                content.push(block.clone());
-                continue;
+        if message.content.is_empty() {
+            continue;
+        }
+        // Allocate only at the first removal. Until then the original shared
+        // payload remains usable, including for histories with valid native tools.
+        let mut content: Option<Vec<ContentBlock>> = None;
+        for (index, block) in message.content.iter().enumerate() {
+            let keep = match block {
+                ContentBlock::ProviderNative { provider, item }
+                    if provider
+                        == jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC =>
+                {
+                    match item.get("type").and_then(Value::as_str) {
+                        Some("server_tool_use") => item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| results.contains(id) || final_paused_id == Some(id)),
+                        Some("web_search_tool_result") => item
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| starts.contains(id)),
+                        _ => true,
+                    }
+                }
+                _ => true,
             };
-
-            if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
-                content.push(block.clone());
-                continue;
-            }
-
-            match item.get("type").and_then(Value::as_str) {
-                Some("server_tool_use") => {
-                    let Some(id) = item.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if results.contains(id) || final_paused_id.as_deref() == Some(id) {
-                        content.push(block.clone());
-                    }
+            if keep {
+                if let Some(content) = &mut content {
+                    content.push(block.clone());
                 }
-                Some("web_search_tool_result") => {
-                    let Some(id) = item.get("tool_use_id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if starts.contains(id) {
-                        content.push(block.clone());
-                    }
-                }
-                _ => content.push(block.clone()),
+            } else if content.is_none() {
+                // A removed prefix may leave no surviving blocks at all.
+                // Do not allocate until there is something worth retaining.
+                let mut kept = Vec::with_capacity(if index == 0 {
+                    0
+                } else {
+                    message.content.len() - 1
+                });
+                kept.extend_from_slice(&message.content[..index]);
+                content = Some(kept);
             }
         }
 
-        if !content.is_empty() {
-            let mut repaired_message = message.clone();
-            repaired_message.content = content;
-            repaired.push(repaired_message);
+        if let Some(content) = content {
+            if !content.is_empty() {
+                repaired.push(Message {
+                    content: content.into(),
+                    ..message.clone()
+                });
+            }
+        } else if !message.content.is_empty() {
+            repaired.push(message.clone());
         }
     }
     repaired
@@ -550,23 +604,21 @@ pub(crate) fn dedupe_tool_uses(messages: &[Message]) -> Vec<Message> {
         return messages.to_vec();
     }
 
-    let mut kept: HashSet<String> = HashSet::new();
+    let mut kept: HashSet<&str> = HashSet::new();
     let mut dropped = 0usize;
     let out = messages
         .iter()
         .map(|msg| {
-            let mut msg = msg.clone();
-            msg.content.retain(|block| match block {
+            filter_message_content(msg, |block| match block {
                 ContentBlock::ToolUse { id, .. } => {
-                    let keep = kept.insert(id.clone());
+                    let keep = kept.insert(id.as_str());
                     if !keep {
                         dropped += 1;
                     }
                     keep
                 }
                 _ => true,
-            });
-            msg
+            })
         })
         .collect();
     jcode_logging::warn(&format!(
@@ -624,9 +676,8 @@ pub(crate) fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
         .iter()
         .enumerate()
         .map(|(mi, msg)| {
-            let mut msg = msg.clone();
             let mut bi = 0usize;
-            msg.content.retain(|block| {
+            filter_message_content(msg, |block| {
                 let index = bi;
                 bi += 1;
                 let ContentBlock::ToolResult { tool_use_id, .. } = block else {
@@ -637,8 +688,7 @@ pub(crate) fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
                     dropped.set(dropped.get() + 1);
                 }
                 keep
-            });
-            msg
+            })
         })
         .collect();
 

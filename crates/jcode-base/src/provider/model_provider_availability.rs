@@ -71,6 +71,27 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
     }
 }
 
+/// An accepted request cannot erase a denial observed by another session after
+/// this request started. Explicit earned resets still use unconditional clears.
+pub(crate) fn clear_provider_unavailability_after_request(
+    provider: &str,
+    label: Option<&str>,
+    started: Instant,
+) {
+    let key = match label {
+        Some(label) => provider_runtime_scope_key(provider, Some(label)),
+        None => current_provider_runtime_scope_key(provider),
+    };
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable
+            .get(&key)
+            .is_some_and(|entry| entry.recorded_at <= started)
+    {
+        unavailable.remove(&key);
+        crate::provider::bump_catalog_generation();
+    }
+}
+
 /// A successful live usage probe can supersede an older quota failure, but
 /// cannot prove that authentication, billing, or transport failures recovered.
 /// Compare the request start, not completion, so an in-flight probe cannot
@@ -192,6 +213,17 @@ pub(super) fn format_provider_unavailability_detail(
 #[cfg(test)]
 mod quota_recovery_tests {
     use super::*;
+
+    #[test]
+    fn successful_request_preserves_a_concurrent_sessions_newer_denial() {
+        let label = "request-recovery-race-test";
+        let started = Instant::now();
+        record_provider_unavailable_for_account_label("claude", Some(label), "429 rate limit");
+        clear_provider_unavailability_after_request("claude", Some(label), started);
+        assert!(provider_unavailability_detail_for_account_label("claude", Some(label)).is_some());
+        clear_provider_unavailability_after_request("claude", Some(label), Instant::now());
+        assert!(provider_unavailability_detail_for_account_label("claude", Some(label)).is_none());
+    }
 
     #[test]
     fn live_quota_recovery_is_account_scoped_and_preserves_newer_failures() {

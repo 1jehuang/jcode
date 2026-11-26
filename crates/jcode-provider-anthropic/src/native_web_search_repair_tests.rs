@@ -8,7 +8,8 @@ fn assistant_with_native(item: serde_json::Value) -> Message {
         content: vec![ContentBlock::ProviderNative {
             provider: jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC.to_string(),
             item,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
@@ -28,7 +29,8 @@ fn orphaned_server_tool_use_is_dropped_from_completed_history() {
             content: vec![ContentBlock::Text {
                 text: "continue".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -55,7 +57,8 @@ fn unmatched_server_tool_result_is_removed() {
             content: vec![ContentBlock::Text {
                 text: "continue".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -113,7 +116,8 @@ fn matched_server_tool_pair_is_replayed_unchanged() {
                         "content": []
                     }),
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -122,7 +126,8 @@ fn matched_server_tool_pair_is_replayed_unchanged() {
             content: vec![ContentBlock::Text {
                 text: "continue".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },

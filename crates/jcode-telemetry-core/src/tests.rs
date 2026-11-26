@@ -62,140 +62,12 @@ fn global_test_lock() -> TestEnvironment {
     }
 }
 
-#[test]
-fn permanent_telemetry_statuses_trip_the_process_breaker() {
-    assert!(telemetry_status_is_permanent(400));
-    assert!(telemetry_status_is_permanent(401));
-    assert!(telemetry_status_is_permanent(404));
-    assert!(!telemetry_status_is_permanent(408));
-    assert!(!telemetry_status_is_permanent(425));
-    assert!(!telemetry_status_is_permanent(429));
-    assert!(!telemetry_status_is_permanent(500));
-}
-
-#[test]
-fn background_delivery_queue_is_bounded() {
-    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    let sender = spawn_background_worker(1, move |_| {
-        let _ = started_tx.send(());
-        let _ = release_rx.recv();
-    })
-    .expect("start test telemetry worker");
-
-    sender
-        .send(serde_json::json!({"event": "first"}))
-        .expect("enqueue first payload");
-    started_rx.recv().expect("worker started first payload");
-    sender
-        .try_send(serde_json::json!({"event": "second"}))
-        .expect("bounded queue accepts one waiting payload");
-    assert!(matches!(
-        sender.try_send(serde_json::json!({"event": "third"})),
-        Err(std::sync::mpsc::TrySendError::Full(_))
-    ));
-
-    release_tx.send(()).expect("release telemetry worker");
-}
-
-#[test]
-fn telemetry_endpoint_uses_production_custom_domain() {
-    assert_eq!(TELEMETRY_ENDPOINT, "https://telemetry.jcode.sh/v1/event");
-    assert_eq!(
-        TRANSCRIPT_ENDPOINT,
-        "https://telemetry.jcode.sh/v1/transcript"
-    );
-}
-
-#[test]
-fn transcript_upload_requires_separate_content_consent() {
-    let _guard = lock_test_env();
-    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
-
-    assert!(!record_transcript(
-        "provider",
-        "model",
-        SessionEndReason::NormalExit,
-        serde_json::json!([{"role": "user", "content": "secret prompt"}]),
-    ));
-    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
-}
-
-#[test]
-fn opted_in_transcript_payload_contains_full_structured_messages() {
-    let _guard = lock_test_env();
-    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
-    assert!(set_content_sharing_enabled(true));
-    let messages = serde_json::json!([
-        {"role": "user", "content": [{"type": "text", "text": "secret prompt"}]},
-        {"role": "assistant", "content": [{"type": "reasoning", "text": "private reasoning"}]}
-    ]);
-
-    assert!(record_transcript(
-        "provider",
-        "model",
-        SessionEndReason::NormalExit,
-        messages.clone(),
-    ));
-    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
-    let payload = payloads.last().expect("transcript payload");
-    assert_eq!(payload["event"], "transcript");
-    assert_eq!(payload["consent_version"], 1);
-    assert_eq!(payload["message_count"], 2);
-    assert_eq!(payload["messages"], messages);
-    assert!(uuid::Uuid::parse_str(payload["upload_id"].as_str().unwrap()).is_ok());
-}
-
 fn lock_test_env() -> TestEnvironment {
     global_test_lock()
 }
 
 fn lock_telemetry_test_state() -> TestEnvironment {
     global_test_lock()
-}
-
-#[test]
-fn test_opt_out_env_var() {
-    let _guard = lock_test_env();
-    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
-    assert!(!is_enabled());
-    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
-}
-
-#[test]
-fn test_do_not_track() {
-    let _guard = lock_test_env();
-    jcode_core::env::set_var("DO_NOT_TRACK", "1");
-    assert!(!is_enabled());
-    jcode_core::env::remove_var("DO_NOT_TRACK");
-}
-
-#[test]
-fn false_opt_out_values_keep_telemetry_enabled() {
-    let _guard = lock_test_env();
-    for value in ["", "0", "false", "no", "off"] {
-        jcode_core::env::set_var("JCODE_NO_TELEMETRY", value);
-        jcode_core::env::set_var("DO_NOT_TRACK", value);
-        assert!(is_enabled(), "{value:?} should not opt out");
-    }
-}
-
-#[test]
-fn in_app_opt_out_emits_once_then_stops_telemetry() {
-    let _guard = lock_test_env();
-    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
-
-    assert!(set_usage_telemetry_enabled(false));
-    assert!(!is_enabled());
-    assert!(set_usage_telemetry_enabled(false));
-
-    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
-    let opt_outs = payloads
-        .iter()
-        .filter(|payload| payload["event"] == "telemetry_opt_out")
-        .collect::<Vec<_>>();
-    assert_eq!(opt_outs.len(), 1);
-    assert_eq!(opt_outs[0]["step"], "telemetry_settings");
 }
 
 #[test]
@@ -764,6 +636,8 @@ fn usage_report_is_attributed_to_caller_session_not_global_slot() {
     assert_ne!(report["session_id"], global_session.as_str());
     assert_eq!(report["provider"], "OpenAI");
     assert_eq!(report["model"], "gpt-6-astra");
+    assert_eq!(report["requested_model"], "gpt-6-astra");
+    assert!(report.get("resolved_model").is_none());
     assert_eq!(report["source"], "agent");
     assert_eq!(report["input_tokens"], 200);
     assert_eq!(report["output_tokens"], 200);
@@ -786,6 +660,59 @@ fn usage_report_is_attributed_to_caller_session_not_global_slot() {
     if let Ok(mut session) = SESSION_STATE.lock() {
         *session = None;
     }
+}
+
+#[test]
+fn usage_report_preserves_requested_alias_and_observed_resolution() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    let oversized = "a".repeat(121);
+    let oversized_unicode = "界".repeat(41);
+    for resolved in [
+        Some("vendor/future-model-2030"),
+        None,
+        Some(" \n "),
+        Some(oversized.as_str()),
+        Some(oversized_unicode.as_str()),
+    ] {
+        record_provider_usage_with_model_attribution(
+            Some("attribution-session"),
+            "OpenRouter",
+            "high",
+            resolved,
+            UsageSource::Agent,
+            ProviderUsage {
+                input_tokens: 10,
+                output_tokens: 2,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        );
+    }
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let reports: Vec<_> = emitted
+        .iter()
+        .filter(|event| event["event"] == "usage_report")
+        .collect();
+    assert_eq!(reports.len(), 5);
+    assert_eq!(reports[0]["model"], "vendor/future-model-2030");
+    assert_eq!(reports[0]["requested_model"], "high");
+    assert_eq!(reports[0]["resolved_model"], "vendor/future-model-2030");
+    for report in &reports[1..] {
+        assert_eq!(report["model"], "high");
+        assert_eq!(report["requested_model"], "high");
+        assert!(report.get("resolved_model").is_none());
+    }
+    // Old durable outbox payloads must still deserialize without metadata.
+    let mut legacy = reports[0].clone();
+    legacy.as_object_mut().unwrap().remove("requested_model");
+    legacy.as_object_mut().unwrap().remove("resolved_model");
+    // Wire types contain &'static str labels, so the test fixture must outlive
+    // the decoded value just like their normal static event vocabulary.
+    let legacy: &'static str = Box::leak(serde_json::to_string(&legacy).unwrap().into_boxed_str());
+    let decoded: UsageReportEvent = serde_json::from_str(legacy).unwrap();
+    assert!(decoded.requested_model.is_none());
+    assert!(decoded.resolved_model.is_none());
 }
 
 #[test]
@@ -829,6 +756,7 @@ fn usage_report_falls_back_to_global_session_and_skips_zero_usage() {
             output_tokens: Some(400),
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            ..Default::default()
         },
     );
     let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
@@ -885,12 +813,42 @@ fn provider_usage_normalizes_cache_subsets_by_transport_not_model() {
 }
 
 #[test]
+fn simple_completion_usage_prefers_observed_request_metadata() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    for resolved_model in [Some("actual-model".to_string()), None] {
+        record_simple_completion_usage(
+            Some("side-call"),
+            "openai",
+            "fallback-model",
+            UsageSource::Compaction,
+            jcode_provider_core::SimpleCompletionUsage {
+                requested_model: Some("private-alias".into()),
+                resolved_model,
+                input_tokens: Some(10),
+                ..Default::default()
+            },
+        );
+    }
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    assert_eq!(emitted.len(), 2);
+    assert_eq!(emitted[0]["model"], "actual-model");
+    assert_eq!(emitted[0]["requested_model"], "private-alias");
+    assert_eq!(emitted[0]["resolved_model"], "actual-model");
+    assert_eq!(emitted[1]["model"], "private-alias");
+    assert_eq!(emitted[1]["requested_model"], "private-alias");
+    assert!(emitted[1].get("resolved_model").is_none());
+}
+
+#[test]
 fn simple_completion_failure_reports_only_observed_usage() {
     let _guard = lock_telemetry_test_state();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
     let error = anyhow::Error::new(jcode_provider_core::SimpleCompletionError::new(
         anyhow::anyhow!("private provider response content"),
         jcode_provider_core::SimpleCompletionUsage {
+            requested_model: Some("private-alias".into()),
+            resolved_model: Some("served-model".into()),
             input_tokens: Some(100),
             output_tokens: None,
             cache_read_input_tokens: Some(60),
@@ -908,6 +866,8 @@ fn simple_completion_failure_reports_only_observed_usage() {
     assert_eq!(report["session_id"], "failed-side-call");
     assert_eq!(report["provider"], "openai");
     assert_eq!(report["model"], "served-model");
+    assert_eq!(report["requested_model"], "private-alias");
+    assert_eq!(report["resolved_model"], "served-model");
     assert_eq!(report["source"], "sidecar");
     assert_eq!(report["input_tokens"], 40);
     assert_eq!(report["output_tokens"], 0);
@@ -1834,3 +1794,6 @@ fn telemetry_categories_gate_events_independently() {
     assert!(content_sharing_enabled());
     assert_eq!(category_settings(), [true; 6]);
 }
+
+#[path = "tests_additional_tests.rs"]
+mod additional_permanent_telemetry_statuses_trip_the_process_breaker;

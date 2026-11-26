@@ -210,7 +210,9 @@ const PRE_COMPACT_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow
 /// `delivery_state_passes`. Missing metadata is not evidence of unfinished work,
 /// and staying within the requested scope is not a failure of ownership. The
 /// deferred feedback-loop review already handles validation-quality concerns.
-fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
+/// Whether the goal records a deliberate stop (confirmed plateau, exhausted
+/// constraints or budget) together with the evidence for it.
+fn goal_has_documented_stop(goal: &TodoGoal) -> bool {
     let stopped = matches!(
         goal.iteration_maturity,
         Some(
@@ -223,10 +225,45 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
         .stopping_evidence
         .as_deref()
         .is_some_and(|evidence| !evidence.trim().is_empty());
+    stopped && has_stopping_evidence
+}
+
+/// Completed todos that still merit a "validate further" follow-up.
+///
+/// A todo qualifies when its completion confidence is missing or below the
+/// passing bar, unless its group's goal documents why validation stopped. More
+/// turns cannot lift an exhausted constraint, so asking again only loops: a
+/// session was nudged "Validate further" every few seconds for an item already
+/// marked `constraints_exhausted` with stopping evidence.
+pub fn todos_needing_validation<'a>(
+    todos: &'a [TodoItem],
+    goals: &[TodoGoal],
+) -> Vec<&'a TodoItem> {
+    todos
+        .iter()
+        .filter(|todo| todo_status_is_completed(&todo.status))
+        .filter(|todo| !completion_confidence_passes(todo.completion_confidence))
+        .filter(|todo| {
+            let group = normalized_group(todo.group.as_deref());
+            !goals.iter().any(|goal| {
+                normalized_group(goal.group.as_deref()) == group && goal_has_documented_stop(goal)
+            })
+        })
+        .collect()
+}
+
+/// Follow-up naming exactly the given completed todos as needing validation.
+pub fn build_todo_validation_continuation_message(targets: &[&TodoItem]) -> String {
+    let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
+    append_named_todos(&mut message, "Validate further:", targets);
+    message
+}
+
+fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     // More autonomous work cannot remove an explicitly documented constraint
     // or exhausted budget. Preserve the honest assessment instead of demanding
     // a higher score or repeatedly asking for the unavailable acceptance path.
-    if stopped && has_stopping_evidence {
+    if goal_has_documented_stop(goal) {
         return Vec::new();
     }
 
@@ -243,7 +280,16 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     {
         reasons.push("keep iterating and test the remaining hypotheses.");
     }
-    if stopped && !has_stopping_evidence {
+    // A documented stop returned above, so a stop reaching here lacks evidence.
+    let stopped = matches!(
+        goal.iteration_maturity,
+        Some(
+            IterationMaturity::PlateauConfirmed
+                | IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+        )
+    );
+    if stopped {
         reasons.push("gather more evidence about whether the work should stop.");
     }
     reasons

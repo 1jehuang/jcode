@@ -96,7 +96,7 @@ Be concise but preserve important details. You can search the full conversation 
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub text: String,
-    pub openai_encrypted_content: Option<String>,
+    pub openai_encrypted_content: Option<std::sync::Arc<str>>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
 }
@@ -534,12 +534,21 @@ pub fn build_emergency_summary_text(
         summary_parts.push(existing.to_string());
     }
 
+    let reason = if pre_tokens >= token_budget as u64 {
+        format!(
+            "The conversation had ~{}k tokens which exceeded the {}k limit.",
+            pre_tokens / 1000,
+            token_budget / 1000,
+        )
+    } else {
+        format!(
+            "The conversation had ~{}k tokens when the provider rejected it for context overflow.",
+            pre_tokens / 1000,
+        )
+    };
     summary_parts.push(format!(
-        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
-         The conversation had ~{}k tokens which exceeded the {}k limit.",
-        dropped_count,
-        pre_tokens / 1000,
-        token_budget / 1000,
+        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. {}",
+        dropped_count, reason,
     ));
 
     let mut file_mentions = Vec::new();
@@ -617,7 +626,12 @@ pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usiz
     let mut truncated = 0;
 
     for msg in messages.iter_mut() {
-        for block in msg.content.iter_mut() {
+        for index in 0..msg.content.len() {
+            if !matches!(&msg.content[index], ContentBlock::ToolResult { content, .. } if content.len() > max_chars)
+            {
+                continue;
+            }
+            let block = &mut msg.content[index];
             match block {
                 ContentBlock::ToolResult { content, .. } if content.len() > max_chars => {
                     *content = emergency_truncated_tool_result(content, max_chars);
@@ -639,7 +653,16 @@ pub fn emergency_truncate_large_payloads(
     let mut truncated = 0;
 
     for msg in messages.iter_mut() {
-        for block in msg.content.iter_mut() {
+        for index in 0..msg.content.len() {
+            let needs_truncation = match &msg.content[index] {
+                ContentBlock::ToolResult { content, .. } => content.len() > max_tool_result_chars,
+                ContentBlock::Image { data, .. } => data.len() > max_image_chars,
+                _ => false,
+            };
+            if !needs_truncation {
+                continue;
+            }
+            let block = &mut msg.content[index];
             match block {
                 ContentBlock::ToolResult { content, .. }
                     if content.len() > max_tool_result_chars =>
@@ -681,6 +704,7 @@ pub fn is_image_rejection_error(error: &str) -> bool {
         || lower.contains("image.source")
         || lower.contains("could not process image")
         || lower.contains("invalid image")
+        || lower.contains("does not represent a valid image")
         || lower.contains("unsupported image")
         || lower.contains("image_parse_error")
         || lower.contains("invalid_image");
@@ -694,10 +718,16 @@ pub fn is_image_rejection_error(error: &str) -> bool {
 /// Replace every inline image with a short text note. Used after a provider
 /// rejected an image so the retried request carries none. Returns the number
 /// of images replaced.
-pub fn strip_all_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+pub fn strip_all_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
+) -> usize {
     let mut stripped = 0;
     for content in contents.iter_mut() {
-        for block in content.iter_mut() {
+        for index in 0..content.as_ref().len() {
+            if !matches!(&content.as_ref()[index], ContentBlock::Image { .. }) {
+                continue;
+            }
+            let block = &mut content.as_mut()[index];
             if let ContentBlock::Image { media_type, .. } = block {
                 let media_type = media_type.clone();
                 *block = ContentBlock::Text {
@@ -756,16 +786,15 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
 ///
 /// Returns the number of images that were replaced with text markers.
 pub fn emergency_strip_large_images(messages: &mut [Message], target_total_chars: usize) -> usize {
-    let mut contents: Vec<&mut Vec<ContentBlock>> =
-        messages.iter_mut().map(|m| &mut m.content).collect();
+    let mut contents: Vec<_> = messages.iter_mut().map(|m| &mut m.content).collect();
     strip_large_images_in_contents(&mut contents, target_total_chars)
 }
 
 /// Core of [`emergency_strip_large_images`], operating directly on a slice of
 /// content-block vectors so it can be reused for both provider `Message`s and
 /// the session's stored-message representation (which share `ContentBlock`).
-pub fn strip_large_images_in_contents(
-    contents: &mut [&mut Vec<ContentBlock>],
+pub fn strip_large_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
     target_total_chars: usize,
 ) -> usize {
     // Collect (content_index, block_index, payload_len) for every inline image,
@@ -773,7 +802,7 @@ pub fn strip_large_images_in_contents(
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {
-        for (bi, block) in content.iter().enumerate() {
+        for (bi, block) in content.as_ref().iter().enumerate() {
             if let ContentBlock::Image { data, .. } = block {
                 images.push((ci, bi, data.len()));
                 total = total.saturating_add(data.len());
@@ -793,7 +822,7 @@ pub fn strip_large_images_in_contents(
         if total <= target_total_chars {
             break;
         }
-        let block = &mut contents[ci][bi];
+        let block = &mut contents[ci].as_mut()[bi];
         if let ContentBlock::Image { media_type, data } = block {
             let original_len = data.len();
             let media_type = media_type.clone();
@@ -811,20 +840,8 @@ pub fn strip_large_images_in_contents(
     stripped
 }
 
-/// Inline tool-result images (computer-use and browser screenshots) are decayed
-/// once the transcript holds more than this many of them. See
-/// [`decay_old_tool_images_in_contents`].
-pub const TOOL_IMAGE_DECAY_TRIGGER_COUNT: usize = 12;
-
-/// Inline tool-result images are also decayed once their combined base64
-/// payload exceeds this many characters.
+/// Trigger on actual byte pressure, not image count, to preserve cached history.
 pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
-
-/// After decay, at most this many of the newest tool-result images keep their
-/// inline data. The gap to the trigger count is hysteresis: decay rewrites
-/// older messages (invalidating provider prompt caches and forcing a full
-/// snapshot write), so it only runs every few screenshots instead of on each.
-pub const TOOL_IMAGE_DECAY_KEEP_COUNT: usize = 6;
 
 /// After decay, the retained tool-result images fit within this many base64
 /// characters, except that the newest image is always kept regardless of size.
@@ -835,24 +852,26 @@ pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
 ///
 /// Only images in messages that carry a `ToolResult` are considered, so images
 /// the user pasted are untouched. Nothing happens until the tool images exceed
-/// [`TOOL_IMAGE_DECAY_TRIGGER_COUNT`] or [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`].
-/// Then every tool image except the newest [`TOOL_IMAGE_DECAY_KEEP_COUNT`]
-/// (that also fit within [`TOOL_IMAGE_DECAY_KEEP_CHARS`]) is replaced with a
-/// short text marker. The newest image always survives so the model still sees
-/// the screenshot it just asked for.
+/// [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`]. Older images outside the retained byte
+/// budget ([`TOOL_IMAGE_DECAY_KEEP_CHARS`]) are replaced with a short text
+/// marker. The newest image always survives so the model still sees the
+/// screenshot it just asked for.
 ///
 /// Returns the number of images replaced.
-pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+pub fn decay_old_tool_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
+) -> usize {
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {
         if !content
+            .as_ref()
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         {
             continue;
         }
-        for (bi, block) in content.iter().enumerate() {
+        for (bi, block) in content.as_ref().iter().enumerate() {
             if let ContentBlock::Image { data, .. } = block {
                 images.push((ci, bi, data.len()));
                 total = total.saturating_add(data.len());
@@ -860,23 +879,22 @@ pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]
         }
     }
 
-    if images.len() <= TOOL_IMAGE_DECAY_TRIGGER_COUNT && total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
+    if total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
         return 0;
     }
 
-    let mut kept_count = 0usize;
+    let mut kept_any = false;
     let mut kept_chars = 0usize;
     let mut stripped = 0usize;
     for (ci, bi, payload_len) in images.into_iter().rev() {
-        let keep = kept_count == 0
-            || (kept_count < TOOL_IMAGE_DECAY_KEEP_COUNT
-                && kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS);
+        let keep =
+            !kept_any || kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS;
         if keep {
-            kept_count += 1;
+            kept_any = true;
             kept_chars = kept_chars.saturating_add(payload_len);
             continue;
         }
-        let block = &mut contents[ci][bi];
+        let block = &mut contents[ci].as_mut()[bi];
         if let ContentBlock::Image { media_type, data } = block {
             let text = format!(
                 "[Older tool screenshot omitted from history to bound transcript size: media_type={media_type}, original_base64_chars={}. Rely on adjacent tool text, or take a new screenshot if visual details are needed.]",

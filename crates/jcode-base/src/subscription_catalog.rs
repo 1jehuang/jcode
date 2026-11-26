@@ -11,6 +11,32 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
+
+/// Opening sentences of the Jcode Cloud account failures. The cloud CLI prints
+/// them and the TUI recognizes them to show onboarding steps instead of a
+/// generic failure, so keep each one a stable prefix of its full message.
+pub const CLOUD_ACCOUNT_REQUIRED: &str = "Jcode Cloud needs a Jcode account.";
+pub const CLOUD_SIGN_IN_EXPIRED: &str = "Your Jcode sign-in expired.";
+pub const CLOUD_NOT_ENTITLED: &str = "Jcode Cloud requires an active paid Jcode subscription.";
+
+/// Signed out: how to get an account from a shell.
+pub fn cloud_account_required_message() -> String {
+    format!(
+        "{CLOUD_ACCOUNT_REQUIRED} Run `jcode account login` to sign in or create one. A paid plan includes your Jcode Cloud machine: {JCODE_PRICING_URL}"
+    )
+}
+
+/// The saved account key was rejected.
+pub fn cloud_sign_in_expired_message() -> String {
+    format!("{CLOUD_SIGN_IN_EXPIRED} Run `jcode account login` again.")
+}
+
+/// Signed in, but the plan does not include the managed machine.
+pub fn cloud_not_entitled_message() -> String {
+    format!(
+        "{CLOUD_NOT_ENTITLED} See plans at {JCODE_PRICING_URL} or change yours with `jcode account manage`."
+    )
+}
 /// User-facing runtime identity. Keep "Subscription" in the name so picker,
 /// header, status, and diagnostics never resemble a generic model host.
 pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";
@@ -45,12 +71,12 @@ impl JcodeTier {
     }
 
     pub fn usable_budget_usd(self) -> f64 {
-        f64::from(self.retail_price_usd()) * 2.0
+        f64::from(self.retail_price_usd()) * 4.0
     }
 
-    /// Provider-price inference included with the monthly plan. The included
-    /// portion is billed at 50%, so every subscription dollar buys two dollars
-    /// of inference. Usage after this allowance is billed at provider API price.
+    /// Provider-price inference included with the monthly plan. Every
+    /// subscription dollar buys four dollars of inference. Usage after this
+    /// allowance is billed at provider API price.
     pub fn included_inference_usd(self) -> f64 {
         self.usable_budget_usd()
     }
@@ -555,11 +581,11 @@ mod tests {
     #[test]
     fn tier_pricing_matches_launched_plans() {
         let expected = [
-            (JcodeTier::Plus, "plus", "Plus", 10, 20.00),
-            (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
-            (JcodeTier::Max, "max", "Max", 100, 200.00),
-            (JcodeTier::Ultra, "ultra", "Ultra", 200, 400.00),
-            (JcodeTier::Flagship, "flagship", "Solo", 1000, 2000.00),
+            (JcodeTier::Plus, "plus", "Plus", 10, 40.00),
+            (JcodeTier::Pro, "pro", "Pro", 20, 80.00),
+            (JcodeTier::Max, "max", "Max", 100, 400.00),
+            (JcodeTier::Ultra, "ultra", "Ultra", 200, 800.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 4000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));

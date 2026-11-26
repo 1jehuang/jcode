@@ -10,6 +10,11 @@ fn picker_provider<'a>(
 }
 
 pub(super) fn with_app(f: impl FnOnce(&mut App)) {
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("named test thread");
+    if super::super::commands_dispatch::ssh_test_runs_in_child(test_name) {
+        return;
+    }
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -581,7 +586,7 @@ fn ssh_inline_picker_filter_and_escape_match_local_navigation() {
         }
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.filter, "claude");
-        assert_eq!(picker.filtered.len(), 2);
+        assert_eq!(picker.filtered.len(), 3);
         app.handle_ssh_login_key(KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(
             app.inline_interactive_state
@@ -638,7 +643,7 @@ fn ssh_inline_picker_status_is_remote_only_and_failure_stays_unknown() {
                 "attention"
             );
             assert_eq!(
-                picker_provider(picker, "gemini").options[0].api_method,
+                picker_provider(picker, "antigravity").options[0].api_method,
                 "status unknown"
             );
             let api = picker_provider(picker, "openai-api");

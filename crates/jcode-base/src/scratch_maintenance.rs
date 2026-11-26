@@ -92,7 +92,7 @@ fn prune_due(dir: &Path) -> bool {
 }
 
 fn mark_pruned(dir: &Path) {
-    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
+    let _ = jcode_storage::touch_stamp(&dir.join(PRUNE_MARKER));
 }
 
 /// Core of [`prune_stale_scratch`], parameterized for unit testing.

@@ -70,6 +70,10 @@ impl MultiProvider {
 
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
+        // A restarted/reexec'd daemon has no usage RAM yet. Restore dated,
+        // account-scoped last-good limits before choosing or binding a route.
+        // Render-time quota accessors remain strictly memory-only.
+        crate::usage::hydrate_persisted_account_usage();
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let initial_provider = Self::initial_provider_from_env();
@@ -597,9 +601,19 @@ impl MultiProvider {
                     .iter()
                     .filter(|route| route.0 == key && route.3 == ready)
                     .collect();
+                let candidate_models: Vec<&str> = candidates
+                    .iter()
+                    .map(|(_, model, _, _)| model.as_str())
+                    .collect();
+                let provider_key = key.split(':').next().unwrap_or(key);
+                let provider_preferred = crate::auth::lifecycle::preferred_model_for_provider(
+                    provider_key,
+                    &candidate_models,
+                );
                 candidates.sort_by_key(|(_, model, _, _)| {
                     (
                         configured_model != Some(model.as_str()),
+                        provider_preferred.as_deref() != Some(model.as_str()),
                         jcode_provider_core::model_generation_rank(model),
                     )
                 });

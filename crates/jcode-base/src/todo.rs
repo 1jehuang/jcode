@@ -45,6 +45,7 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 fn write_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"
@@ -119,6 +120,38 @@ pub fn load_goals(session_id: &str) -> Result<Vec<TodoGoal>> {
     storage::read_json(&path).or_else(|_| Ok(Vec::new()))
 }
 
+/// Summary of a session's persisted todo state for picker display and search.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionTodoSummary {
+    pub title: Option<String>,
+    pub user_intention: Option<String>,
+    pub todo_statuses: Vec<String>,
+}
+
+/// Load todo state for a session once and derive its title hint, user intention,
+/// and non-cancelled todo statuses.
+pub fn load_session_todo_summary(session_id: &str) -> SessionTodoSummary {
+    let todos = load_todos(session_id).unwrap_or_default();
+    let plan = load_plan(session_id).unwrap_or_default();
+    let title = derive_session_title(&todos, &plan);
+    let user_intention = plan
+        .user_intention
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let todo_statuses = todos
+        .into_iter()
+        .filter(|todo| !todo_status_is_cancelled(&todo.status))
+        .map(|todo| todo.status)
+        .collect();
+    SessionTodoSummary {
+        title,
+        user_intention,
+        todo_statuses,
+    }
+}
+
 /// Load todo state for a session and derive its best title hint.
 pub fn load_session_title(session_id: &str) -> Option<String> {
     let todos = load_todos(session_id).ok()?;
@@ -128,7 +161,17 @@ pub fn load_session_title(session_id: &str) -> Option<String> {
 
 pub fn save_goals(session_id: &str, goals: &[TodoGoal]) -> Result<()> {
     let path = goals_path(session_id)?;
-    storage::write_json_fast(&path, goals)
+    storage::write_json_fast(&path, goals)?;
+    publish_stored(session_id);
+    Ok(())
+}
+
+/// Tell client connections that this session's stored todo state changed, so
+/// they push a snapshot instead of each window polling for one.
+fn publish_stored(session_id: &str) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::TodoStateStored(
+        session_id.to_string(),
+    ));
 }
 
 fn goals_path(session_id: &str) -> Result<PathBuf> {
@@ -148,6 +191,7 @@ pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
 pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
     let path = plan_path(session_id)?;
     storage::write_json_fast(&path, plan)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"
@@ -478,7 +522,13 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
                         .map(|old| (old.waiting_on.clone(), old.waiting_reason.clone()))
                         .unwrap_or_default();
                 }
-                if lane.is_empty() || current == lane {
+                // A stale link must never clear a worker that has moved to another lane.
+                if current == lane
+                    || (lane.is_empty()
+                        && current
+                            .iter()
+                            .any(|item| stages::lane_id(item) != link.lane))
+                {
                     return Ok(());
                 }
                 write_todos(&link.worker, &lane)?;
@@ -668,6 +718,12 @@ mod lane_sync_tests {
             lane_change_summary(&mine, &worker_view),
             "changed: add lexer + parser tests"
         );
+
+        // Withdrawing the entire lane must clear the worker's active plan too.
+        let remaining: Vec<_> = edited.into_iter().filter(|todo| todo.id == "u1").collect();
+        save_todos(boss, &remaining).unwrap();
+        assert!(load_todos(fox).unwrap().is_empty());
+        assert_eq!(load_todos(boss).unwrap(), remaining);
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

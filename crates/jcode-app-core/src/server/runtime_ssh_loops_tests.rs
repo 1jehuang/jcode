@@ -65,6 +65,34 @@ fn paused_plan_and_unregistered_sessions_never_continue() {
 }
 
 #[test]
+fn delegated_work_waits_without_nagging_the_root_or_hiding_independent_work() {
+    let mut snapshot = open_snapshot();
+    let mut state = enabled_state();
+    snapshot.todos[0].assigned_to = Some("worker".into());
+    snapshot.running_workers.push("worker".into());
+    for _ in 0..5 {
+        assert!(next_followup(&mut state, &snapshot).follow_up.is_none());
+    }
+    let mut independent = open_snapshot().todos.remove(0);
+    independent.content = "root work".into();
+    snapshot.todos.push(independent);
+    let message = next_followup(&mut state, &snapshot)
+        .follow_up
+        .unwrap()
+        .message;
+    assert!(message.contains("root work"));
+    assert!(!message.contains("finish remote work"));
+    snapshot.running_workers.clear();
+    assert!(
+        next_followup(&mut state, &snapshot)
+            .follow_up
+            .unwrap()
+            .message
+            .contains("finish remote work")
+    );
+}
+
+#[test]
 fn blockers_and_running_tasks_pause_without_consuming_retry_budget() {
     let mut snapshot = open_snapshot();
     let mut state = enabled_state();
@@ -243,7 +271,38 @@ async fn productive_remote_campaign_exceeds_old_turn_cap_then_stops_on_no_progre
 }
 
 #[tokio::test]
-async fn remote_subscription_enables_real_followups_without_manual_poke() {
+async fn delegated_work_durable_await_survives_process_task_refresh() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session = agent.session_id().to_owned();
+    let key = format!("loop-{session}");
+    let wait = todo::await_dependency::dependency_id(&key, 1);
+    let path = crate::storage::runtime_dir()
+        .join(todo::await_dependency::STATE_DIR)
+        .join(format!("{key}.json"));
+    crate::storage::write_json_fast(&path, &json!({"key":key,"session_id":session,"created_at_unix_ms":1,"deadline_unix_ms":u64::MAX,"background":true})).unwrap();
+    let mut todos = open_snapshot().todos;
+    todos[0].waiting_on = vec![wait];
+    todo::save_todos(&session, &todos).unwrap();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    run_followups(&mut agent, tx).await.unwrap();
+    assert!(provider.calls.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn ordinary_session_enables_real_followups_without_client_opt_in() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
@@ -257,10 +316,10 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
     );
     let session_id = agent.session_id().to_string();
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
-    initialize_remote_session(&session_id, true).unwrap();
+    assert!(!state_path(&session_id).unwrap().exists());
     let (tx, rx) = mpsc::unbounded_channel();
-    // The cloud runtime must continue with no observer attached, not just
-    // enqueue work for a live laptop client to dispatch.
+    // The daemon must continue with no observer attached and without a
+    // client-specific subscription or an explicit /poke command.
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
@@ -308,6 +367,85 @@ async fn remote_subscription_enables_real_followups_without_manual_poke() {
 }
 
 #[tokio::test]
+async fn ordinary_session_respects_host_default_off_and_explicit_on() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[features]\nauto_poke = false\n",
+    )
+    .unwrap();
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert!(
+        !read_state(&state_path(&session_id).unwrap())
+            .unwrap()
+            .poke_enabled
+    );
+    assert!(rx.try_recv().is_err(), "disabled continuation is silent");
+
+    control(&session_id, "poke", &["on".into()])
+        .unwrap()
+        .unwrap();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    let mut notices = 0;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            ServerEvent::Notification { from_name, .. }
+                if from_name.as_deref() == Some("daemon continuation") =>
+            {
+                notices += 1
+            }
+            ServerEvent::Done { .. } => panic!("internal continuation must not publish Done"),
+            _ => {}
+        }
+    }
+    assert_eq!(notices, 3, "observers see every daemon-owned continuation");
+}
+
+#[tokio::test]
+async fn cancelled_session_does_not_restart_for_unfinished_todos() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session_id = agent.session_id().to_string();
+    todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
+    agent.request_graceful_shutdown();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        read_state(&state_path(&session_id).unwrap()).unwrap().turns,
+        0
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "cancel must not announce another poke"
+    );
+}
+
+#[tokio::test]
 async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actual_context() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
@@ -322,11 +460,15 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     );
     let session_id = agent.session_id().to_string();
     let (tx, _rx) = mpsc::unbounded_channel();
-    // An ordinary/local session has no remote state and must not gain loops.
+    // Ordinary sessions now delegate to the daemon without a special subscribe.
+    // Disable explicitly here so the workflow assertions below start fresh.
+    control(&session_id, "poke", &["off".into()])
+        .unwrap()
+        .unwrap();
     todo::save_todos(&session_id, &open_snapshot().todos).unwrap();
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
-    assert!(!state_path(&session_id).unwrap().exists());
+    assert!(state_path(&session_id).unwrap().exists());
 
     let (start, _) = execute(&mut agent, "improve", &["parser reliability".into()])
         .await

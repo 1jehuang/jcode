@@ -158,7 +158,7 @@ fn prune_due(dir: &Path) -> bool {
 }
 
 fn mark_pruned(dir: &Path) {
-    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
+    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"1");
 }
 
 /// Core of [`prune_old_versions`], parameterized for unit tests.

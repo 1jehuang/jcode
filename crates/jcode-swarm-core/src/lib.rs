@@ -418,11 +418,10 @@ pub fn normalize_completion_report(report: Option<String>) -> Option<String> {
         return Some(report);
     }
 
-    let suffix = "\n\n[Report truncated by jcode before delivery.]";
-    let keep_chars = MAX_SWARM_COMPLETION_REPORT_CHARS.saturating_sub(suffix.chars().count());
-    let mut truncated: String = report.chars().take(keep_chars).collect();
-    truncated.push_str(suffix);
-    Some(truncated)
+    let prefix = "[Earlier response text truncated by jcode.]\n\n";
+    let keep_chars = MAX_SWARM_COMPLETION_REPORT_CHARS.saturating_sub(prefix.chars().count());
+    let tail: String = report.chars().skip(char_count - keep_chars).collect();
+    Some(format!("{prefix}{tail}"))
 }
 
 fn completion_status_intro(name: &str, status: &str) -> String {
@@ -435,41 +434,36 @@ fn completion_status_intro(name: &str, status: &str) -> String {
     }
 }
 
-fn completion_followup(status: &str, has_report: bool) -> &'static str {
-    match (status, has_report) {
-        ("ready", true) => {
-            "Use assign_task to give them more work, stop to remove them, or summary/read_context for full context."
-        }
-        ("ready", false) => {
-            "Use summary/read_context to inspect results, assign_task for more work, or stop to remove them."
-        }
-        ("failed", true) => {
-            "Use summary/read_context for full context, retry with guidance, or stop to remove them."
-        }
-        ("failed", false) => {
-            "Use summary/read_context to inspect results, assign_task to retry with guidance, or stop to remove them."
-        }
-        ("stopped", _) => "Use summary/read_context to inspect results or stop to remove them.",
-        ("crashed", _) => {
-            "Any swarm task assignments they held are requeued automatically where possible. \
-             Check plan_status, and spawn a replacement or use retry/assign_task if work remains."
-        }
-        (_, true) => {
-            "Use assign_task to give them new work, stop to remove them, or summary/read_context for full context."
-        }
-        (_, false) => "Use assign_task to give them new work, or stop to remove them.",
-    }
+pub fn completion_notification_message(name: &str, status: &str, report: Option<&str>) -> String {
+    completion_notification_with_lane_plan(name, status, report, None)
 }
 
-pub fn completion_notification_message(name: &str, status: &str, report: Option<&str>) -> String {
+/// Completion handoff: authoritative lane progress first, final public response
+/// second. Runtime readiness does not imply that the lane's tasks are complete.
+pub fn completion_notification_with_lane_plan(
+    name: &str,
+    status: &str,
+    report: Option<&str>,
+    lane_plan: Option<&str>,
+) -> String {
     let intro = completion_status_intro(name, status);
-    let followup = completion_followup(status, report.is_some());
-    match report {
-        Some(report) => {
-            format!("{intro}\n\nRecent output (automatically captured):\n{report}\n\n{followup}")
-        }
-        None => format!("{intro}\n\nNo recent assistant output was captured. {followup}"),
+    let plan = lane_plan.map(str::trim).filter(|plan| !plan.is_empty());
+    let response = normalize_completion_report(report.map(str::to_string));
+    let mut message = intro;
+    if let Some(plan) = plan {
+        message.push_str("\n\nLane plan:\n");
+        // The lane counts already convey completed work. Keep task names only
+        // when there is no result report, and always retain unfinished tasks.
+        let compact = plan
+            .lines()
+            .filter(|line| response.is_none() || !line.trim_start().starts_with("- [completed] "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        message.push_str(&compact);
     }
+    message.push_str("\n\nFinal response:\n");
+    message.push_str(response.as_deref().unwrap_or("No report captured."));
+    message
 }
 
 pub fn truncate_detail(text: &str, max_len: usize) -> String {
@@ -656,7 +650,61 @@ mod tests {
             normalized.chars().count(),
             MAX_SWARM_COMPLETION_REPORT_CHARS
         );
-        assert!(normalized.ends_with("[Report truncated by jcode before delivery.]"));
+        assert!(normalized.starts_with("[Earlier response text truncated by jcode.]"));
+        let long = format!(
+            "{}世界🦊 final result",
+            "x".repeat(MAX_SWARM_COMPLETION_REPORT_CHARS)
+        );
+        let normalized = normalize_completion_report(Some(long)).unwrap();
+        assert!(normalized.ends_with("世界🦊 final result"));
+        assert_eq!(
+            normalized.chars().count(),
+            MAX_SWARM_COMPLETION_REPORT_CHARS
+        );
+    }
+
+    #[test]
+    fn completion_handoff_puts_lane_state_before_final_response() {
+        let message = completion_notification_with_lane_plan(
+            "jaguar",
+            "ready",
+            Some("Implemented checks. Live acceptance unverified."),
+            Some(
+                "Phase 1 · security: 1/2 completed\n- [completed] Offline checks\n- [pending] Live acceptance",
+            ),
+        );
+        assert!(message.find("Lane plan:").unwrap() < message.find("Final response:").unwrap());
+        assert!(message.contains("[pending] Live acceptance"));
+        assert!(!message.contains("Recent output"));
+        assert!(!message.contains("Use assign_task"));
+        let empty = completion_notification_message("owl", "failed", None);
+        assert!(!empty.contains("Lane plan:"));
+        assert!(empty.contains("No report captured."));
+        assert!(!message.contains("[completed] Offline checks"));
+
+        let no_report = completion_notification_with_lane_plan(
+            "tulip",
+            "ready",
+            None,
+            Some(
+                "Phase 1 · controlled-compare: 1/1 completed\n- [completed] Implement sealed-image controlled comparison",
+            ),
+        );
+        assert!(no_report.contains("Implement sealed-image controlled comparison"));
+        assert!(no_report.contains("No report captured."));
+        assert!(!no_report.contains("No lane plan available."));
+        let redundant = completion_notification_with_lane_plan(
+            "tulip",
+            "ready",
+            Some("Implemented and tested."),
+            Some(
+                "Phase 1 · controlled-compare: 1/1 completed\n- [completed] Implement sealed-image controlled comparison",
+            ),
+        );
+        assert!(!redundant.contains("Implement sealed-image controlled comparison"));
+        assert!(redundant.contains("controlled-compare: 1/1 completed"));
+        assert!(redundant.contains("Implemented and tested."));
+        assert!(redundant.len() < no_report.len());
     }
 
     #[test]

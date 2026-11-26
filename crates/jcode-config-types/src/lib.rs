@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 mod display;
 mod update_policy;
@@ -342,6 +343,89 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+
+    /// Per-provider threshold overrides keyed by provider name (case-insensitive,
+    /// e.g. `gemini`, `claude`, `openai`, `copilot`, `openrouter`, `bedrock`, `cursor`).
+    /// Unset fields inside a provider override inherit from the top-level `[compaction]` table.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderCompactionConfig>,
+}
+
+/// Per-provider compaction threshold overrides under `[compaction.providers.<name>]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProviderCompactionConfig {
+    /// Override `[compaction] reactive_threshold` for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_threshold: Option<f32>,
+
+    /// Override `[compaction] reactive_threshold_tokens` for this provider.
+    /// Zero disables the absolute token threshold for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reactive_threshold_tokens: Option<usize>,
+
+    /// Override `[compaction] proactive_floor` for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_floor: Option<f32>,
+
+    /// Override `[compaction] proactive_floor_tokens` for this provider.
+    /// Zero disables the absolute token floor for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proactive_floor_tokens: Option<usize>,
+
+    /// Override `[compaction] max_context_tokens` for this provider.
+    /// Zero disables the cap for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+}
+
+impl CompactionConfig {
+    /// Look up a per-provider override by provider name (case-insensitive).
+    pub fn provider_override(&self, provider: &str) -> Option<&ProviderCompactionConfig> {
+        let needle = provider.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        self.providers
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(needle))
+            .map(|(_, value)| value)
+    }
+
+    pub fn effective_reactive_threshold(&self, provider: Option<&str>) -> f32 {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.reactive_threshold)
+            .unwrap_or(self.reactive_threshold)
+    }
+
+    pub fn effective_reactive_threshold_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.reactive_threshold_tokens)
+            .unwrap_or(self.reactive_threshold_tokens)
+    }
+
+    pub fn effective_proactive_floor(&self, provider: Option<&str>) -> f32 {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.proactive_floor)
+            .unwrap_or(self.proactive_floor)
+    }
+
+    pub fn effective_proactive_floor_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.proactive_floor_tokens)
+            .unwrap_or(self.proactive_floor_tokens)
+    }
+
+    pub fn effective_max_context_tokens(&self, provider: Option<&str>) -> usize {
+        provider
+            .and_then(|p| self.provider_override(p))
+            .and_then(|o| o.max_context_tokens)
+            .unwrap_or(self.max_context_tokens)
+    }
 }
 
 impl Default for CompactionConfig {
@@ -361,6 +445,7 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            providers: BTreeMap::new(),
         }
     }
 }
@@ -526,17 +611,6 @@ pub struct AgentsConfig {
     pub swarm_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
-    /// Maximum percentage (1-90) of the chat column height the inline swarm
-    /// gallery band may occupy. Leave unset to use the built-in default (40%).
-    /// Lower values keep more of the transcript visible; set near the minimum
-    /// to effectively collapse the gallery to a thin strip.
-    pub swarm_gallery_max_pct: Option<u8>,
-    /// Layout of the inline swarm strip above the status line:
-    /// `"vertical"` (default) lists one agent per row (session icon + status
-    /// glyph + task), capped to a few lines; `"horizontal"` packs all agents
-    /// as chips on a single row.
-    #[serde(default)]
-    pub swarm_strip_layout: SwarmStripLayout,
     /// Jev Decisions provider for recall: auto, openrouter, typesafe, laya,
     /// aimlapi, or jcode. Auto uses a provider-specific BYOK credential before Jcode.
     #[serde(default = "default_memory_jev_provider")]
@@ -638,75 +712,8 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
-impl Default for AgentsConfig {
-    fn default() -> Self {
-        Self {
-            swarm_model: None,
-            swarm_model_selection: false,
-            swarm_model_allowlist: Vec::new(),
-            swarm_effort: None,
-            swarm_root_effort: None,
-            swarm_spawn_mode: SwarmSpawnMode::default(),
-            swarm_gallery_max_pct: None,
-            swarm_strip_layout: SwarmStripLayout::default(),
-            memory_jev_provider: default_memory_jev_provider(),
-            memory_jev_model: None,
-            browser_jev_model: None,
-            voice_jev_model: None,
-            memory_jev_threshold: default_memory_jev_threshold(),
-            memory_model: None,
-            memory_sidecar_enabled: default_memory_sidecar_enabled(),
-            memory_rerank_cadence: default_memory_rerank_cadence(),
-            memory_rerank_votes: default_memory_rerank_votes(),
-            memory_rerank_min_agree: default_memory_rerank_min_agree(),
-            memory_embedding_backend: default_memory_embedding_backend(),
-            memory_embedding_model: None,
-            memory_embedding_base_url: None,
-            memory_embedding_dim: None,
-            swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
-            swarm_stall_after_secs: default_swarm_stall_after_secs(),
-            swarm_stall_nudge: false,
-        }
-    }
-}
-
-impl AgentsConfig {
-    /// Validate an agent-supplied override before resolving any provider route.
-    /// Matching is exact: a bare model never authorizes another provider's route.
-    pub fn validate_swarm_model_request(&self, model: Option<&str>) -> Result<(), &'static str> {
-        let Some(model) = model else {
-            return Ok(());
-        };
-        if !self.swarm_model_selection {
-            return Err(
-                "Agent-selected swarm models are disabled. Omit model to use the user-configured default.",
-            );
-        }
-        if model.trim().is_empty()
-            || !self
-                .swarm_model_allowlist
-                .iter()
-                .any(|allowed| allowed == model)
-        {
-            return Err(
-                "Requested swarm model is not in agents.swarm_model_allowlist. Omit model to use the user-configured default.",
-            );
-        }
-        Ok(())
-    }
-
-    /// Resolve swarm mode's root effort without allowing the orchestration
-    /// sentinel to recurse into itself. Unknown values use the low-effort
-    /// default without invalidating other settings.
-    pub fn root_effort_for_swarm(&self) -> &'static str {
-        let value = self.swarm_root_effort.as_deref().unwrap_or("low").trim();
-        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-            .into_iter()
-            .find(|level| level.eq_ignore_ascii_case(value))
-            .unwrap_or("low")
-    }
-}
-
+#[path = "lib_agents_defaults.rs"]
+mod agents_defaults;
 /// How swarm-created agents should be spawned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -741,36 +748,6 @@ impl SwarmSpawnMode {
             Self::Headless => "headless",
             Self::Inline => "inline",
             Self::Auto => "auto",
-        }
-    }
-}
-
-/// Layout of the inline swarm strip shown above the status line.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SwarmStripLayout {
-    /// One agent per row: session icon + status glyph + task label, capped to
-    /// a few lines with a `+N more` overflow marker.
-    #[default]
-    Vertical,
-    /// All agents packed as chips on a single row (the historical layout).
-    Horizontal,
-}
-
-impl SwarmStripLayout {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "vertical" | "list" => Some(Self::Vertical),
-            "horizontal" | "chips" | "strip" => Some(Self::Horizontal),
-            _ => None,
-        }
-    }
-
-    /// Canonical lowercase string for this layout (matches config/env values).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Vertical => "vertical",
-            Self::Horizontal => "horizontal",
         }
     }
 }

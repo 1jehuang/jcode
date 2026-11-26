@@ -171,6 +171,7 @@ pub(super) async fn process_message_with_server_failover(
         system_reminder,
         event_tx,
         enabled,
+        None,
     )
     .await
 }
@@ -184,16 +185,18 @@ pub(super) async fn process_reserved_message_with_server_failover(
     system_reminder: Option<String>,
     event_tx: mpsc::UnboundedSender<ServerEvent>,
     enabled: bool,
+    display_role: Option<crate::session::StoredDisplayRole>,
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
-    let result = super::client_lifecycle::process_reserved_message_streaming_mpsc(
+    let result = super::client_lifecycle::process_reserved_message_with_role(
         &mut guard,
         lease,
         content,
         images,
         system_reminder,
         event_tx.clone(),
+        display_role,
     )
     .await;
     if !enabled && result.is_err() {
@@ -245,6 +248,48 @@ pub(super) async fn process_reserved_locked_message_with_server_failover(
         event_tx.clone(),
     )
     .await;
+    retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
+    super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
+}
+
+/// A server wake has no local user echo. Persist it as a context entry and
+/// publish its delivery before streaming, including when receipt notifications
+/// were disabled. Failover retries reuse that entry rather than publishing it
+/// again.
+pub(super) async fn process_reserved_locked_context_with_server_failover(
+    agent: &mut Agent,
+    lease: &crate::agent::TurnLease,
+    content: &str,
+    system_reminder: Option<String>,
+    display_role: crate::session::StoredDisplayRole,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
+) -> anyhow::Result<()> {
+    agent.validate_server_turn(lease)?;
+    let reminder = system_reminder.clone();
+    let result = agent
+        .run_reserved_streaming_mpsc(
+            lease,
+            content,
+            Vec::new(),
+            system_reminder,
+            event_tx.clone(),
+            Some(display_role),
+        )
+        .await;
+    if result.is_ok() {
+        crate::runtime_memory_log::emit_event(
+            crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
+                "turn_completed",
+                "message_turn_finished",
+            )
+            .with_session_id(agent.session_id().to_string())
+            .force_attribution(),
+        );
+        crate::process_memory::release_retained_heap_debounced(
+            "server_turn_completed",
+            std::time::Duration::from_secs(30),
+        );
+    }
     retry_turn_with_server_failover(agent, lease, result, reminder, event_tx.clone()).await?;
     super::runtime_ssh_loops::run_reserved_followups(agent, lease, event_tx).await
 }

@@ -6,6 +6,8 @@ mod word_boundaries;
 #[path = "input/shell_commands.rs"]
 mod shell_commands;
 use shell_commands::*;
+#[path = "input_key_dispatch.rs"]
+mod key_dispatch;
 
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, commands,
@@ -45,36 +47,8 @@ pub(super) fn floor_char_boundary(text: &str, index: usize) -> usize {
     index
 }
 
-/// Remove reasoning-marked lines from committed transcript text. Reasoning lines
-/// are wrapped in emphasis containing the invisible [`REASONING_SENTINEL`]
-/// (see `jcode_tui_markdown::reasoning_line_markup`). Trailing blank lines left
-/// behind are trimmed so the remaining answer renders cleanly.
-pub(super) fn strip_reasoning_lines(content: &str) -> String {
-    let sentinel = jcode_tui_markdown::REASONING_SENTINEL;
-    let mut out_lines: Vec<&str> = Vec::new();
-    for line in content.split('\n') {
-        if line.contains(sentinel) {
-            continue;
-        }
-        out_lines.push(line);
-    }
-    // Collapse runs of blank lines created by removed reasoning blocks, and trim
-    // leading/trailing blank lines.
-    let mut result = String::with_capacity(content.len());
-    let mut prev_blank = true; // suppress leading blanks
-    for line in out_lines {
-        let is_blank = line.trim().is_empty();
-        if is_blank && prev_blank {
-            continue;
-        }
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        result.push_str(line);
-        prev_blank = is_blank;
-    }
-    result.trim_end().to_string()
-}
+mod reasoning_transcript;
+pub(super) use reasoning_transcript::strip_reasoning_lines;
 
 fn mission_turn_reminder(session_id: &str) -> Option<String> {
     crate::mission::active_system_reminder(session_id)
@@ -1151,7 +1125,22 @@ pub(super) fn expand_paste_placeholders(app: &App, input: &str) -> String {
 
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+    stage_queued_input(app, prepared);
+}
+
+pub(super) fn stage_queued_input(app: &mut App, prepared: PreparedInput) {
+    let mut text = prepared.expanded;
+    offset_image_markers(&mut text, prepared.images.len(), app.queued_images.len());
+    app.queued_messages.push(text);
+    app.queued_images.extend(prepared.images);
+}
+
+pub(super) fn offset_image_markers(text: &mut String, count: usize, offset: usize) {
+    if offset > 0 {
+        for i in (1..=count).rev() {
+            *text = text.replace(&format!("[image {i}]"), &format!("[image {}]", offset + i));
+        }
+    }
 }
 
 /// True for composer text that runs as a client command rather than a prompt:
@@ -1272,7 +1261,11 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         had_pending = true;
     }
     if !app.queued_messages.is_empty() {
-        parts.extend(std::mem::take(&mut app.queued_messages));
+        for mut text in std::mem::take(&mut app.queued_messages) {
+            offset_image_markers(&mut text, app.queued_images.len(), app.pending_images.len());
+            parts.push(text);
+        }
+        app.pending_images.append(&mut app.queued_images);
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -1433,8 +1426,14 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
-        // SSH workflow state and todo reads belong to the remote daemon.
-        // Even the guardrail/report checks below consult laptop session files.
+        // Playback observes recorded turns. It must never create new work from
+        // the current machine's todos, guardrails, or overnight configuration.
+        if self.is_replay {
+            return false;
+        }
+        // SSH campaign state and todo reads belong to the remote daemon.
+        // A local daemon still uses the explicit TUI overnight campaign below,
+        // separately from daemon-owned ordinary todo continuation.
         if crate::tui::is_ssh_remote() {
             return false;
         }
@@ -1452,6 +1451,12 @@ impl App {
         // merged into it (or sent ahead of it) after an Esc redirect.
         if self.has_pending_user_followup() {
             return false;
+        }
+        if self.is_remote {
+            // Ordinary todo follow-ups belong to the daemon. Explicit local
+            // /overnight campaigns retain their independent scheduler until
+            // campaign ownership is migrated as well.
+            return self.schedule_overnight_poke_followup_if_needed();
         }
         if self.all_open_todos_are_paused() {
             self.last_auto_poke_fingerprint = None;
@@ -1471,7 +1476,10 @@ impl App {
         &mut self,
         final_response_delivered: bool,
     ) -> bool {
-        if crate::tui::is_ssh_remote() {
+        if self.is_replay {
+            return false;
+        }
+        if self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         // Completion is visible even with /poke off, and never needs another
@@ -1632,12 +1640,16 @@ impl App {
             let needs_spike_challenge = quality_reviews_enabled
                 && confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
+            // Goals that document why validation stopped exempt their todos:
+            // asking again cannot change an exhausted constraint.
+            let validation_targets = crate::todo::todos_needing_validation(&todos, &goals);
             let needs_validation = quality_reviews_enabled
-                && confidence_summary.completion_confidence_needs_validation;
+                && confidence_summary.completion_confidence_needs_validation
+                && !validation_targets.is_empty();
             if (needs_validation || needs_spike_challenge) && gate_budget_left {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
-                let notice = if confidence_summary.completion_confidence_needs_validation {
+                let notice = if needs_validation {
                     crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
                     "🔍 Double-checking confidence for you..."
                 } else {
@@ -1650,7 +1662,11 @@ impl App {
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
-                let summary = super::commands::build_todo_confidence_summary_message(&todos);
+                let summary = if needs_validation {
+                    crate::todo::build_todo_validation_continuation_message(&validation_targets)
+                } else {
+                    crate::todo::build_todo_confidence_spike_continuation_message(&todos)
+                };
                 self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;
@@ -1908,7 +1924,7 @@ fn input_routes_to_new_session(app: &App) -> bool {
     !trimmed.starts_with('/') && extract_input_shell_command(trimmed).is_none()
 }
 
-fn route_prompt_to_new_session_local(app: &mut App) -> bool {
+pub(super) fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     if !input_routes_to_new_session(app) {
         return false;
     }
@@ -2179,6 +2195,8 @@ pub(super) fn handle_alt_key(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('e') => {
             let expanded = crate::tui::ui::viewport::toggle_prompt_history_expanded();
+            app.prompt_history_backfill = (None, 0);
+            app.maybe_backfill_expanded_prompt_history();
             app.set_status_notice(if expanded {
                 "Prompt history: showing more previous prompts (Alt+E to collapse)"
             } else {
@@ -2431,16 +2449,12 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
-    // Swarm views: Alt+N cycles chat → inline controls → full live page → chat.
-    // Selection/open/prompt controls stay available in both active views, while
-    // plain typing continues to flow to the chat input.
+    // Alt+N toggles the dedicated swarm page. Passive worker status lives in
+    // pinned todos rather than a separate inline controls strip.
     if app.toggle_keys.swarm_panel_focus.matches(code, modifiers) {
         match app.cycle_swarm_panel_view() {
             super::tui_state::SwarmPanelView::Chat => {
                 app.set_status_notice("Swarm view closed");
-            }
-            super::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             super::tui_state::SwarmPanelView::FullPage => {
                 app.set_status_notice(crate::tui::keybind::swarm_page_hint());
@@ -3007,11 +3021,21 @@ impl App {
     /// refer to a different image.
     pub(super) fn sync_input_image_attachments(&mut self) {
         let mut removed = 0;
-        for (index, (media_type, data)) in self.pending_images.iter_mut().enumerate() {
-            if !data.is_empty() && !self.input.contains(&format!("[image {}]", index + 1)) {
-                media_type.clear();
-                data.clear();
+        if self.pending_images.is_empty() {
+            self.detached_images.clear();
+        }
+        for (index, slot) in self.pending_images.iter_mut().enumerate() {
+            let marked = self.input.contains(&format!("[image {}]", index + 1));
+            if !slot.1.is_empty() && !marked {
+                // Keep the payload: Esc and Ctrl+U promise "Ctrl+Z to restore",
+                // and a restored marker must still carry its image.
+                self.detached_images.insert(index, std::mem::take(slot));
                 removed += 1;
+            } else if slot.1.is_empty()
+                && marked
+                && let Some(payload) = self.detached_images.remove(&index)
+            {
+                *slot = payload;
             }
         }
         if removed > 0 {
@@ -3028,6 +3052,7 @@ impl App {
     }
 
     pub(super) fn take_pending_image_payloads(&mut self) -> Vec<(String, String)> {
+        self.detached_images.clear();
         std::mem::take(&mut self.pending_images)
             .into_iter()
             .filter(|(media_type, data)| !media_type.is_empty() && !data.is_empty())
@@ -3108,210 +3133,6 @@ impl App {
     #[cfg(test)]
     pub(super) fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
         self.handle_key_core(code, modifiers, None)
-    }
-
-    fn handle_key_core(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-        text_input: Option<String>,
-    ) -> Result<()> {
-        let mut code = code;
-        let mut modifiers = modifiers;
-        ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
-
-        if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
-            return Ok(());
-        }
-
-        // Alt+5 always starts the onboarding rehearsal from a pristine first
-        // screen, even when another modal or a previous sim screen is active.
-        if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
-            return Ok(());
-        }
-        if self.handle_update_sim_shortcut(code, modifiers) {
-            return Ok(());
-        }
-        if self.handle_update_rehearsal_shortcut(code, modifiers) {
-            return Ok(());
-        }
-
-        // Cmd+5 toggles the onboarding rehearsal. Every other key goes to the
-        // real onboarding handlers, exactly as on a first run.
-        if self.handle_onboarding_sim_toggle_shortcut(code, modifiers) {
-            return Ok(());
-        }
-
-        if handle_modal_key(self, code, modifiers)? {
-            return Ok(());
-        }
-
-        if self.handle_onboarding_continue_prompt_key(code) {
-            return Ok(());
-        }
-
-        // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
-        // show "you just pressed X → does Y". Placed after the modal/overlay
-        // handlers so overlay-local keys stay silent. Unknown chords are
-        // reported at the fall-through points below.
-        self.observe_known_hotkey(code, modifiers, false);
-
-        if code == KeyCode::BackTab {
-            self.cycle_model_favorite_hotkey();
-            return Ok(());
-        }
-
-        // While the model picker preview is visible, route its favorite/default
-        // hotkeys (Ctrl+O set default, Ctrl+N toggle favorite) to the focused
-        // picker handler before the global control shortcuts can claim them. This
-        // makes the hotkeys work directly in the preview list the user always
-        // sees, without colliding with the readline/tmux keys (Ctrl+B/Ctrl+F).
-        if self.model_picker_preview_hotkey(code, modifiers)? {
-            return Ok(());
-        }
-
-        if self.handle_key_during_provider_failover(code) {
-            return Ok(());
-        }
-
-        // Accept an armed post-error fallback offer: switch to the next best
-        // model/auth-method and resend the failed turn.
-        if self.pending_fallback_offer.is_some()
-            && !self.is_processing
-            && self.fallback_switch_key_matches(code, modifiers)
-        {
-            self.apply_pending_fallback_offer();
-            return Ok(());
-        }
-
-        // Accept an armed "merge the diverged update" offer: spawn a jcode agent
-        // to reconcile the branches. Shares the fallback-switch accept key.
-        if self.merge_offer_key_matches(code, modifiers) {
-            self.accept_update_merge_offer();
-            return Ok(());
-        }
-
-        if is_next_prompt_new_session_hotkey(code, modifiers) {
-            self.toggle_next_prompt_new_session_routing();
-            return Ok(());
-        }
-
-        if self.handle_command_suggestion_key(code, modifiers) {
-            return Ok(());
-        }
-
-        if handle_pre_control_shortcuts(self, code, modifiers) {
-            return Ok(());
-        }
-
-        self.normalize_diagram_state();
-        let diagram_available = self.diagram_available();
-
-        // Ctrl / Alt(Option) / Cmd(Super) + Up all recall queued/pending messages
-        // for editing and then walk prompt history. We accept any of the three
-        // single modifiers so the gesture works regardless of which one a given
-        // terminal forwards (some send Option as Alt, some forward Command as
-        // Super), without the user having to rebind anything. Alt+Up/Down are
-        // claimed earlier by the speed-tier keys by default; unbinding
-        // speed_increase/speed_decrease restores the Alt alias here.
-        if code == KeyCode::Up && is_prompt_recall_modifier(modifiers) {
-            if retrieve_pending_message_for_edit(self) {
-                return Ok(());
-            }
-            // Normalize to CONTROL so handle_prompt_history_navigation takes its
-            // explicit-history path (jump straight into history even mid-draft).
-            handle_prompt_history_navigation(self, KeyCode::Up, KeyModifiers::CONTROL);
-            return Ok(());
-        }
-
-        if code == KeyCode::Down && is_prompt_recall_modifier(modifiers) {
-            handle_prompt_history_navigation(self, KeyCode::Down, KeyModifiers::CONTROL);
-            return Ok(());
-        }
-
-        // Handle ctrl combos regardless of processing state
-        if modifiers.contains(KeyModifiers::CONTROL)
-            && handle_global_control_shortcuts(self, code, diagram_available)
-        {
-            return Ok(());
-        }
-
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
-        // Terminals may encode Command as either Super or Meta.
-        if is_alternate_enter(code, modifiers) {
-            handle_alternate_enter(self);
-            return Ok(());
-        }
-
-        // Shift+Enter, Alt/Option+Enter, and the trailing-backslash fallback all
-        // insert a newline in the input box.
-        if newline::enter_inserts_newline(self, code, modifiers) {
-            return Ok(());
-        }
-
-        // When the model picker preview is visible, arrow keys navigate the picker list
-        if self
-            .inline_interactive_state
-            .as_ref()
-            .map(|p| p.preview)
-            .unwrap_or(false)
-        {
-            match code {
-                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                    return self.handle_inline_interactive_key(code, modifiers);
-                }
-                _ => {}
-            }
-        }
-
-        if handle_multiline_input_navigation(self, code, modifiers)
-            || handle_prompt_history_navigation(self, code, modifiers)
-        {
-            return Ok(());
-        }
-
-        if let Some(text) = text_input.or_else(|| text_input_for_key(code, modifiers)) {
-            handle_text_input(self, &text);
-            return Ok(());
-        }
-
-        // Never fall through and insert literal text for unhandled Ctrl+key chords. This stays
-        // after text_input so Ctrl+Alt/AltGr symbols delivered as final printable text still work.
-        if modifiers.contains(KeyModifiers::CONTROL) {
-            self.note_unrecognized_hotkey(code, modifiers, false);
-            return Ok(());
-        }
-
-        if code == KeyCode::Enter {
-            // Stray post-paste Enter from some terminals is not a submit (#544).
-            if paste_guard::consume_paste_trailing_enter() {
-                return Ok(());
-            }
-            // During the onboarding model-selection phase, Enter on an empty
-            // prompt opens the model picker instead of submitting nothing.
-            if self.input.trim().is_empty()
-                && matches!(
-                    self.onboarding_phase(),
-                    Some(crate::tui::app::onboarding_flow::OnboardingPhase::ModelSelect)
-                )
-            {
-                self.open_model_picker();
-                return Ok(());
-            }
-            handle_enter(self);
-            return Ok(());
-        }
-
-        // A modified chord (or function key) that reached this point is not
-        // bound to anything; tell the user instead of silently swallowing it or
-        // inserting a surprise character.
-        self.note_unrecognized_hotkey(code, modifiers, false);
-
-        if handle_basic_key(self, code) {
-            return Ok(());
-        }
-
-        Ok(())
     }
 
     pub(super) fn request_full_redraw(&mut self) {
@@ -3681,7 +3502,7 @@ impl App {
         if self.reasoning_partial_len > 0 {
             self.reasoning_partial_len = 0;
         }
-        self.streaming.streaming_text.push_str(text);
+        self.streaming.streaming_text_mut().push_str(text);
         self.refresh_split_view_if_needed();
     }
 
@@ -3741,7 +3562,7 @@ impl App {
     }
 
     pub(super) fn replace_streaming_text(&mut self, text: String) {
-        self.streaming.streaming_text = text;
+        *self.streaming.streaming_text_mut() = text;
         // The live reasoning tail belonged to the *previous* buffer. Keeping its
         // byte length would make `strip_reasoning_partial_tail` slice at an
         // offset that has no relation to the new contents (and can land
@@ -3754,7 +3575,7 @@ impl App {
     }
 
     pub(super) fn clear_streaming_render_state(&mut self) {
-        self.streaming.streaming_text.clear();
+        self.streaming.streaming_text_mut().clear();
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -3820,7 +3641,7 @@ impl App {
     }
 
     pub(super) fn take_streaming_text(&mut self) -> String {
-        let content = std::mem::take(&mut self.streaming.streaming_text);
+        let content = std::mem::take(self.streaming.streaming_text_mut());
         self.stream_message_ended = false;
         self.deferred_stream_done_id = None;
         self.reasoning_streaming = false;
@@ -4092,6 +3913,8 @@ impl App {
         // Remember the typed prompt so we can restore it to the input box if this
         // turn fails (e.g. "token refresh needed"), instead of dropping it.
         self.last_submitted_input = Some(raw_input.clone());
+        self.automatic_failover_targets.clear();
+        self.automatic_failover_stopped = false;
 
         // See `stage_turn_for_remote_tick_loop`: a remote client must never
         // park on the local-only `pending_turn` flag.
@@ -4213,6 +4036,10 @@ impl App {
             let combined = messages.join("\n\n");
             let has_combined = !combined.is_empty();
             let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+            if !messages.is_empty() && !preserve_visible_turn {
+                self.automatic_failover_targets.clear();
+                self.automatic_failover_stopped = false;
+            }
 
             self.commit_pending_streaming_assistant_message();
 
@@ -4236,14 +4063,11 @@ impl App {
                     &combined,
                     self.provider.reasoning_effort().as_deref(),
                 );
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: combined.clone(),
-                        cache_control: None,
-                    }],
-                );
+                let message =
+                    Message::user_with_images(&combined, std::mem::take(&mut self.queued_images));
+                self.session
+                    .add_message(Role::User, message.content.to_vec());
+                self.add_provider_message(message);
             }
             self.append_turn_system_reminder(turn_reminder);
             self.session_save_pending = true;

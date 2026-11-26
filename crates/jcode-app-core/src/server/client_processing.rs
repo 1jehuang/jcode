@@ -195,6 +195,7 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        jarvis_voice,
         id,
         content,
         images,
@@ -322,6 +323,11 @@ pub(super) async fn start_processing_message(
         .await
         .get(client_session_id)
         .is_some_and(|member| member.report_back_to_session_id.is_some());
+    if owned_worker {
+        crate::agents_status::mark_worker(client_session_id);
+    } else {
+        crate::agents_status::load_plan_from_disk(client_session_id);
+    }
     let (start_message_index, pending_queue) = {
         let mut agent_guard = agent.lock().await;
         if owned_worker {
@@ -359,6 +365,7 @@ pub(super) async fn start_processing_message(
                 system_reminder,
                 event_tx,
                 server_failover,
+                jarvis_voice.then_some(crate::session::StoredDisplayRole::JarvisUser),
             ),
         ))
         .catch_unwind()
@@ -391,7 +398,7 @@ pub(super) async fn start_processing_message(
                 id, error
             )),
         }
-        let (completion_report, push_body, push_title) = {
+        let (completion_report, push_body, push_title, push_dir) = {
             let agent = report_agent.lock().await;
             (
                 agent.recent_assistant_output_tail_after(start_message_index),
@@ -399,6 +406,7 @@ pub(super) async fn start_processing_message(
                     .final_assistant_text_after(start_message_index)
                     .unwrap_or_default(),
                 agent.session_display_title_or_name(),
+                agent.working_dir().map(str::to_string),
             )
         };
         crate::agents_status::turn_finished(
@@ -419,12 +427,14 @@ pub(super) async fn start_processing_message(
                         turn_started.elapsed(),
                     ) =>
                 {
-                    crate::mobile_push::notify(
+                    crate::mobile_push::notify_turn(
                         crate::mobile_push::PushKind::TurnDone,
                         &push_session_id,
                         Some(&push_title),
                         &push_body,
                         Some(id),
+                        push_dir.as_deref(),
+                        Some(turn_started.elapsed()),
                     );
                 }
                 Ok(()) => crate::mobile_push::note_skipped(
@@ -434,12 +444,14 @@ pub(super) async fn start_processing_message(
                         turn_started.elapsed().as_secs()
                     ),
                 ),
-                Err(error) => crate::mobile_push::notify(
+                Err(error) => crate::mobile_push::notify_turn(
                     crate::mobile_push::PushKind::TurnError,
                     &push_session_id,
                     Some(&push_title),
                     &crate::util::format_error_chain(error),
                     Some(id),
+                    push_dir.as_deref(),
+                    Some(turn_started.elapsed()),
                 ),
             }
         }
@@ -528,18 +540,7 @@ pub(super) async fn cancel_processing_message(
         .as_deref()
         .unwrap_or(session_control.session_id.as_str())
         .to_string();
-    // Stopping a session also stops the workers it spawned. This runs first
-    // and on every path, including the idle one: a coordinator waiting on
-    // `await_members` has no running turn of its own while its workers do.
-    super::super::swarm::cancel_spawned_descendant_turns(
-        &session_control.session_id,
-        swarm.members,
-        swarm.swarms_by_id,
-        Some(swarm.event_history),
-        Some(swarm.event_counter),
-        Some(swarm.event_tx),
-    )
-    .await;
+    // Cancel only the addressed session. Workers have independent turns.
     crate::logging::info(&format!(
         "SERVER_INTERRUPT_CANCEL_RECEIVED request_id={:?} session={} control_session={} client_processing={} message_id={:?} has_task={} decoded_age_ms={:?}",
         request_id,
@@ -743,16 +744,22 @@ pub(super) async fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> 
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn queue_soft_interrupt(
     id: u64,
     content: String,
     images: Vec<(String, String)>,
     urgent: bool,
+    jarvis_voice: bool,
     client_id: Option<String>,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let source = SoftInterruptSource::User;
+    let source = if jarvis_voice {
+        SoftInterruptSource::JarvisUser
+    } else {
+        SoftInterruptSource::User
+    };
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     crate::logging::info(&format!(

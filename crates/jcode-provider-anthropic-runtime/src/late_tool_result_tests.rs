@@ -8,9 +8,9 @@ use super::*;
 #[tokio::test]
 async fn test_tool_use_answered_later_still_gets_result_immediately_after() {
     let provider = AnthropicProvider::new();
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -90,9 +90,9 @@ async fn test_tool_use_answered_later_still_gets_result_immediately_after() {
 /// image label and any deferred tool reference) when it is moved up, or the
 /// model sees a partial tool output and the reference is dropped.
 fn late_result_conversation(attachments: Vec<ContentBlock>) -> Vec<Message> {
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };

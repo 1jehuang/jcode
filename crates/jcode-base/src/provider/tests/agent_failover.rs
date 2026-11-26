@@ -280,6 +280,109 @@ fn agent_failover_curated_order_beats_larger_context_window() {
 }
 
 #[test]
+fn agent_failover_api_capacity_does_not_inherit_codex_limits() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&["gpt-5.4", "gpt-6.1-sol"]);
+        models::persist_openai_model_catalog_for_scope(
+            "openai-fox",
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 500_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-6.1-sol".into()),
+            "a Codex catalog must not cap the platform API route"
+        );
+
+        let scope = models::openai_catalog_scope_for_credential(
+            false,
+            &std::env::var("OPENAI_API_KEY").unwrap(),
+        );
+        models::persist_openai_model_catalog_for_scope(
+            &scope,
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into(), "gpt-5.4".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 128_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-5.4".into()),
+            "capacity advertised by this API credential remains authoritative"
+        );
+    });
+}
+
+#[test]
+fn agent_failover_context_limits_follow_exact_saved_account() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&[]);
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        for (account, limit) in [("openai-fox", 500_000), ("openai-otter", 900_000)] {
+            auth::codex::upsert_account_from_tokens(account, "fresh", "refresh", None, None)
+                .unwrap();
+            pool.members.push(format!("openai:{account}"));
+            models::persist_openai_model_catalog_for_scope(
+                account,
+                &models::OpenAIModelCatalog {
+                    available_models: vec!["gpt-6.1-sol".into()],
+                    context_limits: HashMap::from([("gpt-6.1-sol".into(), limit)]),
+                    ..Default::default()
+                },
+            );
+        }
+        pool.save().unwrap();
+        agent_failover_catalog(
+            &provider,
+            ["openai-fox", "openai-otter"]
+                .into_iter()
+                .map(|account| ModelRoute {
+                    api_method: format!("openai-oauth@{account}"),
+                    ..build_openai_oauth_route("gpt-6.1-sol", true, "")
+                })
+                .collect(),
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-otter:gpt-6.1-sol".into()),
+            "do not borrow a larger or smaller window from another login"
+        );
+        let messages = [Message::user_with_images(
+            "Run the benchmark",
+            vec![
+                ("image/png".into(), "a".repeat(844_300)),
+                ("image/png".into(), "b".repeat(908_712)),
+            ],
+        )];
+        let tools = [ToolDefinition::new(
+            "unloaded_catalog_tool",
+            "x".repeat(700_000),
+            serde_json::json!({"type": "object"}),
+        )
+        .deferred()];
+        let (_, tokens) = MultiProvider::estimate_request_input(
+            &messages,
+            &tools,
+            CompletionMode::Unified { system: "" },
+        );
+        assert!(tokens < 10_000, "images and unloaded schemas are not text");
+        assert_eq!(
+            agent_failover_target(&provider, tokens, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-fox:gpt-6.1-sol".into()),
+            "the screenshot-shaped request must fit the preferred modern OAuth route"
+        );
+    });
+}
+
+#[test]
 fn agent_failover_configured_unknown_context_cannot_bypass_capacity_check() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();

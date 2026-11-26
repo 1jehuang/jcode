@@ -32,6 +32,16 @@ use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+/// An assistant tool request is persisted before execution. If it is still the
+/// last message after restart, execution never persisted a result.
+pub(super) fn last_message_has_pending_tool(session: &crate::session::StoredMessage) -> bool {
+    session.role == crate::message::Role::Assistant
+        && session
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+}
+
 pub(super) fn session_was_interrupted_by_reload(agent: &Agent) -> bool {
     let messages = agent.messages();
     let Some(last) = messages.last() else {
@@ -65,14 +75,19 @@ pub(super) fn restored_session_was_interrupted(
         .map(|role| *role == crate::message::Role::User)
         .unwrap_or(false);
     let last_is_reload_interrupted = session_was_interrupted_by_reload(agent);
-    let closed_pending_user_during_reload =
+    let pending_turn = last_is_user
+        || agent
+            .messages()
+            .last()
+            .is_some_and(last_message_has_pending_tool);
+    let closed_pending_turn_during_reload =
         matches!(previous_status, crate::session::SessionStatus::Closed)
-            && last_is_user
+            && pending_turn
             && crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
 
-    if last_is_user && matches!(previous_status, crate::session::SessionStatus::Active) {
+    if pending_turn && matches!(previous_status, crate::session::SessionStatus::Active) {
         crate::logging::info(&format!(
-            "Session {} was Active with pending user message - treating as interrupted",
+            "Session {} was Active with a pending user message or tool call - treating as interrupted",
             session_id
         ));
     }
@@ -84,9 +99,9 @@ pub(super) fn restored_session_was_interrupted(
         ));
     }
 
-    if closed_pending_user_during_reload {
+    if closed_pending_turn_during_reload {
         crate::logging::info(&format!(
-            "Session {} was Closed with a pending user message during a recent reload - treating as interrupted",
+            "Session {} was Closed with a pending user message or tool call during a recent reload - treating as interrupted",
             session_id
         ));
     }
@@ -94,42 +109,14 @@ pub(super) fn restored_session_was_interrupted(
     matches!(
         previous_status,
         crate::session::SessionStatus::Crashed { .. }
-    ) || (matches!(previous_status, crate::session::SessionStatus::Active) && last_is_user)
+    ) || (matches!(previous_status, crate::session::SessionStatus::Active) && pending_turn)
         || last_is_reload_interrupted
-        || closed_pending_user_during_reload
+        || closed_pending_turn_during_reload
 }
 
-fn mark_remote_reload_started(request_id: &str) {
-    crate::server::write_reload_state(
-        request_id,
-        jcode_build_meta::version(),
-        crate::server::ReloadPhase::Starting,
-        None,
-    );
-}
-
-async fn rename_shutdown_signal(
-    shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
-    old_session_id: &str,
-    new_session_id: &str,
-) {
-    if old_session_id == new_session_id {
-        return;
-    }
-
-    let mut signals = shutdown_signals.write().await;
-    if let Some(signal) = signals.remove(old_session_id) {
-        signals.insert(new_session_id.to_string(), signal);
-    }
-    drop(signals);
-    rename_background_tool_signal(old_session_id, new_session_id);
-    // In-flight turns are registered in the process-global cancel registry by
-    // session id. Attaching to / resuming a session renames it underneath a
-    // still-streaming turn, so the registration must follow, or a later Esc
-    // finds no active-turn signal for the new id and the model keeps
-    // generating (issue #732, regression of issue #428).
-    crate::turn_cancel_registry::rename_active_turns(old_session_id, new_session_id);
-}
+#[path = "session_reload_signals.rs"]
+mod session_reload_signals;
+use session_reload_signals::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_clear_session(

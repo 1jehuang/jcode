@@ -26,6 +26,7 @@ use super::protocol::{McpServerConfig, McpToolDef};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const CACHE_FILE: &str = "mcp-schema-cache.json";
 const CACHE_VERSION: u32 = 1;
@@ -45,14 +46,43 @@ pub struct CachedServerSchemas {
 pub struct McpSchemaCache {
     version: u32,
     /// server name -> cached schemas
-    servers: BTreeMap<String, CachedServerSchemas>,
+    #[serde(with = "shared_servers")]
+    servers: Arc<BTreeMap<String, Arc<CachedServerSchemas>>>,
+}
+
+// Keep the wire representation independent of serde's optional `rc` feature.
+// Snapshot clones share both the map and schemas. A changed map copies only
+// names and Arc handles, never the unchanged servers' potentially large JSON.
+mod shared_servers {
+    use super::*;
+    use serde::ser::SerializeMap;
+
+    pub fn serialize<S: serde::Serializer>(
+        servers: &Arc<BTreeMap<String, Arc<CachedServerSchemas>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(servers.len()))?;
+        for (name, entry) in servers.iter() {
+            map.serialize_entry(name, entry.as_ref())?;
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<BTreeMap<String, Arc<CachedServerSchemas>>>, D::Error> {
+        let servers = BTreeMap::<String, CachedServerSchemas>::deserialize(deserializer)?;
+        Ok(Arc::new(
+            servers.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
+        ))
+    }
 }
 
 impl Default for McpSchemaCache {
     fn default() -> Self {
         Self {
             version: CACHE_VERSION,
-            servers: BTreeMap::new(),
+            servers: Arc::new(BTreeMap::new()),
         }
     }
 }
@@ -215,9 +245,9 @@ impl McpSchemaCache {
             None => true,
         };
         if changed {
-            self.servers.insert(
+            Arc::make_mut(&mut self.servers).insert(
                 server.to_string(),
-                CachedServerSchemas { fingerprint, tools },
+                Arc::new(CachedServerSchemas { fingerprint, tools }),
             );
         }
         changed
@@ -227,7 +257,14 @@ impl McpSchemaCache {
     /// Returns true if anything was pruned.
     pub fn retain_servers(&mut self, current_servers: &[String]) -> bool {
         let before = self.servers.len();
-        self.servers
+        if self
+            .servers
+            .keys()
+            .all(|name| current_servers.iter().any(|n| n == name))
+        {
+            return false;
+        }
+        Arc::make_mut(&mut self.servers)
             .retain(|name, _| current_servers.iter().any(|n| n == name));
         self.servers.len() != before
     }
@@ -286,3 +323,142 @@ fn tool_defs_equal(a: &[McpToolDef], b: &[McpToolDef]) -> bool {
 #[cfg(test)]
 #[path = "schema_cache_tests.rs"]
 mod schema_cache_tests;
+
+#[cfg(test)]
+mod shared_snapshot_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn catalog() -> (McpSchemaCache, McpServerConfig) {
+        let config: McpServerConfig = serde_json::from_value(json!({
+            "command": "schema-server", "args": [], "env": {}, "shared": true
+        }))
+        .unwrap();
+        let mut cache = McpSchemaCache::default();
+        for server in ["alpha", "beta"] {
+            let tools = (0..32)
+                .map(|i| McpToolDef {
+                    name: format!("tool_{i}"),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {"payload": {
+                            "type": "string", "description": "x".repeat(16_384),
+                            "default": null
+                        }}
+                    }),
+                })
+                .collect();
+            cache.update(server, &config, tools);
+        }
+        (cache, config)
+    }
+
+    #[test]
+    fn large_schema_snapshots_share_and_mutate_in_isolation() {
+        let (original, config) = catalog();
+        let mut snapshot = original.clone();
+        assert!(Arc::ptr_eq(&original.servers, &snapshot.servers));
+        assert!(std::ptr::eq(
+            original.tools_for("alpha", &config).unwrap(),
+            snapshot.tools_for("alpha", &config).unwrap()
+        ));
+        assert!(!snapshot.update(
+            "alpha",
+            &config,
+            original.tools_for("alpha", &config).unwrap().to_vec()
+        ));
+        assert!(!snapshot.retain_servers(&["alpha".into(), "beta".into()]));
+        assert!(Arc::ptr_eq(&original.servers, &snapshot.servers));
+
+        assert!(snapshot.update("alpha", &config, vec![]));
+        assert!(!Arc::ptr_eq(&original.servers, &snapshot.servers));
+        assert!(Arc::ptr_eq(
+            &original.servers["beta"],
+            &snapshot.servers["beta"]
+        ));
+        assert_eq!(original.tools_for("alpha", &config).unwrap().len(), 32);
+        assert!(snapshot.tools_for("alpha", &config).unwrap().is_empty());
+        let before_prune = snapshot.clone();
+        assert!(snapshot.retain_servers(&["beta".into()]));
+        assert_eq!(before_prune.server_count(), 2);
+        assert_eq!(original.server_count(), 2);
+        assert_eq!(snapshot.server_count(), 1);
+        assert!(Arc::ptr_eq(
+            &before_prune.servers["beta"],
+            &snapshot.servers["beta"]
+        ));
+    }
+
+    #[test]
+    fn large_schema_json_is_byte_identical_to_legacy() {
+        #[derive(Serialize, Deserialize)]
+        struct LegacyCache {
+            version: u32,
+            servers: BTreeMap<String, CachedServerSchemas>,
+        }
+        let (cache, _) = catalog();
+        let legacy = LegacyCache {
+            version: CACHE_VERSION,
+            servers: cache
+                .servers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_ref().clone()))
+                .collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        assert!(bytes.len() > 1_000_000);
+        assert_eq!(bytes, serde_json::to_vec_pretty(&cache).unwrap());
+        let decoded: McpSchemaCache = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(bytes, serde_json::to_vec_pretty(&decoded).unwrap());
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .contains("\"description\": null")
+        );
+    }
+
+    #[test]
+    fn large_schema_load_memo_shares_and_respects_path_and_file_changes() {
+        let _guard = crate::storage::lock_test_env();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                unsafe {
+                    match &self.0 {
+                        Some(home) => std::env::set_var("JCODE_HOME", home),
+                        None => std::env::remove_var("JCODE_HOME"),
+                    }
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        let first_home = tempfile::tempdir().unwrap();
+        let second_home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("JCODE_HOME", first_home.path()) };
+        let (cache, config) = catalog();
+        cache.save();
+        let first = McpSchemaCache::load();
+        let mut second = McpSchemaCache::load();
+        assert!(Arc::ptr_eq(&first.servers, &second.servers));
+        assert!(Arc::ptr_eq(
+            &first.servers["alpha"],
+            &second.servers["alpha"]
+        ));
+        second.update("alpha", &config, vec![]);
+        let unchanged = McpSchemaCache::load();
+        assert!(Arc::ptr_eq(&first.servers, &unchanged.servers));
+        second.save();
+        let changed = McpSchemaCache::load();
+        assert!(!Arc::ptr_eq(&first.servers, &changed.servers));
+        assert!(changed.tools_for("alpha", &config).unwrap().is_empty());
+        assert_eq!(first.tools_for("alpha", &config).unwrap().len(), 32);
+        unsafe { std::env::set_var("JCODE_HOME", second_home.path()) };
+        cache.save();
+        let other_path = McpSchemaCache::load();
+        assert!(!Arc::ptr_eq(&first.servers, &other_path.servers));
+        assert_eq!(other_path.tools_for("alpha", &config).unwrap().len(), 32);
+        std::fs::write(cache_path().unwrap(), "{\"version\":999,\"servers\":{}}").unwrap();
+        assert_eq!(McpSchemaCache::load().server_count(), 0);
+    }
+}

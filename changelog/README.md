@@ -9,6 +9,12 @@ consumed by jcode.sh and the GitHub release body.
 - `v<version>.json` - one entry per release (e.g. `v0.34.0.json`).
 - `index.json` - newest-first list of released versions with dates, so
   consumers can discover entries without directory listings.
+- `discord/v<version>.json` - optional custom Discord announcement override.
+  Omit it for normal single-message releases so Discord automatically posts the
+  full GitHub release notes rendered from `v<version>.json`. Only add one when
+  a custom (usually multi-part) Discord post is genuinely needed, and if one
+  already exists when editing `v<version>.json`, update or remove it in the same
+  commit so Discord never posts a stale override.
 
 ## Entry schema
 

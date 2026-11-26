@@ -531,8 +531,10 @@ pub fn default_phase(todos: &[TodoItem]) -> Option<u32> {
 /// Ensure the coordinator's todo list has a lane named `lane` in `phase` for a
 /// spawned worker, returning the updated list and the lane id. An existing
 /// lane with that group in that phase is adopted as is; otherwise one item is
-/// appended from `title` / `details`. Every spawned worker therefore owns
-/// exactly one lane, and that lane is all it syncs.
+/// appended, named `title` with `details` as its body. Todo names must be
+/// unique within a plan, so a `title` already in use gets a numeric suffix.
+/// Every spawned worker therefore owns exactly one lane, and that lane is all
+/// it syncs.
 pub fn ensure_spawn_lane(
     todos: &[TodoItem],
     lane: &str,
@@ -555,13 +557,16 @@ pub fn ensure_spawn_lane(
     }
     let mut todos = todos.to_vec();
     let title = title.trim();
+    let base = if title.is_empty() { lane } else { title };
+    let mut content = base.to_string();
+    let mut suffix = 2;
+    while todos.iter().any(|todo| todo.content == content) {
+        content = format!("{base} ({suffix})");
+        suffix += 1;
+    }
     todos.push(TodoItem {
         id: id_hint.to_string(),
-        content: if title.is_empty() {
-            lane.to_string()
-        } else {
-            title.to_string()
-        },
+        content,
         status: "pending".to_string(),
         priority: "high".to_string(),
         group: Some(lane.to_string()),
@@ -626,5 +631,38 @@ mod spawn_lane_tests {
         let (out, id) = ensure_spawn_lane(&todos, "fix", None, "Fix it", None, "s1");
         assert_eq!(id, "lane::fix");
         assert_eq!(out.last().unwrap().stage, None);
+    }
+
+    /// Regression test (#2151): the spawn call site passes the derived
+    /// label as the title. Verify that the title becomes the todo's
+    /// `content` and the prompt becomes `details`.
+    #[test]
+    fn spawn_lane_title_becomes_content_prompt_becomes_details() {
+        let todos: Vec<TodoItem> = vec![];
+        let title = "fix parser error";
+        let prompt = "Review the diff\nand fix the bug";
+        let (out, id) = ensure_spawn_lane(&todos, "fix parser", None, title, Some(prompt), "s1");
+        assert_eq!(id, "lane::fix parser");
+        let added = out.last().unwrap();
+        // content must be the derived label, NOT the prompt's first line.
+        assert_eq!(added.content, "fix parser error");
+        assert_ne!(added.content, "Review the diff");
+        // details carries the full prompt.
+        assert_eq!(
+            added.details.as_deref(),
+            Some("Review the diff\nand fix the bug")
+        );
+    }
+
+    /// A label reused in another phase, or equal to an existing todo's name,
+    /// must not create a duplicate name: the todo tool rejects those plans.
+    #[test]
+    fn spawn_lane_name_stays_unique_within_the_plan() {
+        let todos = vec![item("docs", "completed", Some(1), Some("docs"))];
+        let (out, id) = ensure_spawn_lane(&todos, "docs", Some(2), "docs", None, "s1");
+        assert_eq!(id, "lane:2:docs");
+        assert_eq!(out.last().unwrap().content, "docs (2)");
+        let (out, _) = ensure_spawn_lane(&out, "docs", Some(3), "docs", None, "s2");
+        assert_eq!(out.last().unwrap().content, "docs (3)");
     }
 }

@@ -35,6 +35,8 @@ impl std::fmt::Debug for ProviderOAuthEmail {
     }
 }
 
+mod screen;
+pub use screen::*;
 mod comm_format;
 mod notifications;
 
@@ -122,6 +124,9 @@ pub struct HistoryBase {
 
 /// Synthetic lazy-window marker used by remote transcript bootstraps.
 pub const RECENT_HISTORY_MARKER_PREFIX: &str = "Earlier remote history - ";
+
+/// `Pong.capabilities` entry of servers that accept `Request::ClientFocus`.
+pub const CLIENT_FOCUS_CAPABILITY: &str = "client_focus";
 
 impl HistoryBase {
     /// Request a bounded initial view. Older servers ignore this hint and
@@ -841,7 +846,8 @@ impl Request {
     pub fn id(&self) -> u64 {
         match self {
             Request::RuntimeCommand { id, .. } => *id,
-            Request::ConfigureTools { id, .. }
+            Request::ScreenContext { id, .. }
+            | Request::ConfigureTools { id, .. }
             | Request::ListTools { id }
             | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
@@ -855,6 +861,7 @@ impl Request {
             Request::Ping { id } => *id,
             Request::GetState { id } => *id,
             Request::GetTodos { id } => *id,
+            Request::ClientFocus { id, .. } => *id,
             Request::DebugCommand { id, .. } => *id,
             Request::ClientDebugCommand { id, .. } => *id,
             Request::ClientDebugResponse { id, .. } => *id,
@@ -991,6 +998,23 @@ pub fn encode_event(event: &ServerEvent) -> String {
     let mut json = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
     json.push('\n');
     json
+}
+
+/// Encode the same newline-terminated JSON as [`encode_event`], reusing storage
+/// for ordinary streaming events. Oversized snapshots are not retained on the
+/// next call. Callers should also release buffers over 64 KiB after writing to
+/// avoid retaining a large final snapshot while the connection is idle.
+pub fn encode_event_into(event: &ServerEvent, buffer: &mut Vec<u8>) {
+    if buffer.capacity() > 64 * 1024 {
+        *buffer = Vec::new();
+    } else {
+        buffer.clear();
+    }
+    if serde_json::to_writer(&mut *buffer, event).is_err() {
+        buffer.clear();
+        buffer.extend_from_slice(b"{}");
+    }
+    buffer.push(b'\n');
 }
 
 /// Decode a request from a JSON string.

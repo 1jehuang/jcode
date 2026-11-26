@@ -202,11 +202,24 @@ fn live_processing_line_uses_real_tokens_transport_and_tool_intent() {
     assert!(!text.contains('\n'));
     status.phase = "streaming".into();
     status.output_tps_milli = Some(12_500);
+    status.status_detail = Some("opening websocket".into());
+    let streaming_line = live_processing_status_line(&status, None, "⠋");
+    let streaming_text = streaming_line.to_string();
     assert!(
-        live_processing_status_line(&status, None, "⠋")
-            .to_string()
-            .contains("12.5 tps")
+        streaming_text.contains("streaming…") && streaming_text.contains("12.5 tps"),
+        "{streaming_text}"
     );
+    assert!(
+        !streaming_text.contains("opening websocket"),
+        "stale websocket-opening detail should not show once streaming: {streaming_text}"
+    );
+    let stalled_line = live_processing_status_line(&status, Some(5.0), "⠋");
+    assert_eq!(stalled_line.spans[1].style.fg, Some(rgb(255, 193, 7)));
+    status.stream_message_ended = true;
+    let finalizing_text = live_processing_status_line(&status, Some(5.0), "⠋").to_string();
+    assert!(finalizing_text.contains("finalizing…"), "{finalizing_text}");
+    status.stream_message_ended = false;
+    status.status_detail = None;
     status.input_tokens = None;
     status.output_tokens = None;
     status.connection_type = None;
@@ -897,4 +910,44 @@ fn voice_ghost_text_wraps_after_input_without_moving_cursor() {
     let ghost = lines[0].spans.last().unwrap();
     assert_eq!(ghost.content.as_ref(), " the bug");
     assert!(ghost.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
+    let mut facts = OverscrollFacts {
+        machine: None,
+        dir: None,
+        branch: None,
+        git: None,
+        context: None,
+        account_remaining: None,
+        auth: None,
+        provider: Some("Antigravity".to_string()),
+        model: Some("Gemini 4 Neon Low".to_string()),
+        effort: Some("low".to_string()),
+    };
+    let (spans, _) = overscroll_fit_facts(&facts, 80);
+    let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        rendered.contains("Gemini 4 Neon Low") && !rendered.contains("Gemini 4 Neon Low low"),
+        "expected no duplicate effort suffix, got: {rendered}"
+    );
+
+    facts.effort = Some("medium".to_string());
+    let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
+    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        mismatched_rendered.contains("Gemini 4 Neon Low")
+            && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),
+        "expected no conflicting effort suffix on effort-named model, got: {mismatched_rendered}"
+    );
+
+    facts.effort = overscroll_short_reasoning("swarm").map(str::to_string);
+    let (swarm_spans, _) = overscroll_fit_facts(&facts, 80);
+    let swarm_rendered: String = swarm_spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(
+        swarm_rendered.contains("Gemini 4 Neon Low")
+            && swarm_rendered.contains(crate::tui::app::effort_display_label("swarm")),
+        "expected swarm effort label to remain visible, got: {swarm_rendered}"
+    );
 }

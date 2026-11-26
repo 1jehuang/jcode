@@ -234,7 +234,7 @@ pub(super) async fn maybe_handle_swarm_write_command(
                     return Ok(Some(
                         serde_json::json!({
                             "sent_to": target_session,
-                            "sent_to_name": target.friendly_name.clone(),
+                            "sent_to_name": target.friendly_name,
                             "message": message,
                         })
                         .to_string(),

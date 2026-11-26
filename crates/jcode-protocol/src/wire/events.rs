@@ -125,7 +125,15 @@ pub enum ServerEvent {
     },
     /// Serialized todo card snapshot containing todos, plan, and goals.
     #[serde(rename = "todos")]
-    Todos { session_id: String, payload: String },
+    Todos {
+        session_id: String,
+        payload: String,
+        /// True when this daemon sends a fresh snapshot whenever the stored
+        /// todo state changes, so the client need not poll. Absent on older
+        /// daemons, which only answer `get_todos`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pushes: bool,
+    },
     #[serde(rename = "account_usage")]
     AccountUsage {
         id: u64,
@@ -843,6 +851,10 @@ pub enum ServerEvent {
         id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Updated model ID when changing effort switches to a sibling model
+        /// variant (for example Antigravity `gemini-4-neon-low` -> `gemini-4-neon-medium`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },

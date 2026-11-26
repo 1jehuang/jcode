@@ -92,6 +92,8 @@ export interface TodoSnapshot {
   long_session_review_due: boolean;
   /** Session-scoped background task IDs still running. Absent on older servers. */
   running_background_tasks?: string[];
+  /** Assigned worker sessions confirmed to own a live turn by the daemon. */
+  running_workers?: string[];
 }
 
 /** Persistent effects of a follow-up decision. */

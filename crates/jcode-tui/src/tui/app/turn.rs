@@ -1,6 +1,9 @@
 #[path = "turn_system_reminder.rs"]
-mod system_reminder;
+pub(super) mod system_reminder;
 use super::*;
+#[path = "turn_prepared_turn.rs"]
+mod prepared_turn;
+
 use crate::message::ToolDefinition;
 
 /// Keep raw JSON separate for every in-flight call. Unkeyed providers address
@@ -13,27 +16,6 @@ struct PendingStreamingTools {
 impl PendingStreamingTools {
     fn start(&mut self, tool: ToolCall) {
         self.calls.push((tool, String::new()));
-    }
-
-    fn input(&mut self, id: Option<&str>, delta: &str) {
-        let call = match id {
-            Some(id) => self.calls.iter_mut().find(|(tool, _)| tool.id == id),
-            None => self.calls.last_mut(),
-        };
-        if let Some((_, input)) = call {
-            input.push_str(delta);
-        }
-    }
-
-    fn finish(&mut self, id: Option<&str>) -> Option<ToolCall> {
-        let index = match id {
-            Some(id) => self.calls.iter().position(|(tool, _)| tool.id == id)?,
-            None => self.calls.len().checked_sub(1)?,
-        };
-        let (mut tool, input) = self.calls.remove(index);
-        tool.input = ToolCall::parse_streamed_input_to_object(&input);
-        tool.refresh_intent_from_input();
-        Some(tool)
     }
 
     fn signature(&mut self, id: &str, signature: &str) {
@@ -416,7 +398,7 @@ impl App {
                                                 let content_clone = content_blocks.clone();
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -479,7 +461,7 @@ impl App {
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -793,6 +775,7 @@ impl App {
                                         self.update_terminal_title();
                                     }
                                     StreamEvent::ConnectionPhase { phase } => {
+                                        self.stream_message_ended = false;
                                         let was_connecting = matches!(
                                             self.status,
                                             ProcessingStatus::Connecting(_)
@@ -833,7 +816,17 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ResolvedModel { model } => {
+                                        call_usage.resolved_model = jcode_provider_core::nonempty_response_model(Some(&model)).map(str::to_string);
+                                    }
                                     StreamEvent::RetryRollback { attempt, max } => {
+                                        // Account for any observed failed-attempt usage, then
+                                        // clear its response model before the next attempt.
+                                        crate::telemetry::record_simple_completion_usage(
+                                            Some(&self.session.id), &provider_name, &model_at_request_start,
+                                            crate::telemetry::UsageSource::Agent,
+                                            std::mem::take(&mut call_usage),
+                                        );
                                         // Transient transport fault mid-stream; the provider is
                                         // replaying the request from the top. Discard the partial
                                         // attempt (accumulators + on-screen streaming render) so
@@ -1276,7 +1269,7 @@ impl App {
                 let content_clone = content_blocks.clone();
                 self.add_provider_message(Message {
                     role: Role::Assistant,
-                    content: content_blocks,
+                    content: content_blocks.into(),
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
                 });
@@ -1353,7 +1346,7 @@ impl App {
                     for blocks in generated_image_contexts.drain(..) {
                         self.add_provider_message(Message {
                             role: Role::User,
-                            content: blocks.clone(),
+                            content: blocks.clone().into(),
                             timestamp: Some(chrono::Utc::now()),
                             tool_duration_ms: None,
                         });
@@ -1424,7 +1417,8 @@ impl App {
                             tool_use_id: tc.id.clone(),
                             content: sdk_content,
                             is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
+                        }]
+                        .into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });
@@ -1681,7 +1675,7 @@ impl App {
                 for blocks in generated_image_contexts.drain(..) {
                     self.add_provider_message(Message {
                         role: Role::User,
-                        content: blocks.clone(),
+                        content: blocks.clone().into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });

@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn transport_controls_do_not_reinterpret_response_content() {
+    let mut saw_text = false;
+    let mut saw_thinking = false;
+    let mut calls = HashMap::new();
+    let mut completed = HashSet::new();
+    let mut pending = VecDeque::new();
+    let mut parse = |data: &str| {
+        parse_openai_response_event(
+            data,
+            &mut saw_text,
+            &mut saw_thinking,
+            &mut calls,
+            &mut completed,
+            &mut pending,
+        )
+    };
+    for phrase in [
+        "falling back from websockets to https transport",
+        "stream disconnected before completion",
+        "FALLING BACK FROM WEBSOCKETS TO HTTPS TRANSPORT",
+    ] {
+        let data =
+            serde_json::json!({"type":"response.output_text.delta","delta":phrase}).to_string();
+        assert!(matches!(parse(&data), Some(StreamEvent::TextDelta(text)) if text == phrase));
+    }
+    assert!(parse("FALLING BACK FROM WEBSOCKETS TO HTTPS TRANSPORT").is_none());
+    assert!(matches!(
+        parse("stream disconnected before completion"),
+        Some(StreamEvent::Error { .. })
+    ));
+    for data in [
+        r#"{"type":"response.output_text.delta","delta":"x"} trailing"#,
+        r#"{"type":"response.output_text.delta","type":"response.output_text.delta","delta":"x"}"#,
+        r#"{"type":"response.output_text.delta","delta":"x","delta":"y"}"#,
+        // Value rejects the overflow even though typed parsing skips unknown fields.
+        r#"{"type":"response.output_text.delta","delta":"falling back from websockets to https transport","unknown":1e999}"#,
+        r#"{"type":"response.output_text.delta","delta":"stream disconnected before completion","unknown":1e999}"#,
+    ] {
+        assert!(
+            !matches!(parse(data), Some(StreamEvent::TextDelta(_))),
+            "{data}"
+        );
+    }
+    // An unknown event is not made structured by a nested/quoted event type.
+    assert!(matches!(
+        parse(
+            r#"{"type":"ping","delta":"stream disconnected before completion","nested":{"type":"response.completed"}}"#
+        ),
+        Some(StreamEvent::Error { .. })
+    ));
+}
+
+#[test]
 fn responses_transport_activity_includes_ignored_sse_frames() {
     use futures::StreamExt;
     use futures::task::noop_waker;

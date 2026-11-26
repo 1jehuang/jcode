@@ -66,6 +66,17 @@
 
 ## Verifying a change at runtime
 
+### Keep benchmark sessions out of user history
+
+For synthetic prompts and streaming/CPU/power benchmarks, set a dedicated
+`JCODE_HOME` and `JCODE_TEST_SESSION=1` for both the server and its clients,
+in addition to using a unique `--socket`. A private socket alone isolates the
+daemon, not persisted sessions. Never run synthetic benchmark prompts against
+the user's normal session storage. On Unix, also give the server and clients the
+same private `TMPDIR`: background task status and output use the OS temp
+folder (`$TMPDIR/jcode-bg-tasks`), not `JCODE_HOME`. Without this, an isolated
+benchmark and the regular daemon can see each other's background tasks.
+
 `cargo build` alone proves nothing about behavior. `jcode run` and interactive
 sessions are served by the long-lived daemon at
 `~/.jcode/builds/shared-server/jcode`, which is a symlink into
@@ -78,8 +89,17 @@ run your build against its own socket:
 
 ```bash
 cargo build --profile selfdev
-./target/selfdev/jcode run --no-update --socket /run/user/1000/jcode-mytest.sock '<prompt>'
+(
+  root=$(mktemp -d) || exit 1
+  export JCODE_HOME="$root/home" TMPDIR="$root/tmp" JCODE_TEST_SESSION=1
+  mkdir -m 700 "$JCODE_HOME" "$TMPDIR" || exit 1
+  printf 'Isolated run directory: %s\n' "$root"
+  ./target/selfdev/jcode run --no-update --socket "$root/server.sock" '<prompt>'
+)
 ```
+
+Remove the printed directory only after the isolated daemon and its background
+tasks have stopped and you no longer need their output.
 
 Two things that waste time otherwise:
 

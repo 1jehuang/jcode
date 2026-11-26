@@ -288,29 +288,11 @@ fn paced_done_keeps_its_identity_across_reconnect_and_cannot_finish_new_turn() {
         ),
         &mut remote,
     );
-    handle_server_event(
-        &mut app,
-        scoped("runtime", 1, ServerEvent::Done { id: 42 }),
-        &mut remote,
-    );
-    assert_eq!(app.deferred_stream_done_id, Some(42));
-    handle_server_event(
-        &mut app,
-        ServerEvent::TurnState {
-            session_id: "session".into(),
-            runtime_generation: "runtime".into(),
-            latest_turn_id: 1,
-            turn_id: None,
-        },
-        &mut remote,
-    );
-    assert_eq!(app.deferred_stream_done_id, Some(42));
-    let ops = app.stream_buffer.flush();
-    app.apply_stream_ops(ops);
-    let id = app.deferred_stream_done_id.take().unwrap();
-    let event = scoped("runtime", 1, ServerEvent::Done { id });
+    let event = scoped("runtime", 1, ServerEvent::Done { id: 42 });
     handle_server_event(&mut app, event.clone(), &mut remote);
     assert!(!app.is_processing);
+    assert!(app.stream_buffer.is_empty());
+    assert_eq!(app.deferred_stream_done_id, None);
     start(&mut app, &mut remote, "runtime", 2);
     handle_server_event(&mut app, event, &mut remote);
     assert!(app.is_processing);
