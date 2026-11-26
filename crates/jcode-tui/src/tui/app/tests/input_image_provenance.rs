@@ -468,3 +468,62 @@ fn provenance_review_queue_reload_preserves_routing_and_literal_markers() {
         assert_eq!(prepared.images.len(), 1);
     });
 }
+
+#[test]
+fn image_provenance_dictation_append_preserves_owned_markers() {
+    let mut app = create_test_app();
+    let literal = "literal [image 1] ";
+    super::input::insert_input_text(&mut app, literal);
+    provenance_attach_image(&mut app);
+    let original = app.input.clone();
+    app.cursor_pos = 0;
+
+    app.handle_local_dictation_completed(
+        " dictated text".into(),
+        crate::protocol::TranscriptMode::Append,
+    );
+
+    assert_eq!(app.input, format!("{original} dictated text"));
+    assert_eq!(app.cursor_pos, app.input.len());
+    let prepared = super::input::take_prepared_input(&mut app);
+    assert_eq!(prepared.expanded, format!("{literal} dictated text"));
+    assert_eq!(
+        prepared.images,
+        vec![("image/png".into(), "fixture-image".into())]
+    );
+}
+
+#[test]
+fn image_provenance_delete_keys_detach_images_in_all_clients() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for mode in 0..3 {
+        for key in [KeyCode::Backspace, KeyCode::Delete] {
+            let mut app = create_test_app();
+            app.is_remote = mode != 0;
+            let literal = "界 literal [image 1] ";
+            super::input::insert_input_text(&mut app, literal);
+            super::input_images::attach_image(&mut app, "image/png".into(), "payload".into());
+            if key == KeyCode::Delete {
+                app.cursor_pos = literal.len();
+            }
+            rt.block_on(async {
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                match mode {
+                    0 => app.handle_key(key, KeyModifiers::NONE).unwrap(),
+                    1 => app
+                        .handle_remote_key(key, KeyModifiers::NONE, &mut remote)
+                        .await
+                        .unwrap(),
+                    _ => super::remote::handle_disconnected_key(&mut app, key, KeyModifiers::NONE)
+                        .unwrap(),
+                }
+            });
+            app.ensure_input_image_markers();
+            assert!(app.pending_images.is_empty(), "mode {mode}, key {key:?}");
+            assert_eq!(app.input, literal, "mode {mode}, key {key:?}");
+            let prepared = super::input::take_prepared_input(&mut app);
+            assert!(prepared.images.is_empty());
+            assert_eq!(prepared.expanded, literal);
+        }
+    }
+}

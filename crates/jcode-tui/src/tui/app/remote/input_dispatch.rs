@@ -687,9 +687,8 @@ pub(in crate::tui::app) fn apply_transcript_event(
             app.set_status_notice("Transcript inserted");
         }
         TranscriptMode::Append => {
-            let mut combined = app.input.clone();
-            combined.push_str(&text);
-            set_transcript_input(app, combined);
+            app.cursor_pos = app.input.len();
+            input::insert_input_text(app, &text);
             app.set_status_notice("Transcript appended");
         }
         TranscriptMode::Replace => {
