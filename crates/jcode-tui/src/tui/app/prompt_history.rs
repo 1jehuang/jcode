@@ -391,7 +391,9 @@ impl App {
     }
 
     pub(super) fn wait_for_prompt_history_switch(&mut self) -> bool {
-        if self.prompt_history_scope.switch_request.is_some() {
+        if self.prompt_history_scope.switch_request.is_some()
+            || self.ssh_sessions.is_switch_pending()
+        {
             self.set_status_notice("Wait for the current session switch to finish");
             true
         } else {
@@ -399,8 +401,10 @@ impl App {
         }
     }
 
-    fn check_prompt_history_switch(&self) -> anyhow::Result<()> {
-        if self.prompt_history_scope.switch_request.is_some() {
+    pub(super) fn check_prompt_history_switch(&self) -> anyhow::Result<()> {
+        if self.prompt_history_scope.switch_request.is_some()
+            || self.ssh_sessions.is_switch_pending()
+        {
             anyhow::bail!("Wait for the current session switch to finish");
         }
         Ok(())
