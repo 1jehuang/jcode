@@ -446,6 +446,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -970,6 +971,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -1461,18 +1463,5 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
-    }
-
-    /// Mark that a server was just spawned - run_remote will retry initial connection
-    /// instead of failing fatally, allowing the TUI to show while the server starts.
-    pub fn set_server_spawning(&mut self) {
-        self.server_spawning = true;
-        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
-        self.remote_startup_phase_started = Some(Instant::now());
     }
 }
