@@ -231,3 +231,79 @@ fn cloud_export_keeps_the_captured_record_through_refresh_but_not_relogin() {
         "replacement-refresh"
     );
 }
+
+#[test]
+fn claude_removed_record_cannot_follow_inherited_email_from_replacement_login() {
+    let _home = TestHome::new();
+    let mut account = claude_account("original", "original-refresh");
+    account.email = Some("same@example.test".into());
+    let label = claude::upsert_account(account).unwrap();
+    let pin = claude_pin(&label).unwrap();
+    assert!(pin.record_id.is_some());
+    assert_eq!(pin.identity.as_deref(), Some("same@example.test"));
+
+    crate::auth::oauth::save_claude_tokens_for_account(
+        &crate::auth::oauth::OAuthTokens {
+            access_token: "replacement-access".into(),
+            refresh_token: "replacement-refresh".into(),
+            expires_at: i64::MAX,
+            id_token: None,
+            scopes: vec![],
+        },
+        &label,
+    )
+    .unwrap();
+    let replacement = claude_pin(&label).unwrap();
+    assert_eq!(replacement.label, pin.label);
+    assert_eq!(
+        replacement.identity, pin.identity,
+        "the real saver retains email"
+    );
+    assert_ne!(replacement.record_id, pin.record_id);
+    assert_eq!(
+        load_claude(&replacement).unwrap().0.access_token,
+        "replacement-access"
+    );
+    assert_eq!(
+        (
+            resolve_claude(&pin).is_err(),
+            load_claude(&pin).is_err(),
+            normalize_claude_pin(&pin).is_err(),
+        ),
+        (true, true, true),
+        "a removed local record must not resolve, load, or normalize via inherited email"
+    );
+}
+
+#[test]
+fn claude_record_refresh_rename_and_recordless_email_pins_keep_their_lineage() {
+    let _home = TestHome::new();
+    let mut account = claude_account("original", "original-refresh");
+    account.email = Some("legacy@example.test".into());
+    let label = claude::upsert_account(account).unwrap();
+    let pin = claude_pin(&label).unwrap();
+    let legacy = AccountPin::new(&label, pin.identity.clone());
+    assert!(legacy.record_id.is_none());
+    claude::update_account_tokens(&label, "rotated-access", "rotated-refresh", i64::MAX).unwrap();
+    let mut store = claude::load_auth_file().unwrap();
+    store.anthropic_accounts[0].label = "claude-panda".into();
+    claude::save_auth_file(&store).unwrap();
+    for retained in [&pin, &legacy] {
+        assert_eq!(resolve_claude(retained).unwrap(), "claude-panda");
+        let (credentials, label) = load_claude(retained).unwrap();
+        assert_eq!(label, "claude-panda");
+        assert_eq!(credentials.access_token, "rotated-access");
+        assert_eq!(
+            normalize_claude_pin(retained).unwrap().record_id,
+            pin.record_id
+        );
+    }
+    let mut duplicate = claude_account("other", "other-refresh");
+    duplicate.email = Some("legacy@example.test".into());
+    claude::upsert_account(duplicate).unwrap();
+    assert!(
+        resolve_claude(&legacy).is_err(),
+        "legacy email must remain unique"
+    );
+    assert_eq!(resolve_claude(&pin).unwrap(), "claude-panda");
+}

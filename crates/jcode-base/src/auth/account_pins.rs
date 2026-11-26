@@ -49,9 +49,17 @@ pub fn openai_pin(label: &str) -> Result<AccountPin> {
 }
 
 pub fn resolve_claude(pin: &AccountPin) -> Result<String> {
+    let accounts = claude::list_accounts()?;
+    if let Some(record_id) = &pin.record_id
+        && !accounts
+            .iter()
+            .any(|account| account.record_id.as_ref() == Some(record_id))
+    {
+        anyhow::bail!("Pinned Claude record was removed; select the account again");
+    }
     super::account_store::resolve_pin(
         pin,
-        &claude::list_accounts()?,
+        &accounts,
         |account| &account.label,
         claude_identity,
         |account| account.record_id.as_deref(),
