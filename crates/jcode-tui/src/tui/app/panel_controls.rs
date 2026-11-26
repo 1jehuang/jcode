@@ -103,7 +103,7 @@ impl App {
 mod repeated_dismiss_tests {
     #[test]
     fn repeated_dismiss_keeps_last_focused_page() {
-        let mut app = super::super::tests::create_test_app();
+        let mut app = super::super::super::tests::create_test_app();
         app.side_panel.focused_page_id = Some("retained-page".to_string());
         app.dismiss_side_panel();
         app.dismiss_side_panel();
