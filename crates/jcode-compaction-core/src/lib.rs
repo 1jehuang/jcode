@@ -534,12 +534,21 @@ pub fn build_emergency_summary_text(
         summary_parts.push(existing.to_string());
     }
 
+    let reason = if pre_tokens >= token_budget as u64 {
+        format!(
+            "The conversation had ~{}k tokens which exceeded the {}k limit.",
+            pre_tokens / 1000,
+            token_budget / 1000,
+        )
+    } else {
+        format!(
+            "The conversation had ~{}k tokens when the provider rejected it for context overflow.",
+            pre_tokens / 1000,
+        )
+    };
     summary_parts.push(format!(
-        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
-         The conversation had ~{}k tokens which exceeded the {}k limit.",
-        dropped_count,
-        pre_tokens / 1000,
-        token_budget / 1000,
+        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. {}",
+        dropped_count, reason,
     ));
 
     let mut file_mentions = Vec::new();
