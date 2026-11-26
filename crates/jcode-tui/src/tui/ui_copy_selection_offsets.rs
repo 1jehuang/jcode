@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::UnicodeWidthStr;
 
 fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
     copy_snapshot_for_pane(pane)?
