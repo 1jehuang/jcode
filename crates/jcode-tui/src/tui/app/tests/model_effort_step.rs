@@ -912,3 +912,90 @@ fn review_r24_refresh_reaches_restored_parent_after_both_catalog_paths() {
         }
     }
 }
+
+#[test]
+fn r24_local_saved_default_keeps_upstream_selection_until_full_catalog() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.provider = Arc::new(EffortRecordingProvider::default());
+        app.is_remote = false;
+        let model = "claude-opus-4-8";
+        let mut parent = r23_model_browser_state(false);
+        parent.entries = vec![
+            r23_model_browser_entry(model, &[("Anthropic", "claude-oauth")]),
+            r23_model_browser_entry(model, &[("Fireworks", "openrouter")]),
+        ];
+        parent.filtered = vec![0, 1];
+        parent.selected = 1;
+        parent.column = parent.max_navigable_column();
+        let full_entries = parent.entries.clone();
+        app.inline_interactive_state = Some(parent);
+
+        app.handle_key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .unwrap()
+                .effort_step
+                .is_some()
+        );
+        app.refresh_open_model_picker_after_catalog_update();
+        r24_press(&mut app, KeyCode::Enter);
+
+        let held = app.inline_interactive_state.as_ref().unwrap();
+        assert_eq!(held.selected_entry().unwrap().name, model);
+        assert_eq!(
+            held.selected_entry()
+                .unwrap()
+                .active_option()
+                .unwrap()
+                .provider,
+            "Fireworks"
+        );
+        assert!(
+            crate::config::Config::load()
+                .provider
+                .default_model
+                .as_deref()
+                .is_some_and(|saved| saved.contains("Fireworks"))
+        );
+
+        let pending = app
+            .pending_model_picker_load
+            .as_mut()
+            .expect("full local load");
+        let (tx, rx) = std::sync::mpsc::channel();
+        pending.receiver = rx;
+        let routes = [("Anthropic", "claude-oauth"), ("Fireworks", "openrouter")]
+            .into_iter()
+            .map(|(provider, api_method)| crate::provider::ModelRoute {
+                model: model.into(),
+                provider: provider.into(),
+                api_method: api_method.into(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            })
+            .collect();
+        tx.send(Ok(ModelPickerRoutesResult {
+            outcome: ModelPickerBuildOutcome::Built {
+                entries: full_entries,
+                model_count: 1,
+                routes,
+            },
+        }))
+        .unwrap();
+        assert!(app.poll_model_picker_load());
+        let selected = app
+            .inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .selected_entry()
+            .unwrap();
+        assert_eq!(selected.name, model);
+        assert_eq!(selected.active_option().unwrap().provider, "Fireworks");
+        assert_eq!(selected.active_option().unwrap().api_method, "openrouter");
+    });
+}

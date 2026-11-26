@@ -500,7 +500,10 @@ impl App {
                 .cloned()
         {
             self.refresh_open_model_picker_after_catalog_update();
-            if let Some(picker) = self.inline_interactive_state.as_mut() {
+            if self.pending_model_picker_load.is_some() {
+                // Keep exact upstream routes until their full replacement arrives.
+                self.inline_interactive_state = Some(previous);
+            } else if let Some(picker) = self.inline_interactive_state.as_mut() {
                 picker.preview = previous.preview;
                 picker.filter = previous.filter.clone();
                 restore_model_browser_after_refresh(picker, &previous);
