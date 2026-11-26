@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static PENDING: AtomicBool = AtomicBool::new(false);
+#[cfg(all(target_os = "linux", not(test)))]
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// True once since the last call if a watched binary location changed.
@@ -23,11 +24,11 @@ pub(super) fn rearm() {
 }
 
 pub(super) fn ensure_started() {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
     #[cfg(all(target_os = "linux", not(test)))]
     {
+        if STARTED.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
         if let Ok(path) = crate::build::current_binary_path()
             && let Some(dir) = path.parent()
