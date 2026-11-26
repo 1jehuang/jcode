@@ -7,21 +7,21 @@ const SOFT_INTERRUPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy)]
 pub(in crate::tui::app) enum SoftInterruptRecovery {
     ById(u64, Instant),
-    ClearAll(u64, Instant),
+    ClearAll(u64, Instant, usize),
     RetryClear(Instant),
 }
 
 impl SoftInterruptRecovery {
     pub(in crate::tui::app) fn request_id(self) -> Option<u64> {
         match self {
-            Self::ById(id, _) | Self::ClearAll(id, _) => Some(id),
+            Self::ById(id, _) | Self::ClearAll(id, _, _) => Some(id),
             Self::RetryClear(_) => None,
         }
     }
 
     fn started(self) -> Instant {
         match self {
-            Self::ById(_, started) | Self::ClearAll(_, started) | Self::RetryClear(started) => {
+            Self::ById(_, started) | Self::ClearAll(_, started, _) | Self::RetryClear(started) => {
                 started
             }
         }
@@ -38,6 +38,11 @@ impl App {
         let content_chars = content.chars().count();
         if self.pending_soft_interrupts.is_empty() {
             self.sent_soft_interrupts.clear();
+            if let Some(SoftInterruptRecovery::ClearAll(_, _, covered)) =
+                &mut self.soft_interrupt_recovery
+            {
+                *covered = 0;
+            }
         }
         self.sent_soft_interrupts
             .push((request_id, content.clone()));
@@ -55,10 +60,14 @@ impl App {
     }
 
     pub(super) fn acknowledge_pending_soft_interrupt(&mut self, request_id: u64) -> bool {
-        if matches!(self.soft_interrupt_recovery, Some(SoftInterruptRecovery::ClearAll(id, _)) if id == request_id)
+        if let Some(SoftInterruptRecovery::ClearAll(id, _, covered)) = self.soft_interrupt_recovery
+            && id == request_id
         {
-            let mut recovered = std::mem::take(&mut self.pending_soft_interrupts);
-            self.clear_pending_soft_interrupt_tracking();
+            let mut recovered = Vec::new();
+            for _ in 0..covered.min(self.pending_soft_interrupts.len()) {
+                recovered.push(self.remove_pending_soft_interrupt(0));
+            }
+            self.soft_interrupt_recovery = None;
             recovered.append(&mut self.queued_messages);
             self.queued_messages = recovered;
             self.set_status_notice("Recovered queued interleave after turn finished");
@@ -102,14 +111,24 @@ impl App {
         self.soft_interrupt_recovery = None;
     }
 
-    fn forget_sent_soft_interrupt(&mut self, content: &str) {
-        if let Some(index) = self
-            .sent_soft_interrupts
-            .iter()
-            .position(|(_, sent)| sent == content)
-        {
-            self.sent_soft_interrupts.remove(index);
+    fn remove_pending_soft_interrupt(&mut self, index: usize) -> String {
+        // Reloaded messages have no IDs and precede the tracked suffix.
+        let unnamed = self
+            .pending_soft_interrupts
+            .len()
+            .saturating_sub(self.sent_soft_interrupts.len());
+        if index >= unnamed {
+            let (request_id, _) = self.sent_soft_interrupts.remove(index - unnamed);
+            self.pending_soft_interrupt_requests
+                .retain(|(id, _)| *id != request_id);
         }
+        if let Some(SoftInterruptRecovery::ClearAll(_, _, covered)) =
+            &mut self.soft_interrupt_recovery
+            && index < *covered
+        {
+            *covered -= 1;
+        }
+        self.pending_soft_interrupts.remove(index)
     }
 
     /// Server caller ids for every pending soft interrupt, or `None` when any
@@ -251,16 +270,7 @@ impl App {
             .iter()
             .position(|pending| pending == content)
         {
-            self.pending_soft_interrupts.remove(index);
-            self.forget_sent_soft_interrupt(content);
-        }
-
-        if let Some(index) = self
-            .pending_soft_interrupt_requests
-            .iter()
-            .position(|(_, pending)| pending == content)
-        {
-            self.pending_soft_interrupt_requests.remove(index);
+            drop(self.remove_pending_soft_interrupt(index));
         }
     }
 
@@ -274,16 +284,8 @@ impl App {
 
             if combined == content {
                 let count = index + 1;
-                let removed: Vec<String> = self.pending_soft_interrupts.drain(..count).collect();
-                for removed_content in removed {
-                    self.forget_sent_soft_interrupt(&removed_content);
-                    if let Some(request_index) = self
-                        .pending_soft_interrupt_requests
-                        .iter()
-                        .position(|(_, pending)| pending == &removed_content)
-                    {
-                        self.pending_soft_interrupt_requests.remove(request_index);
-                    }
+                for _ in 0..count {
+                    drop(self.remove_pending_soft_interrupt(0));
                 }
                 return true;
             }
@@ -421,10 +423,10 @@ pub(super) async fn recover_stranded_soft_interrupts(
             .cancel_soft_interrupts_by_id(ids)
             .await
             .map(|id| SoftInterruptRecovery::ById(id, Instant::now())),
-        None => remote
-            .cancel_soft_interrupts()
-            .await
-            .map(|id| SoftInterruptRecovery::ClearAll(id, Instant::now())),
+        None => remote.cancel_soft_interrupts().await.map(|id| {
+            // Only this pending prefix was covered by the clear write.
+            SoftInterruptRecovery::ClearAll(id, Instant::now(), app.pending_soft_interrupts.len())
+        }),
     };
     match requested {
         Ok(recovery) => {

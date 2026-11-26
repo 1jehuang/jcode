@@ -233,6 +233,7 @@ fn soft_interrupt_clear_ack_fallback_retains_payload_until_confirmed() {
             Some(remote::queue_recovery::SoftInterruptRecovery::ClearAll(
                 clear_id,
                 Instant::now() - Duration::from_secs(60),
+                app.pending_soft_interrupts.len(),
             ));
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
         let retry_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
@@ -380,7 +381,143 @@ async fn process_followups_with_clear_ack(
         !app.is_processing,
         "the clear write must not authorize replay"
     );
+    if let Some(remote::queue_recovery::SoftInterruptRecovery::ById(_, started)) =
+        &mut app.soft_interrupt_recovery
+    {
+        *started = Instant::now() - Duration::from_secs(60);
+        remote::process_remote_followups(app, remote).await;
+    }
     let clear_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
     app.handle_server_event(crate::protocol::ServerEvent::Ack { id: clear_id }, remote);
     remote::process_remote_followups(app, remote).await;
+}
+
+#[test]
+fn soft_interrupt_clear_ack_recovers_only_its_original_prefix() {
+    use crate::protocol::ServerEvent;
+    use remote::queue_recovery::SoftInterruptRecovery;
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for duplicate_text in [false, true] {
+            let mut app = create_test_app();
+            app.is_remote = true;
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            app.track_pending_soft_interrupt(41, "old follow-up".into());
+            app.soft_interrupt_recovery = Some(SoftInterruptRecovery::ById(
+                999,
+                Instant::now() - Duration::from_secs(60),
+            ));
+            rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+            let clear_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
+            let newer = if duplicate_text {
+                "old follow-up"
+            } else {
+                "new follow-up"
+            };
+            app.is_processing = true;
+            app.current_message_id = Some(100);
+            app.track_pending_soft_interrupt(101, newer.into());
+            app.queued_messages.push("later queued prompt".into());
+            app.handle_server_event(ServerEvent::Ack { id: clear_id }, &mut remote);
+            assert_eq!(
+                app.queued_messages,
+                ["old follow-up", "later queued prompt"]
+            );
+            assert_eq!(app.pending_soft_interrupts, [newer]);
+            assert_eq!(app.sent_soft_interrupts, [(101, newer.into())]);
+            assert_eq!(app.pending_soft_interrupt_requests, [(101, newer.into())]);
+            assert!(app.is_processing);
+            assert_eq!(app.current_message_id, Some(100));
+            app.handle_server_event(ServerEvent::Ack { id: clear_id }, &mut remote);
+            assert_eq!(
+                app.queued_messages.len(),
+                2,
+                "duplicate Ack cannot replay again"
+            );
+            app.handle_server_event(ServerEvent::Ack { id: 101 }, &mut remote);
+            assert!(app.pending_soft_interrupt_requests.is_empty());
+            assert_eq!(app.pending_soft_interrupts, [newer]);
+        }
+    });
+}
+
+#[test]
+fn soft_interrupt_clear_ack_excludes_injected_prefix_and_keeps_new_duplicate_tracking() {
+    use crate::protocol::ServerEvent;
+    use remote::queue_recovery::SoftInterruptRecovery;
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for restored in [false, true] {
+            for injected_count in [1, 2] {
+                let mut app = create_test_app();
+                app.is_remote = true;
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                if restored {
+                    app.pending_soft_interrupts = vec!["same".into(), "same".into()];
+                } else {
+                    for id in [41, 42] {
+                        app.track_pending_soft_interrupt(id, "same".into());
+                        app.handle_server_event(ServerEvent::Ack { id }, &mut remote);
+                    }
+                    app.soft_interrupt_recovery = Some(SoftInterruptRecovery::ById(
+                        999,
+                        Instant::now() - Duration::from_secs(60),
+                    ));
+                }
+                rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+                let clear_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
+                app.track_pending_soft_interrupt(101, "same".into());
+                app.handle_server_event(
+                    ServerEvent::SoftInterruptInjected {
+                        content: vec!["same"; injected_count].join("\n\n"),
+                        display_role: None,
+                        point: "tool_start".into(),
+                        tools_skipped: None,
+                        client_ids: vec![],
+                    },
+                    &mut remote,
+                );
+                app.handle_server_event(ServerEvent::Ack { id: clear_id }, &mut remote);
+                assert_eq!(app.queued_messages, vec!["same"; 2 - injected_count]);
+                assert_eq!(app.pending_soft_interrupts, ["same"]);
+                assert_eq!(app.sent_soft_interrupts, [(101, "same".into())]);
+                assert_eq!(app.pending_soft_interrupt_requests, [(101, "same".into())]);
+            }
+        }
+    });
+}
+
+#[test]
+fn soft_interrupt_clear_ack_excludes_a_draft_recalled_before_a_new_send() {
+    use crate::protocol::ServerEvent;
+    use remote::queue_recovery::SoftInterruptRecovery;
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        app.track_pending_soft_interrupt(41, "recalled draft".into());
+        app.soft_interrupt_recovery = Some(SoftInterruptRecovery::ById(
+            999,
+            Instant::now() - Duration::from_secs(60),
+        ));
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        let clear_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
+        assert!(input::retrieve_pending_message_for_edit(&mut app));
+        app.track_pending_soft_interrupt(101, "new follow-up".into());
+        app.handle_server_event(ServerEvent::Ack { id: clear_id }, &mut remote);
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(app.input, "recalled draft");
+        assert_eq!(app.pending_soft_interrupts, ["new follow-up"]);
+        assert_eq!(
+            app.pending_soft_interrupt_requests,
+            [(101, "new follow-up".into())]
+        );
+    });
 }

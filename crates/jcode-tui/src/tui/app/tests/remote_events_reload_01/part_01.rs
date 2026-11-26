@@ -1235,8 +1235,7 @@ fn test_remote_interrupted_recovers_pending_interleaves_in_order() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(42);
     app.interleave_message = Some("unsent interleave".to_string());
-    app.pending_soft_interrupts = vec!["acked interleave".to_string()];
-    app.pending_soft_interrupt_requests = vec![(55, "acked interleave".to_string())];
+    app.track_pending_soft_interrupt(55, "acked interleave".into());
     app.queued_messages.push("queued later".to_string());
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
@@ -1289,8 +1288,7 @@ fn test_remote_done_recovers_stranded_soft_interrupt_as_queued_followup() {
     app.is_processing = true;
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(42);
-    app.pending_soft_interrupts = vec!["late interleave".to_string()];
-    app.pending_soft_interrupt_requests = vec![(55, "late interleave".to_string())];
+    app.track_pending_soft_interrupt(55, "late interleave".into());
     app.queued_messages.push("queued later".to_string());
 
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);

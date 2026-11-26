@@ -635,9 +635,8 @@ fn test_handle_server_event_ack_removes_only_matching_unacked_soft_interrupt() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.pending_soft_interrupts = vec!["first".to_string(), "second".to_string()];
-    app.pending_soft_interrupt_requests =
-        vec![(11, "first".to_string()), (22, "second".to_string())];
+    app.track_pending_soft_interrupt(11, "first".into());
+    app.track_pending_soft_interrupt(22, "second".into());
 
     app.handle_server_event(crate::protocol::ServerEvent::Ack { id: 11 }, &mut remote);
 
@@ -678,8 +677,8 @@ fn test_handle_server_event_soft_interrupt_injected_duplicate_content_keeps_late
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.pending_soft_interrupts = vec!["same".to_string(), "same".to_string()];
-    app.pending_soft_interrupt_requests = vec![(11, "same".to_string()), (22, "same".to_string())];
+    app.track_pending_soft_interrupt(11, "same".into());
+    app.track_pending_soft_interrupt(22, "same".into());
 
     app.handle_server_event(
         crate::protocol::ServerEvent::SoftInterruptInjected {
@@ -706,9 +705,8 @@ fn test_handle_server_event_soft_interrupt_injected_combined_content_clears_comp
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.pending_soft_interrupts = vec!["first".to_string(), "second".to_string()];
-    app.pending_soft_interrupt_requests =
-        vec![(11, "first".to_string()), (22, "second".to_string())];
+    app.track_pending_soft_interrupt(11, "first".into());
+    app.track_pending_soft_interrupt(22, "second".into());
 
     app.handle_server_event(
         crate::protocol::ServerEvent::SoftInterruptInjected {
@@ -732,9 +730,8 @@ fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pend
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.pending_soft_interrupts = vec!["first".to_string(), "second".to_string()];
-    app.pending_soft_interrupt_requests =
-        vec![(11, "first".to_string()), (22, "second".to_string())];
+    app.track_pending_soft_interrupt(11, "first".into());
+    app.track_pending_soft_interrupt(22, "second".into());
 
     app.handle_server_event(
         crate::protocol::ServerEvent::SoftInterruptInjected {
