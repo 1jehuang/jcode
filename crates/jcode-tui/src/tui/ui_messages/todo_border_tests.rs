@@ -93,12 +93,28 @@ fn todo_border_counts_and_rows_fit_the_available_width() {
         ])
         .to_string(),
     );
-    for width in [0, 1, 6, 12, 16, 40, 80, 200] {
+    for width in (0..=16).chain([40, 80, 200]) {
         let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
         assert!(
             lines.iter().all(|line| line.width() <= usize::from(width)),
             "{width}: {lines:?}"
         );
+        if width > 0 {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| !extract_line_text(line).trim().is_empty()),
+                "todo card disappeared at width {width}: {lines:?}"
+            );
+        }
+        if width < 10 {
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| !extract_line_text(line).contains(['╭', '╰'])),
+                "narrow todos should use unboxed rows: {lines:?}"
+            );
+        }
         if width >= 16 {
             let rows: Vec<String> = lines.iter().map(extract_line_text).collect();
             assert!(

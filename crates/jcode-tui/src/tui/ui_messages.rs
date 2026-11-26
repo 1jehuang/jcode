@@ -1059,6 +1059,9 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    if width < 10 {
+        return pinned_todo_rows(msg, width, diff_mode, false);
+    }
     let Some((done, total)) = todo_payload_counts(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
