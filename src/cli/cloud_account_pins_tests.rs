@@ -411,7 +411,7 @@ fn return_fixture(root: &Path, bad_proof: bool) -> (session::Session, Target, Pa
         r#"#!/bin/sh
 set -eu
 case "$1" in
-  *"'complete-return' '--help'"*) exit 0 ;;
+  *"'--help'"*) printf '%s\n' '--expected-pin'; exit 0 ;;
   *"'cancel-return'"*) printf 'cancel\n' >> "$JCODE_HOME/return-calls" ;;
   *"'complete-return'"*) printf 'complete\n' >> "$JCODE_HOME/return-calls" ;;
   *"'export'"*) cat "$JCODE_HOME/return-fixture.tar" ;;
@@ -807,4 +807,36 @@ fn credential_rpc_inherits_the_global_provider_in_both_argument_positions() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn old_credential_exporter_is_rejected_before_return_pauses_the_cloud_session() {
+    let sandbox = AuthTestSandbox::new().unwrap();
+    let (local, target, source) = return_fixture(sandbox.root(), false);
+    let script = source.join("return-transport.sh");
+    let original = std::fs::read_to_string(&script).unwrap();
+    let legacy = original.replace("case \"$1\" in", r#"case "$1" in
+  *"'credentials' '--help'"*) printf 'Usage: credentials\n'; exit 0 ;;
+  *"'--help'"*) exit 0 ;;
+  *"'credentials'"*"'--expected-pin'"*) printf 'credentials\n' >> "$JCODE_HOME/return-calls"; exit 2 ;;
+  *"'export'"*) printf 'export\n' >> "$JCODE_HOME/return-calls"; cat "$JCODE_HOME/return-fixture.tar" ;;
+"#);
+    std::fs::write(&script, legacy).unwrap();
+    assert!(run_return(Some(&local.id), &target, false, false).is_err());
+    assert!(
+        !source.join("return-calls").exists(),
+        "capability failure must precede export, credential access and cancellation"
+    );
+    let lease = storage::read_session_lease(&local.id).unwrap();
+    assert_eq!(lease.epoch, 1);
+    assert_eq!(lease.away_host.as_deref(), Some("offline-cloud"));
+    assert_eq!(
+        session::Session::load(&local.id).unwrap().account_pins,
+        local.account_pins
+    );
+    run_return(Some(&local.id), &target, false, true).unwrap();
+    let calls = std::fs::read_to_string(source.join("return-calls")).unwrap();
+    assert!(calls.lines().any(|line| line == "export"));
+    assert!(!calls.lines().any(|line| line == "credentials"));
 }

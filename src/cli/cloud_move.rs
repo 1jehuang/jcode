@@ -856,6 +856,11 @@ pub(crate) fn run_return(
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
     };
+    if !keep_local_auth {
+        target.preflight(&host).context(
+            "cloud return preflight failed; the session remains on its host. Update cloud jcode or use --keep-local-auth",
+        )?;
+    }
     let epoch = lease.epoch + 1;
 
     // ---- export (cloud stops owning at `epoch`) --------------------------

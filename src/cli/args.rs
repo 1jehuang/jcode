@@ -1085,7 +1085,7 @@ pub(crate) enum CloudCommand {
         #[arg(long)]
         export: bool,
         /// Require the source account captured by the returning session.
-        #[arg(long, requires = "export", hide = true)]
+        #[arg(long, requires = "export")]
         expected_pin: Option<String>,
     },
 
