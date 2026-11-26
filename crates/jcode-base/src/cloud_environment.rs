@@ -378,7 +378,7 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
+        let open_lock = || unsafe {
             libc::openat(
                 dir.as_raw_fd(),
                 name.as_ptr(),
@@ -390,6 +390,18 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
                 0o600,
             )
         };
+        // macOS (APFS) can transiently fail concurrent openat(O_CREAT) of the
+        // same new name with ENOENT. Retry briefly, other errors stay fatal.
+        // The five-second limit below applies only to flock; these retries add
+        // at most 100 x 1 ms of sleeps (about 100 ms, scheduler delays may stretch it).
+        let mut fd = open_lock();
+        for _ in 0..100 {
+            if fd >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            fd = open_lock();
+        }
         ensure!(fd >= 0, "cannot lock private state");
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
@@ -509,8 +521,10 @@ fn environment_relative(root: &Path) -> Result<PathBuf> {
 }
 
 /// Serialize hydration for a shared checkout, without granting any transfer
-/// authority. Keep this guard across validation and publication. Lock acquisition
-/// is bounded to five seconds; dropping it (including process exit) releases it.
+/// authority. Keep this guard across validation and publication. The five-second
+/// limit applies only to flock; ENOENT open retries add at most 100 x 1 ms sleeps
+/// (about 100 ms, scheduler delays may stretch it). Dropping the guard (including
+/// process exit) releases it.
 /// This is separate from the map locks acquired during publication.
 pub fn lock_workspace_hydration(root: &Path) -> Result<std::fs::File> {
     let home = crate::storage::jcode_dir()?;

@@ -50,6 +50,8 @@ pub use openai_reset::{
     prepare_openai_usage_reset_for_account,
 };
 use provider_fetch::*;
+#[cfg(test)]
+pub(crate) use remote_accounts::reset_remote_account_usage_for_tests;
 pub use remote_accounts::{
     clear_remote_account_usage, remote_account_banked_resets, remote_account_list,
     remote_account_usage_received, set_remote_account_usage,

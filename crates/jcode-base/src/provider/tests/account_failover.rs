@@ -61,7 +61,7 @@ struct RemoteQuotaCleanup;
 
 impl Drop for RemoteQuotaCleanup {
     fn drop(&mut self) {
-        crate::usage::clear_remote_account_usage();
+        crate::usage::reset_remote_account_usage_for_tests();
     }
 }
 

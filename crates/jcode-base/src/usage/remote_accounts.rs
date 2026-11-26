@@ -13,6 +13,24 @@ struct RemoteAccounts {
 
 static REMOTE: OnceLock<Mutex<RemoteAccounts>> = OnceLock::new();
 
+// Test-only escape from daemon-only mode. REMOTE is a process-global OnceLock,
+// so one test entering remote mode would otherwise disable local usage reads
+// for every later test in the same binary. Never compiled into production.
+#[cfg(test)]
+static TEST_LOCAL_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn test_enter_remote_mode() {
+    TEST_LOCAL_ONLY.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test cleanup: forget daemon usage and restore local cache reads.
+#[cfg(test)]
+pub(crate) fn reset_remote_account_usage_for_tests() {
+    clear_remote_account_usage();
+    TEST_LOCAL_ONLY.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn try_remote_lock(
     mutex: &Mutex<RemoteAccounts>,
 ) -> Option<std::sync::MutexGuard<'_, RemoteAccounts>> {
@@ -28,6 +46,8 @@ fn try_remote_lock(
 
 /// Enter daemon-only mode without claiming that a response has arrived.
 pub fn clear_remote_account_usage() -> u64 {
+    #[cfg(test)]
+    test_enter_remote_mode();
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
         let generation = state.generation.wrapping_add(1);
         *state = RemoteAccounts {
@@ -72,6 +92,8 @@ pub(super) fn set_remote_account_usage_with_age(
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
     age: std::time::Duration,
 ) {
+    #[cfg(test)]
+    test_enter_remote_mode();
     if let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() {
         *state = RemoteAccounts {
             generation: state.generation.wrapping_add(1),
@@ -88,6 +110,8 @@ pub(super) fn import_remote_account_usage(
     openai: Vec<jcode_protocol::AccountUsageSnapshot>,
     age: std::time::Duration,
 ) -> bool {
+    #[cfg(test)]
+    test_enter_remote_mode();
     let Ok(mut state) = REMOTE.get_or_init(Mutex::default).lock() else {
         return false;
     };
@@ -139,6 +163,10 @@ pub(super) fn cached(
     provider: MultiAccountProviderKind,
     label: &str,
 ) -> Option<Option<AccountUsageSnapshot>> {
+    #[cfg(test)]
+    if TEST_LOCAL_ONLY.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     let remote = REMOTE.get()?;
     // Once enabled, contention or expired data must never fall back to local credentials.
     let Ok(state) = remote.try_lock() else {
@@ -205,6 +233,14 @@ pub fn remote_account_banked_resets(
 mod tests {
     use super::*;
 
+    struct RemoteUsageCleanup;
+
+    impl Drop for RemoteUsageCleanup {
+        fn drop(&mut self) {
+            reset_remote_account_usage_for_tests();
+        }
+    }
+
     #[test]
     fn delayed_snapshot_cannot_overwrite_live_or_reconnected_usage() {
         let mut state = RemoteAccounts {
@@ -227,6 +263,8 @@ mod tests {
 
     #[test]
     fn connection_reset_is_not_an_empty_authoritative_response() {
+        let _guard = crate::storage::lock_test_env();
+        let _cleanup = RemoteUsageCleanup;
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
         assert!(matches!(
@@ -237,6 +275,18 @@ mod tests {
         assert!(remote_account_usage_received());
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
+    }
+
+    #[test]
+    fn remote_usage_cleanup_restores_local_reads_after_panic() {
+        let _guard = crate::storage::lock_test_env();
+        let result = std::panic::catch_unwind(|| {
+            let _cleanup = RemoteUsageCleanup;
+            clear_remote_account_usage();
+            panic!("exercise remote usage cleanup during unwinding");
+        });
+        assert!(result.is_err());
+        assert!(cached(MultiAccountProviderKind::OpenAI, "local").is_none());
     }
 
     #[test]
