@@ -23,6 +23,7 @@ mod elapsed_review;
 mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
+mod status_writer;
 mod wait;
 
 pub use model::{
@@ -148,25 +149,6 @@ impl BackgroundTaskManager {
     async fn read_status_file(&self, path: &std::path::Path) -> Option<TaskStatusFile> {
         let content = fs::read_to_string(path).await.ok()?;
         serde_json::from_str(&content).ok()
-    }
-
-    fn persist_status_file(path: &std::path::Path, status: &impl serde::Serialize) -> Result<()> {
-        use std::io::Write;
-
-        let parent = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Background status path has no parent"))?;
-        let mut file = tempfile::Builder::new()
-            .prefix(".jcode-status-")
-            .suffix(".tmp")
-            .tempfile_in(parent)?;
-        {
-            let mut writer = std::io::BufWriter::new(file.as_file_mut());
-            serde_json::to_writer_pretty(&mut writer, status)?;
-            writer.flush()?;
-        }
-        file.persist(path)?;
-        Ok(())
     }
 
     fn write_status_file(path: &std::path::Path, status: &TaskStatusFile) {
