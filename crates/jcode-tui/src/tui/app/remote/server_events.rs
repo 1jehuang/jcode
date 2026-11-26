@@ -16,10 +16,6 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
 const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
 const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
 const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
@@ -144,7 +140,7 @@ fn should_defer_history_for_runtime_identity(
     should_defer_history_for_runtime_identity_with_allow(
         server_has_update,
         client_detected_stale,
-        allow_runtime_identity_mismatch(),
+        std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some(),
     )
 }
 
