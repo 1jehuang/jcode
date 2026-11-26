@@ -518,6 +518,8 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
 #[derive(Clone, Default)]
 struct EffortOrderProvider {
     applied: Arc<std::sync::Mutex<Vec<String>>>,
+    model: Arc<std::sync::Mutex<String>>,
+    effort_models: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait]
@@ -536,6 +538,20 @@ impl Provider for EffortOrderProvider {
         "effort-order"
     }
 
+    fn model(&self) -> String {
+        let model = self.model.lock().unwrap();
+        if model.is_empty() {
+            "initial-model".into()
+        } else {
+            model.clone()
+        }
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.model.lock().unwrap() = model.into();
+        Ok(())
+    }
+
     fn reasoning_effort(&self) -> Option<String> {
         self.applied.lock().unwrap().last().cloned()
     }
@@ -546,6 +562,7 @@ impl Provider for EffortOrderProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         self.applied.lock().unwrap().push(effort.into());
+        self.effort_models.lock().unwrap().push(self.model());
         Ok(())
     }
 
@@ -631,7 +648,24 @@ async fn busy_effort_socket_requests_apply_in_wire_order_and_keep_ping_responsiv
         .map(|index| ["low", "medium", "high"][index % 3].into())
         .collect();
     let mut requests = String::new();
+    let expected_models: Vec<String> = (0..expected.len())
+        .map(|index| format!("wire-model-{index}"))
+        .collect();
     for (index, effort) in expected.iter().enumerate() {
+        let model = &expected_models[index];
+        let selection = crate::provider::RouteSelection {
+            model: model.clone(),
+            runtime_key: jcode_provider_core::RuntimeKey::Current,
+            provider_label: "effort-order".into(),
+            api_method: "effort-order".into(),
+            detail: String::new(),
+        };
+        let request = if index % 2 == 0 {
+            json!({"type":"set_model", "id":1000+index, "model":model})
+        } else {
+            json!({"type":"set_route", "id":1000+index, "selection":selection, "automatic_failover":false})
+        };
+        requests.push_str(&format!("{request}\n"));
         requests.push_str(&format!(
             "{}\n",
             json!({"type":"set_reasoning_effort", "id":100+index, "effort":effort})
@@ -669,6 +703,11 @@ async fn busy_effort_socket_requests_apply_in_wire_order_and_keep_ping_responsiv
             .collect::<Vec<_>>()
     );
     assert_eq!(*provider.applied.lock().unwrap(), expected);
+    assert_eq!(
+        *provider.effort_models.lock().unwrap(),
+        expected_models,
+        "each effort must apply to its immediately preceding model/route request"
+    );
     assert_eq!(
         agent.lock().await.provider_handle().reasoning_effort(),
         expected.last().cloned()

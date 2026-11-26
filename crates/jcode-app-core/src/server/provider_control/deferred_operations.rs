@@ -42,7 +42,7 @@ pub(super) fn log_provider_control_completed(operation: &'static str, id: u64, q
     );
 }
 
-pub(super) fn spawn_deferred_agent_mutation<F>(
+pub(super) async fn spawn_deferred_agent_mutation<F>(
     operation: &'static str,
     id: u64,
     agent: Arc<Mutex<Agent>>,
@@ -52,8 +52,14 @@ pub(super) fn spawn_deferred_agent_mutation<F>(
     F: FnOnce(&mut Agent, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
+    // Join the same FIFO queue as effort before the task can be rescheduled.
+    let mut agent_lock = Box::pin(tokio::task::unconstrained(agent.lock_owned()));
+    let admitted = futures::poll!(&mut agent_lock);
     crate::runtime_activity::spawn(async move {
-        let mut agent_guard = agent.lock().await;
+        let mut agent_guard = match admitted {
+            std::task::Poll::Ready(guard) => guard,
+            std::task::Poll::Pending => agent_lock.await,
+        };
         log_provider_control_lock_acquired(operation, id, queued_at);
         apply(&mut agent_guard, &client_event_tx);
         log_provider_control_completed(operation, id, queued_at);

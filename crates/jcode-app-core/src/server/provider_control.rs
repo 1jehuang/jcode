@@ -236,7 +236,8 @@ pub(super) async fn handle_cycle_model(
             move |agent_guard, client_event_tx| {
                 apply_cycle_model(id, direction, agent_guard, client_event_tx);
             },
-        );
+        )
+        .await;
     }
 }
 
@@ -427,7 +428,8 @@ pub(super) async fn handle_set_model(
             move |agent_guard, client_event_tx| {
                 apply_set_model(id, model, agent_guard, client_event_tx);
             },
-        );
+        )
+        .await;
     }
 }
 
@@ -461,7 +463,8 @@ pub(super) async fn handle_set_route(
                     client_event_tx,
                 );
             },
-        );
+        )
+        .await;
     }
 }
 

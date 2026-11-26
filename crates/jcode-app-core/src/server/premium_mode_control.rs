@@ -55,6 +55,7 @@ pub(in crate::server) async fn handle_set_premium_mode(
             move |agent_guard, client_event_tx| {
                 apply_set_premium_mode(id, mode, premium_mode, agent_guard, client_event_tx);
             },
-        );
+        )
+        .await;
     }
 }
