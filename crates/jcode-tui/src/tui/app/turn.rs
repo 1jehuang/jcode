@@ -3,10 +3,9 @@ pub(super) mod system_reminder;
 use super::*;
 #[path = "turn_prepared_turn.rs"]
 mod prepared_turn;
+use prepared_turn::PendingStreamingTools;
 
 use crate::message::ToolDefinition;
-
-use prepared_turn::PendingStreamingTools;
 
 impl App {
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
