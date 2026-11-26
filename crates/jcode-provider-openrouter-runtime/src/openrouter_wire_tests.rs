@@ -62,6 +62,7 @@ fn a6api_cache_key_hosts_are_scoped() {
         "https://a6api.com.example.test/v1",
         "https://example.test/a6api.com",
         "not a url",
+        "data:text/plain,a6api.com",
     ] {
         assert!(!is_a6api_api_base(url), "{url}");
     }

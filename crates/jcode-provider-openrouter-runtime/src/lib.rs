@@ -409,26 +409,6 @@ impl OpenRouterTransportState {
 pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
 const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
 
-/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
-fn apply_grok_cli_turn_headers(
-    mut req: reqwest::RequestBuilder,
-    auth: &ProviderAuth,
-    model: &str,
-    conversation_id: &str,
-) -> reqwest::RequestBuilder {
-    if matches!(auth, ProviderAuth::GrokCli { .. }) {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
-            model,
-            conversation_id,
-            &request_id,
-        ) {
-            req = req.header(name, value);
-        }
-    }
-    req
-}
-
 #[derive(Debug, Clone)]
 enum ProviderAuth {
     AuthorizationBearer {
