@@ -65,6 +65,17 @@ fn git_state_for_snapshot(dir: &Path) -> Option<GitState> {
 }
 
 impl Agent {
+    /// Desktop self-development is selected by the session checkout, including
+    /// restored sessions. It must not set the CLI canary/reload flags.
+    pub fn is_desktop_selfdev(&self) -> bool {
+        self.session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(jcode_selfdev_types::desktop_repo_root)
+            .is_some()
+    }
+
     /// Set logging context for this agent's session/provider
     pub(super) fn set_log_context(&self) {
         logging::set_session(&self.session.id);

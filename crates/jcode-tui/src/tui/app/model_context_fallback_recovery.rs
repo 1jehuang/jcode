@@ -324,12 +324,15 @@ impl App {
             "⚠️ Context limit exceeded - auto-compacting and retrying...".to_string(),
         ));
 
-        // Force the compaction manager to think we're at the limit
+        // Sync any actually observed stream token count without fabricating
+        // `self.context_limit` (an upstream route may enforce a smaller window).
         let compaction = self.registry.compaction();
         let compact_started = match compaction.try_write() {
             Ok(mut manager) => {
                 let mut provider_messages = self.materialized_provider_messages();
-                manager.update_observed_input_tokens(self.context_limit);
+                if let Some(observed_tokens) = self.current_stream_context_tokens() {
+                    manager.update_observed_input_tokens(observed_tokens);
+                }
                 let usage = manager.context_usage_with(&provider_messages);
                 if usage > 1.5 {
                     let recovery = manager.recover_within_budget(&mut provider_messages);
