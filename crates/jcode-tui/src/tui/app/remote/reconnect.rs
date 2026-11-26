@@ -880,6 +880,17 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         app.model_catalog_after_history = true;
     }
 
+    if let Some(model_spec) = app.take_pending_initial_model_spec() {
+        crate::logging::info(&format!(
+            "Applying CLI-requested initial model on remote session: {model_spec}"
+        ));
+        if let Err(error) = remote.set_model(&model_spec).await {
+            crate::logging::warn(&format!(
+                "Failed to apply CLI-requested initial model '{model_spec}': {error}"
+            ));
+        }
+    }
+
     // Dispatch restored work once the server history is in place. This must
     // also cover a pending startup submission (e.g. a headed swarm spawn whose
     // initial prompt was staged into `app.input` with `submit_input_on_startup`),
