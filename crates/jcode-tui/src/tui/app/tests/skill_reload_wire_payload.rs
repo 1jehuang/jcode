@@ -303,61 +303,78 @@ fn skill_reload_wire_failed_write_retains_full_draft_and_new_intent_never_uses_o
 #[test]
 fn skill_reload_wire_catalog_pause_preserves_newer_composer() {
     with_temp_jcode_home(|| {
-        let project = tempfile::tempdir().unwrap();
-        skill_reload_write_skill(project.path(), "my-skill");
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
-            let mut remote = crate::tui::backend::RemoteConnection::dummy();
-            remote.mark_history_loaded();
-            let peer = remote.take_dummy_peer().unwrap();
-            let (reader, _writer) = peer.into_split();
-            let mut reader = tokio::io::BufReader::new(reader);
-            skill_reload_submit(&mut app, &mut remote, "my-skill", SKILL_RELOAD_PASTE).await;
-            attachment_routing_read_request(&mut reader).await;
-            retry_draft_rate_error(&mut app, &mut remote);
-            app.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
-            super::input::insert_input_text(&mut app, "newer literal [image 1] ");
-            super::input::handle_text_paste(&mut app, "new1\nnew2\nnew3\nnew4\nnew5\nnew6".into());
-            super::input_images::attach_image(
-                &mut app,
-                "image/png".into(),
-                "catalog-newer-image".into(),
-            );
-            let newer = app.input_draft_snapshot();
-            app.save_input_for_reload("skill-wire-newer-catalog");
-            std::fs::remove_dir_all(project.path().join(".jcode/skills/my-skill")).unwrap();
-            let restored = App::restore_input_for_reload("skill-wire-newer-catalog").unwrap();
-            let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
-            next.apply_restored_reload_input(restored);
-            retry_draft_dispatch(&mut next, &mut remote).await;
-            assert!(!next.is_processing);
-            assert!(next.rate_limit_pending_message.is_none());
-            assert!(next.input.starts_with(&newer.0));
-            assert_eq!(next.cursor_pos, newer.1);
-            assert_eq!(&next.pasted_contents, newer.4.as_ref());
-            assert_eq!(next.pending_images.len(), 2);
-            assert_eq!(next.pending_images[0].1, "catalog-newer-image");
-            assert_eq!(next.pending_images[1].1, "fixture-image");
-            assert!(
-                next.display_messages()
-                    .iter()
-                    .any(|message| message.content.contains(SKILL_RELOAD_PASTE))
-            );
-            assert!(
-                tokio::time::timeout(
-                    Duration::from_millis(50),
-                    attachment_routing_read_request(&mut reader)
-                )
-                .await
-                .is_err()
-            );
-            next.cursor_pos = next.input.len();
-            let recovered = next.input_draft_snapshot();
-            next.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
-                .unwrap();
-            next.undo_input_change();
-            assert_eq!(next.input_draft_snapshot(), recovered);
+            for submit_newer in [false, true] {
+                let project = tempfile::tempdir().unwrap();
+                skill_reload_write_skill(project.path(), "my-skill");
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let peer = remote.take_dummy_peer().unwrap();
+                let (reader, _writer) = peer.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                let stopped =
+                    skill_reload_submit(&mut app, &mut remote, "my-skill", SKILL_RELOAD_PASTE)
+                        .await;
+                attachment_routing_read_request(&mut reader).await;
+                retry_draft_rate_error(&mut app, &mut remote);
+                app.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+                super::input::insert_input_text(&mut app, "newer literal [image 1] ");
+                super::input::handle_text_paste(
+                    &mut app,
+                    "new1\nnew2\nnew3\nnew4\nnew5\nnew6".into(),
+                );
+                super::input_images::attach_image(
+                    &mut app,
+                    "image/png".into(),
+                    "catalog-newer-image".into(),
+                );
+                app.cursor_pos = 5;
+                let newer = app.input_draft_snapshot();
+                app.save_input_for_reload("skill-wire-newer-catalog");
+                std::fs::remove_dir_all(project.path().join(".jcode/skills/my-skill")).unwrap();
+                let restored = App::restore_input_for_reload("skill-wire-newer-catalog").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                retry_draft_dispatch(&mut next, &mut remote).await;
+                assert!(!next.is_processing);
+                assert!(next.rate_limit_pending_message.is_none());
+                assert_eq!(next.input_draft_snapshot(), newer);
+                assert!(
+                    next.display_messages()
+                        .iter()
+                        .any(|message| message.content.contains("Ctrl+Z"))
+                );
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_millis(50),
+                        attachment_routing_read_request(&mut reader)
+                    )
+                    .await
+                    .is_err()
+                );
+                if submit_newer {
+                    let prepared = super::input::take_prepared_input(&mut next);
+                    let expected_content = prepared.expanded.clone();
+                    super::remote::input_dispatch::submit_prepared_remote_input(
+                        &mut next,
+                        &mut remote,
+                        prepared,
+                    )
+                    .await
+                    .unwrap();
+                    let request = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(request["content"], expected_content);
+                    assert_eq!(
+                        request["images"],
+                        serde_json::json!([["image/png", "catalog-newer-image"]])
+                    );
+                } else {
+                    next.undo_input_change();
+                    assert_eq!(next.input_draft_snapshot(), stopped);
+                }
+            }
         });
     });
 }
