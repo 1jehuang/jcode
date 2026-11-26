@@ -59,24 +59,40 @@ async fn execute_with_background_budget(
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
     let (notify, wake) = handoff_delivery(&session_id, &name, &input);
-    let mut work = crate::runtime_activity::spawn_session(
-        &session_id,
-        crate::tool::handoff::scope(async move { registry.execute(&tool_name, input, ctx).await }),
-    )
-    .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
+    let (task_owner, call) = crate::tool::handoff::scope_with_task(async move {
+        registry.execute(&tool_name, input, ctx).await
+    });
+    let mut work = crate::runtime_activity::spawn_session(&session_id, call)
+        .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     tokio::select! {
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
-            let info = crate::background::global()
-                .adopt_with_options(&name, display_name, &session_id, notify, wake, work)
-                .await;
+            let info = adopt_tool_with_progress(
+                &name, display_name, &session_id, (notify, wake), work, task_owner,
+            ).await;
             Ok(crate::tool::ToolOutput::new(format!(
                 "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
                 name, automatic_handoff_reason(budget), info.task_id, crate::tool::background_delivery_notice(wake), crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }
+}
+
+pub(super) async fn adopt_tool_with_progress(
+    name: &str,
+    display_name: Option<String>,
+    session_id: &str,
+    delivery: (bool, bool),
+    handle: tokio::task::JoinHandle<Result<crate::tool::ToolOutput>>,
+    task_owner: tokio::sync::watch::Sender<Option<String>>,
+) -> crate::background::BackgroundTaskInfo {
+    let (notify, wake) = delivery;
+    let info = crate::background::global()
+        .adopt_with_options(name, display_name, session_id, notify, wake, handle)
+        .await;
+    task_owner.send_replace(Some(info.task_id.clone()));
+    info
 }
 
 /// Returns true for an automatic handoff, false for a user/reload signal.

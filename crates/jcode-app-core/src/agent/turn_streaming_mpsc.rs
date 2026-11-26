@@ -1825,17 +1825,15 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle = crate::runtime_activity::spawn_session(
-                    &self.session.id,
-                    crate::tool::handoff::scope(async move {
-                        registry_clone
-                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                            .await
-                    }),
-                )
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Session transfer in progress; tool not accepted")
-                })?;
+                let (task_owner, call) = crate::tool::handoff::scope_with_task(async move {
+                    registry_clone
+                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                        .await
+                });
+                let tool_handle = crate::runtime_activity::spawn_session(&self.session.id, call)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                    })?;
 
                 self.background_tool_signal.reset();
 
@@ -2006,18 +2004,18 @@ impl Agent {
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));
-                    let (notify, wake) =
+                    let delivery =
                         tool_handoff::handoff_delivery(&self.session.id, &tc.name, &tc.input);
-                    let bg_info = crate::background::global()
-                        .adopt_with_options(
-                            &tc.name,
-                            tool_handoff::handoff_display_name(&tc.input),
-                            &self.session.id,
-                            notify,
-                            wake,
-                            tool_handle,
-                        )
-                        .await;
+                    let (_, wake) = delivery;
+                    let bg_info = tool_handoff::adopt_tool_with_progress(
+                        &tc.name,
+                        tool_handoff::handoff_display_name(&tc.input),
+                        &self.session.id,
+                        delivery,
+                        tool_handle,
+                        task_owner,
+                    )
+                    .await;
 
                     let reason = if automatic_background {
                         tool_handoff::automatic_handoff_reason(foreground_budget)

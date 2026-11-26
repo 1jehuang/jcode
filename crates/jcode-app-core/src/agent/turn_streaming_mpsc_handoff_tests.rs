@@ -530,6 +530,142 @@ mod bash_completion {
         }
     }
 
+    #[tokio::test]
+    async fn outer_owned_bash_reports_progress_before_completion() {
+        check_outer_owned_progress(false).await;
+    }
+
+    #[tokio::test]
+    async fn outer_owned_reload_persistable_bash_reports_progress_before_completion() {
+        check_outer_owned_progress(true).await;
+    }
+
+    async fn check_outer_owned_progress(reload_persistable: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = directory.path().join("checkpoint");
+        let finish = directory.path().join("finish");
+        let session = format!(
+            "bash-progress-{}",
+            directory.path().file_name().unwrap().to_string_lossy()
+        );
+        let registry = Registry::new(Arc::new(NoRequestProvider)).await;
+        let ctx = ToolContext {
+            session_id: session.clone(),
+            message_id: "message".into(),
+            tool_call_id: "progress".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: reload_persistable.then(InterruptSignal::new),
+            execution_mode: if reload_persistable {
+                ToolExecutionMode::AgentTurn
+            } else {
+                ToolExecutionMode::Direct
+            },
+        };
+        let input = serde_json::json!({
+            "command":format!(
+                "printf '%s\n' 'JCODE_PROGRESS {{\"percent\":25,\"message\":\"outer-progress\"}}'; while [ ! -f '{}' ]; do sleep 0.02; done; printf '%s\n' 'JCODE_CHECKPOINT {{\"message\":\"outer-checkpoint\"}}'; while [ ! -f '{}' ]; do sleep 0.02; done; printf final-result",
+                checkpoint.display(), finish.display()
+            ),
+            "timeout":80,
+        });
+        let mut bus = crate::bus::Bus::global().subscribe();
+        let handoff = execute_with_background_budget(
+            registry,
+            "bash".into(),
+            input,
+            ctx,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        let task_id = handoff
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let observation =
+            tokio::time::timeout(Duration::from_secs(4), async {
+                loop {
+                    let event = bus.recv().await.map_err(|error| error.to_string())?;
+                    match event {
+                        crate::bus::BusEvent::BackgroundTaskProgress(event)
+                            if event.session_id == session =>
+                        {
+                            if event.task_id != task_id {
+                                return Err("progress attached to a different task".to_string());
+                            }
+                            match event.progress.message.as_deref() {
+                                Some("outer-progress") => {
+                                    if event.progress.percent != Some(25.0) {
+                                        return Err("wrong progress percentage".into());
+                                    }
+                                    tokio::fs::write(&checkpoint, "ready")
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                Some("outer-checkpoint") => break,
+                                _ => {}
+                            }
+                        }
+                        crate::bus::BusEvent::BackgroundTaskCompleted(event)
+                            if event.session_id == session =>
+                        {
+                            return Err("task completed before live progress arrived".to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                let status = crate::background::global()
+                    .status(task_id)
+                    .await
+                    .ok_or("missing task status")?;
+                if status.status != crate::bus::BackgroundTaskStatus::Running {
+                    return Err("progress arrived after completion".into());
+                }
+                if !status.event_history.iter().any(|event| {
+                    event.kind == crate::background::BackgroundTaskEventKind::Checkpoint
+                }) {
+                    return Err("checkpoint was not persisted to the outer task".into());
+                }
+                Ok::<(), String>(())
+            })
+            .await;
+        // Release the real process even when the original code times out above.
+        tokio::fs::write(&checkpoint, "ready").await.unwrap();
+        tokio::fs::write(&finish, "ready").await.unwrap();
+        let completed = crate::background::global()
+            .wait(task_id, Duration::from_secs(10), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.task.status,
+            crate::bus::BackgroundTaskStatus::Completed
+        );
+        assert!(
+            crate::background::global()
+                .output(task_id)
+                .await
+                .unwrap()
+                .contains("final-result")
+        );
+        let tasks = crate::background::global().list().await;
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.session_id == session)
+                .count(),
+            1
+        );
+        assert!(
+            matches!(observation, Ok(Ok(()))),
+            "outer task did not receive live progress and checkpoint: {observation:?}"
+        );
+    }
+
     struct NoRequestProvider;
 
     #[async_trait::async_trait]

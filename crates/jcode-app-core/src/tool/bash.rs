@@ -964,6 +964,10 @@ impl BashTool {
         let promoted_progress = std::sync::Arc::new(PromotedCommandProgress::default());
         let stdout_progress = std::sync::Arc::clone(&promoted_progress);
         let stderr_progress = std::sync::Arc::clone(&promoted_progress);
+        let outer_progress = std::sync::Arc::clone(&promoted_progress);
+        super::handoff::on_backgrounded(move |task_id| async move {
+            outer_progress.attach_task(&task_id).await;
+        });
 
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
@@ -1109,6 +1113,10 @@ impl BashTool {
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
+        let progress_output = info.output_file.clone();
+        super::handoff::on_backgrounded(move |task_id| async move {
+            spawn_detached_progress_follower(task_id, progress_output);
+        });
 
         loop {
             if let Some(status) = child.try_wait()? {

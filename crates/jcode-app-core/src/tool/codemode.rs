@@ -51,14 +51,14 @@ struct RegistryHost {
     registry: Registry,
     ctx: ToolContext,
     counter: AtomicUsize,
-    outer_handoff: bool,
+    outer_handoff: Option<tokio::sync::watch::Receiver<Option<String>>>,
 }
 
 impl Host for RegistryHost {
     fn call_tool(&self, name: String, args: Value) -> BoxFuture<'static, Result<Value, String>> {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let registry = self.registry.clone();
-        let outer_handoff = self.outer_handoff;
+        let outer_handoff = self.outer_handoff.clone();
         let sub_ctx = self.ctx.for_subcall(format!("codemode-{n}-{name}"));
         Box::pin(async move {
             let args = match args {
@@ -66,8 +66,8 @@ impl Host for RegistryHost {
                 other => return Err(format!("arguments must be an object, got {other}")),
             };
             let call = registry.execute(&name, args, sub_ctx);
-            let result = if outer_handoff {
-                super::handoff::scope(call).await
+            let result = if let Some(owner) = outer_handoff {
+                super::handoff::scope_with_owner(owner, call).await
             } else {
                 call.await
             };
@@ -233,7 +233,7 @@ impl Tool for CodemodeTool {
             registry,
             ctx: ctx.clone(),
             counter: AtomicUsize::new(0),
-            outer_handoff: super::handoff::has_outer_owner(),
+            outer_handoff: super::handoff::current_owner(),
         });
         let store = load_store(&ctx.session_id);
         let limits = Limits {
