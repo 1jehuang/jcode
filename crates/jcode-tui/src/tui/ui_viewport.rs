@@ -1292,7 +1292,6 @@ mod viewport_margins;
 pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 
 /// Worker activity and progress live in the pinned todo lanes.
-
 static PINNED_TODO_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static PINNED_TODO_MAX_SCROLL: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
