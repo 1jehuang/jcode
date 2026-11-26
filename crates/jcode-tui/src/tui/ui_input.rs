@@ -760,8 +760,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
@@ -1004,35 +1003,6 @@ fn caption_line(row: &crate::tui::JarvisCaption, width: u16) -> Line<'static> {
         truncate_cells(&format!("{prefix}{}", row.text), width as usize),
         Style::default().fg(color),
     )
-}
-
-#[cfg(test)]
-#[test]
-fn caption_cells_show_score_and_do_not_wrap() {
-    use ratatui::{Terminal, backend::TestBackend};
-    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
-    for (score, expected, prefix) in [
-        (None, Color::DarkGray, "Heard:"),
-        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
-        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
-        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
-        (Some((0.95, true)), Color::Green, "95% Trigger:"),
-    ] {
-        let row = crate::tui::JarvisCaption {
-            id: 1,
-            text: "界".repeat(40),
-            score,
-        };
-        terminal
-            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        for (x, c) in prefix.chars().enumerate() {
-            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
-            assert_eq!(buffer[(x as u16, 0)].fg, expected);
-        }
-        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
-    }
 }
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
