@@ -196,6 +196,19 @@ pub fn provider_unavailability_detail_for_account_label(
     Some(format_provider_unavailability_detail(entry))
 }
 
+/// Only quota cooldowns justify skipping a request. Transient auth, 403 and
+/// transport failures must be retried or a bound session stays wedged.
+pub fn provider_quota_unavailability_detail_for_account_label(
+    provider: &str,
+    account_label: Option<&str>,
+) -> Option<String> {
+    let key = provider_runtime_scope_key(provider, account_label);
+    let entry = runtime_provider_unavailability_for_key(&key)?;
+    (is_quota_failure(&entry.reason)
+        || jcode_provider_core::failover::is_definitive_usage_exhaustion(&entry.reason))
+    .then(|| format_provider_unavailability_detail(entry))
+}
+
 pub(super) fn format_provider_unavailability_detail(
     entry: RuntimeProviderUnavailability,
 ) -> String {
@@ -278,5 +291,32 @@ mod quota_recovery_tests {
         ] {
             assert!(is_quota_failure(reason), "{reason}");
         }
+    }
+
+    #[test]
+    fn bound_preflight_only_skips_requests_for_quota_cooldowns() {
+        let label = "bound-preflight-403-test";
+        record_provider_unavailable_for_account_label(
+            "claude",
+            Some(label),
+            "Anthropic API error (403 Forbidden): Request not allowed",
+        );
+        assert!(provider_unavailability_detail_for_account_label("claude", Some(label)).is_some());
+        assert!(
+            provider_quota_unavailability_detail_for_account_label("claude", Some(label)).is_none()
+        );
+        record_provider_unavailable_for_account_label("claude", Some(label), "usage limit reached");
+        assert!(
+            provider_quota_unavailability_detail_for_account_label("claude", Some(label)).is_some()
+        );
+        record_provider_unavailable_for_account_label(
+            "claude",
+            Some(label),
+            "Anthropic API error (429): weekly limit reached",
+        );
+        assert!(
+            provider_quota_unavailability_detail_for_account_label("claude", Some(label)).is_some()
+        );
+        clear_claude_provider_unavailability_for_account_label(Some(label));
     }
 }
