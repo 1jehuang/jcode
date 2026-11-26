@@ -17,13 +17,14 @@
 /// from detached work that is meant to outlive a reload.
 pub const MCP_CHILD_MARKER_ENV: &str = "JCODE_MCP_CHILD";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod imp {
     use std::collections::HashSet;
     use std::time::Duration;
 
     const REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+    #[cfg(target_os = "linux")]
     fn children_of(pid: u32) -> HashSet<i32> {
         let mut out = HashSet::new();
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
@@ -49,6 +50,7 @@ mod imp {
         out
     }
 
+    #[cfg(target_os = "linux")]
     fn has_mcp_marker(pid: i32) -> bool {
         let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
             return false;
@@ -56,6 +58,80 @@ mod imp {
         let needle = format!("{}=", super::MCP_CHILD_MARKER_ENV);
         environ
             .split(|b| *b == 0)
+            .any(|entry| entry.starts_with(needle.as_bytes()))
+    }
+
+    /// `PROC_PPID_ONLY` from `<sys/proc_info.h>`; not exported by `libc`.
+    #[cfg(target_os = "macos")]
+    const PROC_PPID_ONLY: u32 = 6;
+
+    /// macOS has no procfs. `proc_listpids(PROC_PPID_ONLY)` walks both the live
+    /// and the zombie process lists, so exited children are included. It
+    /// returns bytes, unlike `proc_listchildpids`, whose unit changed across
+    /// macOS releases.
+    #[cfg(target_os = "macos")]
+    fn children_of(pid: u32) -> HashSet<i32> {
+        let mut out = HashSet::new();
+        // SAFETY: a null buffer asks only for the size needed.
+        let needed = unsafe { libc::proc_listpids(PROC_PPID_ONLY, pid, std::ptr::null_mut(), 0) };
+        if needed <= 0 {
+            return out;
+        }
+        // Headroom for children spawned between the two calls.
+        let mut pids = vec![0i32; needed as usize / std::mem::size_of::<i32>() + 32];
+        let size = (pids.len() * std::mem::size_of::<i32>()) as libc::c_int;
+        // SAFETY: the buffer is `size` bytes long and owned by us.
+        let filled =
+            unsafe { libc::proc_listpids(PROC_PPID_ONLY, pid, pids.as_mut_ptr().cast(), size) };
+        if filled <= 0 {
+            return out;
+        }
+        pids.truncate(filled as usize / std::mem::size_of::<i32>());
+        out.extend(pids.into_iter().filter(|&p| p > 0));
+        out
+    }
+
+    /// The environment of a same-user process via `KERN_PROCARGS2`: argc, the
+    /// exec path, argv and then the environment, all NUL separated.
+    #[cfg(target_os = "macos")]
+    fn has_mcp_marker(pid: i32) -> bool {
+        let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        let mut argmax: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>();
+        // SAFETY: `argmax` is a c_int and `len` holds its size.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                2,
+                (&mut argmax as *mut libc::c_int).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || argmax <= 0 {
+            return false;
+        }
+        let mut buf = vec![0u8; argmax as usize];
+        let mut len = buf.len();
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        // SAFETY: `buf` is `len` bytes long; the kernel writes at most that.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return false;
+        }
+        buf.truncate(len);
+        let needle = format!("{}=", super::MCP_CHILD_MARKER_ENV);
+        buf.split(|b| *b == 0)
             .any(|entry| entry.starts_with(needle.as_bytes()))
     }
 
@@ -120,28 +196,46 @@ mod imp {
             let mut set = std::collections::HashSet::from([pid]);
             super::reap(&mut set);
             assert!(set.is_empty());
-            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            assert!(!super::children_of(std::process::id()).contains(&pid));
+        }
+
+        /// A long-lived child whose environment the OS lets us read. macOS hides
+        /// the environment of SIP-protected system binaries such as
+        /// `/bin/sleep` from `KERN_PROCARGS2`, so the test re-runs its own
+        /// binary (ad-hoc signed, not a platform binary) on an ignored test
+        /// that only sleeps. Real MCP servers (node, npx, python) are readable.
+        fn sleeping_child(marked: bool) -> std::process::Child {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--ignored",
+                "--exact",
+                "inherited_children::imp::tests::sleep_for_marker_test",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+            if marked {
+                cmd.env(super::super::MCP_CHILD_MARKER_ENV, "x");
+            }
+            cmd.spawn().unwrap()
+        }
+
+        #[test]
+        #[ignore = "helper process for detects_mcp_marker"]
+        fn sleep_for_marker_test() {
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
 
         #[test]
         fn detects_mcp_marker() {
-            let mut child = std::process::Command::new("sleep")
-                .arg("5")
-                .env(super::super::MCP_CHILD_MARKER_ENV, "x")
-                .spawn()
-                .unwrap();
-            let mut plain = std::process::Command::new("sleep")
-                .arg("5")
-                .spawn()
-                .unwrap();
+            let mut child = sleeping_child(true);
+            let mut plain = sleeping_child(false);
             // Some process launchers return before the final image's environ is
-            // visible through procfs. Wait for the observable marker, not a
+            // visible to the OS. Wait for the observable marker, not a
             // fixed startup delay, and retain diagnostics on a real failure.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while !super::has_mcp_marker(child.id() as i32) {
                 if std::time::Instant::now() >= deadline {
-                    let environ = std::fs::read(format!("/proc/{}/environ", child.id()))
-                        .map(|bytes| format!("read {} bytes without marker", bytes.len()));
+                    let environ = format!("marker not seen for pid {}", child.id());
                     child.kill().unwrap();
                     child.wait().unwrap();
                     plain.kill().unwrap();
@@ -167,8 +261,8 @@ pub fn start() {
     // reload too), and the server calls it again. A second snapshot taken
     // after this image spawned children would steal their exit statuses.
     static ONCE: std::sync::Once = std::sync::Once::new();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     ONCE.call_once(imp::start);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     ONCE.call_once(|| {});
 }
