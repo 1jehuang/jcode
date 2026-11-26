@@ -587,7 +587,10 @@ mod tests {
             CLOUD_DISCONNECT_NUDGE_NOTICE,
             SLOW_RUST_BUILD_NUDGE_NOTICE,
         ] {
-            assert!(!notice.contains('\n'), "notice must be single-line: {notice}");
+            assert!(
+                !notice.contains('\n'),
+                "notice must be single-line: {notice}"
+            );
             assert!(
                 notice.len() <= 75,
                 "notice too wide ({} chars): {notice}",
