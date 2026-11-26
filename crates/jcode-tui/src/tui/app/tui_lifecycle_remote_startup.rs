@@ -41,8 +41,20 @@ impl App {
             self.active_skill = Some(skill);
             return true;
         }
-        if self.rate_limit_pending_message.is_some() {
-            self.restore_terminal_remote_retry_input();
+        if self.rate_limit_pending_message.is_some()
+            && let Some((_, draft)) = self.last_submitted_draft.take()
+        {
+            let newer = self.take_input_draft();
+            super::remote::input_dispatch::restore_prepared_remote_input(self, draft);
+            if !newer.0.is_empty() || !newer.2.is_empty() {
+                self.remember_input_undo_state();
+                self.restore_input_draft(newer);
+                self.push_display_message(DisplayMessage::system(
+                    "Stopped skill prompt saved · Ctrl+Z to restore",
+                ));
+            }
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
         }
         self.clear_pending_remote_retry();
         self.last_submitted_input = None;
