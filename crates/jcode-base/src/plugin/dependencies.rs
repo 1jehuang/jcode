@@ -69,12 +69,7 @@ pub(super) fn parse(value: Option<&serde_json::Value>) -> Result<Vec<String>> {
 }
 
 fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.as_bytes()[0].is_ascii_alphanumeric()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+    safe_name(value).is_ok()
 }
 
 fn qualified(id: &str, declaring_marketplace: &str) -> String {
