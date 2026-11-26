@@ -72,7 +72,7 @@ mod swarm_mutation_state;
 mod swarm_persistence;
 pub(crate) mod swarm_todo_link;
 mod swarm_watchdog;
-mod turn_failover;
+pub(crate) mod turn_failover;
 mod util;
 mod worker_revive;
 

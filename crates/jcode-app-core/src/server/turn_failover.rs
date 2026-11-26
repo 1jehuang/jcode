@@ -56,6 +56,19 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
     if !error_wants_failover(error) {
         return None;
     }
+    // Best-fit policy: a 429/cap/timeout releases this session's sticky pins.
+    if let (Some(policy), Some(reason)) = (
+        best_fit_router::Policy::load(),
+        best_fit_router::step_down_reason(error),
+    ) {
+        for tier in [best_fit_router::PARENT_TIER, best_fit_router::SWARM_TIER] {
+            if best_fit_router::step_down(&policy, agent.session_id(), tier, reason) {
+                best_fit_router::telemetry(serde_json::json!({
+                    "event": "step_down", "session_id": agent.session_id(), "tier": tier, "reason": reason,
+                }));
+            }
+        }
+    }
     if !super::provider_control::automatic_failover_source_is_pool_member(agent) {
         return None;
     }
@@ -329,6 +342,9 @@ pub(super) async fn retry_turn_with_server_failover(
     }
     result
 }
+
+#[path = "best_fit_router.rs"]
+pub(crate) mod best_fit_router;
 
 #[cfg(test)]
 mod tests {

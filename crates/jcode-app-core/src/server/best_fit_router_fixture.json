@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "_doc": "Best-fit model routing policy, read by jcode at swarm dispatch and list_models (crates/jcode-app-core/src/server/best_fit_router.rs). Provider-, model- and family-agnostic: routes are classified only from live list_models metadata (api_method, cheapness.billing_kind, detail). Tests: scripts/test-routing-policy.sh.",
+  "billing": {
+    "allow": ["subscription", "oauth", "local"],
+    "allow_metered_when": "metered_approved",
+    "block": ["metered", "browser", "unknown"],
+    "classify": {
+      "browser": { "api_method_contains": ["web"] },
+      "oauth": { "api_method_contains": ["oauth"] },
+      "local": { "detail_contains": ["localhost", "127.0.0.1", "[::1]"] },
+      "subscription": { "billing_kind": ["subscription", "included_quota"] },
+      "metered": { "billing_kind": ["metered"] }
+    },
+    "_unclassified": "a route matching no class is 'unknown' and blocked unless its provider profile sets metered_approved = true"
+  },
+  "capability_parse": {
+    "context_window_regex": "context ~([0-9]+) tokens",
+    "no_tools_contains": ["no tools"]
+  },
+  "tiers": {
+    "deep_architecture": {
+      "use_for": ["parent", "refactor", "copy"],
+      "supports_tools": true,
+      "prefer": ["oauth", "subscription", "metered_approved", "local"],
+      "rank": "highest_reasoning_then_context"
+    },
+    "parallel_shard": {
+      "use_for": ["swarm"],
+      "supports_tools": true,
+      "prefer": ["local", "metered_approved", "oauth", "subscription"],
+      "rank": "lowest_latency_then_cost"
+    },
+    "lightweight_local": {
+      "use_for": ["lint", "format", "offline"],
+      "supports_tools": true,
+      "prefer": ["local"],
+      "require_health_probe_ms": 2000,
+      "min_context_over_payload": true,
+      "rank": "lowest_latency_then_cost"
+    }
+  },
+  "stickiness": {
+    "pin": "per_session_per_tier",
+    "step_down_on": ["429", "cap_exhausted", "timeout"],
+    "max_step_downs": 3
+  },
+  "telemetry": { "path": "~/.jcode/logs/hook-telemetry.jsonl", "hook": "best_fit_router" }
+}

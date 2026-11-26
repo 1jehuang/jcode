@@ -79,7 +79,45 @@ impl Agent {
 
     /// Record a lightweight environment snapshot for post-mortem debugging
     pub(super) fn log_env_snapshot(&mut self, reason: &str) {
+        if reason == "create" {
+            self.log_turn0_route_compliance();
+        }
         self.record_env_snapshot_inner(reason, true);
+    }
+
+    /// Turn 0: classify the parent route against `routing-policy.json` off the
+    /// startup path and log `Routes used: parent=<route> (<tier>/<billing>)`.
+    fn log_turn0_route_compliance(&self) {
+        let provider = std::sync::Arc::clone(&self.provider);
+        let session_id = self.session.id.clone();
+        let model = self.provider_model();
+        std::thread::spawn(move || {
+            use crate::server::turn_failover::best_fit_router as bf;
+            let Some(policy) = bf::Policy::load() else {
+                return;
+            };
+            let approved = bf::approved_profiles();
+            let billing = provider
+                .model_routes()
+                .iter()
+                .find(|r| r.available && r.model == model)
+                .map(|r| policy.classify(r, &approved));
+            let compliant = billing.is_some_and(|b| policy.allowed(b));
+            let billing = billing.map_or("unknown", |b| b.as_str());
+            let receipt = format!(
+                "Routes used: parent={model} ({}/{billing})",
+                bf::PARENT_TIER
+            );
+            if !compliant {
+                logging::warn(&format!(
+                    "best-fit policy: parent route not billing-eligible: {receipt}"
+                ));
+            }
+            bf::telemetry(serde_json::json!({
+                "event": "turn0_parent", "session_id": session_id, "tier": bf::PARENT_TIER,
+                "route": model, "billing": billing, "compliant": compliant, "receipt": receipt,
+            }));
+        });
     }
 
     /// Record the snapshot without saving. For callers that persist the

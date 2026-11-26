@@ -235,13 +235,11 @@ pub(super) async fn registry_requested_model(
 ) -> anyhow::Result<Option<String>> {
     let model = match requested {
         Some(m) if registry_mode && !is_inherit_sentinel(m.trim()) => m,
+        // No explicit worker model: the declarative routing policy picks one.
+        None => return Ok(best_fit_swarm_model(req_session_id, sessions, provider_template).await),
         other => return Ok(other),
     };
-    let agent = sessions.read().await.get(req_session_id).cloned();
-    let routes = match agent.as_ref().and_then(|a| a.try_lock().ok()) {
-        Some(guard) => guard.model_routes(),
-        None => provider_template.model_routes(),
-    };
+    let routes = live_routes(req_session_id, sessions, provider_template).await;
     resolve_registry_model(&model, &routes)
         .map(Some)
         .map_err(anyhow::Error::msg)
@@ -300,3 +298,56 @@ pub(super) fn resolve_registry_model(
 #[cfg(test)]
 #[path = "comm_session_registry_tests.rs"]
 mod registry_tests;
+
+/// Best-fit worker pick from `routing-policy.json` (`parallel_shard` tier),
+/// sticky per coordinator session. `None` (no policy, nothing eligible) keeps
+/// the existing configured/inherited default. Logs one telemetry row.
+pub(super) async fn best_fit_swarm_model(
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    provider_template: &Arc<dyn Provider>,
+) -> Option<String> {
+    use super::super::turn_failover::best_fit_router as bf;
+    let policy = bf::Policy::load()?;
+    let routes = live_routes(req_session_id, sessions, provider_template).await;
+    let started = std::time::Instant::now();
+    let picked = tokio::task::spawn_blocking({
+        let sid = req_session_id.to_string();
+        move || bf::pick(&policy, &sid, bf::SWARM_TIER, &routes, &bf::local_probe)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        crate::logging::warn(&format!("best-fit pick task failed: {e}"));
+        None
+    });
+    bf::telemetry(serde_json::json!({
+        "event": "swarm_dispatch",
+        "session_id": req_session_id,
+        "tier": bf::SWARM_TIER,
+        "route": picked.as_ref().map(|(r, _, _)| bf::route_id(r)),
+        "billing": picked.as_ref().map(|(_, b, _)| b.as_str()),
+        "sticky": picked.as_ref().map(|(_, _, s)| *s),
+        "ms": started.elapsed().as_millis() as u64,
+    }));
+    let (route, _, _) = picked?;
+    match resolve_registry_model(&bf::route_id(&route), std::slice::from_ref(&route)) {
+        Ok(model) => Some(model),
+        Err(e) => {
+            crate::logging::warn(&format!("best-fit pick not spawnable: {e}"));
+            None
+        }
+    }
+}
+
+/// The requester's live route catalog when its lock is free, else the template's.
+async fn live_routes(
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    provider_template: &Arc<dyn Provider>,
+) -> Vec<jcode_provider_core::ModelRoute> {
+    let agent = sessions.read().await.get(req_session_id).cloned();
+    match agent.as_ref().and_then(|a| a.try_lock().ok()) {
+        Some(guard) => guard.model_routes(),
+        None => provider_template.model_routes(),
+    }
+}
