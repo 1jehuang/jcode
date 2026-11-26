@@ -82,7 +82,10 @@ async fn cancel_publishes_background_task_completed_event() -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for BackgroundTaskCompleted");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for BackgroundTaskCompleted"
+        );
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(BusEvent::BackgroundTaskCompleted(ev))) if ev.task_id == info.task_id => {
                 assert_eq!(ev.status, BackgroundTaskStatus::Failed);
@@ -133,6 +136,84 @@ async fn adopted_task_output_exists_while_running_and_is_replaced_on_completion(
         manager.output(&info.task_id).await.as_deref(),
         Some("complete output\n")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_task_completion_replaces_status_without_mutating_an_open_reader() -> Result<()> {
+    use std::io::Read;
+
+    for adopted in [false, true] {
+        let tmp = tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+        let mut events = Bus::global().subscribe();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let info = if adopted {
+            let handle = tokio::spawn(async move {
+                finish_rx.await?;
+                Ok(jcode_tool_types::ToolOutput::new("done"))
+            });
+            manager.adopt("bash", "status-reader", handle).await
+        } else {
+            manager
+                .spawn("bash", "status-reader", |_| async move {
+                    finish_rx.await?;
+                    Ok(TaskResult::completed(Some(0)))
+                })
+                .await
+        };
+
+        // Hold a reader open across completion, without relying on disk timing.
+        let mut reader = std::fs::File::open(&info.status_file)?;
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await
+                    && event.task_id == info.task_id
+                {
+                    break;
+                }
+            }
+        })
+        .await?;
+
+        let mut snapshot = String::new();
+        reader.read_to_string(&mut snapshot)?;
+        let prior: TaskStatusFile = serde_json::from_str(&snapshot)?;
+        assert_eq!(prior.status, BackgroundTaskStatus::Running);
+        assert_eq!(
+            manager.status(&info.task_id).await.unwrap().status,
+            BackgroundTaskStatus::Completed
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn failed_status_serialization_preserves_the_previous_file() -> Result<()> {
+    struct FailingStatus;
+    impl serde::Serialize for FailingStatus {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            use serde::ser::SerializeSeq;
+            let mut seq = serializer.serialize_seq(None)?;
+            seq.serialize_element(&"partial status".repeat(4096))?;
+            Err(serde::ser::Error::custom(
+                "deliberate serialization failure",
+            ))
+        }
+    }
+
+    let tmp = tempdir()?;
+    let path = tmp.path().join("task.status.json");
+    let status = running_status_fixture("status-write-failure", "status-writer");
+    BackgroundTaskManager::persist_status_file(&path, &status)?;
+    let original = std::fs::read(&path)?;
+    assert!(BackgroundTaskManager::persist_status_file(&path, &FailingStatus).is_err());
+    assert_eq!(std::fs::read(&path)?, original);
+    assert_eq!(std::fs::read_dir(tmp.path())?.count(), 1);
     Ok(())
 }
 
