@@ -321,21 +321,32 @@ fn claude_tool_name(tool: &str) -> &str {
     }
 }
 
-fn expand_plugin_paths(text: &str, root: &Path, data: Option<&Path>) -> String {
-    static VARIABLES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"\$\{CLAUDE_PLUGIN_(?:ROOT|DATA)\}|\$CLAUDE_PLUGIN_(?:ROOT|DATA)\b")
-            .expect("valid plugin variable pattern")
-    });
+fn expand_plugin_paths(text: &str, root: &Path, data: Option<&Path>) -> Option<String> {
+    static VARIABLES: std::sync::LazyLock<Result<regex::Regex, regex::Error>> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\$\{CLAUDE_PLUGIN_(?:ROOT|DATA)\}|\$CLAUDE_PLUGIN_(?:ROOT|DATA)\b")
+        });
+    let variables = match &*VARIABLES {
+        Ok(variables) => variables,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot expand plugin hook paths: {error}"));
+            return None;
+        }
+    };
     // Substitute once. A path containing '$' or '${...}' is literal data, not
     // another expansion pass, and direct-exec arguments are never shell parsed.
-    VARIABLES
-        .replace_all(text, |captures: &regex::Captures<'_>| match &captures[0] {
-            "${CLAUDE_PLUGIN_ROOT}" | "$CLAUDE_PLUGIN_ROOT" => root.to_string_lossy().into_owned(),
-            _ => data
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| captures[0].to_owned()),
-        })
-        .into_owned()
+    Some(
+        variables
+            .replace_all(text, |captures: &regex::Captures<'_>| match &captures[0] {
+                "${CLAUDE_PLUGIN_ROOT}" | "$CLAUDE_PLUGIN_ROOT" => {
+                    root.to_string_lossy().into_owned()
+                }
+                _ => data
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| captures[0].to_owned()),
+            })
+            .into_owned(),
+    )
 }
 
 async fn execute(
@@ -376,11 +387,10 @@ async fn execute(
             &hook.command,
             &hook.root,
             data.as_deref(),
-        ));
-        cmd.args(
-            args.iter()
-                .map(|arg| expand_plugin_paths(arg, &hook.root, data.as_deref())),
-        );
+        )?);
+        for arg in args {
+            cmd.arg(expand_plugin_paths(arg, &hook.root, data.as_deref())?);
+        }
         cmd
     } else {
         #[cfg(unix)]

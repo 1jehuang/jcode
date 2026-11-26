@@ -356,7 +356,9 @@ impl PluginManager {
             );
             for dependency in installed_dependencies(record, &base)? {
                 let dependency = qualified(&dependency, &market);
-                let (name, market) = dependency.split_once('@').expect("qualified dependency");
+                let (name, market) = dependency
+                    .split_once('@')
+                    .context("dependency must have a marketplace")?;
                 pending.push((name.to_owned(), market.to_owned()));
             }
         }
@@ -583,7 +585,9 @@ pub(super) fn satisfied(
                 visiting.push(key.clone());
                 let result = deps.iter().try_for_each(|dependency| {
                     let dependency = qualified(dependency, &key.1);
-                    let (name, market) = dependency.split_once('@').expect("qualified dependency");
+                    let (name, market) = dependency
+                        .split_once('@')
+                        .ok_or_else(|| "dependency must have a marketplace".to_owned())?;
                     check(
                         &(name.to_owned(), market.to_owned()),
                         records,

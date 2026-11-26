@@ -403,13 +403,9 @@ impl ContinuousRecording {
         recorder: &str,
         config: ContinuousConfig,
     ) -> Result<Self, VoiceError> {
-        Self::start_auto_with_restoration(
-            cancel,
-            key,
-            recorder,
-            config,
-            || Box::pin(std::future::pending()),
-        )
+        Self::start_auto_with_restoration(cancel, key, recorder, config, || {
+            Box::pin(std::future::pending())
+        })
     }
 
     pub fn start_auto_with_restoration(

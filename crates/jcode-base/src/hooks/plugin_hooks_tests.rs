@@ -102,7 +102,8 @@ fn argv_plugin_paths_are_one_pass_and_do_not_expand_prefix_variables() {
             "${CLAUDE_PLUGIN_ROOT}:$CLAUDE_PLUGIN_DATA:$CLAUDE_PLUGIN_DATA_EXTRA",
             root,
             Some(data)
-        ),
+        )
+        .expect("plugin variable pattern must compile"),
         "/code/${CLAUDE_PLUGIN_DATA}:/data/$CLAUDE_PLUGIN_ROOT:$CLAUDE_PLUGIN_DATA_EXTRA"
     );
 }

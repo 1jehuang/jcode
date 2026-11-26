@@ -325,7 +325,7 @@ impl PluginManager {
             matches.len() == 1,
             "plugin not installed or ambiguous: {spec}"
         );
-        let p = matches.into_iter().next().expect("one matching plugin");
+        let p = matches.into_iter().next().context("one matching plugin")?;
         p.enabled = enabled;
         p.automatically_disabled = false;
         let root = p.clone();
