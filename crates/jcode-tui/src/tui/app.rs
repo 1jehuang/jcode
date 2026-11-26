@@ -1369,6 +1369,9 @@ pub struct App {
     /// the conversation appears without waiting for the server's History.
     /// Send GetModelCatalog once bootstrap History has arrived.
     model_catalog_after_history: bool,
+    /// CLI-requested `--provider`/`--model` spec to apply once after connecting
+    /// to an already-running shared server.
+    pending_initial_model_spec: Option<String>,
     pending_startup_transcript: Option<std::sync::mpsc::Receiver<StartupTranscript>>,
     /// Fingerprint of the locally rendered startup transcript, delivered by
     /// the startup transcript thread before display conversion so the

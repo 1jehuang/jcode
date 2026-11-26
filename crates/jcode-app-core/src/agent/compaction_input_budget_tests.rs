@@ -107,7 +107,7 @@ async fn input_budget_survives_image_and_native_compaction_resets() {
 }
 
 #[tokio::test]
-async fn input_budget_context_recovery_observes_the_input_limit() {
+async fn input_budget_context_recovery_preserves_observed_tokens() {
     let _home = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let mut agent = Agent::new(
         Arc::new(InputBudgetProvider(Arc::new(AtomicUsize::new(32_000)))),
@@ -127,8 +127,12 @@ async fn input_budget_context_recovery_observes_the_input_limit() {
         );
     }
     let original = serde_json::to_value(&agent.session.messages).unwrap();
+    let manager = agent.registry.compaction();
+    assert_eq!(manager.read().await.token_budget(), 32_000);
+    manager.write().await.update_observed_input_tokens(47_123);
     assert!(agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
-    assert_eq!(agent.last_recovery_compaction.unwrap().0, 32_000);
+    assert_eq!(agent.last_recovery_compaction.unwrap().0, 47_123);
+    assert_eq!(manager.read().await.token_budget(), 32_000);
     assert_eq!(
         serde_json::to_value(&agent.session.messages).unwrap(),
         original
