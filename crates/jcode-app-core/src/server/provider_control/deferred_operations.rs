@@ -254,3 +254,30 @@ pub(super) async fn apply_auth_route_to_agent(
         }
     }
 }
+
+pub(super) fn spawn_deferred_reasoning_effort_change(
+    id: u64,
+    effort: String,
+    agent_lock: impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<Agent>> + Send + 'static,
+    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
+    crate::runtime_activity::spawn(async move {
+        let mut agent_guard = agent_lock.await;
+        log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
+        let prev_model = agent_guard.provider_model();
+        let result = agent_guard.set_reasoning_effort(&effort);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|new_model| new_model != &prev_model);
+        crate::logging::info(&format!(
+            "Deferred reasoning effort change completed request_id={} requested={} success={}",
+            id,
+            effort,
+            result.is_ok()
+        ));
+        send_reasoning_effort_result(id, result, updated_model, &client_event_tx);
+        log_provider_control_completed("set_reasoning_effort", id, queued_at);
+    });
+}

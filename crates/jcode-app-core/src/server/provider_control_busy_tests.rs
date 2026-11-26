@@ -635,3 +635,34 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
     let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
     assert_eq!(saved.model.as_deref(), Some("gemini-4-neon-high"));
 }
+
+#[tokio::test]
+async fn queued_effort_precedes_new_request_even_before_its_task_runs() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("session_effort_admission_order").await;
+    let busy = agent.lock().await;
+    handle_set_reasoning_effort(10, "low".into(), &agent, &tx).await;
+    drop(busy);
+    // No scheduler yield: the queued task has not polled its lock yet.
+    handle_set_reasoning_effort(11, "high".into(), &agent, &tx).await;
+    for (expected_id, expected_effort) in [(10, "low"), (11, "high")] {
+        let event = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                event,
+                ServerEvent::ReasoningEffortChanged {
+                    id,
+                    effort: Some(ref effort),
+                    error: None,
+                    ..
+                } if id == expected_id && effort == expected_effort
+            ),
+            "out-of-order effort response: {event:?}"
+        );
+    }
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+}

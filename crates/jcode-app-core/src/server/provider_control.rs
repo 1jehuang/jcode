@@ -99,6 +99,7 @@ use deferred_operations::{
     log_provider_control_completed, log_provider_control_deferred,
     log_provider_control_lock_acquired, spawn_deferred_agent_mutation,
     spawn_deferred_auth_refreshes, spawn_deferred_provider_operation,
+    spawn_deferred_reasoning_effort_change,
 };
 
 fn send_model_changed_result(
@@ -607,23 +608,21 @@ pub(super) async fn handle_set_reasoning_effort(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
-    let (result, updated_model) = if let Ok(mut agent_guard) = agent.try_lock() {
-        let prev_model = agent_guard.provider_model();
-        let result = agent_guard.set_reasoning_effort(&effort);
-        let updated_model = result
-            .is_ok()
-            .then(|| agent_guard.provider_model())
-            .filter(|new_model| new_model != &prev_model);
-        (result, updated_model)
-    } else {
-        spawn_deferred_reasoning_effort_change(
-            id,
-            effort,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-        );
-        return;
-    };
+    // Register in the FIFO mutex queue before a spawned task can be reordered.
+    let mut agent_lock = Box::pin(tokio::task::unconstrained(Arc::clone(agent).lock_owned()));
+    let (result, updated_model) =
+        if let std::task::Poll::Ready(mut agent_guard) = futures::poll!(&mut agent_lock) {
+            let prev_model = agent_guard.provider_model();
+            let result = agent_guard.set_reasoning_effort(&effort);
+            let updated_model = result
+                .is_ok()
+                .then(|| agent_guard.provider_model())
+                .filter(|new_model| new_model != &prev_model);
+            (result, updated_model)
+        } else {
+            spawn_deferred_reasoning_effort_change(id, effort, agent_lock, client_event_tx.clone());
+            return;
+        };
 
     send_reasoning_effort_result(id, result, updated_model, client_event_tx);
 }
@@ -652,33 +651,6 @@ fn send_reasoning_effort_result(
             });
         }
     }
-}
-
-fn spawn_deferred_reasoning_effort_change(
-    id: u64,
-    effort: String,
-    agent: Arc<Mutex<Agent>>,
-    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
-) {
-    let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
-    crate::runtime_activity::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
-        let prev_model = agent_guard.provider_model();
-        let result = agent_guard.set_reasoning_effort(&effort);
-        let updated_model = result
-            .is_ok()
-            .then(|| agent_guard.provider_model())
-            .filter(|new_model| new_model != &prev_model);
-        crate::logging::info(&format!(
-            "Deferred reasoning effort change completed request_id={} requested={} success={}",
-            id,
-            effort,
-            result.is_ok()
-        ));
-        send_reasoning_effort_result(id, result, updated_model, &client_event_tx);
-        log_provider_control_completed("set_reasoning_effort", id, queued_at);
-    });
 }
 
 pub(super) async fn handle_set_service_tier(
