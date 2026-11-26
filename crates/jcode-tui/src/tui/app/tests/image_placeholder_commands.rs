@@ -199,3 +199,5 @@ include!("input_selection_keys.rs");
 include!("input_text_selection.rs");
 include!("input_image_selection.rs");
 include!("attachment_routing.rs");
+
+include!("retry_draft_correlation.rs");

@@ -933,7 +933,7 @@ fn handle_server_event_inner(
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             app.processing_started = None;
-            app.current_message_id = None;
+            app.hold_current_remote_request();
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
             let auto_poked = app.schedule_turn_end_followups();
@@ -1237,7 +1237,7 @@ fn handle_server_event_inner(
                 app.stream_message_ended = false;
                 app.processing_started = None;
                 app.clear_visible_turn_started();
-                app.current_message_id = None;
+                app.hold_current_remote_request();
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 return false;
