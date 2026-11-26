@@ -82,6 +82,8 @@ fi
 # filesystem root to become a recursive deletion boundary. The suffix prevents
 # command substitution from stripping newlines from a directory name.
 [[ -d "$target_dir" ]] || { log "no target directory: $target_dir"; exit 0; }
+target_dir_logical=$(cd -L -- "$target_dir" && printf '%s/' "$PWD")
+target_dir_logical=${target_dir_logical%/}
 target_dir=$(cd -P -- "$target_dir" && printf '%s/' "$PWD")
 target_dir=${target_dir%/}
 [[ "$target_dir" != / ]] || { log "refusing filesystem root"; exit 2; }
@@ -121,12 +123,13 @@ dir_bytes() {
 
 # Is any rustc/cargo process currently operating inside this path?
 path_has_active_process() {
-  local path="$1" procs
+  local path="$1" logical_path procs
+  logical_path="$target_dir_logical${path#"$target_dir"}"
   procs=$(ps -A -o command= 2>/dev/null) || return 1
   # One awk pass: an early-exiting `grep -q` in a pipeline would SIGPIPE its
   # writer, and with pipefail that reads as "no match".
-  awk -v path="$path" '
-    $0 ~ /(^|\/)(rustc|cargo|clippy-driver)( |$)/ && index($0, path) { found = 1 }
+  awk -v path="$path" -v logical_path="$logical_path" '
+    $0 ~ /(^|\/)(rustc|cargo|clippy-driver)( |$)/ && (index($0, path) || index($0, logical_path)) { found = 1 }
     END { exit !found }' <<<"$procs"
 }
 

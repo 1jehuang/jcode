@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(os.environ.get("JCODE_TEST_CLEANUP_SCRIPT", str(
     Path(__file__).resolve().parents[1] / "scripts/clean_target.sh")))
@@ -154,6 +155,29 @@ class CleanupScriptTests(unittest.TestCase):
             paths.append(path)
         result = self.run_script("--apply", "--sweep-only", "--sweep", "2")
         self.assertEqual((result.returncode, paths[0].exists(), paths[1].exists()), (0, False, True))
+
+    def test_symlink_target_keeps_active_compiler_alias(self):
+        physical_target = self.target
+        alias = self.root / "target alias"
+        alias.symlink_to(physical_target, target_is_directory=True)
+        tools = self.root / "bin"
+        tools.mkdir()
+        ps = tools / "ps"
+        ps.write_text('#!/bin/sh\nprintf \'%s\\n\' "$JCODE_TEST_ACTIVE_COMMAND"\n')
+        ps.chmod(0o755)
+        for compiler in ["rustc", "cargo", "clippy-driver"]:
+            with self.subTest(compiler=compiler):
+                self.target = physical_target
+                old, newest = self.sessions(crate="crate-" + compiler)
+                self.target = alias
+                command = f"{compiler} --out-dir {alias}/debug/deps"
+                with patch.dict(os.environ, {
+                    "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+                    "JCODE_TEST_ACTIVE_COMMAND": command,
+                }):
+                    result = self.run_script("--apply", "--sweep-only", "--sweep", "2")
+                self.assertEqual((result.returncode, old.exists(), newest.exists()),
+                                 (0, True, True), result.stderr)
 
     def test_recent_incremental_files_are_preserved(self):
         old, _ = self.sessions()
