@@ -592,7 +592,7 @@ fn prepare_script_for_paths_with_candidate(
     let home = shell_quote(home);
     let want = shell_quote(target.unwrap_or(""));
     let capability_schema = shell_quote(&format!(
-        "handoff-capabilities-v2:{}:{}",
+        "handoff-capabilities-v3:{}:{}",
         jcode_build_meta::VERSION,
         jcode_build_meta::GIT_HASH,
     ));
@@ -710,7 +710,8 @@ probe() {{
 capable() {{
   if [ "$warm" = 1 ] && {{ [ "$1" = "$cli" ] || [ "$1" = "$backend" ]; }}; then return 0; fi
   probe "$1" cloud receive --help >/dev/null 2>&1 &&
-    probe "$1" cloud credentials --help 2>/dev/null | grep -F -- '--expected-pin' >/dev/null &&
+    credential_help=$(probe "$1" cloud credentials --help 2>/dev/null) &&
+    printf '%s\n' "$credential_help" | grep -F -- '--expected-pin' >/dev/null &&
     probe "$1" cloud router-credentials --help >/dev/null 2>&1 &&
     probe "$1" cloud cancel-return --help >/dev/null 2>&1 &&
     probe "$1" cloud replace-receive --help >/dev/null 2>&1 &&

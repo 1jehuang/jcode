@@ -190,7 +190,7 @@ impl Target {
         // no longer has metadata.
         let metadata = exe.metadata().ok().map(|m| (m.len(), m.modified().ok()));
         Ok(format!(
-            "{host}\n{}\n{};--expected-pin\n{namespace}\n{:?}\n{:?}\n{}\n{:?}\n{}\n{}\n{}",
+            "{host}\n{}\n{};--expected-pin;status=0\n{namespace}\n{:?}\n{:?}\n{}\n{:?}\n{}\n{}\n{}",
             self.remote_binary(),
             REQUIRED_REMOTE_COMMANDS.join(","),
             std::env::var_os("JCODE_CLOUD_RELEASE"),

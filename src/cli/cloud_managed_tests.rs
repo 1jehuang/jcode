@@ -850,14 +850,14 @@ fn managed_capability_probe_rejects_credentials_help_without_pin_check() {
     let script = prepare_script_for_paths("", None, "/unused", false);
     let start = script.find("probe() {").unwrap();
     let end = script[start..].find("version_output() {").unwrap() + start;
-    for pinned in [false, true] {
+    for (pinned, help_exit) in [(false, 0), (true, 0), (true, 9)] {
         let binary = dir.path().join("jcode");
         let help = if pinned {
             "--expected-pin"
         } else {
             "Usage: credentials"
         };
-        std::fs::write(&binary, format!("#!/bin/sh\ncase \"$*\" in *'cloud credentials --help') printf '%s\\n' '{help}' ;; *) exit 0 ;; esac\n")).unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\ncase \"$*\" in *'cloud credentials --help') printf '%s\\n' '{help}'; exit {help_exit} ;; *) exit 0 ;; esac\n")).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
         let result = Command::new("sh")
             .arg("-c")
@@ -872,8 +872,8 @@ fn managed_capability_probe_rejects_credentials_help_without_pin_check() {
             .unwrap();
         assert_eq!(
             result.status.success(),
-            pinned,
-            "a successful old help command does not prove conditional export support"
+            pinned && help_exit == 0,
+            "conditional export requires both the flag and a successful help command"
         );
     }
 }
