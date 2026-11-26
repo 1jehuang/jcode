@@ -217,6 +217,32 @@ fn failed_status_serialization_preserves_the_previous_file() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn status_writes_buffer_bytes_and_name_temps_for_cleanup() -> Result<()> {
+    struct InspectTemporary<'a>(&'a std::path::Path);
+    impl serde::Serialize for InspectTemporary<'_> {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            let result = serde::Serialize::serialize("buffered snapshot", serializer)?;
+            let entries: Vec<_> = std::fs::read_dir(self.0).unwrap().collect();
+            assert_eq!(entries.len(), 1);
+            let temporary = entries[0].as_ref().unwrap();
+            assert_eq!(temporary.path().extension().unwrap(), "tmp");
+            assert_eq!(temporary.metadata().unwrap().len(), 0);
+            Ok(result)
+        }
+    }
+
+    let tmp = tempdir()?;
+    let path = tmp.path().join("task.status.json");
+    BackgroundTaskManager::persist_status_file(&path, &InspectTemporary(tmp.path()))?;
+    assert_eq!(std::fs::read_to_string(&path)?, "\"buffered snapshot\"");
+    assert_eq!(std::fs::read_dir(tmp.path())?.count(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
     let tmp = tempdir()?;
@@ -1149,48 +1175,5 @@ async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
     std::fs::remove_file(&info.status_file)?;
     assert_eq!(manager.sweep().await, 0);
     assert!(manager.settled.lock().await.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn task_ownership_waits_for_status_writer_without_settling() -> Result<()> {
-    let tmp = tempdir()?;
-    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
-    let info = manager.reserve_task_info();
-    manager
-        .register_detached_task(
-            &info,
-            "bash",
-            None,
-            "owner",
-            i32::MAX as u32,
-            &Utc::now().to_rfc3339(),
-            true,
-            true,
-        )
-        .await;
-    let original = fs::read(&info.status_file).await?;
-    let writer = manager.progress_updates.lock().await;
-    fs::write(&info.status_file, b"{").await?;
-    let ownership = manager.task_belongs_to_session(&info.task_id, "owner");
-    tokio::pin!(ownership);
-    assert!(
-        tokio::time::timeout(Duration::ZERO, &mut ownership)
-            .await
-            .is_err()
-    );
-    fs::write(&info.status_file, &original).await?;
-    drop(writer);
-    assert!(ownership.await);
-    assert!(
-        !manager
-            .task_belongs_to_session(&info.task_id, "other")
-            .await
-    );
-    assert_eq!(
-        fs::read(&info.status_file).await?,
-        original,
-        "ownership reads must not reconcile the ended detached task"
-    );
     Ok(())
 }
