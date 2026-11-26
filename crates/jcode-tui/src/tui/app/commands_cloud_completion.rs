@@ -258,3 +258,12 @@ pub(super) fn finish_cloud_command(app: &mut App, job: CloudJob, output: std::pr
         }
     }
 }
+
+fn report_session_ids(report: &serde_json::Value, field: &str) -> Vec<String> {
+    report[field]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect()
+}
