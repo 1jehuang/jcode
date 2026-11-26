@@ -534,6 +534,9 @@ pub(super) async fn dispatch_due_remote_retry(
         app.rate_limit_reset = None;
         return false;
     };
+    if !app.restore_remote_replay_skill() {
+        return true;
+    }
     app.rate_limit_reset = None;
     if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
         && !crate::network_retry::is_probably_online().await
