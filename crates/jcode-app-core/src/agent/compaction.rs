@@ -153,17 +153,16 @@ impl Agent {
             return false;
         }
 
-        let context_limit = self.provider.context_window() as u64;
         let compaction = self.registry.compaction();
 
         let (dropped, usage_pct) = match compaction.try_write() {
             Ok(mut manager) => {
                 let (dropped, usage_pct) = {
                     let all_messages = self.session.provider_messages();
-                    manager.update_observed_input_tokens(context_limit);
                     let usage_pct = manager.context_usage_with(all_messages) * 100.0;
-                    // The provider rejected the request, so the context was at
-                    // least the limit even if the local estimate is lower.
+                    // Preserve the actual observed/estimated token count rather than
+                    // overwriting it with `provider.context_window()`: an upstream route
+                    // may reject at a smaller limit (e.g. 64k) than the catalog window (1M).
                     let pre_tokens = manager.effective_token_count_with(all_messages) as u64;
                     let dropped = match manager.hard_compact_with(all_messages) {
                         Ok(dropped) => dropped,
