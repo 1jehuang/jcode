@@ -153,9 +153,11 @@ pub(super) fn find_stable_update_with(
                 && is_stable_tag(&r.release.tag_name)
                 && matches!(is_update(&r.release), Ok(false))
         });
-        if let Some(found) = select_installable_stable(releases, &mut is_update, |release, asset| {
-            sums_list_asset(&client, release, asset)
-        })? {
+        if let Some(found) =
+            select_installable_stable(releases, &mut is_update, |release, asset| {
+                sums_list_asset(&client, release, asset)
+            })?
+        {
             return Ok(Some(found));
         }
         if page_len < FALLBACK_PAGE_SIZE || reached_installed {
