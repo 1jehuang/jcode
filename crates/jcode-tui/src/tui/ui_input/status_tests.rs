@@ -935,7 +935,10 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
 
     facts.effort = Some("medium".to_string());
     let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
-    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    let mismatched_rendered: String = mismatched_spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
     assert!(
         mismatched_rendered.contains("Gemini 4 Neon Low")
             && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),

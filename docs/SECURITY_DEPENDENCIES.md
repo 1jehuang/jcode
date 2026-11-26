@@ -91,7 +91,8 @@ It is not an allowlist. It is a triage record so advisories are visible and acti
   so an ignore would not have been clearly safe. See #657.
 - `RUSTSEC-2024-0320` (`yaml-rust`) was removed from the dependency graph on 2026-03-05 by trimming `syntect` features to built-in syntax/theme dumps instead of YAML loading.
 - `RUSTSEC-2026-0194` / `RUSTSEC-2026-0195` (`quick-xml` 0.39.2): reached only through `wayland-scanner`, a build-time proc-macro in the desktop crate's winit stack. It parses trusted, vendored Wayland protocol XML during compilation and never touches untrusted input at runtime. Remediation is upstream: `wayland-scanner` needs to move to `quick-xml >= 0.41`. Triaged and ignored in `scripts/security_preflight.sh` on 2026-07-04.
-- `scripts/security_preflight.sh` ignores the vulnerability advisories that are explicitly triaged above (`lettre` and `rustls-webpki`) so CI can remain actionable. New vulnerabilities still fail CI by default.
+- `RUSTSEC-2026-0594` (`cookie` 0.18.2): private cookie nonces can repeat in processes that fork. Reached through `actix-web` in the desktop crate's local server. jcode never forks after initializing cookies; the nonce reuse path is unreachable. Triaged and ignored in `scripts/security_preflight.sh` on 2026-11-23.
+- `scripts/security_preflight.sh` ignores the vulnerability advisories that are explicitly triaged above (`lettre`, `rustls-webpki`, `cookie`) so CI can remain actionable. New vulnerabilities still fail CI by default.
 - Before changing dependency versions, run:
   - `cargo check`
   - `cargo test -j 1`

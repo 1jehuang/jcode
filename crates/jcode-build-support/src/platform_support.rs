@@ -102,6 +102,43 @@ pub fn atomic_symlink_swap(src: &Path, dst: &Path, temp: &Path) -> std::io::Resu
     Ok(())
 }
 
+/// Ad-hoc codesign a binary on macOS so the kernel accepts it after a copy
+/// or hard-link. On non-macOS this is a no-op.
+pub fn adhoc_codesign(path: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                // Non-fatal: the binary may still work without it on some
+                // kernels/configurations, but log the failure.
+                eprintln!(
+                    "warning: ad-hoc codesign failed for {} (exit {})",
+                    path.display(),
+                    s.code().unwrap_or(-1)
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not run codesign for {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 /// Delete stale `.jcode-launcher-old-*` backups left in `dir` by earlier swaps.
 ///
 /// A backup is only removed when it is older than `max_age`; a file still held
