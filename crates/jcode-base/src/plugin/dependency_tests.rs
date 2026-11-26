@@ -607,3 +607,233 @@ fn reactivation_never_auto_enables_a_lower_scope_dependency() {
         assert_eq!(leaf.automatically_disabled, automatic);
     }
 }
+
+#[test]
+fn dependency_name_policy_catalog_and_manifest_install_leading_punctuation() {
+    for from_manifest in [false, true] {
+        for market_name in ["fixture", "_fixture", "-fixture"] {
+            for name in ["_leaf", "-leaf"] {
+                for declaration in [
+                    json!(name),
+                    json!(format!("{name}@{market_name}")),
+                    json!({"name":name}),
+                ] {
+                    let (temp, manager) = fixture();
+                    let mut root_plugin = json!({"name":"root","source":"./root"});
+                    if !from_manifest {
+                        root_plugin["dependencies"] = json!([declaration]);
+                    }
+                    let source = market(
+                        temp.path(),
+                        market_name,
+                        json!([root_plugin, {"name":name,"source":format!("./{name}")}]),
+                        &[],
+                    );
+                    if from_manifest {
+                        manifest(
+                            &source,
+                            "root",
+                            json!({"name":"root","dependencies":[declaration]}),
+                        );
+                    }
+                    manager.add_marketplace(source.to_str().unwrap()).unwrap();
+                    manager
+                        .install(&format!("root@{market_name}"), PluginScope::User)
+                        .unwrap();
+                    let installed = manager.list().unwrap();
+                    assert_eq!(installed.len(), 2);
+                    let dependency = installed.iter().find(|plugin| plugin.name == name).unwrap();
+                    assert_eq!(dependency.marketplace, market_name);
+                    assert!(
+                        installed
+                            .iter()
+                            .all(|plugin| plugin.enabled && plugin.scope == PluginScope::User)
+                    );
+                    assert_eq!(
+                        fs::read_to_string(dependency.root.join("bytes")).unwrap(),
+                        name
+                    );
+                    assert!(manager.dependency_diagnostics().unwrap().is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dependency_name_policy_cross_market_names_keep_root_allowlist_and_atomicity() {
+    for from_manifest in [false, true] {
+        for market_name in ["_other", "-other"] {
+            for name in ["leaf", "_leaf", "-leaf"] {
+                for declaration in [
+                    json!(format!("{name}@{market_name}")),
+                    json!({"name":name,"marketplace":market_name}),
+                ] {
+                    let (temp, manager) = fixture();
+                    let mut root_plugin = json!({"name":"root","source":"./root"});
+                    if !from_manifest {
+                        root_plugin["dependencies"] = json!([declaration]);
+                    }
+                    let root = market(temp.path(), "fixture", json!([root_plugin]), &[]);
+                    if from_manifest {
+                        manifest(
+                            &root,
+                            "root",
+                            json!({"name":"root","dependencies":[declaration]}),
+                        );
+                    }
+                    let dependency = market(
+                        temp.path(),
+                        market_name,
+                        json!([{"name":name,"source":format!("./{name}")}]),
+                        &[],
+                    );
+                    for source in [&root, &dependency] {
+                        manager.add_marketplace(source.to_str().unwrap()).unwrap();
+                    }
+                    let before = registry(&manager);
+                    let error = manager
+                        .install("root@fixture", PluginScope::User)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains("ROOT"), "{error}");
+                    assert_eq!(registry(&manager), before);
+                    assert!(manager.list().unwrap().is_empty());
+                    assert!(!manager.base().join("cache").exists());
+                    let path = root.join(".claude-plugin/marketplace.json");
+                    let mut catalog: Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    catalog["allowCrossMarketplaceDependenciesOn"] = json!([market_name]);
+                    fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+                    manager.update_marketplace("fixture").unwrap();
+                    manager.install("root@fixture", PluginScope::User).unwrap();
+                    let installed = manager.list().unwrap();
+                    assert_eq!(installed.len(), 2);
+                    assert!(installed.iter().all(|plugin| plugin.enabled));
+                    assert_eq!(
+                        installed
+                            .iter()
+                            .find(|plugin| plugin.name == name)
+                            .unwrap()
+                            .marketplace,
+                        market_name
+                    );
+                    assert!(manager.dependency_diagnostics().unwrap().is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dependency_name_policy_parser_matches_boundary_names_and_useful_errors() {
+    for name in [
+        "_".to_string(),
+        "-".into(),
+        "_leaf".into(),
+        "-leaf".into(),
+        "x-_9".into(),
+        "x".repeat(128),
+    ] {
+        assert!(safe_name(&name).is_ok());
+        for declaration in [json!(name), json!({"name":name})] {
+            assert_eq!(
+                dependencies::parse(Some(&json!([declaration]))).unwrap(),
+                [name.clone()]
+            );
+        }
+        for declaration in [
+            json!(format!("leaf@{name}")),
+            json!({"name":"leaf","marketplace":name}),
+        ] {
+            assert_eq!(
+                dependencies::parse(Some(&json!([declaration]))).unwrap(),
+                [format!("leaf@{name}")]
+            );
+        }
+    }
+    for name in [
+        "".to_string(),
+        ".".into(),
+        "bad.name".into(),
+        "../escape".into(),
+        "a/b".into(),
+        "a\\b".into(),
+        "é".into(),
+        "x".repeat(129),
+    ] {
+        assert!(safe_name(&name).is_err());
+        for (declaration, expected) in [
+            (json!(name), "invalid dependency identifier"),
+            (
+                json!(format!("leaf@{name}")),
+                "invalid dependency identifier",
+            ),
+            (json!({"name":name}), "invalid dependency object name"),
+            (
+                json!({"name":"leaf","marketplace":name}),
+                "invalid dependency marketplace",
+            ),
+        ] {
+            let error = dependencies::parse(Some(&json!([declaration])))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+}
+
+#[test]
+fn dependency_name_policy_invalid_edges_preserve_registry_and_installed_bytes() {
+    for from_manifest in [false, true] {
+        let (temp, manager) = fixture();
+        let source = market(
+            temp.path(),
+            "fixture",
+            json!([{"name":"root","source":"./root"}]),
+            &[],
+        );
+        manager.add_marketplace(source.to_str().unwrap()).unwrap();
+        let installed = manager.install("root", PluginScope::User).unwrap();
+        let saved = serde_json::to_value(manager.list().unwrap()).unwrap();
+        for declaration in [
+            json!("bad.name"),
+            json!("leaf@bad.market"),
+            json!({"name":"bad.name"}),
+            json!({"name":"leaf","marketplace":"bad.market"}),
+            json!("../escape"),
+            json!({"name":"../escape"}),
+            json!("x".repeat(129)),
+            json!({"name":"leaf","marketplace":"x".repeat(129)}),
+        ] {
+            if from_manifest {
+                manifest(
+                    &source,
+                    "root",
+                    json!({"name":"root","dependencies":[declaration]}),
+                );
+            } else {
+                let path = source.join(".claude-plugin/marketplace.json");
+                let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                catalog["plugins"][0]["dependencies"] = json!([declaration]);
+                fs::write(path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+            }
+            manager.update_marketplace("fixture").unwrap();
+            let before = registry(&manager);
+            let error = manager
+                .update("root", PluginScope::User)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("invalid dependency"), "{error}");
+            assert_eq!(registry(&manager), before);
+            assert_eq!(
+                serde_json::to_value(manager.list().unwrap()).unwrap(),
+                saved
+            );
+            assert_eq!(
+                fs::read_to_string(installed.root.join("bytes")).unwrap(),
+                "root"
+            );
+        }
+    }
+}
