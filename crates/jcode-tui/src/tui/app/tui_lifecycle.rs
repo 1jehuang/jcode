@@ -156,11 +156,10 @@ impl App {
 
     /// Track a failed turn for the credential-failure circuit breaker.
     ///
-    /// Returns `true` when the error classifies as a credential/auth failure
-    /// AND the consecutive-failure count has reached the breaker threshold,
-    /// meaning the caller must stop all automatic resend paths. Non-credential
-    /// errors reset the streak (the breaker only guards against retrying a
-    /// dead credential, not mixed transient failures).
+    /// Returns `true` when the error classifies as a credential/auth failure AND the
+    /// consecutive-failure count has reached the breaker threshold, meaning the caller must
+    /// stop all automatic resend paths. Non-credential errors reset the streak (the breaker
+    /// only guards against retrying a dead credential, not mixed transient failures).
     pub(super) fn note_error_for_credential_breaker(&mut self, message: &str) -> bool {
         if crate::provider::error_looks_like_credential_failure(message) {
             self.consecutive_credential_failures =
@@ -227,9 +226,8 @@ impl App {
         mut session: Session,
     ) -> Self {
         let skills = Arc::new(SkillRegistry::default());
-        // Remote and replay clients never connect MCP servers locally (the
-        // server owns them), so skip parsing ~/.claude.json and friends on the
-        // first-frame path.
+        // Remote and replay clients never connect MCP servers locally (the server owns
+        // them), so skip parsing ~/.claude.json and friends on the first-frame path.
         let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
             crate::mcp::McpConfig::default(),
         )));
@@ -434,6 +432,7 @@ impl App {
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_server_context: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
             remote_provider_oauth_email: None,
@@ -959,6 +958,7 @@ impl App {
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
             remote_provider_model: None,
+            remote_server_context: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
             remote_provider_oauth_email: None,

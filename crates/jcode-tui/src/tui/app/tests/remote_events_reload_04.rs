@@ -993,44 +993,6 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
 }
 
 #[test]
-fn test_remote_context_limit_survives_a_later_local_re_derivation() {
-    // The server resolves the window for a model chosen server-side and sends
-    // it on attach. The startup and model-switch paths then call
-    // update_context_limit_for_model with None, which for a model absent from
-    // the static catalog fell through to the client's inert provider and the
-    // generic 200_000 default, overwriting a correct 1M value. Measured on
-    // stealth/space-bunny-alpha@Stealth: the panel showed 200000 while the
-    // route carried 1000000.
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("OpenRouter".to_string());
-    app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
-
-    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
-    assert_eq!(
-        app.context_limit, 1_000_000,
-        "server window must be adopted"
-    );
-
-    // A later local re-derivation must not undo it.
-    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
-    assert_eq!(
-        app.context_limit, 1_000_000,
-        "a None call must not downgrade the window the server already reported"
-    );
-
-    let data = crate::tui::TuiState::info_widget_data(&app);
-    assert_eq!(data.context_limit, Some(1_000_000));
-
-    // The compaction budget has to move with it, or a 1M route keeps triggering
-    // compaction about five times too early.
-    let compaction = app.registry.compaction();
-    if let Ok(manager) = compaction.try_read() {
-        assert_eq!(manager.token_budget(), 1_000_000);
-    }
-}
-
-#[test]
 fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let mut app = create_test_app();
     app.is_remote = true;
@@ -2585,3 +2547,6 @@ fn test_server_waiting_for_network_connection_phase_sets_status_and_exempts_stal
 
 #[path = "remote_events_reload_04_additional_tests.rs"]
 mod additional_test_remote_fast_status_tracks_history_tier_including_explicit_off;
+
+#[path = "remote_context_window.rs"]
+mod remote_context_window;
