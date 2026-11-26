@@ -684,9 +684,9 @@ fn auth_doctor_provider_arg<'a>(
 }
 
 mod resume;
-use resume::resolve_resume_arg;
 #[cfg(test)]
 use resume::{ResumeResolutionFailureAction, resolve_resume_id, resume_resolution_failure_action};
+use resume::{resolve_resume_arg, wait_for_existing_reload_server};
 
 mod subcommand_mapping;
 use subcommand_mapping::*;
@@ -804,17 +804,23 @@ async fn run_default_command(args: Args) -> Result<()> {
         .await;
     }
 
-    if server_running && explicit_provider_or_model {
+    let initial_model_spec = if server_running {
+        client_initial_model_spec(
+            &args.provider,
+            args.model.as_deref(),
+            args.provider_profile.as_deref(),
+        )
+    } else {
+        None
+    };
+
+    if server_running && explicit_provider_or_model && initial_model_spec.is_none() {
         output::stderr_info(
-            "Server already running; provider/model flags only apply when starting a new server.",
+            "Server already running; provider-only flags without --model only apply when starting a new server.",
         );
         output::stderr_info(format!(
-            "Current server settings control `/model`. Restart server to apply: --provider {}{}",
+            "Current server settings control `/model`. Pass `--model <id>` or restart server to apply: --provider {}",
             args.provider.as_arg_value(),
-            args.model
-                .as_ref()
-                .map(|m| format!(" --model {}", m))
-                .unwrap_or_default()
         ));
     }
 
@@ -862,10 +868,29 @@ async fn run_default_command(args: Args) -> Result<()> {
         args.remote_working_dir,
         args.onboarding_sim,
         args.update_sim,
+        initial_model_spec,
     )
     .await?;
 
     Ok(())
+}
+
+fn client_initial_model_spec(
+    provider: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Option<String> {
+    let model = model.map(str::trim).filter(|m| !m.is_empty())?;
+    if model.contains(':') {
+        return Some(model.to_string());
+    }
+    if let Some(profile) = provider_profile.map(str::trim).filter(|p| !p.is_empty()) {
+        return Some(format!("{profile}:{model}"));
+    }
+    if *provider != ProviderChoice::Auto {
+        return Some(format!("{}:{model}", provider.as_arg_value()));
+    }
+    Some(model.to_string())
 }
 
 fn print_provider_test_coverage_report(report: &str, colorize: bool) {
@@ -881,34 +906,6 @@ fn print_provider_test_coverage_report(report: &str, colorize: bool) {
 
 pub(crate) async fn server_is_running() -> bool {
     server_is_running_at(&server::socket_path()).await
-}
-
-async fn wait_for_existing_reload_server(context: &str) -> bool {
-    if let Some(state) = server::recent_reload_state(std::time::Duration::from_secs(30)) {
-        match state.phase {
-            server::ReloadPhase::Starting => {
-                crate::logging::info(&format!(
-                    "Reload state=starting during {}; waiting for existing server to return",
-                    context
-                ));
-                return wait_for_reloading_server().await;
-            }
-            server::ReloadPhase::Failed => {
-                crate::logging::warn(&format!(
-                    "Reload state=failed during {} on {}: {}; recent_state={}",
-                    context,
-                    server::socket_path().display(),
-                    state
-                        .detail
-                        .unwrap_or_else(|| "unknown reload failure".to_string()),
-                    server::reload_state_summary(std::time::Duration::from_secs(60))
-                ));
-            }
-            server::ReloadPhase::SocketReady => {}
-        }
-    }
-
-    false
 }
 
 pub(crate) async fn wait_for_resuming_server(context: &str, timeout: std::time::Duration) -> bool {
