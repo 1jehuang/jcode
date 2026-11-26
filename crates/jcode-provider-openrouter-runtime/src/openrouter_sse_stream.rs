@@ -6,10 +6,18 @@ use std::pin::Pin;
 // VSLLM can accept a request while its selected upstream channel remains
 // silent. Avoid multiplying a five-minute idle budget by eight attempts.
 fn vsllm_endpoint(api_base: &str) -> bool {
-    reqwest::Url::parse(api_base)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "vsllm.cc" || host == "www.vsllm.cc")
+    let url = match reqwest::Url::parse(api_base) {
+        Ok(url) => url,
+        Err(error) => {
+            jcode_base::logging::warn(&format!(
+                "Cannot classify streaming API endpoint URL: {error}"
+            ));
+            return false;
+        }
+    };
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("vsllm.cc") || host.eq_ignore_ascii_case("www.vsllm.cc")
+    })
 }
 
 fn endpoint_idle_timeout(api_base: &str, configured: std::time::Duration) -> std::time::Duration {
@@ -45,7 +53,11 @@ mod vsllm_timeout_tests {
                 .as_secs(),
             25
         );
-        for url in ["https://other.test/v1", "https://vsllm.cc.other.test/v1"] {
+        for url in [
+            "https://other.test/v1",
+            "https://vsllm.cc.other.test/v1",
+            "not a valid URL",
+        ] {
             assert_eq!(endpoint_idle_timeout(url, configured), configured);
             assert_eq!(endpoint_attempt_limit(url, 8), 8);
         }
