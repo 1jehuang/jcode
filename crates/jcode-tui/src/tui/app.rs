@@ -1347,6 +1347,9 @@ pub struct App {
     /// the conversation appears without waiting for the server's History.
     /// Send GetModelCatalog once bootstrap History has arrived.
     model_catalog_after_history: bool,
+    /// CLI-requested `--provider`/`--model` spec to apply once after connecting
+    /// to an already-running shared server.
+    pending_initial_model_spec: Option<String>,
     pending_startup_transcript: Option<std::sync::mpsc::Receiver<StartupTranscript>>,
     /// Fingerprint of the locally rendered startup transcript, delivered by
     /// the startup transcript thread before display conversion so the
@@ -2052,37 +2055,6 @@ impl App {
             baseline,
             cache_generation: self.kv_cache.cache_generation,
         });
-    }
-
-    /// Session id the next KV-cache baseline should be tagged with.
-    ///
-    /// A single `App` can stream several sessions over its lifetime (remote
-    /// session switches, local handoffs). The baseline must only be compared
-    /// against requests from the same session, so we capture the active id here.
-    fn kv_cache_session_id(&self) -> Option<String> {
-        if self.is_remote {
-            self.remote_session_id.clone()
-        } else {
-            Some(self.session.id.clone())
-        }
-    }
-
-    /// Return the stored baseline only when it belongs to the active session.
-    ///
-    /// Diffing a request against a baseline captured for a different (often
-    /// larger) session makes the new history look like a broken prefix and
-    /// emits a spurious `harness:_prefix_changed` miss. Treat a foreign baseline
-    /// as absent (warmup) instead.
-    fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
-        let baseline = self.kv_cache.kv_cache_baseline.clone()?;
-        let current = self.kv_cache_session_id();
-        if baseline.session_id == current
-            && baseline.cache_generation == self.kv_cache.cache_generation
-        {
-            Some(baseline)
-        } else {
-            None
-        }
     }
 
     fn maybe_push_cold_cache_warning(
