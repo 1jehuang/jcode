@@ -720,7 +720,15 @@ fn test_local_escape_with_pending_prompt_redirects_to_it() {
     );
     assert_eq!(app.queued_messages(), &["do this instead"]);
     assert!(app.interleave_message.is_none());
-    assert_eq!(app.pending_images.len(), 1, "staged images are not dropped");
+    assert_eq!(
+        app.queued_images,
+        [("image/png".to_string(), "aGk=".to_string())],
+        "staged images stay with the queued redirect"
+    );
+    assert!(
+        app.pending_images.is_empty(),
+        "redirect images are not composer attachments"
+    );
     assert_eq!(
         app.status_notice(),
         Some("Interrupting... sending your next prompt".to_string())
