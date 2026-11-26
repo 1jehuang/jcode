@@ -405,6 +405,7 @@ pub(super) async fn spawn_swarm_agent(
         req_session_id,
         sessions,
         provider_template,
+        initial_message.as_deref().unwrap_or_default(),
     )
     .await?;
     let resolved_working_dir =

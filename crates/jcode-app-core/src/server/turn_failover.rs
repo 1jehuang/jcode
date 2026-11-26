@@ -61,7 +61,21 @@ pub(super) fn pick_failover_target(agent: &Agent, error: &str) -> Option<Failove
         best_fit_router::Policy::load(),
         best_fit_router::step_down_reason(error),
     ) {
-        for tier in [best_fit_router::PARENT_TIER, best_fit_router::SWARM_TIER] {
+        // Cross-process 120s breaker on the failing parent route (429/timeout only).
+        let model = agent.provider_model();
+        if let Some(r) = agent
+            .model_routes()
+            .iter()
+            .find(|r| r.available && r.model == model)
+        {
+            let id = best_fit_router::route_id(r);
+            if policy.trip(&id, reason) {
+                best_fit_router::telemetry(serde_json::json!({
+                    "event": "breaker_open", "route": id, "reason": reason,
+                }));
+            }
+        }
+        for tier in best_fit_router::ALL_TIERS {
             if best_fit_router::step_down(&policy, agent.session_id(), tier, reason) {
                 best_fit_router::telemetry(serde_json::json!({
                     "event": "step_down", "session_id": agent.session_id(), "tier": tier, "reason": reason,

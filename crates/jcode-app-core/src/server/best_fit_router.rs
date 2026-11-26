@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 pub(crate) const PARENT_TIER: &str = "deep_architecture";
 pub(crate) const SWARM_TIER: &str = "parallel_shard";
+pub(crate) const CODE_TIER: &str = "code_execution";
+pub(crate) const LOCAL_TIER: &str = "lightweight_local";
+pub(crate) const ALL_TIERS: [&str; 4] = [PARENT_TIER, CODE_TIER, SWARM_TIER, LOCAL_TIER];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Billing {
@@ -112,7 +115,7 @@ impl Policy {
         if self.class_has("oauth", "api_method_contains", &api) {
             return Billing::Oauth;
         }
-        if self.class_has("local", "detail_contains", &detail) {
+        if self.is_true_local(route) || self.class_has("local", "detail_contains", &detail) {
             return Billing::Local;
         }
         if kind_is("subscription") {
@@ -129,6 +132,79 @@ impl Policy {
             return Billing::Metered;
         }
         Billing::Unknown
+    }
+
+    /// Loopback host in the route detail AND no remote/cloud/proxy marker anywhere.
+    pub(crate) fn is_true_local(&self, route: &ModelRoute) -> bool {
+        let detail = route.detail.to_lowercase();
+        let all = format!("{} {} {}", route.model, route.api_method, route.detail).to_lowercase();
+        strs(&self.raw, "/local_detection/loopback_hosts")
+            .iter()
+            .any(|h| detail.contains(&format!("//{h}")))
+            && !strs(&self.raw, "/local_detection/remote_markers")
+                .iter()
+                .any(|m| all.contains(m.as_str()))
+    }
+
+    fn num(&self, ptr: &str) -> Option<u64> {
+        self.raw.pointer(ptr).and_then(Value::as_u64)
+    }
+
+    /// Spawn prompt -> tier: a mutating marker wins, else read-only by file count.
+    pub(crate) fn classify_spawn(&self, prompt: &str) -> &'static str {
+        let p = prompt.to_lowercase();
+        let tier = |k: &str, d: &'static str| -> &'static str {
+            let want = self
+                .raw
+                .pointer(&format!("/swarm_classification/{k}"))
+                .and_then(Value::as_str);
+            ALL_TIERS
+                .into_iter()
+                .find(|t| Some(*t) == want)
+                .unwrap_or(d)
+        };
+        if strs(&self.raw, "/swarm_classification/mutating_markers")
+            .iter()
+            .any(|m| p.contains(m.as_str()))
+        {
+            return tier("mutating_tier", CODE_TIER);
+        }
+        let files: HashSet<&str> = self
+            .raw
+            .pointer("/swarm_classification/file_token_regex")
+            .and_then(Value::as_str)
+            .and_then(|r| regex::Regex::new(r).ok())
+            .map(|re| re.find_iter(&p).map(|m| m.as_str()).collect())
+            .unwrap_or_default();
+        let small = self
+            .num("/swarm_classification/small_max_files")
+            .unwrap_or(3) as usize;
+        if !files.is_empty() && files.len() <= small {
+            tier("small_read_only_tier", LOCAL_TIER)
+        } else {
+            tier("read_only_tier", SWARM_TIER)
+        }
+    }
+
+    /// Rough token estimate for payload-aware context escalation.
+    pub(crate) fn estimate_tokens(&self, text: &str) -> u64 {
+        let cpt = self
+            .num("/invariants/context_escalation/chars_per_token")
+            .unwrap_or(4)
+            .max(1);
+        text.len() as u64 / cpt
+    }
+
+    fn escalation(&self) -> f64 {
+        self.raw
+            .pointer("/invariants/context_escalation/multiplier")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.5)
+    }
+
+    pub(crate) fn spill_to(&self, tier: &str) -> Option<&'static str> {
+        let want = self.tier(tier)?.get("spill_to")?.as_str()?;
+        ALL_TIERS.into_iter().find(|t| *t == want)
     }
 
     pub(crate) fn allowed(&self, b: Billing) -> bool {
@@ -191,10 +267,12 @@ impl Policy {
             .get("supports_tools")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let ctx_floor = t
-            .get("min_context_over_payload")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let min_ctx = t
+            .get("min_context_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        // Payload-aware escalation: window must be >= estimated tokens * multiplier.
+        let need_ctx = min_ctx.max((payload_tokens as f64 * self.escalation()).ceil() as u64);
         let deep = t.get("rank").and_then(Value::as_str) == Some("highest_reasoning_then_context");
         let mut out: Vec<_> = routes
             .iter()
@@ -202,8 +280,12 @@ impl Policy {
             .map(|r| (r, self.classify(r, approved)))
             .filter(|(_, b)| self.allowed(*b) && prefer.iter().any(|p| p == b.as_str()))
             .filter(|(r, _)| !need_tools || self.supports_tools(r))
-            .filter(|(r, _)| {
-                !ctx_floor || self.context_window(r).is_none_or(|c| c > payload_tokens)
+            // Unknown window passes only when no floor applies.
+            // shortcut: an unadvertised window passes the static floor but never a payload
+            // escalation above it; tighten once every route advertises its window.
+            .filter(|(r, _)| match self.context_window(r) {
+                Some(c) => c >= need_ctx,
+                None => need_ctx <= min_ctx,
             })
             // A local route is only eligible while its endpoint answers within 2s.
             .filter(|(r, b)| *b != Billing::Local || probe(r))
@@ -322,6 +404,8 @@ fn pins() -> &'static Mutex<HashMap<PinKey, PinState>> {
 
 /// Sticky best-fit pick: reuse the session's pinned route for this tier while it
 /// stays eligible, so mid-session dispatches never invalidate the KV cache.
+/// Single-tier form of [`dispatch`], kept for the pin/step-down tests.
+#[cfg(test)]
 pub(crate) fn pick(
     policy: &Policy,
     session_id: &str,
@@ -410,6 +494,249 @@ pub(crate) fn telemetry(event: Value) {
     if let Err(e) = written {
         crate::logging::warn(&format!("best-fit telemetry write failed: {e}"));
     }
+}
+
+/// Cross-process router state shared by every jcode window:
+/// `~/.jcode/state/router-state.json`, guarded by an flock on a sibling lock file.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub(crate) struct SharedState {
+    /// local route id -> (holder pid, lease expiry unix s) for max_concurrent_local.
+    /// shortcut: a lease expires instead of being released on worker exit; wire an
+    /// explicit release when swarm member completion reaches this module.
+    #[serde(default)]
+    pub local_slots: HashMap<String, (u32, u64)>,
+    /// route id -> unix seconds until which the breaker is open
+    #[serde(default)]
+    pub breakers: HashMap<String, u64>,
+    /// session id -> metered tokens dispatched
+    #[serde(default)]
+    pub metered_tokens: HashMap<String, u64>,
+}
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn pid_alive(pid: u32) -> bool {
+    // kill(pid, 0): 0 = alive, EPERM = alive but not ours.
+    let alive = unsafe { ::libc::kill(pid as ::libc::pid_t, 0) == 0 };
+    alive || std::io::Error::last_os_error().raw_os_error() == Some(::libc::EPERM)
+}
+
+pub(crate) fn state_path() -> Option<std::path::PathBuf> {
+    match std::env::var("JCODE_ROUTER_STATE") {
+        Ok(p) if !p.is_empty() => Some(p.into()),
+        _ => dirs::home_dir().map(|h| h.join(".jcode/state/router-state.json")),
+    }
+}
+
+/// Run `f` on the shared state under an exclusive flock; drops dead-pid slots
+/// and expired breakers first. `None` when the state file is unreachable.
+pub(crate) fn with_state<T>(f: impl FnOnce(&mut SharedState) -> T) -> Option<T> {
+    use std::os::unix::io::AsRawFd;
+    let path = state_path()?;
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+        .ok()?;
+    if unsafe { ::libc::flock(lock.as_raw_fd(), ::libc::LOCK_EX) } != 0 {
+        return None;
+    }
+    // A corrupt or missing file starts fresh; the lock still serializes writers.
+    let mut st: SharedState = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let now = now_s();
+    st.local_slots
+        .retain(|_, (pid, until)| *until > now && pid_alive(*pid));
+    st.breakers.retain(|_, until| *until > now);
+    let out = f(&mut st);
+    let tmp = path.with_extension("tmp");
+    let written = serde_json::to_vec_pretty(&st)
+        .map_err(std::io::Error::other)
+        .and_then(|b| std::fs::write(&tmp, b))
+        .and_then(|_| std::fs::rename(&tmp, &path));
+    if let Err(e) = written {
+        crate::logging::warn(&format!("router-state write failed: {e}"));
+    }
+    unsafe { ::libc::flock(lock.as_raw_fd(), ::libc::LOCK_UN) };
+    Some(out)
+}
+
+impl Policy {
+    fn breaker_reasons(&self) -> Vec<String> {
+        strs(&self.raw, "/invariants/circuit_breaker/on")
+    }
+
+    /// Open the cross-process breaker for `route` on a listed reason (429/timeout).
+    pub(crate) fn trip(&self, route: &str, reason: &str) -> bool {
+        if !self
+            .breaker_reasons()
+            .iter()
+            .any(|r| r == &reason.to_lowercase())
+        {
+            return false;
+        }
+        let until = now_s()
+            + self
+                .num("/invariants/circuit_breaker/cooldown_s")
+                .unwrap_or(120);
+        with_state(|st| st.breakers.insert(route.to_string(), until)).is_some()
+    }
+
+    fn max_local(&self) -> usize {
+        self.num(&format!("/tiers/{LOCAL_TIER}/max_concurrent_local"))
+            .unwrap_or(1) as usize
+    }
+
+    fn budget(&self) -> Option<u64> {
+        self.num("/invariants/budget/max_session_metered_tokens")
+    }
+
+    fn over_budget_allowed(&self, b: Billing) -> bool {
+        strs(&self.raw, "/invariants/budget/over_budget_billing")
+            .iter()
+            .any(|x| x == b.as_str())
+    }
+
+    /// Env override for a tier: `JCODE_ROUTE_TIER_MODEL_<TIER>` (upper-case tier).
+    pub(crate) fn env_override(&self, tier: &str) -> Option<String> {
+        let prefix = self
+            .raw
+            .pointer("/invariants/env_override")
+            .and_then(Value::as_str)
+            .unwrap_or("JCODE_ROUTE_TIER_MODEL_")
+            .trim_end_matches("<TIER>");
+        std::env::var(format!("{prefix}{}", tier.to_uppercase()))
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    }
+}
+
+/// Live catalog with a policy TTL (`invariants.catalog.list_models_ttl_s`, 60s):
+/// reuse `cached` routes for `key` until stale, else store `fresh`.
+pub(crate) fn catalog_ttl(
+    policy: &Policy,
+    key: &str,
+    fresh: impl FnOnce() -> Vec<ModelRoute>,
+) -> Vec<ModelRoute> {
+    type Catalog = Mutex<HashMap<String, (Instant, Vec<ModelRoute>)>>;
+    static CAT: OnceLock<Catalog> = OnceLock::new();
+    let ttl = Duration::from_secs(
+        policy
+            .num("/invariants/catalog/list_models_ttl_s")
+            .unwrap_or(60),
+    );
+    let cat = CAT.get_or_init(Default::default);
+    if let Ok(c) = cat.lock()
+        && let Some((at, r)) = c.get(key)
+        && at.elapsed() < ttl
+    {
+        return r.clone();
+    }
+    let routes = fresh();
+    if let Ok(mut c) = cat.lock() {
+        c.insert(key.to_string(), (Instant::now(), routes.clone()));
+    }
+    routes
+}
+
+/// Outcome of a tiered dispatch.
+#[derive(Debug, Clone)]
+pub(crate) struct Dispatch {
+    pub route: ModelRoute,
+    pub billing: Billing,
+    pub tier: &'static str,
+    pub requested_tier: &'static str,
+    pub sticky: bool,
+    pub over_budget: bool,
+    pub payload_tokens: u64,
+}
+
+/// Full 4-tier dispatch: classify the spawn prompt, apply breakers, budget,
+/// local slot limits and payload escalation, spilling a full/cold local tier
+/// to its `spill_to` tier. Records slot holder pid and metered spend.
+pub(crate) fn dispatch(
+    policy: &Policy,
+    session_id: &str,
+    prompt: &str,
+    routes: &[ModelRoute],
+    probe: &dyn Fn(&ModelRoute) -> bool,
+    pid: u32,
+) -> Option<Dispatch> {
+    let requested_tier = policy.classify_spawn(prompt);
+    let payload_tokens = policy.estimate_tokens(prompt);
+    let approved = approved_profiles();
+    let max_local = policy.max_local();
+    with_state(|st| {
+        let spent = st.metered_tokens.get(session_id).copied().unwrap_or(0);
+        let over_budget = policy
+            .budget()
+            .is_some_and(|cap| spent + payload_tokens > cap);
+        let open: HashSet<String> = st.breakers.keys().cloned().collect();
+        let held = st.local_slots.len();
+        let mut tier = requested_tier;
+        loop {
+            let mut excluded = open.clone();
+            if let Ok(map) = pins().lock()
+                && let Some((_, ex)) = map.get(&(session_id.to_string(), tier.to_string()))
+            {
+                excluded.extend(ex.iter().cloned());
+            }
+            let ranked = policy.rank(tier, routes, &approved, payload_tokens, &excluded, probe);
+            let pinned = pins().lock().ok().and_then(|m| {
+                m.get(&(session_id.to_string(), tier.to_string()))
+                    .map(|p| p.0.clone())
+            });
+            let ok = |(r, b): &&(&ModelRoute, Billing)| {
+                (!over_budget || policy.over_budget_allowed(*b))
+                    && (*b != Billing::Local
+                        || held < max_local
+                        || st.local_slots.get(&route_id(r)).is_some_and(|s| s.0 == pid))
+            };
+            let pick = ranked
+                .iter()
+                .filter(ok)
+                .find(|(r, _)| Some(route_id(r)) == pinned)
+                .map(|x| (*x, true))
+                .or_else(|| ranked.iter().find(ok).map(|x| (*x, false)));
+            if let Some(((r, b), sticky)) = pick {
+                if let Ok(mut m) = pins().lock() {
+                    m.entry((session_id.to_string(), tier.to_string()))
+                        .or_insert_with(|| (String::new(), HashSet::new()))
+                        .0 = route_id(r);
+                }
+                if b == Billing::Local {
+                    let lease = policy
+                        .num("/invariants/shared_state/local_lease_s")
+                        .unwrap_or(600);
+                    st.local_slots.insert(route_id(r), (pid, now_s() + lease));
+                }
+                if matches!(b, Billing::MeteredApproved | Billing::Metered) {
+                    *st.metered_tokens.entry(session_id.to_string()).or_default() += payload_tokens;
+                }
+                return Some(Dispatch {
+                    route: r.clone(),
+                    billing: b,
+                    tier,
+                    requested_tier,
+                    sticky,
+                    over_budget,
+                    payload_tokens,
+                });
+            }
+            tier = policy.spill_to(tier)?;
+        }
+    })
+    .flatten()
 }
 
 #[cfg(test)]

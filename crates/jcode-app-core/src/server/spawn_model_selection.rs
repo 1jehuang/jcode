@@ -232,11 +232,17 @@ pub(super) async fn registry_requested_model(
     req_session_id: &str,
     sessions: &SessionAgents,
     provider_template: &Arc<dyn Provider>,
+    prompt: &str,
 ) -> anyhow::Result<Option<String>> {
     let model = match requested {
         Some(m) if registry_mode && !is_inherit_sentinel(m.trim()) => m,
         // No explicit worker model: the declarative routing policy picks one.
-        None => return Ok(best_fit_swarm_model(req_session_id, sessions, provider_template).await),
+        // Precedence: explicit arg > env override > routing-policy.json > config.toml.
+        None => {
+            return Ok(
+                best_fit_swarm_model(req_session_id, sessions, provider_template, prompt).await,
+            );
+        }
         other => return Ok(other),
     };
     let routes = live_routes(req_session_id, sessions, provider_template).await;
@@ -299,21 +305,43 @@ pub(super) fn resolve_registry_model(
 #[path = "comm_session_registry_tests.rs"]
 mod registry_tests;
 
-/// Best-fit worker pick from `routing-policy.json` (`parallel_shard` tier),
-/// sticky per coordinator session. `None` (no policy, nothing eligible) keeps
-/// the existing configured/inherited default. Logs one telemetry row.
+/// Best-fit worker pick from `routing-policy.json`: the spawn prompt is
+/// classified into `lightweight_local` / `parallel_shard` / `code_execution`,
+/// then breakers, budget, local slots and payload escalation apply (shared
+/// across jcode processes). An env override for the tier wins over the policy.
+/// `None` (no policy, nothing eligible) keeps the config.toml default.
 pub(super) async fn best_fit_swarm_model(
     req_session_id: &str,
     sessions: &SessionAgents,
     provider_template: &Arc<dyn Provider>,
+    prompt: &str,
 ) -> Option<String> {
     use super::super::turn_failover::best_fit_router as bf;
     let policy = bf::Policy::load()?;
-    let routes = live_routes(req_session_id, sessions, provider_template).await;
+    let tier = policy.classify_spawn(prompt);
+    if let Some(model) = policy.env_override(tier) {
+        bf::telemetry(serde_json::json!({
+            "event": "swarm_dispatch", "session_id": req_session_id, "tier": tier,
+            "route": model, "billing": "env_override", "source": "env_override",
+        }));
+        return Some(model);
+    }
+    let live = live_routes(req_session_id, sessions, provider_template).await;
+    let routes = bf::catalog_ttl(&policy, req_session_id, || live);
     let started = std::time::Instant::now();
     let picked = tokio::task::spawn_blocking({
         let sid = req_session_id.to_string();
-        move || bf::pick(&policy, &sid, bf::SWARM_TIER, &routes, &bf::local_probe)
+        let prompt = prompt.to_string();
+        move || {
+            bf::dispatch(
+                &policy,
+                &sid,
+                &prompt,
+                &routes,
+                &bf::local_probe,
+                std::process::id(),
+            )
+        }
     })
     .await
     .unwrap_or_else(|e| {
@@ -323,13 +351,17 @@ pub(super) async fn best_fit_swarm_model(
     bf::telemetry(serde_json::json!({
         "event": "swarm_dispatch",
         "session_id": req_session_id,
-        "tier": bf::SWARM_TIER,
-        "route": picked.as_ref().map(|(r, _, _)| bf::route_id(r)),
-        "billing": picked.as_ref().map(|(_, b, _)| b.as_str()),
-        "sticky": picked.as_ref().map(|(_, _, s)| *s),
+        "source": "routing-policy.json",
+        "requested_tier": picked.as_ref().map_or(tier, |d| d.requested_tier),
+        "tier": picked.as_ref().map(|d| d.tier),
+        "route": picked.as_ref().map(|d| bf::route_id(&d.route)),
+        "billing": picked.as_ref().map(|d| d.billing.as_str()),
+        "sticky": picked.as_ref().map(|d| d.sticky),
+        "over_budget": picked.as_ref().map(|d| d.over_budget),
+        "payload_tokens": picked.as_ref().map(|d| d.payload_tokens),
         "ms": started.elapsed().as_millis() as u64,
     }));
-    let (route, _, _) = picked?;
+    let route = picked?.route;
     match resolve_registry_model(&bf::route_id(&route), std::slice::from_ref(&route)) {
         Ok(model) => Some(model),
         Err(e) => {

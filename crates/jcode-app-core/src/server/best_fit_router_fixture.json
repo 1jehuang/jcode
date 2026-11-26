@@ -1,49 +1,199 @@
 {
-  "version": 1,
+  "version": 2,
   "_doc": "Best-fit model routing policy, read by jcode at swarm dispatch and list_models (crates/jcode-app-core/src/server/best_fit_router.rs). Provider-, model- and family-agnostic: routes are classified only from live list_models metadata (api_method, cheapness.billing_kind, detail). Tests: scripts/test-routing-policy.sh.",
   "billing": {
-    "allow": ["subscription", "oauth", "local"],
+    "allow": [
+      "subscription",
+      "oauth",
+      "local"
+    ],
     "allow_metered_when": "metered_approved",
-    "block": ["metered", "browser", "unknown"],
+    "block": [
+      "metered",
+      "browser",
+      "unknown"
+    ],
     "classify": {
-      "browser": { "api_method_contains": ["web"] },
-      "oauth": { "api_method_contains": ["oauth"] },
-      "local": { "detail_contains": ["localhost", "127.0.0.1", "[::1]"] },
-      "subscription": { "billing_kind": ["subscription", "included_quota"] },
-      "metered": { "billing_kind": ["metered"] }
+      "browser": {
+        "api_method_contains": [
+          "web"
+        ]
+      },
+      "oauth": {
+        "api_method_contains": [
+          "oauth"
+        ]
+      },
+      "local": {
+        "true_local": true
+      },
+      "subscription": {
+        "billing_kind": [
+          "subscription",
+          "included_quota"
+        ]
+      },
+      "metered": {
+        "billing_kind": [
+          "metered"
+        ]
+      }
     },
     "_unclassified": "a route matching no class is 'unknown' and blocked unless its provider profile sets metered_approved = true"
   },
   "capability_parse": {
     "context_window_regex": "context ~([0-9]+) tokens",
-    "no_tools_contains": ["no tools"]
+    "no_tools_contains": [
+      "no tools"
+    ]
   },
   "tiers": {
     "deep_architecture": {
-      "use_for": ["parent", "refactor", "copy"],
+      "use_for": [
+        "parent",
+        "multi_file_plan",
+        "refactor",
+        "copy"
+      ],
       "supports_tools": true,
-      "prefer": ["oauth", "subscription", "metered_approved", "local"],
-      "rank": "highest_reasoning_then_context"
+      "prefer": [
+        "oauth",
+        "subscription",
+        "metered_approved",
+        "local"
+      ],
+      "rank": "highest_reasoning_then_context",
+      "min_context_tokens": 128000
     },
     "parallel_shard": {
-      "use_for": ["swarm"],
+      "use_for": [
+        "swarm_read_only"
+      ],
       "supports_tools": true,
-      "prefer": ["local", "metered_approved", "oauth", "subscription"],
-      "rank": "lowest_latency_then_cost"
+      "prefer": [
+        "local",
+        "metered_approved",
+        "oauth",
+        "subscription"
+      ],
+      "rank": "lowest_latency_then_cost",
+      "min_context_tokens": 0,
+      "quota_conservation": true
     },
     "lightweight_local": {
-      "use_for": ["lint", "format", "offline"],
+      "use_for": [
+        "swarm_read_only_small",
+        "lint",
+        "format",
+        "check"
+      ],
       "supports_tools": true,
-      "prefer": ["local"],
+      "prefer": [
+        "local"
+      ],
+      "max_files": 3,
+      "max_concurrent_local": 1,
+      "min_context_tokens": 16384,
       "require_health_probe_ms": 2000,
-      "min_context_over_payload": true,
+      "spill_to": "parallel_shard",
       "rank": "lowest_latency_then_cost"
+    },
+    "code_execution": {
+      "use_for": [
+        "swarm_mutating"
+      ],
+      "supports_tools": true,
+      "min_context_tokens": 65536,
+      "prefer": [
+        "oauth",
+        "subscription",
+        "metered_approved",
+        "local"
+      ],
+      "rank": "highest_reasoning_then_context"
     }
   },
   "stickiness": {
     "pin": "per_session_per_tier",
-    "step_down_on": ["429", "cap_exhausted", "timeout"],
+    "step_down_on": [
+      "429",
+      "cap_exhausted",
+      "timeout"
+    ],
     "max_step_downs": 3
   },
-  "telemetry": { "path": "~/.jcode/logs/hook-telemetry.jsonl", "hook": "best_fit_router" }
+  "telemetry": {
+    "path": "~/.jcode/logs/hook-telemetry.jsonl",
+    "hook": "best_fit_router"
+  },
+  "local_detection": {
+    "_doc": "true-local = loopback host in route detail AND none of the remote markers in model/api_method/detail",
+    "loopback_hosts": [
+      "localhost",
+      "127.0.0.1",
+      "[::1]"
+    ],
+    "remote_markers": [
+      ":cloud",
+      "-cloud",
+      "proxy",
+      "upstream"
+    ]
+  },
+  "swarm_classification": {
+    "_doc": "spawn prompt -> tier; mutating marker wins, else read-only by file count",
+    "mutating_markers": [
+      "write",
+      "edit",
+      "implement",
+      "fix",
+      "migration",
+      "migrate",
+      "add test",
+      "commit",
+      "refactor",
+      "create",
+      "patch"
+    ],
+    "small_max_files": 3,
+    "file_token_regex": "[\\w./-]+\\.[a-z0-9]{1,5}\\b",
+    "mutating_tier": "code_execution",
+    "read_only_tier": "parallel_shard",
+    "small_read_only_tier": "lightweight_local"
+  },
+  "invariants": {
+    "precedence": [
+      "explicit_call_arg",
+      "env_override",
+      "routing-policy.json",
+      "config.toml_fallback"
+    ],
+    "env_override": "JCODE_ROUTE_TIER_MODEL_<TIER>",
+    "context_escalation": {
+      "multiplier": 1.5,
+      "chars_per_token": 4
+    },
+    "circuit_breaker": {
+      "on": [
+        "429",
+        "timeout"
+      ],
+      "cooldown_s": 120
+    },
+    "catalog": {
+      "list_models_ttl_s": 60
+    },
+    "budget": {
+      "max_session_metered_tokens": 2000000,
+      "over_budget_billing": [
+        "local",
+        "subscription",
+        "oauth"
+      ]
+    },
+    "shared_state": {
+      "path": "~/.jcode/state/router-state.json",
+      "stale_pid_cleanup": true
+    }
+  }
 }
