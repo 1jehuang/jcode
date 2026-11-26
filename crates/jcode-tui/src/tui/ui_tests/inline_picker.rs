@@ -313,6 +313,7 @@ fn model_effort_step_keeps_selected_level_visible_in_short_terminals() {
         model,
         parent,
         save_default: false,
+        parent_needs_refresh: false,
     }));
     state.inline_interactive_state = Some(picker);
     for height in [1, 2, 3, 4, 12] {

@@ -81,10 +81,9 @@ impl App {
         let Some(route) = entry.options.get(entry.selected_option) else {
             return;
         };
-        let effort_suffix = effort
-            .as_deref()
-            .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
-            .unwrap_or_else(String::new);
+        let effort_suffix = effort.as_deref().map_or_else(String::new, |effort| {
+            format!(" ({})", reasoning_effort_picker_label(effort))
+        });
         if !route.available {
             self.push_display_message(DisplayMessage::error(
                 crate::tui::app::model_context::unavailable_model_route_message(
@@ -229,14 +228,13 @@ impl App {
         }
         if !self.is_remote
             && let Some(effort) = effort
+            && let Err(error) = self.provider.set_reasoning_effort(&effort)
         {
-            if let Err(error) = self.provider.set_reasoning_effort(&effort) {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Model switched, but reasoning level was rejected: {error}"
-                )));
-                self.set_status_notice("Model switched; reasoning level rejected");
-                return;
-            }
+            self.push_display_message(DisplayMessage::error(format!(
+                "Model switched, but reasoning level was rejected: {error}"
+            )));
+            self.set_status_notice("Model switched; reasoning level rejected");
+            return;
         }
         if !self.is_remote && !route_detail.is_empty() {
             self.push_display_message(DisplayMessage::system(format!(
@@ -301,9 +299,9 @@ impl App {
         } else {
             (bare_name.clone(), None)
         };
-        let effort_suffix = effort
-            .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
-            .unwrap_or_else(String::new);
+        let effort_suffix = effort.map_or_else(String::new, |effort| {
+            format!(" ({})", reasoning_effort_picker_label(effort))
+        });
 
         let notice = format!(
             "Default → {}{} via {}",
@@ -357,8 +355,9 @@ impl App {
     pub(super) fn open_model_effort_step(&mut self, save_default: bool) {
         let current_model = if self.is_remote {
             self.remote_provider_model
-                .clone()
-                .unwrap_or_else(String::new)
+                .as_deref()
+                .unwrap_or("")
+                .to_string()
         } else {
             self.provider.model()
         };
@@ -433,6 +432,7 @@ impl App {
                 model,
                 parent,
                 save_default,
+                parent_needs_refresh: false,
             })),
         });
     }
@@ -442,9 +442,11 @@ impl App {
             return;
         };
         let last = picker.filtered.len().saturating_sub(1);
+        let mut refresh_parent = false;
         match code {
             KeyCode::Esc => {
                 if let Some(step) = picker.effort_step.take() {
+                    refresh_parent = step.parent_needs_refresh;
                     self.inline_interactive_state = Some(step.parent);
                 }
             }
@@ -471,7 +473,9 @@ impl App {
                     model,
                     parent,
                     save_default,
+                    parent_needs_refresh,
                 } = *step;
+                refresh_parent = parent_needs_refresh;
                 let parent_index = parent.selected_entry_index();
                 // Back to the list first: a failed switch or a saved default
                 // leaves the user in the model list, not in the step.
@@ -485,6 +489,23 @@ impl App {
                 }
             }
             _ => {}
+        }
+
+        // Catalogs may change while the level chooser holds the model list.
+        if refresh_parent
+            && let Some(previous) = self
+                .inline_interactive_state
+                .as_ref()
+                .filter(|picker| picker_is_runtime_model_picker(picker))
+                .cloned()
+        {
+            self.refresh_open_model_picker_after_catalog_update();
+            if let Some(picker) = self.inline_interactive_state.as_mut() {
+                picker.preview = previous.preview;
+                picker.filter = previous.filter.clone();
+                restore_model_browser_after_refresh(picker, &previous);
+                picker.column = previous.column.min(picker.max_navigable_column());
+            }
         }
     }
 }

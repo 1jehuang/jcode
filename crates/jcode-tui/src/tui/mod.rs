@@ -1805,6 +1805,7 @@ pub struct ModelEffortStep {
     pub model: PickerEntry,
     pub parent: InlineInteractiveState,
     pub save_default: bool,
+    pub parent_needs_refresh: bool,
 }
 
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {

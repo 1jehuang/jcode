@@ -1083,6 +1083,13 @@ impl App {
     /// user closed and reopened it. Reopen in place instead, preserving the
     /// typed filter.
     pub(super) fn refresh_open_model_picker_after_catalog_update(&mut self) {
+        if let Some(step) = self
+            .inline_interactive_state
+            .as_mut()
+            .and_then(|picker| picker.effort_step.as_mut())
+        {
+            step.parent_needs_refresh = true;
+        }
         let picker_open = self
             .inline_interactive_state
             .as_ref()
@@ -1100,12 +1107,8 @@ impl App {
         let was_pending = self.auth_catalog_refresh_pending;
         self.auth_catalog_refresh_pending = false;
         self.invalidate_model_picker_cache();
-        let picker_open = self
-            .inline_interactive_state
-            .as_ref()
-            .is_some_and(picker_is_runtime_model_picker);
-        if was_pending && picker_open {
-            self.open_model_picker_preserving_input();
+        if was_pending {
+            self.refresh_open_model_picker_after_catalog_update();
         }
     }
 
@@ -1284,6 +1287,13 @@ impl App {
                 let routes = if picker_open {
                     self.apply_built_model_picker(pending.signature, result.outcome, true, true)
                 } else {
+                    if let Some(step) = self
+                        .inline_interactive_state
+                        .as_mut()
+                        .and_then(|picker| picker.effort_step.as_mut())
+                    {
+                        step.parent_needs_refresh = true;
+                    }
                     // User dismissed the picker while it loaded. Keep the work
                     // as a warm cache, but do not pop the picker back open.
                     match result.outcome {

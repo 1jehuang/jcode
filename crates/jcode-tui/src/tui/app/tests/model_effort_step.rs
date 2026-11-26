@@ -793,3 +793,122 @@ fn r24_effort_step_reports_local_rejection_after_the_model_switch() {
         );
     });
 }
+
+#[test]
+fn review_r24_refresh_reaches_restored_parent_after_both_catalog_paths() {
+    for refresh in ["catalog", "load", "auth"] {
+        for save_default in [false, true] {
+            with_temp_jcode_home(|| {
+                let mut app = create_test_app();
+                configure_test_remote_models_with_openai_recommendations(&mut app);
+                app.open_model_picker();
+                r23_type_into(&mut app, "@openai gpt");
+                r24_select_model_row(&mut app, "gpt-5.5", "openai-oauth");
+                let parent = app.inline_interactive_state.as_ref().unwrap().clone();
+                let signature = app.model_picker_cache.as_ref().unwrap().signature.clone();
+                let mut entries = parent.entries.clone();
+                let selected = entries
+                    .iter_mut()
+                    .find(|entry| {
+                        entry.name == "gpt-5.5"
+                            && entry
+                                .active_option()
+                                .is_some_and(|route| route.api_method == "openai-oauth")
+                    })
+                    .unwrap();
+                selected
+                    .options
+                    .iter_mut()
+                    .for_each(|route| route.available = false);
+                let mut future = selected.clone();
+                future.name = "gpt-future-review".into();
+                future
+                    .options
+                    .iter_mut()
+                    .for_each(|route| route.available = true);
+                entries.push(future);
+                let mut routes = app.remote_model_options.clone();
+                let selected = routes
+                    .iter_mut()
+                    .find(|route| route.model == "gpt-5.5" && route.api_method == "openai-oauth")
+                    .unwrap();
+                selected.available = false;
+                let mut future = selected.clone();
+                future.model = "gpt-future-review".into();
+                future.available = true;
+                routes.push(future);
+                if save_default {
+                    app.handle_key(KeyCode::Char('o'), KeyModifiers::CONTROL)
+                        .unwrap();
+                } else {
+                    r24_press(&mut app, KeyCode::Enter);
+                }
+                let levels = r24_effort_step_names(&app);
+                let selected_level = app.inline_interactive_state.as_ref().unwrap().selected;
+                if refresh == "load" {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    tx.send(Ok(ModelPickerRoutesResult {
+                        outcome: ModelPickerBuildOutcome::Built {
+                            model_count: entries.len(),
+                            entries,
+                            routes,
+                        },
+                    }))
+                    .unwrap();
+                    app.pending_model_picker_load = Some(PendingModelPickerLoad {
+                        store_remote_routes: true,
+                        request_id: app.model_picker_load_request_id,
+                        signature,
+                        picker_started: Instant::now(),
+                        receiver: rx,
+                    });
+                    assert!(app.poll_model_picker_load());
+                } else {
+                    app.remote_model_options = routes;
+                    app.invalidate_model_picker_cache();
+                    if refresh == "auth" {
+                        app.auth_catalog_refresh_pending = true;
+                        app.finish_auth_catalog_refresh();
+                    } else {
+                        app.refresh_open_model_picker_after_catalog_update();
+                    }
+                }
+                assert_eq!(r24_effort_step_names(&app), levels);
+                assert_eq!(
+                    app.inline_interactive_state.as_ref().unwrap().selected,
+                    selected_level
+                );
+                assert!(app.pending_route_selection.is_none());
+                r24_press(
+                    &mut app,
+                    if save_default {
+                        KeyCode::Enter
+                    } else {
+                        KeyCode::Esc
+                    },
+                );
+                let restored = app
+                    .inline_interactive_state
+                    .as_ref()
+                    .expect("back in model list");
+                assert!(restored.effort_step.is_none());
+                assert!(
+                    restored
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == "gpt-future-review"),
+                    "new models must appear after returning; refresh={refresh}, default={save_default}"
+                );
+                assert_eq!(restored.filter, parent.filter);
+                assert_eq!(restored.column, parent.column);
+                let selected = restored.selected_entry().unwrap();
+                assert_eq!(selected.name, "gpt-5.5");
+                assert_eq!(selected.active_option().unwrap().api_method, "openai-oauth");
+                assert!(
+                    !selected.active_option().unwrap().available,
+                    "updated route availability must replace the held parent"
+                );
+            });
+        }
+    }
+}
