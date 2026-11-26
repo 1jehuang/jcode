@@ -3,6 +3,11 @@ use super::App;
 use std::sync::Arc;
 
 impl super::input::PreparedInput {
+    pub(super) fn expanded_raw_input(&self) -> String {
+        let text = self.image_markers.without_owned_markers(&self.raw_input);
+        super::input::expand_paste_placeholders_with(&self.pasted_contents, &text)
+    }
+
     pub(super) fn routing_input(&self) -> &str {
         self.routing_input.as_deref().unwrap_or(&self.raw_input)
     }
@@ -65,6 +70,18 @@ fn owned_marker_matches(text: Option<&str>, number: usize) -> bool {
 }
 
 impl InputImageMarkers {
+    fn without_owned_markers(&self, input: &str) -> String {
+        let mut text = input.to_string();
+        if self.text == text {
+            for &(start, end, _) in self.spans.iter().rev() {
+                if text.get(start..end).is_some() {
+                    text.replace_range(start..end, "");
+                }
+            }
+        }
+        text
+    }
+
     pub(super) fn from_saved(value: &serde_json::Value) -> Self {
         match value.get("image_markers") {
             None => Self::default(),
@@ -355,15 +372,7 @@ impl App {
     /// Transport text does not carry owned markers. On content-only restores,
     /// fresh owned spans can therefore be added without claiming any literal.
     pub(super) fn input_without_owned_image_markers(&self) -> String {
-        let mut text = self.input.clone();
-        if self.input_image_markers.text == text {
-            for &(start, end, _) in self.input_image_markers.spans.iter().rev() {
-                if text.get(start..end).is_some() {
-                    text.replace_range(start..end, "");
-                }
-            }
-        }
-        text
+        self.input_image_markers.without_owned_markers(&self.input)
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
