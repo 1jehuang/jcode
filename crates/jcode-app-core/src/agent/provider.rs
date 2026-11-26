@@ -187,6 +187,7 @@ impl Agent {
         self.kv_cache_monitor.reset();
     }
 
+    #[cfg(test)]
     pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
         let was_enabled = self
             .registry
