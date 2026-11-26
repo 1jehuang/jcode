@@ -1148,17 +1148,6 @@ impl Agent {
         &self.session.id
     }
 
-    /// Desktop self-development is selected by the session checkout, including
-    /// restored sessions. It must not set the CLI canary/reload flags.
-    pub fn is_desktop_selfdev(&self) -> bool {
-        self.session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(jcode_selfdev_types::desktop_repo_root)
-            .is_some()
-    }
-
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
             if self.session.original_working_dir.is_none()
