@@ -15,6 +15,14 @@ reminder to every user turn or retry. Ordinary sessions keep their existing prom
 See [screen context implementation](JARVIS_SCREEN_CONTEXT.md) for the bounded,
 opt-in passive screen-awareness channel.
 
+## Running workspace scripts
+
+Ask, for example, “Run `python3 scripts/check.py` and tell me whether it passed.”
+Jarvis can run a quick script directly and delegate longer jobs. The script runs
+in the **agent session's working directory**, not on the microphone client if
+the session is remote. This uses the ordinary `bash` tool and its permissions.
+A partial transcript or background speech is not a request to execute anything.
+
 ## External speech service
 
 Jcode ships neither a speech model nor voice weights. Install and run your
