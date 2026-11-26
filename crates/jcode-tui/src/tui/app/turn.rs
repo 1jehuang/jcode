@@ -3,43 +3,9 @@ pub(super) mod system_reminder;
 use super::*;
 #[path = "turn_prepared_turn.rs"]
 mod prepared_turn;
+use prepared_turn::PendingStreamingTools;
 
 use crate::message::ToolDefinition;
-
-/// Keep raw JSON separate for every in-flight call. Unkeyed providers address
-/// the most recently started call, preserving the legacy sequential behavior.
-#[derive(Default)]
-struct PendingStreamingTools {
-    calls: Vec<(ToolCall, String)>,
-}
-
-impl PendingStreamingTools {
-    fn start(&mut self, tool: ToolCall) {
-        self.calls.push((tool, String::new()));
-    }
-
-    fn signature(&mut self, id: &str, signature: &str) {
-        if let Some((tool, _)) = self.calls.iter_mut().find(|(tool, _)| tool.id == id) {
-            tool.thought_signature = Some(signature.to_owned());
-        }
-    }
-
-    fn drain(&mut self) -> impl Iterator<Item = ToolCall> + '_ {
-        self.calls.drain(..).map(|(mut tool, input)| {
-            tool.input = ToolCall::parse_streamed_input_to_object(&input);
-            tool.refresh_intent_from_input();
-            tool
-        })
-    }
-
-    fn is_empty(&self) -> bool {
-        self.calls.is_empty()
-    }
-
-    fn clear(&mut self) {
-        self.calls.clear();
-    }
-}
 
 impl App {
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
