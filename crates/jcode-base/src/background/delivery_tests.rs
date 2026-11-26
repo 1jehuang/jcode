@@ -161,7 +161,7 @@ async fn reconciled_detached_and_orphaned_completions_obey_wait_delivery() -> Re
             status.pid = Some(dead_pid);
             fs::write(&info.output_file, format!("done\n{EXIT_MARKER_PREFIX}0\n")).await?;
         }
-        manager.write_status_file(&info.status_file, &status).await;
+        BackgroundTaskManager::write_status_file(&info.status_file, &status);
         let terminal = manager
             .status(&info.task_id)
             .await

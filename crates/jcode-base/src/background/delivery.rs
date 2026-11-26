@@ -65,7 +65,7 @@ impl BackgroundTaskManager {
                 progress: event_progress,
             },
         );
-        self.write_status_file(&status_path, &status).await;
+        Self::write_status_file(&status_path, &status);
 
         if let Some(task) = self.tasks.read().await.get(task_id)
             && let Err(error) = task.delivery_flags.send((notify, wake))

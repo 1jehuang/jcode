@@ -14,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
@@ -24,6 +23,7 @@ mod elapsed_review;
 mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
+mod wait;
 
 pub use model::{
     BackgroundCleanupResult, BackgroundTaskEventKind, BackgroundTaskEventRecord,
@@ -150,9 +150,23 @@ impl BackgroundTaskManager {
         serde_json::from_str(&content).ok()
     }
 
-    async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
-        if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+    fn persist_status_file(path: &std::path::Path, status: &impl serde::Serialize) -> Result<()> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Background status path has no parent"))?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer_pretty(&mut file, status)?;
+        file.persist(path)?;
+        Ok(())
+    }
+
+    fn write_status_file(path: &std::path::Path, status: &TaskStatusFile) {
+        // Keep replacement inside the caller's status lock, even if its task is aborted.
+        if let Err(error) = Self::persist_status_file(path, status) {
+            crate::logging::warn(&format!(
+                "Cannot persist background task status {}: {error}",
+                path.display()
+            ));
         }
     }
 
@@ -205,7 +219,7 @@ impl BackgroundTaskManager {
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
         );
 
-        self.write_status_file(status_path, &status).await;
+        Self::write_status_file(status_path, &status);
 
         self.publish_completion(&status, status.wake, output);
 
@@ -281,7 +295,7 @@ impl BackgroundTaskManager {
             &mut status,
             terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
         );
-        self.write_status_file(status_path, &status).await;
+        Self::write_status_file(status_path, &status);
 
         let output = fs::read_to_string(self.output_path_for(&status.task_id))
             .await
@@ -376,7 +390,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&info.status_file, &status).await;
+        Self::write_status_file(&info.status_file, &status);
         self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
@@ -450,9 +464,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        Self::write_status_file(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -534,9 +546,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             let published_wake = held_wake(&held_deliveries, &final_status, wake_flag);
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            Self::write_status_file(&status_path_clone, &final_status);
 
             // Drop this task from the live map now that its terminal status is
             // persisted. Order matters: pruning only after the status-file
@@ -652,7 +662,12 @@ impl BackgroundTaskManager {
         // returning its ID. Adopted work buffers its output until completion,
         // when the wrapper below replaces this initially empty file. Create it
         // before spawning that wrapper so a fast completion cannot be truncated.
-        let _ = std::fs::write(&output_path, "");
+        if let Err(error) = std::fs::write(&output_path, "") {
+            crate::logging::warn(&format!(
+                "Cannot create adopted task output {}: {error}",
+                output_path.display()
+            ));
+        }
 
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
@@ -675,9 +690,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        Self::write_status_file(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -724,8 +737,11 @@ impl BackgroundTaskManager {
                 ),
             };
 
-            if let Ok(mut file) = File::create(&output_path_clone).await {
-                let _ = file.write_all(output_text.as_bytes()).await;
+            if let Err(error) = fs::write(&output_path_clone, &output_text).await {
+                crate::logging::warn(&format!(
+                    "Cannot save adopted task output {}: {error}",
+                    output_path_clone.display()
+                ));
             }
 
             let status_guard = status_updates.lock().await;
@@ -767,9 +783,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             let published_wake = held_wake(&held_deliveries, &final_status, wake_flag);
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            Self::write_status_file(&status_path_clone, &final_status);
 
             // Prune the live-map entry only after the terminal status file is
             // persisted (and after registration below, so instant completions
@@ -946,156 +960,6 @@ impl BackgroundTaskManager {
         fs::read_to_string(&output_path).await.ok()
     }
 
-    /// Wait for a task to finish, emit progress, or reach the caller's maximum wait.
-    ///
-    /// This combines bus-driven wakeups with a light periodic status reconciliation so
-    /// detached tasks, missed broadcast messages, or crash/reload edges still return no
-    /// later than `max_wait` and can notice completion without active polling by the agent.
-    pub async fn wait(
-        &self,
-        task_id: &str,
-        max_wait: Duration,
-        return_on_progress: bool,
-    ) -> Option<BackgroundTaskWaitResult> {
-        let mut bus_rx = Bus::global().subscribe();
-        let initial = self.status(task_id).await?;
-        if initial.status != BackgroundTaskStatus::Running {
-            return Some(BackgroundTaskWaitResult {
-                reason: BackgroundTaskWaitReason::AlreadyFinished,
-                task: initial,
-                progress_event: None,
-                event_record: None,
-            });
-        }
-        if max_wait.is_zero() {
-            return Some(BackgroundTaskWaitResult {
-                reason: BackgroundTaskWaitReason::Timeout,
-                task: initial,
-                progress_event: None,
-                event_record: None,
-            });
-        }
-
-        let mut last_progress = initial.progress.clone();
-        let deadline = TokioInstant::now() + max_wait;
-        let timeout = tokio::time::sleep_until(deadline);
-        tokio::pin!(timeout);
-        let mut poll = tokio::time::interval(Duration::from_secs(1));
-        poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                _ = &mut timeout => {
-                    let task = self.status(task_id).await?;
-                    let reason = if task.status == BackgroundTaskStatus::Running {
-                        BackgroundTaskWaitReason::Timeout
-                    } else {
-                        BackgroundTaskWaitReason::Finished
-                    };
-                    return Some(BackgroundTaskWaitResult {
-                        reason,
-                        task,
-                        progress_event: None,
-                        event_record: None,
-                    });
-                }
-                _ = poll.tick() => {
-                    let task = self.status(task_id).await?;
-                    if task.status != BackgroundTaskStatus::Running {
-                        return Some(BackgroundTaskWaitResult {
-                            reason: BackgroundTaskWaitReason::Finished,
-                            task,
-                            progress_event: None,
-                            event_record: None,
-                        });
-                    }
-                    if return_on_progress && task.progress != last_progress {
-                        let event_record = task.event_history.last().cloned();
-                        return Some(BackgroundTaskWaitResult {
-                            reason: progress_wait_reason(event_record.as_ref()),
-                            progress_event: None,
-                            task,
-                            event_record,
-                        });
-                    }
-                    last_progress = task.progress.clone();
-                }
-                event = bus_rx.recv() => {
-                    match event {
-                        Ok(BusEvent::BackgroundTaskCompleted(event)) if event.task_id == task_id => {
-                            let task = self.status(task_id).await?;
-                            return Some(BackgroundTaskWaitResult {
-                                reason: BackgroundTaskWaitReason::Finished,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        Ok(BusEvent::BackgroundTaskProgress(event)) if event.task_id == task_id => {
-                            if return_on_progress {
-                                let task = self.status(task_id).await?;
-                                let event_record = task.event_history.last().cloned();
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: progress_wait_reason(event_record.as_ref()),
-                                    task,
-                                    progress_event: Some(event),
-                                    event_record,
-                                });
-                            }
-                        }
-                        Ok(BusEvent::BackgroundTaskStalled(event)) if event.task_id == task_id => {
-                            // A stall is always worth returning: the caller
-                            // should decide whether to keep waiting or act.
-                            let task = self.status(task_id).await?;
-                            return Some(BackgroundTaskWaitResult {
-                                reason: BackgroundTaskWaitReason::Stalled,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let task = self.status(task_id).await?;
-                            if task.status != BackgroundTaskStatus::Running {
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: BackgroundTaskWaitReason::Finished,
-                                    task,
-                                    progress_event: None,
-                                    event_record: None,
-                                });
-                            }
-                            if return_on_progress && task.progress != last_progress {
-                                let event_record = task.event_history.last().cloned();
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: progress_wait_reason(event_record.as_ref()),
-                                    progress_event: None,
-                                    task,
-                                    event_record,
-                                });
-                            }
-                            last_progress = task.progress.clone();
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            let task = self.status(task_id).await?;
-                            let reason = if task.status == BackgroundTaskStatus::Running {
-                                BackgroundTaskWaitReason::Timeout
-                            } else {
-                                BackgroundTaskWaitReason::Finished
-                            };
-                            return Some(BackgroundTaskWaitResult {
-                                reason,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
     /// Update progress for an existing background task.
     pub async fn update_progress(
         &self,
@@ -1168,7 +1032,7 @@ impl BackgroundTaskManager {
             &mut status,
             progress_event_record(event_kind, progress.clone()),
         );
-        self.write_status_file(&status_path, &status).await;
+        Self::write_status_file(&status_path, &status);
 
         Bus::global().publish(BusEvent::BackgroundTaskProgress(
             BackgroundTaskProgressEvent {
@@ -1239,9 +1103,7 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
-            }
+            Self::write_status_file(&task.status_path, &final_status);
             let output_path = self.output_path_for(&final_status.task_id);
             let published_wake =
                 held_stop_wake(&self.held_deliveries, &final_status.task_id, wake_flag);
@@ -1304,7 +1166,7 @@ impl BackgroundTaskManager {
                 &mut status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            self.write_status_file(&status_path, &status).await;
+            Self::write_status_file(&status_path, &status);
             let output_path = self.output_path_for(&status.task_id);
             let published_wake =
                 held_stop_wake(&self.held_deliveries, &status.task_id, status.wake);
@@ -1393,8 +1255,7 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
             );
-            self.write_status_file(&task.status_path, &final_status)
-                .await;
+            Self::write_status_file(&task.status_path, &final_status);
             finalized += 1;
         }
 
