@@ -120,9 +120,18 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_jarvis_speech_error();
     needs_redraw |= app.poll_jarvis_listening(remote).await;
     needs_redraw |= app.poll_pending_startup_transcript();
+    if app
+        .usage_reset
+        .limit_wait
+        .is_some_and(|(reset, _)| app.rate_limit_reset != Some(reset))
+    {
+        app.usage_reset.limit_wait = None;
+    }
     if remote.has_loaded_history()
         && let Err(error) = remote
-            .poll_account_usage_for_focus(app.client_focused())
+            .poll_account_usage_for_focus(
+                app.client_focused() || app.usage_reset.limit_wait.is_some(),
+            )
             .await
     {
         crate::logging::warn(&format!("Failed to request daemon account usage: {error}"));

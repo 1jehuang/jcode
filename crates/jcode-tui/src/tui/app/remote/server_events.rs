@@ -1200,15 +1200,29 @@ fn handle_server_event_inner(
                 crate::auth::refresh_state::error_is_permanent_rejection(&message);
             let is_definitive_exhaustion =
                 jcode_provider_core::is_definitive_usage_exhaustion(&message);
-            let reset_duration =
-                if is_failover_prompt || is_permanent_refresh_rejection || is_definitive_exhaustion
-                {
-                    None
-                } else {
-                    retry_after_secs
-                        .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
-                        .or_else(|| parse_rate_limit_error(&message))
-                };
+            let subscription_usage_limit = is_definitive_exhaustion
+                && app.remote_resolved_credential
+                    == Some(jcode_provider_core::ResolvedCredential::Oauth)
+                && app.remote_provider_oauth_account_label.is_some()
+                && matches!(
+                    app.remote_provider_name
+                        .as_deref()
+                        .and_then(jcode_provider_core::parse_provider_hint),
+                    Some(
+                        jcode_provider_core::ActiveProvider::OpenAI
+                            | jcode_provider_core::ActiveProvider::Claude
+                    )
+                );
+            let reset_duration = if is_failover_prompt
+                || is_permanent_refresh_rejection
+                || (is_definitive_exhaustion && !subscription_usage_limit)
+            {
+                None
+            } else {
+                retry_after_secs
+                    .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
+                    .or_else(|| parse_rate_limit_error(&message))
+            };
             // A stale reset or a limit that never clears must not resend the
             // same turn forever. Rate-limit holds share the per-turn retry
             // budget, which begin_remote_send carries across resends.
@@ -1225,6 +1239,11 @@ fn handle_server_event_inner(
                 })
             {
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                if subscription_usage_limit {
+                    app.usage_reset.limit_wait = app
+                        .rate_limit_reset
+                        .map(|reset| (reset, chrono::Utc::now().timestamp_millis()));
+                }
                 let (rate_limit_line, nudged) =
                     app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                 app.push_display_message(DisplayMessage::system(rate_limit_line));
@@ -2730,9 +2749,15 @@ fn handle_server_event_inner(
             true
         }
         ServerEvent::AccountUsage {
-            anthropic, openai, ..
+            anthropic,
+            openai,
+            recoveries,
+            ..
         } => {
             crate::usage::set_remote_account_usage(anthropic, openai);
+            for recovery in recoveries {
+                app.resume_after_usage_recovery(&recovery);
+            }
             crate::tui::ui::prepare::invalidate_header_prep_cache();
             true
         }
