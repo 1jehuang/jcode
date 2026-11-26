@@ -18,6 +18,7 @@ pub(in crate::tui::app) struct RestoredReloadInput {
     pub pending_soft_interrupts: Vec<String>,
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
+    pub last_submitted_draft: Option<super::input::PreparedInput>,
     pub rate_limit_reset: Option<Instant>,
     pub observe_mode_enabled: bool,
     pub observe_page_markdown: String,
@@ -48,12 +49,29 @@ impl App {
         self.input_image_markers = restored.image_markers;
         self.pasted_contents = restored.pasted_contents;
         self.ensure_input_image_markers();
-        if restored.submit_on_restore && !self.pending_images.is_empty() {
+        let command_shaped =
+            self.input.trim_start().starts_with('!') || self.input.trim_start().starts_with('/');
+        let proven_draft = restored.last_submitted_draft.as_ref().is_some_and(|draft| {
+            draft.raw_input == self.input
+                && draft.images == self.pending_images
+                && draft.image_markers == self.input_image_markers
+                && draft.pasted_contents == self.pasted_contents
+        });
+        let review_required = restored.submit_on_restore
+            && !self.pending_images.is_empty()
+            && command_shaped
+            && !proven_draft;
+        if restored.submit_on_restore
+            && !self.pending_images.is_empty()
+            && !review_required
+            && !proven_draft
+        {
             let prompt = self.input_without_owned_image_markers();
             self.input.clear();
             self.restore_recalled_prompt_text(prompt);
         }
         self.submit_input_on_startup = restored.submit_on_restore
+            && !review_required
             && (!self.input.is_empty() || !self.pending_images.is_empty());
         crate::logging::info(&format!(
             "Startup input restored: submit_on_restore={} input_chars={} pending_images={} queued_messages={} hidden_system={} => submit_input_on_startup={}",
@@ -65,7 +83,9 @@ impl App {
             self.submit_input_on_startup,
         ));
         self.hidden_queued_system_messages = restored.hidden_queued_system_messages;
-        if let Some(status_notice) = restored.startup_status_notice {
+        if review_required {
+            self.set_status_notice("Restored image prompt needs review before sending; its original command intent could not be verified");
+        } else if let Some(status_notice) = restored.startup_status_notice {
             self.set_status_notice(status_notice);
         } else if self.submit_input_on_startup {
             self.set_status_notice("Startup prompt queued");
@@ -75,6 +95,11 @@ impl App {
         }
         self.interleave_message = None;
         self.interleave_images.clear();
+        let held_draft = restored
+            .last_submitted_draft
+            .filter(|_| restored.rate_limit_pending_message.is_some());
+        self.last_submitted_input = held_draft.as_ref().map(|draft| draft.raw_input.clone());
+        self.last_submitted_draft = held_draft.map(|draft| (self.current_message_id, draft));
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.observe_page_markdown = restored.observe_page_markdown;
@@ -139,5 +164,41 @@ impl App {
                 self.pending_turn = true;
             }
         }
+    }
+}
+
+impl RestoredReloadInput {
+    pub(in crate::tui::app) fn submitted_draft_from_saved(
+        value: &serde_json::Value,
+        rate_limit_pending_message: Option<&super::PendingRemoteMessage>,
+        input: &str,
+        pending_images: &[(String, String)],
+    ) -> Option<super::input::PreparedInput> {
+        match value.get("last_submitted_draft") {
+            Some(value) if !value.is_null() => {
+                match serde_json::from_value::<super::input::PreparedInput>(value.clone()) {
+                    Ok(draft) => Some(draft),
+                    Err(error) => {
+                        crate::logging::warn(&format!("Invalid saved submitted draft: {error}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+        .filter(|draft| {
+            if let Some(pending) = rate_limit_pending_message {
+                !pending.is_system
+                    && draft.expanded == pending.content
+                    && draft.images == pending.images
+            } else {
+                value
+                    .get("submit_on_restore")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    && draft.raw_input == input
+                    && draft.images == pending_images
+            }
+        })
     }
 }

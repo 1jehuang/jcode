@@ -353,14 +353,15 @@ fn image_followup_recovery_primary_resume_keeps_prompt_routing_and_owned_markers
             let prepared = super::input::take_prepared_input(&mut app);
             app.rate_limit_pending_message = Some(PendingRemoteMessage {
                 jarvis_voice: false,
-                content: prepared.expanded,
-                images: prepared.images,
+                content: prepared.expanded.clone(),
+                images: prepared.images.clone(),
                 is_system: false,
                 system_reminder: None,
                 auto_retry: false,
                 retry_attempts: 0,
                 retry_at: None,
             });
+            app.last_submitted_draft = Some((app.current_message_id, prepared));
             let mut restored = reload_image_followup(&app);
             assert!(restored.submit_input_on_startup);
             let prepared = super::input::take_prepared_input(&mut restored);
@@ -384,6 +385,10 @@ fn image_followup_recovery_spawned_startup_prompt_keeps_image_routing() {
             let saved = App::restore_input_for_reload("image-startup-routing").unwrap();
             let mut app = create_test_app();
             app.apply_restored_reload_input(saved);
+            assert!(
+                app.submit_input_on_startup,
+                "a known startup prompt must auto-submit"
+            );
             let prepared = super::input::take_prepared_input(&mut app);
             assert!(super::input::extract_input_shell_command(prepared.routing_input()).is_none());
             assert!(!prepared.routing_input().trim_start().starts_with('/'));
@@ -409,4 +414,39 @@ fn review_image_recovery_recall_keeps_a_staged_image_only_prompt() {
     let recalled = super::input::take_prepared_input(&mut app);
     assert_eq!(recalled.expanded, "");
     assert_eq!(recalled.images, images);
+}
+
+#[test]
+fn startup_prompt_provenance_keeps_literals_whitespace_and_image_order() {
+    with_temp_jcode_home(|| {
+        let images = vec![
+            queued_recovery_image(),
+            ("image/jpeg".into(), "c2Vjb25k".into()),
+        ];
+        for text in [
+            "!echo [image 1]",
+            "/help [image 2]",
+            " \t!echo héllo [image 1] \n",
+            "見て [image 1]\n[image 2] ",
+            "",
+        ] {
+            App::save_startup_submission_for_session(
+                "startup-prompt-provenance",
+                text.into(),
+                images.clone(),
+            );
+            let saved = App::restore_input_for_reload("startup-prompt-provenance").unwrap();
+            if !text.trim_start().starts_with('!') && !text.trim_start().starts_with('/') {
+                assert_eq!(saved.input, text, "ordinary saved text must remain exact");
+            }
+            let mut app = create_test_app();
+            app.apply_restored_reload_input(saved);
+            assert!(app.submit_input_on_startup);
+            let prepared = super::input::take_prepared_input(&mut app);
+            assert!(super::input::extract_input_shell_command(prepared.routing_input()).is_none());
+            assert!(!prepared.routing_input().trim_start().starts_with('/'));
+            assert_eq!(prepared.expanded, text);
+            assert_eq!(prepared.images, images);
+        }
+    });
 }
