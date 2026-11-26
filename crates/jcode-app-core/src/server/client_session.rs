@@ -603,6 +603,7 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
 
 #[path = "client_response_capability.rs"]
 pub(super) mod response_capability;
+use response_capability::refresh_session;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_subscribe(
@@ -1231,7 +1232,6 @@ async fn claim_live_target_agent(
     session_id: &str,
     client_connection_id: &str,
     client_instance_id: Option<&str>,
-    _source_agent: &Arc<Mutex<Agent>>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) -> Option<(Arc<Mutex<Agent>>, Registry)> {
@@ -1321,7 +1321,6 @@ pub(super) async fn handle_resume_session(
         &session_id,
         client_connection_id,
         incoming_client_instance_id.as_deref(),
-        agent,
         sessions,
         client_connections,
     )
@@ -1477,6 +1476,7 @@ pub(super) async fn handle_resume_session(
         }
 
         *client_session_id = session_id.clone();
+        refresh_session(sessions, client_connections, &old_session_id).await;
 
         send_resume_todos(&session_id, writer).await?;
         handle_get_history(
@@ -1770,6 +1770,7 @@ pub(super) async fn handle_resume_session(
                 }
             }
 
+            refresh_session(sessions, client_connections, &old_session_id).await;
             unregister_session_event_sender(swarm_members, &old_session_id, client_connection_id)
                 .await;
             let retired_source = remove_detached_source_if_unclaimed(

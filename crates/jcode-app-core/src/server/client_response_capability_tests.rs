@@ -38,12 +38,18 @@ async fn user_response_deferred_refresh_reads_current_connections() {
     {
         let registry_writer = connections.write().await;
         let busy = agent.lock().await;
+        let owners = Arc::strong_count(&agent);
         tokio::time::timeout(
             Duration::from_secs(1),
             refresh_session(&sessions, &connections, &session_id),
         )
         .await
         .expect("refresh must not block on cleanup's registry writer");
+        assert_eq!(
+            Arc::strong_count(&agent),
+            owners,
+            "queued refresh must not retain Agent"
+        );
         drop(busy);
         tokio::task::yield_now().await;
         drop(
@@ -58,14 +64,14 @@ async fn user_response_deferred_refresh_reads_current_connections() {
         guard
             .set_desktop_response_capability(enabled_before_queue)
             .await;
-        connections
-            .write()
-            .await
+        let registry = guard.registry();
+        let mut connections_guard = connections.write().await;
+        connections_guard
             .get_mut("desktop")
             .unwrap()
             .supports_user_response = enabled_before_queue;
-        // Refresh must return while the Agent is held, then read the new
-        // connection snapshot when its deferred task finally acquires it.
+        // The registry writer is the barrier. Deferred work must read its final state,
+        // and apply through the weak registry while the Agent stays busy.
         tokio::time::timeout(Duration::from_secs(1), async {
             for _ in 0..3 {
                 refresh_session(&sessions, &connections, &session_id).await;
@@ -73,20 +79,14 @@ async fn user_response_deferred_refresh_reads_current_connections() {
         })
         .await
         .expect("busy capability refresh blocked attachment");
-        connections
-            .write()
-            .await
+        connections_guard
             .get_mut("desktop")
             .unwrap()
             .supports_user_response = !enabled_before_queue;
-        // Park all deferred refreshes on the held Agent before releasing it.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        drop(guard);
+        drop(connections_guard);
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let enabled = agent
-                    .lock()
-                    .await
+                let enabled = registry
                     .tool_names()
                     .await
                     .iter()
@@ -98,7 +98,8 @@ async fn user_response_deferred_refresh_reads_current_connections() {
             }
         })
         .await
-        .expect("deferred refresh replayed stale support");
+        .expect("deferred refresh replayed stale support or waited for Agent");
+        drop(guard);
     }
 }
 

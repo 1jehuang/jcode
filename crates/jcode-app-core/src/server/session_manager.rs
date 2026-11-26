@@ -12,6 +12,11 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard};
 
 type AgentHandle = Arc<Mutex<Agent>>;
 type AgentMap = HashMap<String, AgentHandle>;
+type RuntimeMetadata = (
+    crate::agent::TurnObserver,
+    crate::tool::WeakRegistry,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 #[derive(Default)]
 pub(crate) struct SessionManager {
@@ -21,7 +26,7 @@ pub(crate) struct SessionManager {
     // client or task still owns a handle. These weak tombstones do not retain
     // idle agents and expire as soon as the last old handle is gone.
     owners: StdMutex<HashMap<String, Weak<Mutex<Agent>>>>,
-    metadata: StdMutex<HashMap<String, (crate::agent::TurnObserver, crate::tool::WeakRegistry)>>,
+    metadata: StdMutex<HashMap<String, RuntimeMetadata>>,
 }
 
 #[cfg(test)]
@@ -38,7 +43,7 @@ impl SessionManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
-            .map(|(observer, _)| observer.clone())
+            .map(|(observer, _, _)| observer.clone())
     }
 
     pub(super) fn tool_registry(&self, session_id: &str) -> Option<crate::tool::Registry> {
@@ -46,7 +51,18 @@ impl SessionManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
-            .and_then(|(_, registry)| registry.upgrade())
+            .and_then(|(_, registry, _)| registry.upgrade())
+    }
+
+    pub(super) fn response_capability_registry(
+        &self,
+        session_id: &str,
+    ) -> Option<(crate::tool::Registry, Arc<std::sync::atomic::AtomicBool>)> {
+        self.metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .and_then(|(_, registry, changed)| Some((registry.upgrade()?, Arc::clone(changed))))
     }
 
     pub(super) async fn read(&self) -> RwLockReadGuard<'_, AgentMap> {
@@ -153,7 +169,11 @@ impl SessionManager {
                 agent.try_lock().ok().map(|owner| {
                     (
                         id.clone(),
-                        (owner.server_turn_observer(), owner.registry_weak()),
+                        (
+                            owner.server_turn_observer(),
+                            owner.registry_weak(),
+                            owner.response_capability_invalidator(),
+                        ),
                     )
                 })
             })
@@ -272,7 +292,11 @@ impl SessionReservation<'_> {
                     self.session_id
                 );
             }
-            (owner.server_turn_observer(), owner.registry_weak())
+            (
+                owner.server_turn_observer(),
+                owner.registry_weak(),
+                owner.response_capability_invalidator(),
+            )
         };
         let mut agents = self.manager.agents.write().await;
         let mut owners = self

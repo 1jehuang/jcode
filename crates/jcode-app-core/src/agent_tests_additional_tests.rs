@@ -130,3 +130,27 @@ async fn saved_account_observed_binding_is_persisted() {
             .contains("personal")
     );
 }
+
+#[tokio::test]
+async fn response_capability_registry_updates_invalidate_locked_provider_tools() {
+    let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());
+    let registry = agent.registry();
+    let changed = agent.response_capability_invalidator();
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|tool| tool.name == "user_response")
+    );
+    for enabled in [true, false] {
+        registry.set_desktop_ui_enabled(enabled).await;
+        changed.store(true, std::sync::atomic::Ordering::Release);
+        let definitions = agent.tool_definitions().await;
+        for name in ["user_response", "applet"] {
+            assert_eq!(definitions.iter().any(|tool| tool.name == name), enabled);
+        }
+        assert!(!changed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(agent.locked_tools.is_some());
+    }
+}

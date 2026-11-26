@@ -176,6 +176,30 @@ impl Agent {
         self.registry.downgrade()
     }
 
+    pub(crate) fn response_capability_invalidator(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.response_capability_changed)
+    }
+
+    pub(crate) fn invalidate_sdk_tools(&mut self) {
+        self.mcp_late_register_resolved = false;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
+    }
+
+    pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
+        let was_enabled = self
+            .registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|n| n == "user_response");
+        if was_enabled != enabled {
+            self.registry.set_desktop_ui_enabled(enabled).await;
+            self.invalidate_sdk_tools();
+        }
+    }
+
     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
         self.registry.compaction().read().await.mode()
     }
