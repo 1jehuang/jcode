@@ -134,7 +134,7 @@ async fn deferred_sign_in_route_checks_attempt_origin_source_and_exact_grant_at_
         crate::auth::claude::trust_native_source().unwrap();
         crate::auth::claude::set_active_account(&selected).unwrap();
         let credentials = crate::auth::claude::load_credentials_for_account(&selected).unwrap();
-        let completed = completion::capture(&credentials, LoginSource::Native).unwrap();
+        let completed = completion::capture(&credentials, LoginSource::Native, None).unwrap();
         let flow = LoginFlow::new().unwrap();
         completion::claim(&flow.path).unwrap();
         completion::finish(&flow.path, &flow.attempt, Some(completed.clone())).unwrap();

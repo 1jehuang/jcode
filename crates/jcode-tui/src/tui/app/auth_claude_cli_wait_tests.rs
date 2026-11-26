@@ -25,7 +25,7 @@ fn finish(flow: &LoginFlow, label: &str) {
     let attempt = completion::claim(&flow.path).unwrap();
     crate::auth::claude::set_active_account(label).unwrap();
     let credentials = crate::auth::claude::load_credentials_for_account(label).unwrap();
-    let completed = completion::capture(&credentials, LoginSource::Native).unwrap();
+    let completed = completion::capture(&credentials, LoginSource::Native, None).unwrap();
     completion::finish(&flow.path, &attempt, Some(completed)).unwrap();
 }
 
@@ -116,7 +116,7 @@ fn cli_completion_process_helper() {
     let attempt = completion::claim(std::path::Path::new(&path)).unwrap();
     crate::auth::claude::set_active_account(&label).unwrap();
     let selected = crate::auth::claude::load_credentials_for_account(&label).unwrap();
-    let result = completion::capture(&selected, LoginSource::Native).unwrap();
+    let result = completion::capture(&selected, LoginSource::Native, None).unwrap();
     completion::finish(std::path::Path::new(&path), &attempt, Some(result)).unwrap();
 }
 
@@ -285,7 +285,7 @@ fn receipt_is_one_use_across_competing_claimers_and_contains_no_credentials() {
         1
     );
     let selected = crate::auth::claude::load_credentials_for_account(&label).unwrap();
-    let completed = completion::capture(&selected, LoginSource::Native).unwrap();
+    let completed = completion::capture(&selected, LoginSource::Native, None).unwrap();
     completion::finish(&receipt.path, &receipt.attempt, Some(completed)).unwrap();
     let contents = std::fs::read_to_string(&receipt.path).unwrap();
     assert!(!contents.contains("private-receipt-access"));
@@ -573,7 +573,8 @@ fn completed_file_login_is_rejected_in_a_different_or_revoked_daemon_source() {
     }})).unwrap();
     crate::auth::claude::trust_external_auth_source(source).unwrap();
     let credentials = crate::auth::claude::load_claude_code_credentials().unwrap();
-    let completed = completion::capture(&credentials, LoginSource::File(path.clone())).unwrap();
+    let completed =
+        completion::capture(&credentials, LoginSource::File(path.clone()), None).unwrap();
     let receipt = LoginFlow::new().unwrap();
     completion::claim(&receipt.path).unwrap();
     completion::finish(&receipt.path, &receipt.attempt, Some(completed.clone())).unwrap();
