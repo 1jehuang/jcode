@@ -158,7 +158,7 @@ pub const GEMINI_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatib
     api_key_env: "GEMINI_API_KEY",
     env_file: "gemini.env",
     setup_url: "https://ai.google.dev/gemini-api/docs/openai",
-    default_model: Some("gemini-2.5-flash"),
+    default_model: Some("gemini-3.8-flash"),
     requires_api_key: true,
 };
 
