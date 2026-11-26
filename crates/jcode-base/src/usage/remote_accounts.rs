@@ -233,6 +233,14 @@ pub fn remote_account_banked_resets(
 mod tests {
     use super::*;
 
+    struct RemoteUsageCleanup;
+
+    impl Drop for RemoteUsageCleanup {
+        fn drop(&mut self) {
+            reset_remote_account_usage_for_tests();
+        }
+    }
+
     #[test]
     fn delayed_snapshot_cannot_overwrite_live_or_reconnected_usage() {
         let mut state = RemoteAccounts {
@@ -256,6 +264,7 @@ mod tests {
     #[test]
     fn connection_reset_is_not_an_empty_authoritative_response() {
         let _guard = crate::storage::lock_test_env();
+        let _cleanup = RemoteUsageCleanup;
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
         assert!(matches!(
@@ -266,7 +275,18 @@ mod tests {
         assert!(remote_account_usage_received());
         clear_remote_account_usage();
         assert!(!remote_account_usage_received());
-        reset_remote_account_usage_for_tests();
+    }
+
+    #[test]
+    fn remote_usage_cleanup_restores_local_reads_after_panic() {
+        let _guard = crate::storage::lock_test_env();
+        let result = std::panic::catch_unwind(|| {
+            let _cleanup = RemoteUsageCleanup;
+            clear_remote_account_usage();
+            panic!("exercise remote usage cleanup during unwinding");
+        });
+        assert!(result.is_err());
+        assert!(cached(MultiAccountProviderKind::OpenAI, "local").is_none());
     }
 
     #[test]
