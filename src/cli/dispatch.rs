@@ -810,20 +810,10 @@ async fn run_default_command(args: Args) -> Result<()> {
             &args.provider,
             args.model.as_deref(),
             args.provider_profile.as_deref(),
-        )
+        )?
     } else {
         None
     };
-
-    if server_running && explicit_provider_or_model && initial_model_spec.is_none() {
-        output::stderr_info(
-            "Server already running; provider-only flags without --model only apply when starting a new server.",
-        );
-        output::stderr_info(format!(
-            "Current server settings control `/model`. Pass `--model <id>` or restart server to apply: --provider {}",
-            args.provider.as_arg_value(),
-        ));
-    }
 
     if server_running && explicit_tool_options {
         output::stderr_info(
@@ -880,18 +870,28 @@ fn client_initial_model_spec(
     provider: &ProviderChoice,
     model: Option<&str>,
     provider_profile: Option<&str>,
-) -> Option<String> {
-    let model = model.map(str::trim).filter(|m| !m.is_empty())?;
+) -> Result<Option<String>> {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        if *provider != ProviderChoice::Auto
+            || provider_profile.is_some_and(|profile| !profile.trim().is_empty())
+        {
+            anyhow::bail!(
+                "The existing server was left running. Pass --model <id> with --provider {} to select a route for this client session.",
+                provider.as_arg_value(),
+            );
+        }
+        return Ok(None);
+    };
     if model.contains(':') {
-        return Some(model.to_string());
+        return Ok(Some(model.to_string()));
     }
     if let Some(profile) = provider_profile.map(str::trim).filter(|p| !p.is_empty()) {
-        return Some(format!("{profile}:{model}"));
+        return Ok(Some(format!("{profile}:{model}")));
     }
     if *provider != ProviderChoice::Auto {
-        return Some(format!("{}:{model}", provider.as_arg_value()));
+        return Ok(Some(format!("{}:{model}", provider.as_arg_value())));
     }
-    Some(model.to_string())
+    Ok(Some(model.to_string()))
 }
 
 fn print_provider_test_coverage_report(report: &str, colorize: bool) {

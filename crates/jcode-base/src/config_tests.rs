@@ -692,6 +692,7 @@ fn acp_config_defaults_to_standard_profile_and_full_tools() {
     let cfg = Config::default();
     assert_eq!(cfg.acp.profile, "standard");
     assert_eq!(cfg.acp.tool_profile, "full");
+    assert_eq!(cfg.acp.permission_mode, "jcode");
 }
 
 #[test]
@@ -1761,20 +1762,7 @@ fn tool_auto_background_timeout_configuration() {
         );
     }
 }
-#[test]
-fn browser_handoff_defaults_off_and_roundtrips() {
-    for contents in ["", "[tools]\n"] {
-        let config: Config = toml::from_str(contents).unwrap();
-        assert!(!config.tools.browser_handoff);
-    }
-    for enabled in [false, true] {
-        let config: Config =
-            toml::from_str(&format!("[tools]\nbrowser_handoff = {enabled}\n")).unwrap();
-        assert_eq!(config.tools.browser_handoff, enabled);
-        let restored: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
-        assert_eq!(restored.tools.browser_handoff, enabled);
-    }
-}
+include!("config_tests/browser_handoff.rs");
 
 #[path = "config_tests_additional_tests.rs"]
 mod additional_hibernation_environment_override_accepts_seconds_and_zero_but_not_invalid_values;

@@ -611,18 +611,23 @@ pub(super) async fn execute_debug_command(
             "openai" | "codex" => jcode_provider_core::DEFAULT_OPENAI_MODEL,
             "openrouter" => "anthropic/claude-sonnet-4",
             "cursor" => "gpt-5",
+            "cursor-acp" => "default",
             "copilot" => "copilot:claude-sonnet-4",
             "gemini" => "gemini-2.5-pro",
             "antigravity" => "default",
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Unknown provider '{}'. Use: claude, openai, openrouter, cursor, copilot, gemini, antigravity",
+                    "Unknown provider '{}'. Use: claude, openai, openrouter, cursor, cursor-acp, copilot, gemini, antigravity",
                     provider
                 ));
             }
         };
+        let model_spec = crate::provider::MultiProvider::model_switch_request_for_session_model(
+            default_model,
+            Some(&provider),
+        );
         let mut agent = agent.lock().await;
-        agent.set_model(default_model)?;
+        agent.set_model(&model_spec)?;
         crate::telemetry::record_provider_switch();
         let payload = serde_json::json!({
             "model": agent.provider_model(),

@@ -862,6 +862,19 @@ impl App {
             );
             return;
         }
+        // Standalone runtimes like Cursor ACP advertise foundation models from
+        // multiple vendors (e.g. `claude-opus-5[...]`, `gpt-5.3-codex[...]`,
+        // `gemini-3.1-pro[]`) under their own provider label. The prefix-based
+        // reclassification below would mistake those for local Anthropic/OpenAI
+        // Gemini routes and synthesize duplicate credential rows. The server-sent
+        // routes are authoritative for these runtimes, so skip augmentation.
+        let provider_is_standalone_acp = remote_provider_name.is_some_and(|name| {
+            name.eq_ignore_ascii_case(crate::provider::external::CURSOR_ACP_RUNTIME)
+                || name.eq_ignore_ascii_case("Cursor ACP")
+        });
+        if provider_is_standalone_acp {
+            return;
+        }
         let poisoned_by_jcode_subscription = !routes.is_empty()
             && routes.iter().all(|route| {
                 route
@@ -1113,11 +1126,7 @@ impl App {
         &self,
         current_model: &str,
     ) -> Vec<crate::provider::ModelRoute> {
-        crate::provider::simplified_model_routes_for_picker(
-            self.provider.name(),
-            current_model,
-            self.provider.available_models_display(),
-        )
+        crate::provider::simplified_model_routes_for_provider(self.provider.as_ref(), current_model)
     }
 
     pub(super) fn open_model_picker(&mut self) {
@@ -1174,7 +1183,7 @@ impl App {
             entries: vec![PickerEntry {
                 name: model_label,
                 options: vec![PickerOption {
-                    provider: self.provider.name().to_string(),
+                    provider: self.provider.display_name(),
                     api_method: "current".to_string(),
                     available: true,
                     detail: "updating model list…".to_string(),

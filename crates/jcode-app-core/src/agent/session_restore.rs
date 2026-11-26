@@ -79,7 +79,7 @@ impl Agent {
         drop(replaced_session);
         let swap_ms = assign_start.elapsed().as_millis() - close_ms;
         let lap = Instant::now();
-        self.provider.set_session_id(&self.session.id);
+        Self::bind_provider_context(self.provider.as_ref(), &self.session);
         let provider_ms = lap.elapsed().as_millis();
         let lap = Instant::now();
         self.refresh_agents_md_snapshot();

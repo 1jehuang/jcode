@@ -22,6 +22,7 @@ impl MultiProvider {
         let antigravity = self.antigravity_provider();
         let gemini = self.gemini_provider();
         let cursor = self.cursor_provider();
+        let cursor_acp = self.cursor_acp_provider();
         let bedrock = self.bedrock_provider();
         // Compatible profiles (including Grok Build) have independent catalogs
         // and do not occupy the OpenRouter slot.
@@ -41,6 +42,7 @@ impl MultiProvider {
             antigravity_result,
             gemini_result,
             cursor_result,
+            cursor_acp_result,
             bedrock_result,
             compatible_results,
         ) = tokio::join!(
@@ -87,6 +89,12 @@ impl MultiProvider {
                 }
             },
             async {
+                match cursor_acp {
+                    Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
+                    None => Ok(()),
+                }
+            },
+            async {
                 match bedrock {
                     Some(provider) => refresh_child_catalog(provider.as_ref(), force).await,
                     None => Ok(()),
@@ -100,6 +108,12 @@ impl MultiProvider {
         );
 
         let active_provider = self.active_provider();
+        // Cursor ACP is selected through the external active-provider slot,
+        // not the `ActiveProvider` enum, so the match below would misclassify
+        // its refresh failure as an optional-provider error and a forced
+        // refresh would report success while the active catalog never updated.
+        let cursor_acp_is_active =
+            self.active_external_provider().as_deref() == Some(external::CURSOR_ACP_RUNTIME);
         let mut errors = Vec::new();
         let mut optional_errors = Vec::new();
         let active_profile = ProviderRegistry::new(self).active_compatible_profile_id();
@@ -121,6 +135,7 @@ impl MultiProvider {
             ("antigravity", antigravity_result),
             ("gemini", gemini_result),
             ("cursor", cursor_result),
+            ("cursor-acp", cursor_acp_result),
             ("bedrock", bedrock_result),
         ] {
             if let Err(err) = result {
@@ -136,6 +151,8 @@ impl MultiProvider {
                             | (ActiveProvider::Cursor, "cursor")
                             | (ActiveProvider::Bedrock, "bedrock")
                     );
+                let is_active =
+                    is_active || (cursor_acp_is_active && provider_name == "cursor-acp");
                 if !is_active || matches!(provider_name, "bedrock") {
                     optional_errors.push(format!("{provider_name}: {err}"));
                 } else {
