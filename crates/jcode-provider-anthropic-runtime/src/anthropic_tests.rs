@@ -2090,7 +2090,8 @@ async fn config_header_overrides_apply_on_the_wire_and_replace_built_in_headers(
         content: vec![jcode_message_types::ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];

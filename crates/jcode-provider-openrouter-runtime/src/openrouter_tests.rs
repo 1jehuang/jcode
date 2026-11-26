@@ -3510,3 +3510,6 @@ fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
 
 #[path = "catalog_auth_tests.rs"]
 mod catalog_auth;
+
+#[path = "openrouter_tests_additional_tests.rs"]
+mod additional_cache_breakpoint_preserves_shared_payload_when_already_marked;
