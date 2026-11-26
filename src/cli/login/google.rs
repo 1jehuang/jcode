@@ -467,6 +467,34 @@ pub(super) fn default_google_services(options: &LoginOptions) -> Vec<GoogleServi
         .unwrap_or_else(default_pending_google_services)
 }
 
+fn prompt_google_services(existing: Option<&[GoogleService]>) -> Result<Vec<GoogleService>> {
+    let default = existing
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_vec())
+        .unwrap_or_else(|| GoogleService::ALL.to_vec());
+    let default_ids = default
+        .iter()
+        .map(GoogleService::id)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    eprintln!("── Google Services ──\n");
+    eprintln!("  gmail     Search, read, draft, and send email");
+    eprintln!("  calendar  View and manage Google Calendar events\n");
+    eprintln!("Enter a comma-separated list, or 'all'.");
+    let input = prompt(&format!("Services (default: {default_ids}): "))?;
+    if input.is_empty() {
+        return Ok(default);
+    }
+    match GoogleService::parse_list(&input) {
+        Ok(services) => Ok(services),
+        Err(err) => {
+            eprintln!("{err} Using {default_ids}.");
+            Ok(default)
+        }
+    }
+}
+
 #[cfg(test)]
 mod transactional_tests {
     use super::*;
@@ -690,33 +718,5 @@ mod transactional_tests {
                 ..
             }
         ));
-    }
-}
-
-fn prompt_google_services(existing: Option<&[GoogleService]>) -> Result<Vec<GoogleService>> {
-    let default = existing
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_vec())
-        .unwrap_or_else(|| GoogleService::ALL.to_vec());
-    let default_ids = default
-        .iter()
-        .map(GoogleService::id)
-        .collect::<Vec<_>>()
-        .join(",");
-
-    eprintln!("── Google Services ──\n");
-    eprintln!("  gmail     Search, read, draft, and send email");
-    eprintln!("  calendar  View and manage Google Calendar events\n");
-    eprintln!("Enter a comma-separated list, or 'all'.");
-    let input = prompt(&format!("Services (default: {default_ids}): "))?;
-    if input.is_empty() {
-        return Ok(default);
-    }
-    match GoogleService::parse_list(&input) {
-        Ok(services) => Ok(services),
-        Err(err) => {
-            eprintln!("{err} Using {default_ids}.");
-            Ok(default)
-        }
     }
 }
