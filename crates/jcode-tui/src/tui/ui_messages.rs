@@ -1,6 +1,7 @@
 #[path = "ui_messages/todo_payload_cache.rs"]
 mod todo_payload_cache;
 use todo_payload_cache::cached_todo_payload;
+pub(crate) use todo_payload_cache::todo_payload_counts;
 
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
@@ -1060,7 +1061,10 @@ pub(crate) fn render_todos_message(
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     if width < 10 {
-        return pinned_todo_rows(msg, width, diff_mode, false);
+        return render_todos_message_with_cap(msg, width, diff_mode, true, false)
+            .into_iter()
+            .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
+            .collect();
     }
     let Some((done, total)) = todo_payload_counts(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
@@ -1076,16 +1080,6 @@ pub(crate) fn render_todos_message(
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     lines
-}
-
-pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
-    let payload = cached_todo_payload(content)?;
-    let todos = payload.todos();
-    let done = todos
-        .iter()
-        .filter(|todo| todo.status == "completed")
-        .count();
-    Some((done, todos.len()))
 }
 
 /// Shared border color for inline cards and the pinned band.

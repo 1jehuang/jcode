@@ -1677,7 +1677,7 @@ fn finished_chat_todo_cards_show_lane_names_and_dots_without_changing_saved_data
             for width in 0..110 {
                 let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
                 assert!(
-                    lines.is_empty() || lines.len() == 4,
+                    lines.len() == if width < 10 { 2 } else { 4 },
                     "width={width}: {lines:?}"
                 );
                 assert!(

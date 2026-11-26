@@ -35,3 +35,13 @@ pub(super) fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCa
 #[cfg(test)]
 #[path = "todo_payload_cache_tests.rs"]
 mod todo_payload_cache_tests;
+
+pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
+    let payload = cached_todo_payload(content)?;
+    let todos = payload.todos();
+    let done = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .count();
+    Some((done, todos.len()))
+}
