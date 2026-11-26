@@ -2489,7 +2489,7 @@ impl SessionPicker {
                 break Ok(Some(result));
             }
             if event::poll(input_poll_timeout)? {
-                match event::read()? {
+                match super::ctrl_layout::normalize_ctrl_layout(event::read()?) {
                     Event::Key(key) => match self.handle_key_event(key)? {
                         OverlayAction::Continue => {}
                         OverlayAction::Close => break Ok(None),
