@@ -1384,10 +1384,9 @@ impl App {
             }
         }
 
-        let observed_tokens = self
-            .current_stream_context_tokens()
-            .unwrap_or(self.context_limit);
-        manager.update_observed_input_tokens(observed_tokens);
+        if let Some(observed_tokens) = self.current_stream_context_tokens() {
+            manager.update_observed_input_tokens(observed_tokens);
+        }
 
         match manager.force_compact_with(&provider_messages, self.provider.clone()) {
             Ok(()) => Some(

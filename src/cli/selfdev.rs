@@ -238,6 +238,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
         None,
         false,
         false,
+        None,
     )
     .await
 }
