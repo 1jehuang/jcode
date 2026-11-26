@@ -1003,7 +1003,13 @@ impl BashTool {
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
 
-        match tokio::time::timeout(timeout_duration, &mut work_handle).await {
+        // The outer executor keeps this future alive and owns its completion.
+        let result = if super::handoff::has_outer_owner() {
+            Ok((&mut work_handle).await)
+        } else {
+            tokio::time::timeout(timeout_duration, &mut work_handle).await
+        };
+        match result {
             Ok(join_result) => match join_result {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
@@ -1121,7 +1127,7 @@ impl BashTool {
                 );
             }
 
-            if started.elapsed() >= timeout_duration {
+            if started.elapsed() >= timeout_duration && !super::handoff::has_outer_owner() {
                 let elapsed = started.elapsed();
                 manager
                     .register_detached_task(

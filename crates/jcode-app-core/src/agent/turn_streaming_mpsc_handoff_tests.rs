@@ -399,3 +399,157 @@ async fn custom_sdk_shell_names_keep_default_completion_delivery() {
         crate::background::global().cancel(id).await.unwrap();
     }
 }
+
+#[cfg(unix)]
+mod bash_completion {
+    use super::*;
+
+    #[tokio::test]
+    async fn bash_outer_handoff_publishes_one_final_completion() {
+        check_bash_outer_completion(false).await;
+    }
+
+    #[tokio::test]
+    async fn reload_persistable_bash_outer_handoff_publishes_one_final_completion() {
+        check_bash_outer_completion(true).await;
+    }
+
+    async fn check_bash_outer_completion(reload_persistable: bool) {
+        for silent in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let release = directory.path().join("release");
+            let session = format!(
+                "bash-outer-{}-{silent}",
+                directory.path().file_name().unwrap().to_string_lossy()
+            );
+            let expected = "one final shell result";
+            let registry = Registry::new(Arc::new(NoRequestProvider)).await;
+            let ctx = ToolContext {
+                session_id: session.clone(),
+                message_id: "message".into(),
+                tool_call_id: "single-shell-completion".into(),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: reload_persistable.then(InterruptSignal::new),
+                execution_mode: if reload_persistable {
+                    ToolExecutionMode::AgentTurn
+                } else {
+                    ToolExecutionMode::Direct
+                },
+            };
+            let mut input = serde_json::json!({
+                "command": format!(
+                    "while [ ! -f '{}' ]; do sleep 0.02; done; printf '{expected}'",
+                    release.display()
+                ),
+                "timeout": 80,
+            });
+            if silent {
+                input["notify"] = false.into();
+                input["wake"] = false.into();
+            }
+            let mut bus = crate::bus::Bus::global().subscribe();
+            let handoff = execute_with_background_budget(
+                registry,
+                "bash".into(),
+                input,
+                ctx,
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+            let task_id = handoff
+                .output
+                .split("task_id: ")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap();
+            // Hold the subprocess past its own timeout after the outer handoff.
+            // It cannot finish early because only this test releases it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::fs::write(&release, "ready").await.unwrap();
+            let completed = crate::background::global()
+                .wait(task_id, Duration::from_secs(10), false)
+                .await
+                .unwrap();
+            let mut completions = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let crate::bus::BusEvent::BackgroundTaskCompleted(event) =
+                        bus.recv().await.unwrap()
+                        && event.session_id == session
+                    {
+                        let final_result = event.output_preview.contains(expected);
+                        completions.push(event);
+                        if final_result {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the shell must publish its actual final result");
+            while let Ok(event) = bus.try_recv() {
+                if let crate::bus::BusEvent::BackgroundTaskCompleted(event) = event
+                    && event.session_id == session
+                {
+                    completions.push(event);
+                }
+            }
+            assert_eq!(
+                completions.len(),
+                1,
+                "duplicate shell completions: {completions:?}"
+            );
+            let event = &completions[0];
+            assert_eq!(event.task_id, task_id);
+            assert_eq!((event.notify, event.wake), (!silent, !silent));
+            assert_eq!(
+                completed.task.status,
+                crate::bus::BackgroundTaskStatus::Completed
+            );
+            let output = crate::background::global().output(task_id).await.unwrap();
+            assert!(
+                output.contains(expected),
+                "the outer task lost the shell result: {output}"
+            );
+            assert!(
+                !output.contains("continuing in background"),
+                "outer completion contains a nested handoff: {output}"
+            );
+            let tasks = crate::background::global().list().await;
+            assert_eq!(
+                tasks
+                    .iter()
+                    .filter(|task| task.session_id == session)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    struct NoRequestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for NoRequestProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("shell handoff must not send a provider request")
+        }
+
+        fn name(&self) -> &str {
+            "shell-test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+}
