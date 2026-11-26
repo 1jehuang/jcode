@@ -1,3 +1,6 @@
+#[path = "session_query_tests.rs"]
+mod session_query_tests;
+
 #[test]
 fn test_fast_default_on_saves_config_and_updates_session() {
     let _guard = crate::storage::lock_test_env();
