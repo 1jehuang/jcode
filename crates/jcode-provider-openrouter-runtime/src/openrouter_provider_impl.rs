@@ -270,6 +270,13 @@ impl Provider for OpenRouterProvider {
             }
         }
 
+        let wire_model = request["model"].as_str().unwrap_or(&model);
+        anyhow::ensure!(
+            self.model_supports_chat(wire_model),
+            "Model '{}' is not configured as chat-capable",
+            wire_model
+        );
+
         let (message_items, system_value, tools_value, tool_count) =
             canonical_input_parts(&request);
         jcode_provider_core::fingerprint::log_provider_canonical_input(
@@ -922,6 +929,13 @@ impl OpenRouterProvider {
                 request_obj.insert(key.clone(), value.clone());
             }
         }
+
+        let wire_model = request["model"].as_str().unwrap_or(&model);
+        anyhow::ensure!(
+            self.model_supports_chat(wire_model),
+            "Model '{}' is not configured as chat-capable",
+            wire_model
+        );
 
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "azure-openai",

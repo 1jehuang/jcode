@@ -1351,7 +1351,7 @@ fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Rec
     (format!("http://{addr}/v1"), request_rx)
 }
 
-fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
+pub(super) fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
     let addr = listener.local_addr().expect("fake provider addr");
     let (request_tx, request_rx) = mpsc::channel();
