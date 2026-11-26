@@ -608,6 +608,26 @@ impl ContinuousRecording {
         }
         true
     }
+    /// Suppress capture for a ready reply even when continuous ambient noise
+    /// prevents a quiet window, as long as no accepted request is queued.
+    pub fn suppress_for_playback(&self) -> bool {
+        let mut output = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.is_capturing()
+            || output.queue.iter().any(|e| {
+                matches!(
+                    e,
+                    ContinuousEvent::Transcript { .. } | ContinuousEvent::Continuation { .. }
+                )
+            })
+        {
+            return false;
+        }
+        output.quiet = QuietWindow::default();
+        if !self.suppressed.swap(true, Ordering::SeqCst) {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        true
+    }
     pub fn is_capturing(&self) -> bool {
         self.capturing.load(Ordering::SeqCst) && !self.is_finished()
     }
