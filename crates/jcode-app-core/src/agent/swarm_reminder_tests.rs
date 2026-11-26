@@ -96,6 +96,8 @@ async fn jarvis_delegation_policy_only_changes_the_attached_root() {
     let root = agent.build_system_prompt_split(None).static_part;
     for rule in [
         "only one sequential task",
+        "explicitly requested workspace script directly",
+        "Never pass a raw transcript to the shell",
         "do not also call `swarm spawn`",
         "do not dispatch workers",
         "Never delegate around an approval",
@@ -235,6 +237,48 @@ fn jarvis_tool_config() -> crate::protocol::SessionToolConfig {
         }],
         ..Default::default()
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn jarvis_workspace_script_uses_session_directory_and_respects_disabled_bash() {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let workspace = sandbox.external_dir();
+    std::fs::write(
+        workspace.join("check.sh"),
+        "echo jarvis-fixture-ok > result\n",
+    )
+    .unwrap();
+    let provider: Arc<dyn Provider> = Arc::new(EffortProvider { effort: None });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.set_working_dir(workspace.to_str().unwrap());
+    let id = agent.session_id().to_owned();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let _guard = crate::tool::sdk::ConnectionGuard(id.clone());
+    let mut config = jarvis_tool_config();
+    crate::tool::sdk::configure(&id, &id, config.clone(), tx.clone()).unwrap();
+
+    let args = serde_json::json!({"command":"sh ./check.sh","intent":"Run the workspace fixture"});
+    let result = workspace.join("result");
+    agent.execute_tool("bash", args.clone()).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&result).unwrap(),
+        "jarvis-fixture-ok\n"
+    );
+
+    std::fs::remove_file(&result).unwrap();
+    config.disabled.push("bash".into());
+    crate::tool::sdk::configure(&id, &id, config, tx).unwrap();
+    assert!(
+        agent
+            .execute_tool("bash", args)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+    assert!(!result.exists());
 }
 
 #[tokio::test]
