@@ -1208,15 +1208,28 @@ impl App {
             .take_if(|pending| !pending.is_system)
         {
             let raw_input = self.last_submitted_input.take();
-            self.restore_failover_payload(super::FallbackResendPayload {
-                content: pending.content,
-                images: pending.images,
-                is_system: pending.is_system,
-                system_reminder: pending.system_reminder,
-                auto_retry: pending.auto_retry,
-                retry_attempts: pending.retry_attempts,
-                raw_input,
-            });
+            if let Some(draft) = self
+                .last_submitted_draft
+                .take()
+                .filter(|(id, draft)| {
+                    *id == self.current_message_id
+                        && draft.expanded == pending.content
+                        && draft.images == pending.images
+                })
+                .map(|(_, draft)| draft)
+            {
+                super::remote::input_dispatch::restore_undelivered_prepared_input(self, draft);
+            } else {
+                self.restore_failover_payload(super::FallbackResendPayload {
+                    content: pending.content,
+                    images: pending.images,
+                    is_system: pending.is_system,
+                    system_reminder: pending.system_reminder,
+                    auto_retry: pending.auto_retry,
+                    retry_attempts: pending.retry_attempts,
+                    raw_input,
+                });
+            }
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
         } else {
@@ -1229,18 +1242,26 @@ impl App {
     /// "token refresh needed" / auth error). Only restores when the input box is
     /// empty, so we never clobber text the user has already started typing.
     pub(super) fn restore_failed_input_to_box(&mut self) {
+        let draft = self.last_submitted_draft.take();
         let Some(prompt) = self.last_submitted_input.take() else {
             return;
         };
         if prompt.trim().is_empty() {
             return;
         }
-        if !self.input.is_empty() {
+        if !self.input.is_empty() || !self.pending_images.is_empty() {
             // User already started a new prompt; do not overwrite it.
             return;
         }
-        self.input = prompt;
-        self.cursor_pos = self.input.len();
+        if let Some(draft) = draft
+            .filter(|(_, draft)| draft.raw_input == prompt)
+            .map(|(_, draft)| draft)
+        {
+            super::remote::input_dispatch::restore_prepared_remote_input(self, draft);
+        } else {
+            self.input = prompt;
+            self.cursor_pos = self.input.len();
+        }
         self.reset_tab_completion();
         self.sync_model_picker_preview_from_input();
         self.set_status_notice("Prompt restored to input after error");

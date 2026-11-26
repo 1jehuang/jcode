@@ -183,3 +183,5 @@ fn selection_review_held_edge_ticks_extend_the_editable_range_and_highlight() {
         }
     }
 }
+
+include!("selection_watch.rs");

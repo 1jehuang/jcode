@@ -130,6 +130,7 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
+        self.last_submitted_draft = None;
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
     }
@@ -679,6 +680,7 @@ impl App {
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
+            last_submitted_draft: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
@@ -1206,6 +1208,7 @@ impl App {
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
+            last_submitted_draft: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),

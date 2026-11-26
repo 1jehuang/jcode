@@ -198,3 +198,4 @@ include!("input_image_provenance.rs");
 include!("input_selection_keys.rs");
 include!("input_text_selection.rs");
 include!("input_image_selection.rs");
+include!("attachment_routing.rs");

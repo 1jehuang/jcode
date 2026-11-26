@@ -1068,6 +1068,7 @@ fn handle_server_event_inner(
                 // Turn completed successfully; drop the saved prompt so a later
                 // unrelated failure cannot restore stale text into the input box.
                 app.last_submitted_input = None;
+                app.last_submitted_draft = None;
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -1799,6 +1800,7 @@ fn handle_server_event_inner(
             if session_changed {
                 if !preserve_startup_send {
                     app.rate_limit_pending_message = None;
+                    app.last_submitted_draft = None;
                 }
                 app.rate_limit_reset = None;
                 app.connection_type = None;

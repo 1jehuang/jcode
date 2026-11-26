@@ -1941,6 +1941,10 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
+    if app.copy_selection_mode && input::handle_modal_key(app, code, modifiers)? {
+        return Ok(());
+    }
+
     if input::handle_account_shortcut(app, code, modifiers)
         || super::input_selection::handle_input_selection_key(app, code, modifiers)
     {

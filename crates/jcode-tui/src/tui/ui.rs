@@ -14,7 +14,8 @@
 mod copy_selection_offsets;
 pub(crate) use copy_selection_offsets::{
     copy_viewport_line_count, copy_viewport_line_text, input_byte_offset_for_copy_point,
-    input_pane_line_count, input_pane_line_text, side_pane_line_count, side_pane_line_text,
+    input_copy_point_for_byte_offset, input_pane_line_count, input_pane_line_text,
+    side_pane_line_count, side_pane_line_text,
 };
 #[path = "ui_copy_pane_drag.rs"]
 mod copy_pane_drag;

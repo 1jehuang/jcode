@@ -274,7 +274,7 @@ impl App {
             return false;
         }
         self.clear_input_selection();
-        if let Some(cursor) = cursor {
+        if let Some(cursor) = cursor.filter(|_| !self.copy_selection_mode) {
             self.cursor_pos = cursor.min(self.input.len());
             self.reset_tab_completion();
         }
@@ -296,8 +296,11 @@ impl App {
         }
         self.copy_selection_pending_anchor = None;
         self.copy_selection_dragging = false;
-        self.copy_selection_anchor = None;
-        self.copy_selection_cursor = None;
+        self.copy_selection_edge_autoscroll = None;
+        if !self.copy_selection_mode {
+            self.copy_selection_anchor = None;
+            self.copy_selection_cursor = None;
+        }
         true
     }
 
@@ -311,7 +314,18 @@ impl App {
         };
         match range {
             Some((start, end)) if start < end => {
-                self.set_input_selection(start, end);
+                if self.copy_selection_mode {
+                    let to_point =
+                        |byte| crate::tui::ui::input_copy_point_for_byte_offset(&self.input, byte);
+                    let (Some(anchor), Some(cursor)) = (to_point(start), to_point(end)) else {
+                        return false;
+                    };
+                    self.copy_selection_anchor = Some(anchor);
+                    self.copy_selection_cursor = Some(cursor);
+                    self.copy_selection_goal_column = Some(cursor.column);
+                } else {
+                    self.set_input_selection(start, end);
+                }
                 true
             }
             _ => false,

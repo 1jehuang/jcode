@@ -52,3 +52,24 @@ pub(crate) fn input_byte_offset_for_copy_point(
     }
     Some(input.len())
 }
+
+pub(crate) fn input_copy_point_for_byte_offset(
+    input: &str,
+    byte: usize,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let before = input.get(..byte)?;
+    let raw_line = before.bytes().filter(|&byte| byte == b'\n').count();
+    let column = before.rsplit('\n').next()?.width();
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Input)?;
+    (0..snapshot.wrapped_plain_line_count()).find_map(|abs_line| {
+        let map = snapshot.wrapped_line_map(abs_line)?;
+        (map.raw_line == raw_line && (map.start_col..=map.end_col).contains(&column)).then(|| {
+            crate::tui::CopySelectionPoint {
+                pane: crate::tui::CopySelectionPane::Input,
+                abs_line,
+                column: column - map.start_col
+                    + snapshot.wrapped_copy_offset(abs_line).unwrap_or(0),
+            }
+        })
+    })
+}

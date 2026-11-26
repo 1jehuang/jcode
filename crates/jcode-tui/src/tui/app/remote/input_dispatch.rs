@@ -121,6 +121,16 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
         app.cloud_recovery_context = None;
         app.cloud_recovery_auto_pending = false;
     }
+    app.last_submitted_draft = app
+        .last_submitted_draft
+        .take()
+        .filter(|(id, draft)| {
+            *id == app.current_message_id
+                && !is_system
+                && draft.expanded == content
+                && draft.images == images
+        })
+        .map(|(_, draft)| (Some(msg_id), draft));
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
@@ -300,7 +310,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // Keyboard dispatch propagates Err to the TUI event loop. A failed write
     // is recoverable: keep the consumed composer (including attachments) and
     // report it here rather than exiting the client or claiming delivery.
-    if let Err(error) = app
+    let request_id = match app
         .begin_remote_send(
             remote,
             prepared.expanded.clone(),
@@ -309,22 +319,26 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         )
         .await
     {
-        crate::logging::info(&format!(
-            "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
-            app.remote_session_id,
-            app.current_message_id,
-            prepared.expanded.len(),
-            prepared.images.len(),
-            app.queued_messages.len()
-        ));
-        app.remove_display_message(echo_index);
-        restore_undelivered_prepared_input(app, prepared);
-        app.push_display_message(DisplayMessage::error(format!(
-            "Failed to send message: {error}"
-        )));
-        app.set_status_notice("Message not sent; draft restored");
-        return Ok(());
-    }
+        Ok(id) => id,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
+                app.remote_session_id,
+                app.current_message_id,
+                prepared.expanded.len(),
+                prepared.images.len(),
+                app.queued_messages.len()
+            ));
+            app.remove_display_message(echo_index);
+            restore_undelivered_prepared_input(app, prepared);
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to send message: {error}"
+            )));
+            app.set_status_notice("Message not sent; draft restored");
+            return Ok(());
+        }
+    };
+    app.last_submitted_draft = Some((Some(request_id), prepared));
     Ok(())
 }
 
@@ -408,7 +422,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     let expanded_prompt = app
         .current_skills_snapshot()
         .resolve_invocation(&prepared.expanded)
-        .and_then(|invocation| invocation.prompt)
+        .map(|invocation| invocation.prompt.unwrap_or(""))
         .unwrap_or(trailing_prompt)
         .to_string();
     submit_prepared_remote_input(
@@ -664,6 +678,7 @@ pub(super) async fn submit_remote_input_shell(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = None;
+    app.last_submitted_draft = None;
     remote.reset_call_output_tokens_seen();
     app.set_status_notice(format!(
         "Running remote shell: {}",
@@ -688,6 +703,7 @@ pub(in crate::tui::app) fn apply_transcript_event(
             app.set_status_notice("Transcript inserted");
         }
         TranscriptMode::Append => {
+            app.clear_input_selection();
             app.cursor_pos = app.input.len();
             input::insert_input_text(app, &text);
             app.set_status_notice("Transcript appended");

@@ -1865,6 +1865,7 @@ pub struct App {
     // input box if the turn fails (e.g. "token refresh needed") so the user does not
     // lose what they typed and can resend after recovering.
     last_submitted_input: Option<String>,
+    last_submitted_draft: Option<(Option<u64>, input::PreparedInput)>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing
