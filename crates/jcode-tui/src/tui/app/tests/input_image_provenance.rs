@@ -527,3 +527,5 @@ fn image_provenance_delete_keys_detach_images_in_all_clients() {
         }
     }
 }
+
+include!("paste_removal.rs");
