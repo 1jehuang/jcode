@@ -14,6 +14,11 @@ pub struct Token {
     pub receives_pipe: bool,
     /// True for `>` / `>|` redirect destinations, which are truncated on open.
     pub is_truncating_redirect_target: bool,
+    /// True for every redirect destination (`>`, `>>`, `<`, `&>`). These are
+    /// never operands of the command, so they are excluded from target
+    /// collection; only the truncating subset is also classified as a write
+    /// (#932: `rm -rf x 2>/dev/null` reported `/dev/null` as a delete target).
+    pub is_redirect_target: bool,
     /// True for control operators like `&&`, which are never path targets.
     pub is_operator: bool,
 }
@@ -24,6 +29,7 @@ impl Token {
             text: text.into(),
             receives_pipe: false,
             is_truncating_redirect_target: false,
+            is_redirect_target: false,
             is_operator: false,
         }
     }
@@ -99,22 +105,40 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     let mut has_content = false;
     let mut chars = command.chars().peekable();
     let mut pending_redirect = false;
+    let mut pending_truncating = false;
 
     macro_rules! flush {
-        () => {
+        () => {{
             if has_content {
                 let mut token = Token::word(std::mem::take(&mut current));
+                if pending_redirect {
+                    token.is_redirect_target = true;
+                    token.is_truncating_redirect_target = pending_truncating;
+                }
                 #[allow(unused_assignments)]
                 {
-                    if pending_redirect {
-                        token.is_truncating_redirect_target = true;
-                        pending_redirect = false;
-                    }
                     has_content = false;
                 }
                 tokens.push(token);
+                #[allow(unused_assignments)]
+                {
+                    pending_redirect = false;
+                    pending_truncating = false;
+                }
             }
-        };
+        }};
+    }
+
+    // A redirect operator with no destination word leaves nothing to mark, and
+    // the flag must not carry over across a command boundary to a later word.
+    macro_rules! clear_redirect {
+        () => {{
+            #[allow(unused_assignments)]
+            {
+                pending_redirect = false;
+                pending_truncating = false;
+            }
+        }};
     }
 
     while let Some(c) = chars.next() {
@@ -154,12 +178,14 @@ pub fn tokenize(command: &str) -> Vec<Token> {
             ' ' | '\t' => flush!(),
             '\n' | ';' => {
                 flush!();
+                clear_redirect!();
                 let mut op = Token::word(c.to_string());
                 op.is_operator = true;
                 tokens.push(op);
             }
             '&' | '|' => {
                 flush!();
+                clear_redirect!();
                 let mut text = c.to_string();
                 if chars.peek() == Some(&c) {
                     text.push(c);
@@ -171,16 +197,19 @@ pub fn tokenize(command: &str) -> Vec<Token> {
             }
             '(' | ')' => {
                 flush!();
+                clear_redirect!();
                 let mut op = Token::word(c.to_string());
                 op.is_operator = true;
                 tokens.push(op);
             }
             '>' => {
+                drop_fd_prefix(&mut current, &mut has_content);
                 flush!();
                 // `>>` appends and does not truncate, so it is far less
                 // destructive; only a single `>` clobbers.
                 if chars.peek() == Some(&'>') {
                     chars.next();
+                    pending_redirect = true;
                 } else if chars.peek() == Some(&'&') {
                     // `>&N` / `>&-` duplicate or close a file descriptor and
                     // never name a file to truncate. Consume the FD word.
@@ -197,15 +226,21 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                     if fd.is_empty() {
                         // `>& file` (bash: redirect stdout+stderr) truncates.
                         pending_redirect = true;
+                        pending_truncating = true;
                     }
                 } else {
                     if chars.peek() == Some(&'|') {
                         chars.next();
                     }
                     pending_redirect = true;
+                    pending_truncating = true;
                 }
             }
-            '<' => flush!(),
+            '<' => {
+                drop_fd_prefix(&mut current, &mut has_content);
+                flush!();
+                pending_redirect = true;
+            }
             _ => {
                 has_content = true;
                 current.push(c);
@@ -215,6 +250,21 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     flush!();
 
     tokens
+}
+
+/// Drop a bare file-descriptor number that prefixes a redirect (`2>/dev/null`).
+///
+/// The number is redirect syntax, not an operand, but it was emitted as an
+/// ordinary word and then collected as a delete target: `rm -rf x 2>/dev/null`
+/// reported a recursive delete of `.../2` (#932). A descriptor prefix has to be
+/// adjacent to the operator, and a space flushes the word first, so only the
+/// adjacent spelling reaches here. `rm -rf x 2 >/dev/null` really does name a
+/// file called `2` and is left alone.
+fn drop_fd_prefix(current: &mut String, has_content: &mut bool) {
+    if *has_content && current.chars().all(|c| c.is_ascii_digit()) {
+        current.clear();
+        *has_content = false;
+    }
 }
 
 /// Remove heredoc payloads before tokenizing shell source.
