@@ -175,6 +175,26 @@ impl App {
 }
 
 impl App {
+    /// Release a known request while retaining only its own pending draft.
+    pub(in super::super) fn hold_current_remote_request(&mut self) {
+        self.last_submitted_draft = self
+            .last_submitted_draft
+            .take()
+            .filter(|(id, draft)| {
+                *id == self.current_message_id
+                    && self
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            !pending.is_system
+                                && draft.expanded == pending.content
+                                && draft.images == pending.images
+                        })
+            })
+            .map(|(_, draft)| (None, draft));
+        self.current_message_id = None;
+    }
+
     pub(in super::super) fn schedule_pending_remote_retry_with_limit(
         &mut self,
         reason: &str,
