@@ -21,6 +21,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
             output_tokens: 10,
             cache_read_input_tokens: None,
             cache_creation_input_tokens: None,
+            request_elapsed_ms: None,
         }),
     );
     session.add_message_ext(
@@ -36,6 +37,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
             output_tokens: 20,
             cache_read_input_tokens: Some(150),
             cache_creation_input_tokens: Some(25),
+            request_elapsed_ms: None,
         }),
     );
 
@@ -2723,6 +2725,7 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
             output_tokens: 100,
             cache_read_input_tokens: Some(6_000),
             cache_creation_input_tokens: Some(2_000),
+            request_elapsed_ms: Some(1_234),
         },
         // Anthropic uncached input: read and write are disjoint.
         StoredTokenUsage {
@@ -2731,11 +2734,13 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
             output_tokens: 100,
             cache_read_input_tokens: Some(7_000),
             cache_creation_input_tokens: Some(2_000),
+            request_elapsed_ms: Some(1_234),
         },
     ] {
         let json = serde_json::to_string(&usage).unwrap();
         let restored: StoredTokenUsage = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.prompt_tokens, Some(10_000));
+        assert_eq!(restored.request_elapsed_ms, Some(1_234));
         session.add_message_ext(Role::Assistant, vec![], None, Some(restored));
     }
     let totals = session.token_usage_totals();
@@ -2745,6 +2750,7 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
     assert_eq!(totals.cache_creation_input_tokens, 4_000);
     let legacy: StoredTokenUsage = serde_json::from_str(r#"{"input_tokens":10000,"output_tokens":100,"cache_read_input_tokens":6000,"cache_creation_input_tokens":2000}"#).unwrap();
     assert_eq!(legacy.prompt_tokens, None);
+    assert_eq!(legacy.request_elapsed_ms, None);
     session.add_message_ext(Role::Assistant, vec![], None, Some(legacy));
     assert_eq!(session.token_usage_totals().cache_prompt_tokens, None);
     assert_eq!(session.token_usage_totals().cache_read_input_tokens, 19_000);
