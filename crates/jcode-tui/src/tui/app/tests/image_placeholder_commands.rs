@@ -198,3 +198,5 @@ include!("input_image_provenance.rs");
 
 include!("queued_image_recovery.rs");
 include!("attachment_routing.rs");
+
+include!("retry_draft_correlation.rs");

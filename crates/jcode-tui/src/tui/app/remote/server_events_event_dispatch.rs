@@ -150,7 +150,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     let rejected_id = *id;
                     let redraw = handle_server_event_inner(app, event, remote);
                     if !app.is_processing && app.current_message_id == Some(rejected_id) {
-                        app.current_message_id = None;
+                        app.hold_current_remote_request();
                     }
                     return redraw;
                 }

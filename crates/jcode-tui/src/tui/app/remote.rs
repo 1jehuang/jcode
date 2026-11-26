@@ -1331,7 +1331,7 @@ pub(super) fn handle_disconnect(
         }
     }
     let recovered_local = recover_local_interleave_to_queue(app, "disconnect");
-    app.current_message_id = None;
+    app.hold_current_remote_request();
     app.last_stream_activity = None;
     app.remote_resume_activity = None;
     let ops = app.stream_buffer.flush();
@@ -1722,7 +1722,7 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
             app.is_processing = false;
             app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;
-            app.current_message_id = None;
+            app.hold_current_remote_request();
             app.processing_started = None;
             app.last_stream_activity = None;
             if !app.streaming.streaming_text.is_empty() {
