@@ -217,6 +217,32 @@ fn failed_status_serialization_preserves_the_previous_file() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn status_writes_buffer_bytes_and_name_temps_for_cleanup() -> Result<()> {
+    struct InspectTemporary<'a>(&'a std::path::Path);
+    impl serde::Serialize for InspectTemporary<'_> {
+        fn serialize<S: serde::Serializer>(
+            &self,
+            serializer: S,
+        ) -> std::result::Result<S::Ok, S::Error> {
+            let result = serde::Serialize::serialize("buffered snapshot", serializer)?;
+            let entries: Vec<_> = std::fs::read_dir(self.0).unwrap().collect();
+            assert_eq!(entries.len(), 1);
+            let temporary = entries[0].as_ref().unwrap();
+            assert_eq!(temporary.path().extension().unwrap(), "tmp");
+            assert_eq!(temporary.metadata().unwrap().len(), 0);
+            Ok(result)
+        }
+    }
+
+    let tmp = tempdir()?;
+    let path = tmp.path().join("task.status.json");
+    BackgroundTaskManager::persist_status_file(&path, &InspectTemporary(tmp.path()))?;
+    assert_eq!(std::fs::read_to_string(&path)?, "\"buffered snapshot\"");
+    assert_eq!(std::fs::read_dir(tmp.path())?.count(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
     let tmp = tempdir()?;
