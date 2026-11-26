@@ -33,6 +33,7 @@ fn daily_prune_waits_for_manifest_repair() {
             #[cfg(windows)]
             {
                 use std::os::windows::fs::OpenOptionsExt;
+                directories.access_mode(0x80000000 | 0x00000100); // GENERIC_READ | FILE_WRITE_ATTRIBUTES.
                 directories.custom_flags(0x02000000); // FILE_FLAG_BACKUP_SEMANTICS opens directories.
             }
             for (name, age) in [("rollback", 3), ("recent", 2)] {
