@@ -535,7 +535,7 @@ fn reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it() {
         .unwrap();
     runtime.block_on(async {
         let mut ids = Vec::new();
-        for reloading in ["before", "during", "normal"] {
+        for reloading in ["before", "during", "normal", "ready"] {
             let fixture = Fixture::new(true).await;
             {
                 let mut agent = fixture.agent.lock().await;
@@ -548,11 +548,15 @@ fn reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it() {
                     }],
                 );
             }
-            if reloading == "before" {
+            if matches!(reloading, "before" | "ready") {
                 crate::server::write_reload_state(
                     "memory-reload-fixture",
                     "fixture-hash",
-                    crate::server::ReloadPhase::Starting,
+                    if reloading == "ready" {
+                        crate::server::ReloadPhase::SocketReady
+                    } else {
+                        crate::server::ReloadPhase::Starting
+                    },
                     None,
                 );
             } else {
@@ -616,6 +620,12 @@ fn reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it() {
                 .iter()
                 .any(|entry| entry["detail"]["target_session"] == ids[2]),
             "normal disconnect still triggers final extraction"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[3]),
+            "ordinary disconnect after SocketReady still triggers final extraction"
         );
     });
 }

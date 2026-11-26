@@ -17,6 +17,13 @@ use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+
+fn reload_in_progress() -> bool {
+    matches!(
+        crate::server::recent_reload_state(RELOAD_DISCONNECT_MARKER_MAX_AGE),
+        Some(state) if state.phase == crate::server::ReloadPhase::Starting
+    )
+}
 pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
 
 // The last registered event sender remains on the member after it detaches.
@@ -137,7 +144,7 @@ pub(super) async fn cleanup_client_connection(
     client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     idle_reconnect_grace: Duration,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let server_reloading = crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE);
+    let server_reloading = reload_in_progress();
     let disposition = disconnect_disposition(disconnected_while_processing(
         client_is_processing,
         processing_task.as_ref(),
@@ -298,9 +305,7 @@ pub(super) async fn cleanup_client_connection(
                     }
 
                     let memory_enabled = agent.memory_enabled();
-                    let transcript = if memory_enabled
-                        && !server_reloading
-                        && !crate::server::reload_marker_active(RELOAD_DISCONNECT_MARKER_MAX_AGE)
+                    let transcript = if memory_enabled && !server_reloading && !reload_in_progress()
                     {
                         Some(agent.build_transcript_for_extraction())
                     } else {
