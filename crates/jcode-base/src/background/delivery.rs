@@ -147,6 +147,7 @@ impl BackgroundTaskManager {
         Some(status)
     }
 
+    // Capture wake ownership before terminal persistence, never after a waiter can release it.
     pub(super) fn publish_completion(&self, status: &TaskStatusFile, wake: bool, output: String) {
         let output_file = self.output_path_for(&status.task_id);
         let output_preview = if output.len() > 500 {
@@ -165,7 +166,7 @@ impl BackgroundTaskManager {
             output_file,
             duration_secs: status.duration_secs.unwrap_or(0.0),
             notify: status.notify,
-            wake: held_wake(&self.held_deliveries, status, wake),
+            wake,
         }));
     }
 }

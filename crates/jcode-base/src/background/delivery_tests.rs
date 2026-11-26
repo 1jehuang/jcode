@@ -219,3 +219,147 @@ async fn terminal_snapshot_survives_failed_status_publication() {
         }
     }
 }
+
+async fn pause_reconciliation_reads() -> (std::sync::mpsc::Sender<()>, tokio::task::JoinHandle<()>)
+{
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (resume, pause) = std::sync::mpsc::channel();
+    let blocker = tokio::task::spawn_blocking(move || {
+        entered.send(()).unwrap();
+        pause.recv().unwrap();
+    });
+    started.await.unwrap();
+    (resume, blocker)
+}
+
+#[test]
+fn orphan_completion_keeps_suppression_after_terminal_visibility_and_wait_release() -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()?
+        .block_on(async {
+            for held in [false, true] {
+                for abandon in [false, true] {
+                    let dir = tempfile::tempdir()?;
+                    let manager = BackgroundTaskManager::with_output_dir(dir.path().into());
+                    let mut events = Bus::global().subscribe();
+                    let (info, _finish) = started(&manager, false, true).await;
+                    if held {
+                        assert!(manager.hold_delivery(&info.task_id, "wait-owner").await);
+                    }
+                    let task = manager.tasks.write().await.remove(&info.task_id).unwrap();
+                    task.handle.abort();
+                    let _ = task.handle.await;
+                    let mut status = manager.read_status_file(&info.status_file).await.unwrap();
+                    status.owner_instance = Some("previous-process-image".into());
+                    BackgroundTaskManager::write_status_file(&info.status_file, &status);
+                    let mut finalizing = Box::pin(
+                        manager.finalize_orphaned_status_if_needed(status, &info.status_file),
+                    );
+
+                    let mut terminal_barrier = None;
+                    for _ in 0..3 {
+                        let (resume, blocker) = pause_reconciliation_reads().await;
+                        assert!(futures::poll!(&mut finalizing).is_pending());
+                        let visible: TaskStatusFile =
+                            serde_json::from_slice(&std::fs::read(&info.status_file)?)?;
+                        if visible.status != BackgroundTaskStatus::Running {
+                            terminal_barrier = Some((resume, blocker));
+                            break;
+                        }
+                        resume.send(())?;
+                        blocker.await?;
+                        // Finish the queued read without polling the finalizer again.
+                        tokio::task::spawn_blocking(|| ()).await?;
+                    }
+                    let (resume, blocker) =
+                        terminal_barrier.expect("terminal status becomes visible");
+                    let mut release = Box::pin(manager.release_delivery(&info.task_id, abandon));
+                    assert!(futures::poll!(&mut release).is_pending());
+                    resume.send(())?;
+                    blocker.await?;
+                    let returned = release.await.expect("waiter sees terminal status");
+                    assert_eq!(returned.status, BackgroundTaskStatus::Failed);
+
+                    // The wait reply/abandonment finishes before the original publication resumes.
+                    assert_eq!(finalizing.await.status, BackgroundTaskStatus::Failed);
+                    let mut wakes = 0;
+                    let mut completions = 0;
+                    while let Ok(event) = events.try_recv() {
+                        if let BusEvent::BackgroundTaskCompleted(event) = event
+                            && event.task_id == info.task_id
+                        {
+                            assert!(event.notify);
+                            completions += 1;
+                            wakes += usize::from(event.wake);
+                        }
+                    }
+                    assert_eq!(wakes, usize::from(!held || abandon));
+                    assert_eq!(completions, 1 + usize::from(held && abandon));
+                }
+            }
+            Ok(())
+        })
+}
+
+#[test]
+fn reconciliation_preserves_a_terminal_status_written_after_its_initial_snapshot() -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()?
+        .block_on(async {
+            for detached in [false, true] {
+                let dir = tempfile::tempdir()?;
+                let manager = BackgroundTaskManager::with_output_dir(dir.path().into());
+                let mut events = Bus::global().subscribe();
+                let (info, _finish) = started(&manager, false, true).await;
+                assert!(manager.hold_delivery(&info.task_id, "wait-owner").await);
+                let task = manager.tasks.write().await.remove(&info.task_id).unwrap();
+                task.handle.abort();
+                let _ = task.handle.await;
+                let mut status = manager.read_status_file(&info.status_file).await.unwrap();
+                status.owner_instance = Some("previous-process-image".into());
+                if detached {
+                    status.detached = true;
+                    status.pid = Some(2_000_000_000);
+                    assert!(!crate::platform::is_process_running(status.pid.unwrap()));
+                }
+                BackgroundTaskManager::write_status_file(&info.status_file, &status);
+                let mut replacement = status.clone();
+                replacement.status = BackgroundTaskStatus::Superseded;
+                let (resume, blocker) = pause_reconciliation_reads().await;
+                let mut finalizing = Box::pin(async {
+                    if detached {
+                        manager
+                            .finalize_detached_status_if_needed(status, &info.status_file)
+                            .await
+                    } else {
+                        manager
+                            .finalize_orphaned_status_if_needed(status, &info.status_file)
+                            .await
+                    }
+                });
+                assert!(futures::poll!(&mut finalizing).is_pending());
+                BackgroundTaskManager::write_status_file(&info.status_file, &replacement);
+                resume.send(())?;
+                blocker.await?;
+                assert_eq!(finalizing.await.status, BackgroundTaskStatus::Superseded);
+                let returned = manager
+                    .release_delivery(&info.task_id, false)
+                    .await
+                    .unwrap();
+                assert_eq!(returned.status, BackgroundTaskStatus::Superseded);
+                while let Ok(event) = events.try_recv() {
+                    if let BusEvent::BackgroundTaskCompleted(event) = event {
+                        assert_ne!(
+                            event.task_id, info.task_id,
+                            "stale reconciliation published"
+                        );
+                    }
+                }
+            }
+            Ok(())
+        })
+}

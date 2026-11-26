@@ -151,11 +151,20 @@ impl BackgroundTaskManager {
     }
 
     fn persist_status_file(path: &std::path::Path, status: &impl serde::Serialize) -> Result<()> {
+        use std::io::Write;
+
         let parent = path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Background status path has no parent"))?;
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer_pretty(&mut file, status)?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".jcode-status-")
+            .suffix(".tmp")
+            .tempfile_in(parent)?;
+        {
+            let mut writer = std::io::BufWriter::new(file.as_file_mut());
+            serde_json::to_writer_pretty(&mut writer, status)?;
+            writer.flush()?;
+        }
         file.persist(path)?;
         Ok(())
     }
@@ -191,6 +200,16 @@ impl BackgroundTaskManager {
 
         let output_path = self.output_path_for(&status.task_id);
         let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let status_guard = self.progress_updates.lock().await;
+        if let Some(latest) = self.read_status_file(status_path).await {
+            status = latest;
+        }
+        if status.status != BackgroundTaskStatus::Running
+            || !status.detached
+            || status.pid != Some(pid)
+        {
+            return status;
+        }
         let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
@@ -219,9 +238,11 @@ impl BackgroundTaskManager {
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
         );
 
+        let published_wake = held_wake(&self.held_deliveries, &status, status.wake);
         Self::write_status_file(status_path, &status);
+        drop(status_guard);
 
-        self.publish_completion(&status, status.wake, output);
+        self.publish_completion(&status, published_wake, output);
 
         status
     }
@@ -276,6 +297,13 @@ impl BackgroundTaskManager {
         if !Self::status_is_reconcilable_orphan(&status) {
             return status;
         }
+        let status_guard = self.progress_updates.lock().await;
+        if let Some(latest) = self.read_status_file(status_path).await {
+            status = latest;
+        }
+        if !Self::status_is_reconcilable_orphan(&status) {
+            return status;
+        }
         // Belt and braces: never rewrite a task this process is executing.
         if self.is_live_task(&status.task_id) {
             return status;
@@ -295,12 +323,14 @@ impl BackgroundTaskManager {
             &mut status,
             terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
         );
+        let published_wake = held_wake(&self.held_deliveries, &status, status.wake);
         Self::write_status_file(status_path, &status);
+        drop(status_guard);
 
         let output = fs::read_to_string(self.output_path_for(&status.task_id))
             .await
             .unwrap_or_default();
-        self.publish_completion(&status, status.wake, output);
+        self.publish_completion(&status, published_wake, output);
 
         status
     }
@@ -1123,15 +1153,20 @@ impl BackgroundTaskManager {
 
             Ok(true)
         } else {
-            let _status_guard = self.progress_updates.lock().await;
-
             let status_path = self.status_path_for(task_id);
+            let Some(status) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            let status = self
+                .finalize_detached_status_if_needed(status, &status_path)
+                .await;
+            if status.status != BackgroundTaskStatus::Running {
+                return Ok(false);
+            }
+            let _status_guard = self.progress_updates.lock().await;
             let Some(mut status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
             };
-            status = self
-                .finalize_detached_status_if_needed(status, &status_path)
-                .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
             }
