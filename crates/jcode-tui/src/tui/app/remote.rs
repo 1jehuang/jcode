@@ -750,7 +750,7 @@ async fn apply_terminal_event<B: Backend>(
             input_attribution.scroll_delta = mouse_scroll_delta(&mouse);
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
                 needs_redraw |= dispatch_compacted_history_load(app, remote).await;
             }
@@ -1071,7 +1071,7 @@ where
         Some(Ok(Event::Mouse(mouse))) => {
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
             }
         }
@@ -1745,10 +1745,6 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
             }
         }
     }
-}
-
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    app.handle_mouse_event(mouse);
 }
 
 async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConnection) -> String {

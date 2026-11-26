@@ -82,22 +82,6 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 mod subscribe_context;
 use subscribe_context::*;
 
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
-
 struct ProcessingMessage {
     jarvis_voice: bool,
     id: u64,
@@ -2405,7 +2389,9 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        if let Err(error) = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }) {
+                            crate::logging::warn(&format!("Cannot deliver runtime command result to disconnected client: {error}"));
+                        }
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:

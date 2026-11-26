@@ -41,6 +41,38 @@ fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
 }
 
 #[test]
+fn client_initial_model_spec_formats_provider_and_model_for_running_server() {
+    assert_eq!(
+        client_initial_model_spec(
+            &ProviderChoice::Openrouter,
+            Some("thinkingmachines/inkling-2-mini"),
+            None,
+        ),
+        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Auto, Some("gpt-5.4"), None),
+        Some("gpt-5.4".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(
+            &ProviderChoice::Openrouter,
+            Some("openrouter:thinkingmachines/inkling-2-mini"),
+            None,
+        ),
+        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Auto, Some("my-model"), Some("my-profile")),
+        Some("my-profile:my-model".to_string())
+    );
+    assert_eq!(
+        client_initial_model_spec(&ProviderChoice::Openrouter, None, None),
+        None
+    );
+}
+
+#[test]
 fn auth_doctor_positional_provider_wins_over_global_provider() {
     assert_eq!(
         auth_doctor_provider_arg(Some("openai"), &ProviderChoice::Cerebras),
