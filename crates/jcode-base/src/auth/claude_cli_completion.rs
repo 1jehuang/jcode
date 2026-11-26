@@ -63,7 +63,7 @@ pub(in crate::auth) fn follow_validation_refresh(
     )
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoginSource {
     Native,
     File(PathBuf),
@@ -75,6 +75,8 @@ pub struct CompletedLogin {
     pub fingerprint: String,
     pub saved_account: Option<String>,
     persisted_default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_fingerprint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,6 +201,7 @@ pub fn fingerprint(credentials: &claude::ClaudeCredentials) -> String {
 pub fn capture(
     credentials: &claude::ClaudeCredentials,
     source: LoginSource,
+    acquired: Option<&CompletedLogin>,
 ) -> Result<CompletedLogin> {
     let _lock = super::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let auth = claude::load_auth_file()?;
@@ -210,16 +213,43 @@ pub fn capture(
         matches.next().is_none(),
         "Claude login matches more than one saved account"
     );
-    anyhow::ensure!(
-        fingerprint(&claude::load_credentials()?) == fingerprint(credentials),
-        "Claude login selection changed before completion"
-    );
-    Ok(CompletedLogin {
+    if let Some(acquired) = acquired {
+        anyhow::ensure!(
+            acquired.source == source
+                && acquired
+                    .saved_account
+                    .as_ref()
+                    .is_none_or(|label| saved_account.as_ref() == Some(label)),
+            "Claude login credential source or saved account changed during validation"
+        );
+    }
+    let file_fingerprint = matches!(source, LoginSource::File(_)).then(|| {
+        acquired.map_or_else(
+            || fingerprint(credentials),
+            |login| login.fingerprint.clone(),
+        )
+    });
+    let completed = CompletedLogin {
         source,
         fingerprint: fingerprint(credentials),
         saved_account,
         persisted_default: auth.active_anthropic_account,
-    })
+        file_fingerprint,
+    };
+    validate(&completed)?;
+    anyhow::ensure!(
+        selected_login_matches(&completed)?,
+        "Claude login selection changed before completion"
+    );
+    Ok(completed)
+}
+
+fn selected_login_matches(completed: &CompletedLogin) -> Result<bool> {
+    let selected = fingerprint(&claude::load_credentials()?);
+    // An unchanged source file may retain priority after this attempt rotates its grant.
+    Ok(selected == completed.fingerprint
+        || (completed.saved_account.is_some()
+            && completed.file_fingerprint.as_deref() == Some(selected.as_str())))
 }
 
 fn source_allowed(source: &LoginSource) -> Result<()> {
@@ -254,7 +284,7 @@ pub fn apply(completed: &CompletedLogin, expected_override: Option<&str>) -> Res
     let result = (|| {
         source_allowed(&completed.source)?;
         anyhow::ensure!(
-            fingerprint(&claude::load_credentials()?) == completed.fingerprint,
+            selected_login_matches(completed)?,
             "Another credential source takes precedence over the completed login"
         );
         Ok(())
@@ -267,6 +297,13 @@ pub fn apply(completed: &CompletedLogin, expected_override: Option<&str>) -> Res
 
 fn validate(completed: &CompletedLogin) -> Result<()> {
     source_allowed(&completed.source)?;
+    if let Some(original) = &completed.file_fingerprint {
+        anyhow::ensure!(
+            matches!(completed.source, LoginSource::File(_))
+                && fingerprint(&claude::load_claude_code_credentials()?) == *original,
+            "Claude Code credential file changed during login"
+        );
+    }
     let auth = claude::load_auth_file()?;
     anyhow::ensure!(
         auth.active_anthropic_account == completed.persisted_default,

@@ -248,7 +248,7 @@ pub(super) async fn login_claude_code_flow(
     } else {
         auth::claude_cli_completion::LoginSource::File(file_path)
     };
-    let acquired = auth::claude_cli_completion::capture(&credentials, source.clone())?;
+    let acquired = auth::claude_cli_completion::capture(&credentials, source.clone(), None)?;
     let selection = (
         auth::claude::get_active_account_override(),
         auth::claude::load_auth_file()?.active_anthropic_account,
@@ -259,7 +259,7 @@ pub(super) async fn login_claude_code_flow(
         auth::claude::get_active_account_override() == selection.0,
         "The saved Claude account selection changed during validation. Retry to use this login."
     );
-    let completed = auth::claude_cli_completion::capture(&credentials, source)?;
+    let completed = auth::claude_cli_completion::capture(&credentials, source, Some(&acquired))?;
     let default_after = auth::claude::load_auth_file()?.active_anthropic_account;
     anyhow::ensure!(
         default_after == selection.1
