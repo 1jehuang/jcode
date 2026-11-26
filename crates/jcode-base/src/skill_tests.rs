@@ -71,6 +71,7 @@ fn test_skill(name: &str, description: &str, content: &str) -> Skill {
         name: name.to_string(),
         description: description.to_string(),
         allowed_tools: None,
+        command: None,
         content: content.to_string(),
         path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),
         search_text: std::sync::OnceLock::from(build_skill_search_text(name, description, content)),
@@ -832,4 +833,64 @@ fn unloadable_skills_are_reported_instead_of_silently_skipped() {
     assert_eq!(merged.load_errors().len(), 2);
     assert_eq!(registry.load_from_dir_count(temp.path()).unwrap(), 2);
     assert_eq!(registry.load_errors().len(), 1);
+}
+
+#[test]
+fn command_frontmatter_is_parsed_trimmed_and_optional() {
+    let temp = tempfile::tempdir().unwrap();
+    let with = write_skill_file(
+        temp.path(),
+        "fleet",
+        "---\nname: fleet\ndescription: Fleet CLI\ncommand: \"  fleet --json  \"\n---\n\nbody\n",
+    );
+    let skill = SkillRegistry::parse_skill(&with).unwrap();
+    assert_eq!(skill.command.as_deref(), Some("fleet --json"));
+    assert_eq!(skill.content, "body");
+
+    let blank = write_skill_file(
+        temp.path(),
+        "blank",
+        "---\nname: blank\ndescription: Blank\ncommand: \"\"\n---\n\nbody\n",
+    );
+    assert_eq!(SkillRegistry::parse_skill(&blank).unwrap().command, None);
+
+    let without = write_skill_file(
+        temp.path(),
+        "plain",
+        "---\nname: plain\ndescription: Plain\n---\n\nbody\n",
+    );
+    assert_eq!(SkillRegistry::parse_skill(&without).unwrap().command, None);
+}
+
+#[test]
+fn lenient_frontmatter_reads_command() {
+    let (frontmatter, _) = SkillRegistry::parse_frontmatter(
+        "---\nname: fleet\ndescription: runs: fleet\ncommand: fleet status\n---\nbody",
+    )
+    .unwrap();
+    assert_eq!(frontmatter.command.as_deref(), Some("fleet status"));
+}
+
+#[test]
+fn command_line_appends_shell_quoted_args() {
+    let mut skill = test_skill("fleet", "Fleet CLI", "body");
+    assert_eq!(skill.command_line("status"), None);
+
+    skill.command = Some("fleet".to_string());
+    assert_eq!(skill.command_line("").as_deref(), Some("fleet"));
+    assert_eq!(
+        skill
+            .command_line("dispatch box-1 'fix the build'")
+            .as_deref(),
+        Some("fleet dispatch box-1 'fix the build'")
+    );
+    assert_eq!(
+        skill.command_line("x; rm -rf ~ $(id)").as_deref(),
+        Some("fleet 'x;' rm -rf '~' '$(id)'")
+    );
+    // Unbalanced quotes fall back to whitespace splitting, still quoted.
+    assert_eq!(
+        skill.command_line("it's").as_deref(),
+        Some("fleet \"it's\"")
+    );
 }
