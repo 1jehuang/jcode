@@ -1,4 +1,4 @@
-//! Whether an unfocused client's window can be seen at all.
+﻿//! Whether an unfocused client's window can be seen at all.
 //!
 //! Terminal focus reports give two states, focused and not. A tiling desktop
 //! needs a third: an unfocused window may sit next to the focused one in plain
@@ -411,6 +411,7 @@ mod tests {
         assert_eq!(parse_tmux("yes no\n"), Visibility::Unknown);
     }
 
+    #[cfg(unix)]
     fn workspaces(shown: &[u64]) -> serde_json::Value {
         json!({"Ok": {"Workspaces": [
             {"id": 1, "is_active": shown.contains(&1)},
@@ -418,6 +419,7 @@ mod tests {
         ]}})
     }
 
+    #[cfg(unix)]
     fn windows(entries: &[(u64, u64, bool)]) -> serde_json::Value {
         let windows: Vec<_> = entries
             .iter()
@@ -429,6 +431,9 @@ mod tests {
     }
 
     #[test]
+    // `parse_niri` is Unix-only, so the niri tests are the only ones that cannot
+    // run on Windows. Everything else in this module is portable.
+    #[cfg(unix)]
     fn niri_window_on_a_workspace_that_is_not_shown_is_hidden() {
         let ancestors = [900, 500, 100];
         let all = windows(&[(500, 2, false), (777, 1, true)]);
@@ -448,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn niri_single_instance_terminal_is_hidden_only_if_all_its_windows_are() {
         let ancestors = [900, 500];
         assert_eq!(
@@ -469,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn niri_answers_unknown_rather_than_guess() {
         let shown = workspaces(&[1]);
         // No ancestor owns a window: the client runs over ssh or in a nested

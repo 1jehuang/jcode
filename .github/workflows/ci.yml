@@ -450,6 +450,73 @@ jobs:
           cargo install cargo-audit --locked
           scripts/security_preflight.sh --strict
 
+  windows-keyboard-probe:
+    # Manual only. This drives a real ConPTY, which no other job does, so it is the
+    # only automated check of the Windows keyboard path that can see what a terminal
+    # actually delivers. Dispatch-gated because it is a separate Windows job whose
+    # value is diagnostic rather than per-commit.
+    name: Windows keyboard probe (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-keyboard-probe
+          cache-all-crates: "true"
+
+      - name: Build the client
+        shell: pwsh
+        run: |
+          & cargo build --locked --target x86_64-pc-windows-msvc -p jcode --bin jcode
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows client build failed'
+          }
+
+      - name: Install the pty tooling
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pywinpty pyte
+          if ($LASTEXITCODE -ne 0) {
+            throw 'pip install failed'
+          }
+
+      - name: Probe the composer in a real ConPTY
+        # Fails when the report reaches the composer, when ordinary typing does not,
+        # or when the app never logs the strip. Any of the three makes the
+        # observation worthless, so all three are required.
+        shell: pwsh
+        run: |
+          python scripts/repro/windows_keyboard_leak/pty_probe.py `
+            --label ci `
+            --binary "target\x86_64-pc-windows-msvc\debug\jcode.exe" `
+            --run-dir "$env:RUNNER_TEMP\probe" `
+            --fixture "scripts/repro/windows_keyboard_leak/fixture/session_probe_1735689600000_0123456789abcdef.json" `
+            --resume-arg probe `
+            --dismiss-overlay
+          if ($LASTEXITCODE -ne 0) {
+            throw 'the keyboard probe saw a report reach the composer, or could not observe the composer at all'
+          }
+
+      - name: Upload probe artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-keyboard-probe
+          path: ${{ runner.temp }}/probe
+
   windows-build-test:
     name: Build & Test (windows-latest)
     runs-on: windows-latest

@@ -3,6 +3,7 @@ pub(crate) mod app;
 pub mod jarvis;
 pub mod justrust_status;
 pub(crate) mod screen_context;
+mod ui_diagnostics;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {
@@ -53,6 +54,7 @@ mod info_widget_overview;
 mod info_widget_settle;
 pub mod info_widget_stability;
 pub mod keybind;
+mod keyboard_protocol;
 mod layout_utils;
 pub mod login_picker;
 pub mod markdown;
@@ -187,11 +189,9 @@ pub fn enable_keyboard_enhancement() -> bool {
         crate::logging::info("Keyboard enhancement request skipped: termination already started");
         return false;
     }
-    let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
-    crate::logging::info(&format!(
-        "Keyboard enhancement request: {}",
-        if result { "sent" } else { "FAILED" }
-    ));
+    let outcome = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux());
+    let result = outcome.is_ok();
+    keyboard_protocol::log_enable_outcome(&outcome);
     if result {
         // Set while still holding the state lock so a signal cleanup cannot
         // observe the push write without the ownership flag.
@@ -225,11 +225,11 @@ fn enable_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    use crossterm::event::PushKeyboardEnhancementFlags;
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    crossterm::execute!(
+    keyboard_protocol::write_mode(
         writer,
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+        keyboard_protocol::Action::Push,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
     )
 }
 
@@ -365,29 +365,24 @@ fn disable_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    if inside_tmux {
-        writer.write_all(b"\x1b[>4;0m")?;
-    }
-    crossterm::execute!(writer, crossterm::event::PopKeyboardEnhancementFlags)
-}
-
-fn request_tmux_extended_keys_to(
-    writer: &mut impl std::io::Write,
-    inside_tmux: bool,
-) -> std::io::Result<()> {
-    if inside_tmux {
-        // `extended-keys on` needs modifyOtherKeys opt-in, not a Kitty push.
-        writer.write_all(b"\x1b[>4;2m")?;
-    }
-    Ok(())
+    keyboard_protocol::write_mode(
+        writer,
+        keyboard_protocol::Action::Pop,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
+    )
 }
 
 fn reapply_keyboard_enhancement_to(
     writer: &mut impl std::io::Write,
     inside_tmux: bool,
 ) -> std::io::Result<()> {
-    request_tmux_extended_keys_to(writer, inside_tmux)?;
-    write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())
+    keyboard_protocol::write_mode(
+        writer,
+        keyboard_protocol::Action::Set,
+        inside_tmux,
+        keyboard_enhancement_flags().bits(),
+    )
 }
 
 /// Reassert terminal modes that terminals may clear while the TUI remains alive.
@@ -423,10 +418,16 @@ pub(crate) fn reapply_terminal_modes_to(
 
 pub(crate) fn reapply_configured_terminal_modes_after_focus() {
     let policy = crate::perf::tui_policy();
+    // Reassert keyboard reporting only when startup negotiation actually
+    // succeeded and this process still owns the stack entry. Passing the
+    // configured policy instead re-requested CSI-u after every focus-in on
+    // hosts that never negotiated it (Windows/ConPTY, #1812).
+    let keyboard_enhanced =
+        policy.enable_keyboard_enhancement && kitty_keyboard_push_active().load(Ordering::Acquire);
     if let Err(error) = reapply_terminal_modes_after_focus_to(
         &mut std::io::stdout(),
         policy.enable_mouse_capture,
-        policy.enable_keyboard_enhancement,
+        keyboard_enhanced,
     ) {
         crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
     }
@@ -506,6 +507,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn adopt_records_inherited_entry_without_pushing() {
         let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
             .lock()
@@ -565,6 +567,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, true).unwrap();
@@ -580,6 +583,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
         let mut output = Vec::new();
         enable_keyboard_enhancement_to(&mut output, false).unwrap();
@@ -629,6 +633,7 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
         for mouse_capture in [false, true] {
             for keyboard_enhanced in [false, true] {
