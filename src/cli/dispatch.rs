@@ -355,7 +355,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
-            selfdev::run_self_dev(build, args.resume).await?;
+            selfdev::run_self_dev(build, args).await?;
         }
         Some(Command::Debug {
             command,
@@ -860,17 +860,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
-    tui_launch::run_tui_client(
-        args.resume,
-        startup_hints,
-        !server_running,
-        args.fresh_spawn,
-        args.remote_working_dir,
-        args.onboarding_sim,
-        args.update_sim,
-        initial_model_spec,
-    )
-    .await?;
+    tui_launch::run_tui_client(&args, startup_hints, !server_running, initial_model_spec).await?;
 
     Ok(())
 }
