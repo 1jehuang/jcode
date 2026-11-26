@@ -104,7 +104,14 @@ impl Config {
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
     fn load_for_update() -> anyhow::Result<Self> {
-        Ok(Self::load_from_file_strict()?.unwrap_or_default())
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+        Self::load_for_update_at_path(&path)
+    }
+
+    fn load_for_update_at_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        Ok(Self::load_from_path(path)?.unwrap_or_default())
     }
 
     /// Load config from file only (no env overrides)
@@ -131,7 +138,7 @@ impl Config {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
         let mut config = toml::from_str::<Self>(&content).map_err(|e| {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
@@ -209,10 +216,7 @@ impl Config {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        let mut cfg = match Self::load_from_path(&path)? {
-            Some(config) => config,
-            None => Self::default(),
-        };
+        let mut cfg = Self::load_for_update_at_path(&path)?;
         #[cfg(test)]
         role_transaction_tests::loaded();
         match target {
