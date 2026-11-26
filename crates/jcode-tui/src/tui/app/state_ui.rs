@@ -495,6 +495,12 @@ impl App {
                         .unwrap_or(0) as u8,
                     retry_at: None,
                 });
+            let last_submitted_draft = RestoredReloadInput::submitted_draft_from_saved(
+                &value,
+                rate_limit_pending_message.as_ref(),
+                &input,
+                &pending_images,
+            );
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")
                 .and_then(|v| v.as_u64())
@@ -568,6 +574,7 @@ impl App {
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
+                last_submitted_draft,
                 rate_limit_reset,
                 observe_mode_enabled,
                 observe_page_markdown,
@@ -615,6 +622,7 @@ impl App {
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
+            last_submitted_draft: None,
             rate_limit_reset: None,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),

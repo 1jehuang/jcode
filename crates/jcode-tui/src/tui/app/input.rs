@@ -73,6 +73,7 @@ pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
@@ -529,8 +530,8 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     }
 
     let placeholder = paste_placeholder(&text);
-    app.pasted_contents.push(text);
     insert_input_text(app, &placeholder);
+    app.pasted_contents.push(text);
 }
 
 fn expand_matching_paste(app: &mut App, text: &str) -> bool {
@@ -565,7 +566,6 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
     app.input.insert_str(placeholder_start, text);
     app.input_images_inserted(placeholder_start, text.len(), None);
     app.cursor_pos = placeholder_start + text.len();
-    app.pasted_contents.remove(content_index);
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
     true
@@ -1146,10 +1146,16 @@ pub(super) fn is_queueable_command_input(input: &str) -> bool {
 
 /// Ctrl+Enter on a slash or shell command while a turn is running: hold the
 /// command and run it as a real command once the turn ends, instead of
-/// running it now. Returns true when the command was queued.
+/// running it now. Returns true when the shortcut was handled.
 pub(super) fn try_queue_command(app: &mut App) -> bool {
     if !app.is_processing() || !is_queueable_command_input(&app.input) {
         return false;
+    }
+    if !app.pending_images.is_empty() {
+        app.set_status_notice(
+            "Commands with attached images cannot be queued. Press Enter to submit this draft.",
+        );
+        return true;
     }
     let raw_input = std::mem::take(&mut app.input);
     let expanded = expand_paste_placeholders(app, &raw_input);
@@ -2936,7 +2942,7 @@ pub(super) fn stage_local_interleave(
     app.set_status_notice("⏭ Sending now (interleave)");
 }
 
-fn paste_placeholder(content: &str) -> String {
+pub(super) fn paste_placeholder(content: &str) -> String {
     let line_count = content.lines().count().max(1);
     format!(
         "[pasted {} line{}]",
@@ -3996,6 +4002,7 @@ impl App {
                 Ok(()) => {
                     self.last_stream_error = None;
                     self.last_submitted_input = None;
+                    self.last_submitted_draft = None;
                 }
                 Err(e) => {
                     let err_str = crate::util::format_error_chain(&e);

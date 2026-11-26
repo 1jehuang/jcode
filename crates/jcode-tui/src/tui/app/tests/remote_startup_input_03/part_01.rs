@@ -392,14 +392,14 @@ fn test_paste_again_does_not_expand_an_edited_placeholder() {
     app.handle_paste(big.clone());
     app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
         .unwrap();
-    app.handle_paste(big);
+    app.handle_paste(big.clone());
 
     assert_eq!(
         app.input(),
         "[pasted 5 lines[pasted 5 lines]",
         "an edited placeholder must not be mistaken for the original"
     );
-    assert_eq!(app.pasted_contents.len(), 2);
+    assert_eq!(app.pasted_contents, vec![big]);
 }
 
 #[test]
