@@ -95,9 +95,10 @@ impl App {
         }
         self.interleave_message = None;
         self.interleave_images.clear();
-        let held_draft = restored
-            .last_submitted_draft
-            .filter(|_| restored.rate_limit_pending_message.is_some());
+        let held_draft = restored.last_submitted_draft.filter(|_| {
+            restored.rate_limit_pending_message.is_some()
+                || (self.submit_input_on_startup && proven_draft)
+        });
         self.last_submitted_input = held_draft.as_ref().map(|draft| draft.raw_input.clone());
         self.last_submitted_draft = held_draft.map(|draft| (self.current_message_id, draft));
         self.rate_limit_pending_message = restored.rate_limit_pending_message;

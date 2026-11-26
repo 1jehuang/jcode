@@ -200,3 +200,5 @@ include!("queued_image_recovery.rs");
 include!("attachment_routing.rs");
 
 include!("retry_draft_correlation.rs");
+
+include!("skill_reload_wire_payload.rs");

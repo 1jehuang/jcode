@@ -178,6 +178,9 @@ pub(in super::super) async fn process_remote_followups(
     }
 
     if app.submit_input_on_startup && !app.is_processing {
+        if !app.restore_remote_replay_skill() {
+            return;
+        }
         app.submit_input_on_startup = false;
         app.startup_submit_deferred_reason = None;
         if !app.input.is_empty() || !app.pending_images.is_empty() {
@@ -187,6 +190,18 @@ pub(in super::super) async fn process_remote_followups(
                 app.pending_images.len(),
             ));
             let prepared = input::take_prepared_input(app);
+            let prepared = app
+                .last_submitted_draft
+                .take()
+                .filter(|(id, draft)| {
+                    *id == app.current_message_id
+                        && draft.raw_input == prepared.raw_input
+                        && draft.images == prepared.images
+                        && draft.image_markers == prepared.image_markers
+                        && draft.pasted_contents == prepared.pasted_contents
+                })
+                .map(|(_, draft)| draft)
+                .unwrap_or(prepared);
             if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
                 crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
                 app.push_display_message(DisplayMessage::error(format!(
