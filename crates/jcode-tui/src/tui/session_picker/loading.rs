@@ -67,7 +67,8 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 5;
+// Older caches can contain native sessions labeled by their model provider.
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 6;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -687,37 +688,6 @@ fn session_file_stem_for_candidate(file_name: &str) -> Option<(&str, bool)> {
         return None;
     }
     Some((stem, true))
-}
-
-fn classify_session_source(
-    id: &str,
-    provider_key: Option<&str>,
-    model: Option<&str>,
-) -> SessionSource {
-    if id.starts_with("imported_cc_") {
-        return SessionSource::ClaudeCode;
-    }
-
-    let provider_key = provider_key.unwrap_or_default().to_ascii_lowercase();
-    let model = model.unwrap_or_default().to_ascii_lowercase();
-
-    if provider_key == "pi" || provider_key.starts_with("pi-") {
-        return SessionSource::Pi;
-    }
-    if provider_key == "opencode"
-        || provider_key == "opencode-go"
-        || provider_key.contains("opencode")
-    {
-        return SessionSource::OpenCode;
-    }
-    if provider_key.contains("codex") || model.contains("codex") || model.contains("openai-codex") {
-        return SessionSource::Codex;
-    }
-    if provider_key == "cursor" || provider_key == "cursor-agent" {
-        return SessionSource::Cursor;
-    }
-
-    SessionSource::Jcode
 }
 
 fn collect_files_recursive(root: &Path, extension: &str) -> Vec<PathBuf> {
@@ -1807,6 +1777,7 @@ pub(super) fn crashed_sessions_from_all_sessions(
 /// Parse a single jcode session snapshot (+ journal) into a [`SessionInfo`],
 /// returning `None` for empty/imported sessions or read/parse errors. Pulled out
 /// of `load_sessions` so the summary pass can run across a scoped thread pool.
+/// External transcripts receive their source labels from their respective loaders.
 fn parse_jcode_session_info(
     sessions_dir: &Path,
     stem: &str,
@@ -1844,11 +1815,6 @@ fn parse_jcode_session_info(
 
     let status = session.status.clone();
     let needs_catchup = catchup_seen.needs_catchup(stem, session.updated_at, &status);
-    let source = classify_session_source(
-        stem,
-        session.provider_key.as_deref(),
-        session.model.as_deref(),
-    );
 
     let todo_summary = crate::todo::load_session_todo_summary(stem);
     let title = session
@@ -1910,7 +1876,7 @@ fn parse_jcode_session_info(
         search_index,
         server_name: None,
         server_icon: None,
-        source,
+        source: SessionSource::Jcode,
         resume_target: ResumeTarget::JcodeSession {
             session_id: stem.to_string(),
         },
@@ -3013,3 +2979,7 @@ pub(crate) fn load_external_cli_sessions_grouped(
 #[cfg(test)]
 #[path = "loading_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "loading_source_tests.rs"]
+mod source_tests;
