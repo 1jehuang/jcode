@@ -661,3 +661,145 @@ fn credential_file_preflight_rejects_symlinks_before_cli_sign_in() {
             .contains("regular file")
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fake_cli_unexpired_file_refresh_keeps_source_proof_and_rejects_replacement() {
+    for change in [
+        "unchanged",
+        "file-replaced",
+        "approval-revoked",
+        "saved-login-replaced",
+        "manual-choice",
+        "unobserved-refresh",
+    ] {
+        let home = TestHome::new();
+        let mut env = FakeCliEnv::new(home._sandbox.root(), true);
+        env.set("CLAUDE_CODE_OAUTH_TOKEN", "synthetic-expired-access");
+        let _answer = PromptAnswer::set(true);
+        if change == "unobserved-refresh" {
+            auth::oauth::save_claude_tokens_for_account(
+                &auth::oauth::OAuthTokens {
+                    access_token: "fake-cli-access".into(),
+                    refresh_token: "fake-cli-refresh".into(),
+                    expires_at: 4_102_444_800_000,
+                    id_token: None,
+                    scopes: Vec::new(),
+                },
+                "existing-file-login",
+            )
+            .unwrap();
+        }
+        let flow = auth::claude_cli_completion::LoginFlow::new().unwrap();
+        let attempt = auth::claude_cli_completion::claim(&flow.path).unwrap();
+        let file = auth::claude::ExternalClaudeAuthSource::ClaudeCode
+            .path()
+            .unwrap();
+        let result = login_claude_code_flow(async {
+            assert!(flow.result()?.is_none());
+            if change != "unobserved-refresh" {
+            auth::oauth::save_claude_tokens_for_account(
+                &auth::oauth::OAuthTokens {
+                    access_token: "fake-cli-access".into(),
+                    refresh_token: "fake-cli-refresh".into(),
+                    expires_at: 4_102_444_800_000,
+                    id_token: None,
+                    scopes: Vec::new(),
+                },
+                "first-file-login",
+            )?;
+            }
+            let label = auth::claude::list_accounts()?.remove(0).label;
+            if change == "unobserved-refresh" {
+                let refresh_label = label.clone();
+                tokio::spawn(async move {
+                    auth::claude::update_account_tokens(
+                        &refresh_label, "file-refreshed-access", "file-refreshed-refresh", 4_102_444_800_000,
+                    )
+                }).await??;
+            } else {
+            auth::claude::update_account_tokens(
+                &label,
+                "file-refreshed-access",
+                "file-refreshed-refresh",
+                4_102_444_800_000,
+            )?;
+            }
+            match change {
+                "file-replaced" => std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"replacement-access","refreshToken":"replacement-refresh","expiresAt":4102444800000}}"#)?,
+                "approval-revoked" => crate::config::Config::revoke_external_auth_source_for_path(
+                    auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID, &file,
+                )?,
+                "saved-login-replaced" => auth::oauth::save_claude_tokens_for_account(
+                    &auth::oauth::OAuthTokens {
+                        access_token: "replacement-access".into(),
+                        refresh_token: "replacement-refresh".into(),
+                        expires_at: 4_102_444_800_000,
+                        id_token: None,
+                        scopes: Vec::new(),
+                    },
+                    &label,
+                )?,
+                "manual-choice" => auth::claude::set_active_account_override(Some("manual-choice".into())),
+                _ => {}
+            }
+            Ok(())
+        }).await;
+        if change == "unchanged" {
+            let completed = result.unwrap();
+            let saved = auth::claude::load_credentials_for_account(
+                completed.saved_account.as_deref().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved.access_token, "file-refreshed-access");
+            assert_eq!(
+                completed.fingerprint,
+                auth::claude_cli_completion::fingerprint(&saved)
+            );
+            assert_eq!(
+                auth::claude::load_claude_code_credentials()
+                    .unwrap()
+                    .access_token,
+                "fake-cli-access"
+            );
+            auth::claude_cli_completion::finish(&flow.path, &attempt, Some(completed.clone()))
+                .unwrap();
+            auth::claude_cli_completion::with_verified_receipt(
+                &flow.path,
+                &attempt,
+                &completed.fingerprint,
+                || auth::claude_cli_completion::apply(&completed, None),
+            )
+            .unwrap();
+            assert_eq!(
+                auth::claude::get_active_account_override(),
+                completed.saved_account
+            );
+            std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"later-access","refreshToken":"later-refresh","expiresAt":4102444800000}}"#).unwrap();
+            assert!(
+                auth::claude_cli_completion::with_verified_receipt(
+                    &flow.path,
+                    &attempt,
+                    &completed.fingerprint,
+                    || Ok(()),
+                )
+                .is_err(),
+                "a replacement after completion must invalidate the receipt"
+            );
+            assert!(
+                auth::claude_cli_completion::apply(&completed, completed.saved_account.as_deref(),)
+                    .is_err()
+            );
+        } else {
+            assert!(result.is_err(), "{change} must not complete this login");
+            auth::claude_cli_completion::finish(&flow.path, &attempt, None).unwrap();
+            assert!(matches!(flow.result().unwrap(), Some(None)));
+            if change == "manual-choice" {
+                assert_eq!(
+                    auth::claude::get_active_account_override().as_deref(),
+                    Some("manual-choice")
+                );
+            }
+        }
+    }
+}

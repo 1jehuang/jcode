@@ -6,6 +6,7 @@ use std::process::Command;
 
 use crate::{build, logging, session, startup_profile};
 
+use super::args::Args;
 use super::output;
 use super::provider_init::ProviderChoice;
 
@@ -98,7 +99,7 @@ async fn wait_for_reloading_server() -> bool {
     }
 }
 
-pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
+pub(crate) async fn run_self_dev(should_build: bool, mut args: Args) -> Result<()> {
     startup_profile::mark("run_self_dev_enter");
     crate::env::set_var(CLIENT_SELFDEV_ENV, "1");
 
@@ -106,8 +107,8 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
     crate::env::set_var("JCODE_REPO_DIR", &repo_dir);
 
     startup_profile::mark("selfdev_session_create");
-    let is_resume = resume_session.is_some();
-    let session_id = if let Some(id) = resume_session {
+    let is_resume = args.resume.is_some();
+    let session_id = if let Some(id) = args.resume.take() {
         if let Ok(mut session) = session::Session::load(&id)
             && !session.is_canary
         {
@@ -230,17 +231,12 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
 
     output::stderr_info("Starting self-dev TUI...");
 
-    super::tui_launch::run_tui_client(
-        Some(session_id),
-        None,
-        !server_running,
-        false,
-        None,
-        false,
-        false,
-        None,
-    )
-    .await
+    args.resume = Some(session_id);
+    args.fresh_spawn = false;
+    args.remote_working_dir = None;
+    args.onboarding_sim = false;
+    args.update_sim = false;
+    super::tui_launch::run_tui_client(&args, None, !server_running, None).await
 }
 #[cfg(test)]
 #[path = "selfdev_tests.rs"]
