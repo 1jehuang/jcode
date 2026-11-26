@@ -643,3 +643,13 @@ fn strip_large_images_strips_all_when_single_image_exceeds_budget() {
     assert_eq!(stripped, 1);
     assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
 }
+
+#[test]
+fn emergency_summary_distinguishes_provider_rejection_below_local_budget() {
+    let below = build_emergency_summary_text(None, 12, 65_000, 200_000, &[]);
+    assert!(below.contains("~65k tokens when the provider rejected it for context overflow."));
+    assert!(!below.contains("exceeded the 200k limit"));
+
+    let above = build_emergency_summary_text(None, 12, 210_000, 200_000, &[]);
+    assert!(above.contains("~210k tokens which exceeded the 200k limit."));
+}
