@@ -1,4 +1,4 @@
-use super::{Args, Result, output, session};
+use super::{Args, Result, output, server, session, wait_for_reloading_server};
 
 pub(super) fn resolve_resume_arg(args: &mut Args) -> Result<()> {
     if let Some(ref resume_id) = args.resume {
@@ -75,4 +75,32 @@ pub(super) fn resolve_resume_id(resume_id: &str) -> Result<String> {
             None => Err(native_err),
         },
     }
+}
+
+pub(super) async fn wait_for_existing_reload_server(context: &str) -> bool {
+    if let Some(state) = server::recent_reload_state(std::time::Duration::from_secs(30)) {
+        match state.phase {
+            server::ReloadPhase::Starting => {
+                crate::logging::info(&format!(
+                    "Reload state=starting during {}; waiting for existing server to return",
+                    context
+                ));
+                return wait_for_reloading_server().await;
+            }
+            server::ReloadPhase::Failed => {
+                crate::logging::warn(&format!(
+                    "Reload state=failed during {} on {}: {}; recent_state={}",
+                    context,
+                    server::socket_path().display(),
+                    state
+                        .detail
+                        .unwrap_or_else(|| "unknown reload failure".to_string()),
+                    server::reload_state_summary(std::time::Duration::from_secs(60))
+                ));
+            }
+            server::ReloadPhase::SocketReady => {}
+        }
+    }
+
+    false
 }
