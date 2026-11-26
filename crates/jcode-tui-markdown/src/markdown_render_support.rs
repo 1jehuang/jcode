@@ -421,7 +421,8 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     for line in code.lines() {
-        let highlighted = highlighter.highlight_line(line, &SYNTAX_SET);
+        let line = expand_code_tabs(line);
+        let highlighted = highlighter.highlight_line(&line, &SYNTAX_SET);
 
         match highlighted {
             Ok(ranges) => {
@@ -430,7 +431,7 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
             Err(_) => {
                 // Fallback to plain text
                 lines.push(Line::from(Span::styled(
-                    line.to_string(),
+                    line.into_owned(),
                     Style::default().fg(code_fg()),
                 )));
             }
@@ -438,6 +439,29 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
     }
 
     lines
+}
+
+/// Ratatui draws a tab as nothing, so expand tabs to four-cell stops counted
+/// from the start of the code line, before the frame gutter is added. Each
+/// segment is measured as a string so sequences such as `⌨️` count as Ratatui
+/// draws them.
+fn expand_code_tabs(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.contains('\t') {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut expanded = String::with_capacity(line.len() + 8);
+    let mut column = 0usize;
+    let mut segments = line.split('\t').peekable();
+    while let Some(segment) = segments.next() {
+        expanded.push_str(segment);
+        column += unicode_width::UnicodeWidthStr::width(segment);
+        if segments.peek().is_some() {
+            let spaces = 4 - column % 4;
+            expanded.extend(std::iter::repeat_n(' ', spaces));
+            column += spaces;
+        }
+    }
+    std::borrow::Cow::Owned(expanded)
 }
 
 /// Convert syntect ranges to spans, merging neighbours whose terminal style is
