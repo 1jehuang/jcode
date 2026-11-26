@@ -108,9 +108,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             owner_pid,
             temp_idle_timeout_secs,
             server_name,
+            replace,
         }) => {
             let serve_start = Instant::now();
             crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+            server::configure_serve_replace(replace);
             if temporary_server {
                 server::configure_temporary_server(owner_pid, temp_idle_timeout_secs);
             }

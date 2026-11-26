@@ -106,9 +106,63 @@ pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
 /// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/xx/.../T/`)
 /// - Fallback: `std::env::temp_dir()`
 ///
-/// Can be overridden with `$JCODE_RUNTIME_DIR`.
+/// Can be overridden with `$JCODE_RUNTIME_DIR` (or `$KCODE_RUNTIME_DIR` for a
+/// kcode binary; each product reads only its own override).
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
+    runtime_dir_for_product(product_slug())
+}
+
+/// Canonical product slug for the running binary: `kcode` or `jcode`.
+///
+/// Both products are built from this source tree but they must not share
+/// runtime state: a kcode process binding, probing, or reaping jcode's daemon
+/// socket would let one product wedge the other. The slug is derived from the
+/// *invoked* program name (`argv[0]`), which keeps the decision local to the
+/// binary the operator actually ran rather than to whatever name a build
+/// happened to use.
+///
+/// Anything that is not recognisably kcode stays `jcode`, so existing installs,
+/// tests, helper binaries, and old callers keep the historical paths.
+pub fn product_slug() -> &'static str {
+    static SLUG: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    SLUG.get_or_init(|| {
+        let invoked = std::env::args_os().next().map(PathBuf::from);
+        let program = invoked.or_else(|| std::env::current_exe().ok());
+        let name = program
+            .as_deref()
+            .and_then(Path::file_stem)
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("jcode");
+        product_slug_from_program(name)
+    })
+}
+
+/// Map an invoked program name (with or without an `.exe`-style extension) to
+/// its product slug.
+///
+/// Only the product a binary belongs to is inferred, never a new arbitrary
+/// slug: names such as `kcode`, `kcode-dev`, or `kcode_0.93` all mean the kcode
+/// product, and every other name means jcode.
+pub fn product_slug_from_program(program: &str) -> &'static str {
+    let stem = Path::new(program)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(program);
+    let normalized = stem.to_ascii_lowercase();
+    if normalized == "kcode"
+        || normalized.starts_with("kcode-")
+        || normalized.starts_with("kcode_")
+        || normalized.starts_with("kcode.")
+    {
+        "kcode"
+    } else {
+        "jcode"
+    }
+}
+
+/// Runtime directory for an explicit product slug (see [`product_slug`]).
+pub fn runtime_dir_for_product(product: &str) -> PathBuf {
+    if let Ok(dir) = std::env::var(runtime_dir_env_var(product)) {
         return PathBuf::from(dir);
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -121,13 +175,21 @@ pub fn runtime_dir() -> PathBuf {
         }
     }
 
-    let dir = fallback_runtime_dir();
+    let dir = fallback_runtime_dir(product);
     ensure_private_runtime_dir(&dir);
     dir
 }
 
-fn fallback_runtime_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jcode-{}", runtime_user_discriminator()))
+/// Environment variable that overrides the runtime directory for `product`.
+///
+/// Product-scoped on purpose: an inherited `JCODE_RUNTIME_DIR` must not move a
+/// kcode binary onto jcode's runtime state.
+pub fn runtime_dir_env_var(product: &str) -> String {
+    format!("{}_RUNTIME_DIR", product.to_ascii_uppercase())
+}
+
+fn fallback_runtime_dir(product: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{product}-{}", runtime_user_discriminator()))
 }
 
 #[cfg(unix)]
@@ -200,10 +262,10 @@ pub fn logs_dir() -> Result<PathBuf> {
 /// such as swarm plans and member records, belongs here instead: it resolves
 /// to `~/.jcode/state` (respecting `JCODE_HOME`).
 ///
-/// When `JCODE_RUNTIME_DIR` is set (tests and sandboxed temp servers), it
-/// takes precedence so isolated runs never touch the real jcode home.
+/// When `JCODE_RUNTIME_DIR` (or the kcode counterpart) is set, it takes
+/// precedence so isolated runs never touch the real product home.
 pub fn durable_state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JCODE_RUNTIME_DIR") {
+    if let Ok(dir) = std::env::var(runtime_dir_env_var(product_slug())) {
         return PathBuf::from(dir).join("durable-state");
     }
     match jcode_dir() {
