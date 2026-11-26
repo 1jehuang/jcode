@@ -656,3 +656,6 @@ async fn transport_retains_only_opened_document_diagnostics() {
     }
     client.shutdown().await;
 }
+
+#[path = "lsp_special_file_tests.rs"]
+mod special_file_tests;

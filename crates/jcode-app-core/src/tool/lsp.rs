@@ -126,6 +126,30 @@ fn expand_json_with_data(
     Ok(())
 }
 
+fn open_regular_file(path: &Path) -> Result<std::fs::File> {
+    ensure!(
+        std::fs::metadata(path)?.is_file(),
+        "LSP input must be a regular file"
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A path can become a FIFO after the preflight. Reject it without
+        // leaving an open/read thread blocked after cancellation.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    // Other platforms retain the preflight and descriptor check, without
+    // the Unix guarantee that opening a swapped named pipe cannot block.
+    let file = options.open(path)?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "LSP input must be a regular file"
+    );
+    Ok(file)
+}
+
 fn read_config_file(root: &Path, relative: &str) -> Result<Value> {
     let relative = relative
         .strip_prefix("${CLAUDE_PLUGIN_ROOT}/")
@@ -142,7 +166,7 @@ fn read_config_file(root: &Path, relative: &str) -> Result<Value> {
         path.starts_with(root),
         "Plugin LSP config escapes plugin root"
     );
-    let file = std::fs::File::open(&path)?;
+    let file = open_regular_file(&path)?;
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(
         &mut std::io::Read::take(file, (MAX_MESSAGE + 1) as u64),
@@ -629,8 +653,7 @@ async fn run_server(
     input: &Input,
 ) -> Result<ToolOutput> {
     let mut content = String::new();
-    tokio::fs::File::open(file)
-        .await?
+    tokio::fs::File::from_std(open_regular_file(file)?)
         .take((MAX_MESSAGE / 2 + 1) as u64)
         .read_to_string(&mut content)
         .await?;
