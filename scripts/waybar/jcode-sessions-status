@@ -1,0 +1,485 @@
+#!/usr/bin/env python3
+"""Waybar custom module: jcode active sessions (event-driven).
+
+Subscribes to all jcode debug sockets for status_change and member_change
+events. When an event fires, re-queries root-session and live swarm-agent
+counts and prints updated JSON to stdout for waybar to pick up.
+
+Watches socket directories with inotify for immediate server discovery.
+Periodic local refresh is only a fallback when directory watching fails.
+"""
+
+from __future__ import annotations
+
+import glob
+import ctypes
+import errno
+import json
+import os
+import select
+import socket
+import sys
+import time
+import threading
+import subprocess
+import shlex
+import struct
+from pathlib import Path
+
+SOCKET_TIMEOUT = 2
+REFRESH_INTERVAL = 10
+CLOUD_REFRESH_INTERVAL = 30
+
+
+class SocketDirectoryWatcher(threading.Thread):
+    """Watch before initial discovery so bind/unlink cannot fall into a gap."""
+
+    def __init__(self, on_update, directories=None):
+        super().__init__(daemon=True)
+        self.on_update = on_update
+        self.directories = list(dict.fromkeys(directories or [
+            os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}', '/tmp']))
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.libc.inotify_init1.argtypes = [ctypes.c_int]
+        self.libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        self.fd = self.libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), 'inotify_init1')
+        try:
+            # CREATE, DELETE, MOVED_FROM/TO, DELETE_SELF, MOVE_SELF.
+            for directory in self.directories:
+                if self.libc.inotify_add_watch(self.fd, os.fsencode(directory), 0xfc0) < 0:
+                    raise OSError(ctypes.get_errno(), 'inotify_add_watch')
+        except BaseException:
+            os.close(self.fd)
+            raise
+        self.failed = False
+        self.stopped = threading.Event()
+        self.wake_read, self.wake_write = socket.socketpair()
+
+    def stop(self):
+        self.stopped.set()
+        try:
+            self.wake_write.send(b'x')
+        except OSError:
+            pass
+
+    @staticmethod
+    def relevant(data):
+        offset = 0
+        relevant = False
+        while offset + 16 <= len(data):
+            _, mask, _, size = struct.unpack_from('iIII', data, offset)
+            name = data[offset + 16:offset + 16 + size].split(b'\0', 1)[0]
+            # Overflow and lost watches require a rescan/re-establishment.
+            if mask & 0xec00 or (name.startswith(b'jcode') and name.endswith(b'-debug.sock')):
+                relevant = True
+            offset += 16 + size
+        return relevant
+
+    def run(self):
+        try:
+            while not self.stopped.is_set():
+                readable, _, _ = select.select([self.fd, self.wake_read], [], [])
+                if self.wake_read in readable:
+                    break
+                for _ in range(16):
+                    if self.stopped.is_set():
+                        break
+                    try:
+                        data = os.read(self.fd, 65536)
+                    except BlockingIOError:
+                        break
+                    if self.relevant(data):
+                        self.on_update()
+                    # A watched root disappeared. Fall back until main rebuilds.
+                    off = 0
+                    while off + 16 <= len(data):
+                        _, mask, _, size = struct.unpack_from('iIII', data, off)
+                        if mask & 0xac00:
+                            raise OSError(errno.ENOENT, 'socket directory watch lost')
+                        off += 16 + size
+        except OSError:
+            self.failed = True
+            self.on_update()
+        finally:
+            os.close(self.fd)
+            self.wake_read.close()
+            self.wake_write.close()
+
+
+def _pid_is_live(path: Path) -> bool:
+    try:
+        pid = int(path.read_text().strip())
+        if not 0 < pid <= 2147483647:
+            return False
+        try:
+            os.kill(pid, 0)
+        except PermissionError:
+            return True
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _cloud_probe(root=None) -> dict:
+    """Read Jcode's presence registry, including internal/swarm sessions.
+
+    This mirrors storage::session_presence and needs no debug-control access.
+    Multiple sessions can share one daemon PID, so count sessions, not PIDs.
+    """
+    root = Path(root or os.environ.get("JCODE_HOME") or Path.home() / ".jcode")
+    active = root / "active_pids"
+    try:
+        paths = list(active.iterdir()) if active.exists() else []
+        live = [path for path in paths if _pid_is_live(path)]
+        return {
+            "alive": len(live),
+            "streaming": sum(_pid_is_live(root / "streaming_pids" / path.name)
+                             for path in live),
+        }
+    except OSError:
+        return {"streaming": None, "alive": None, "detail": "cloud presence registry unreadable"}
+
+
+def _run(args, **kwargs):
+    return subprocess.run(args, capture_output=True, text=True, timeout=20,
+                          check=True, **kwargs)
+
+
+def _query_cloud_counts() -> dict:
+    """Do not provision cloud machines just to display a status indicator."""
+    try:
+        jcode = str(Path.home() / ".local/bin/jcode")
+        status = _run([jcode, "--no-update", "--no-selfdev", "cloud", "machine", "status"]).stdout
+        offline = any(state in status for state in
+                      ("`: stopped", "`: sleeping", "`: not provisioned"))
+        if "`: running" not in status and not offline:
+            raise ValueError("machine state unavailable")
+        root = Path.home() / ".jcode/cloud"
+        hosts = [] if offline else [(root / "ssh_config", "jcode-cloud")]
+        machines = json.loads(_run([jcode, "--no-update", "--no-selfdev", "cloud",
+                                    "ephemeral", "list", "--json"]).stdout)
+        if not isinstance(machines, list):
+            raise ValueError("invalid cloud inventory")
+        for machine in machines:
+            if machine["state"] == "running":
+                machine_id = machine["id"]
+                if not isinstance(machine_id, str) or not machine_id.startswith("cm_") or not machine_id[3:].isalnum():
+                    raise ValueError("invalid machine ID")
+                hosts.append((root / "ephemeral" / machine_id / "ssh_config",
+                              "jcode-ephemeral-" + machine_id))
+            elif machine["state"] not in ("terminated", "stopped", "sleeping", "expired"):
+                raise ValueError("cloud machine is transitioning")
+        # The managed proxy authorizes SSH. Only invoke it after the read-only
+        # machine status confirms this machine is already running.
+        command = "python3 -c " + shlex.quote(Path(__file__).read_text()) + " --cloud-probe"
+        totals = {"streaming": 0, "alive": 0}
+        for config, host in hosts:
+            result = _run(["ssh", "-F", str(config), "-T", "-o", "BatchMode=yes",
+                           "-o", "ConnectTimeout=5", "-o", "PermitLocalCommand=no",
+                           "-o", "ClearAllForwardings=yes", host, command])
+            counts = json.loads(result.stdout)
+            if counts.get("alive") is None:
+                return {"streaming": None, "alive": None,
+                        "detail": counts.get("detail", "cloud population unavailable")}
+            if any(type(counts.get(key)) is not int for key in totals):
+                raise ValueError("cloud population unavailable")
+            if not 0 <= counts["streaming"] <= counts["alive"]:
+                raise ValueError("invalid cloud population")
+            for key in totals:
+                totals[key] += counts[key]
+        return {**totals, "detail": "managed + ephemeral cloud, including detached and swarm agents"}
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError):
+        return {"streaming": None, "alive": None, "detail": "cloud status unavailable"}
+
+
+class CloudPoller(threading.Thread):
+    def __init__(self, on_update):
+        super().__init__(daemon=True)
+        self.on_update = on_update
+        self.counts = {"streaming": None, "alive": None, "detail": "checking cloud"}
+
+    def run(self):
+        while True:
+            self.counts = _query_cloud_counts()
+            self.on_update()
+            time.sleep(CLOUD_REFRESH_INTERVAL)
+
+
+def _find_debug_sockets() -> list[str]:
+    sockets = []
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    for path in glob.glob(os.path.join(runtime_dir, "jcode*-debug.sock")):
+        sockets.append(path)
+    for path in glob.glob("/tmp/jcode*-debug.sock"):
+        sockets.append(path)
+    return sockets
+
+
+def _send_cmd(sock_path: str, command: str) -> dict | None:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(SOCKET_TIMEOUT)
+            s.connect(sock_path)
+            req = {"type": "debug_command", "id": 1, "command": command}
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = []
+            while True:
+                byte = s.recv(1)
+                if not byte:
+                    break
+                buf.append(byte)
+                if byte == b"\n":
+                    break
+            raw = b"".join(buf).decode("utf-8", errors="replace").strip()
+            return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+def _query_sessions(sock_path: str) -> list[dict]:
+    resp = _send_cmd(sock_path, "sessions")
+    if not resp or not resp.get("ok"):
+        return []
+    try:
+        sessions = json.loads(resp.get("output", "[]"))
+        return sessions if isinstance(sessions, list) else []
+    except Exception:
+        return []
+
+
+def _query_server_info(sock_path: str) -> dict:
+    resp = _send_cmd(sock_path, "server:info")
+    if not resp or not resp.get("ok"):
+        return {}
+    try:
+        info = json.loads(resp.get("output", "{}"))
+        return info if isinstance(info, dict) else {}
+    except Exception:
+        return {}
+
+
+def _collect_counts(sockets: list[str]) -> tuple[int, int, int]:
+    sessions_by_id: dict[str, dict] = {}
+    spawned_agents_by_server: dict[str, int] = {}
+    for sock_path in sockets:
+        for session in _query_sessions(sock_path):
+            session_id = session.get("session_id")
+            if session_id:
+                sessions_by_id[session_id] = session
+        info = _query_server_info(sock_path)
+        server_id = info.get("id")
+        if server_id:
+            spawned_count = info.get("spawned_swarm_agent_count", 0)
+            spawned_agents_by_server[server_id] = (
+                max(0, spawned_count) if isinstance(spawned_count, int) else 0
+            )
+
+    streaming = sum(1 for session in sessions_by_id.values() if session.get("is_processing"))
+    return streaming, len(sessions_by_id), sum(spawned_agents_by_server.values())
+
+
+def _build_output(streaming: int, total: int, swarm_agents: int, cloud=None) -> dict:
+    # Nerd Font icons: spinner = streaming, copies = sessions, sitemap = swarm
+    text = f"\uf110 {streaming}  \uf24d {total}  \uf0e8 {swarm_agents}"
+    cloud = cloud or {"streaming": None, "alive": None, "detail": "checking cloud"}
+    cloud_streaming = cloud["streaming"]
+    cloud_alive = cloud["alive"]
+    shown = lambda value: "?" if value is None else str(value)
+    text += f"  \uf0c2 {shown(cloud_streaming)}/{shown(cloud_alive)}"
+    tooltip = (f"Local: {streaming} streaming, {total} root sessions, "
+               f"{swarm_agents} live non-root swarm agents\n"
+               f"Cloud: {shown(cloud_streaming)} streaming / {shown(cloud_alive)} alive\n"
+               f"{cloud['detail']} (refreshes every {CLOUD_REFRESH_INTERVAL}s)")
+    if total == 0 and swarm_agents == 0 and cloud_alive == 0:
+        return {
+            "text": text,
+            "tooltip": tooltip,
+            "class": "none",
+        }
+    return {
+        "text": text,
+        "tooltip": tooltip,
+        "class": "streaming" if streaming > 0 or (cloud_streaming or 0) > 0 else "active",
+    }
+
+
+def _emit(data: dict):
+    print(json.dumps(data), flush=True)
+
+
+class SocketSubscriber(threading.Thread):
+    """Subscribe to a debug socket's event stream in a background thread."""
+
+    def __init__(self, sock_path: str, on_event, retry_delay=1):
+        super().__init__(daemon=True)
+        self.sock_path = sock_path
+        self.on_event = on_event
+        self.alive = True
+        self.connection = None
+        self.lock = threading.Lock()
+        self.ready = threading.Event()
+        self.finished = threading.Event()
+        self.retry_delay = retry_delay
+        self.retry_at = float('inf')
+        self.connected_at = None
+        self.identity = None
+
+    def run(self):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            with self.lock:
+                if not self.alive:
+                    s.close()
+                    return
+                self.connection = s
+            s.settimeout(SOCKET_TIMEOUT)
+            s.connect(self.sock_path)
+            req = {
+                "type": "debug_command",
+                "id": 1,
+                "command": "events:subscribe:status_change,member_change",
+            }
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            while self.alive:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        data = json.loads(line.decode("utf-8", errors="replace"))
+                        if data.get("ok") and not self.ready.is_set():
+                            self.connected_at = time.monotonic()
+                            self.ready.set()
+                            s.settimeout(None)
+                            self.on_event(self.sock_path, {"type": "subscribed"})
+                        elif data.get("type") in ("event", "lag"):
+                            self.on_event(self.sock_path, data)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            self.retry_at = time.monotonic() + self.retry_delay
+            self.alive = False
+            with self.lock:
+                if self.connection is not None:
+                    self.connection.close()
+                    self.connection = None
+            self.finished.set()
+            self.on_event(self.sock_path, {"type": "disconnected"})
+
+    def stop(self):
+        self.alive = False
+        with self.lock:
+            if self.connection is not None:
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+
+def main():
+    last_output: str | None = None
+    subscribers: dict[str, SocketSubscriber] = {}
+    event_flag = threading.Event()
+    def start_watcher():
+        try:
+            watcher = SocketDirectoryWatcher(event_flag.set)
+            watcher.start()
+            return watcher
+        except (OSError, AttributeError):
+            return None
+
+    watcher = start_watcher()
+    cloud = CloudPoller(event_flag.set)
+    cloud.start()
+
+    def on_event(sock_path, data):
+        event_flag.set()
+
+    def refresh():
+        nonlocal last_output
+        sockets = _find_debug_sockets()
+
+        identities = {}
+        for path in sockets:
+            try:
+                stat = os.stat(path)
+                identities[path] = (stat.st_dev, stat.st_ino)
+            except OSError:
+                pass
+        sockets = list(identities)
+
+        dead = [p for p, sub in subscribers.items()
+                if p not in identities or sub.identity != identities[p]]
+        for p in dead:
+            subscribers[p].stop()
+            del subscribers[p]
+
+        for sock_path in sockets:
+            previous = subscribers.get(sock_path)
+            if previous is None or (not previous.alive and time.monotonic() >= previous.retry_at):
+                delay = 1
+                if previous is not None:
+                    stable = (previous.connected_at is not None and
+                              previous.retry_at - previous.retry_delay - previous.connected_at
+                              >= REFRESH_INTERVAL)
+                    delay = 1 if stable else min(30, previous.retry_delay * 2)
+                sub = SocketSubscriber(sock_path, on_event, delay)
+                sub.identity = identities[sock_path]
+                subscribers[sock_path] = sub
+                sub.start()
+
+        # Establish the event stream before taking the snapshot. All new
+        # subscribers run concurrently, with one bounded handshake budget.
+        deadline = time.monotonic() + SOCKET_TIMEOUT
+        for sub in subscribers.values():
+            while sub.alive and not sub.ready.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                sub.finished.wait(min(0.01, remaining))
+        streaming, total, swarm_agents = _collect_counts([
+            p for p, sub in subscribers.items() if sub.alive and sub.ready.is_set()])
+        out = _build_output(streaming, total, swarm_agents, cloud.counts)
+        out_str = json.dumps(out)
+        if out_str != last_output:
+            _emit(out)
+            last_output = out_str
+
+    try:
+        refresh()
+        fallback_at = time.monotonic() + REFRESH_INTERVAL
+        while True:
+            now = time.monotonic()
+            deadlines = [sub.retry_at for sub in subscribers.values() if not sub.alive]
+            if watcher is None or watcher.failed:
+                deadlines.append(fallback_at)
+            timeout = max(0, min(deadlines) - now) if deadlines else None
+            triggered = event_flag.wait(timeout=timeout)
+            if triggered:
+                event_flag.clear()
+                # Fixed window, not a sliding debounce: continuous events cannot
+                # postpone the next snapshot indefinitely. Preserve later wakes.
+                time.sleep(0.05)
+            if (watcher is None or watcher.failed) and time.monotonic() >= fallback_at:
+                watcher = start_watcher()
+                fallback_at = time.monotonic() + REFRESH_INTERVAL
+            refresh()
+    finally:
+        for sub in subscribers.values():
+            sub.stop()
+        if watcher is not None:
+            watcher.stop()
+
+
+if __name__ == "__main__":
+    if "--cloud-probe" in sys.argv:
+        _emit(_cloud_probe())
+    else:
+        main()

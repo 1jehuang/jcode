@@ -2,6 +2,26 @@ use super::*;
 use anyhow::{Result, anyhow};
 
 #[test]
+fn claude_profile_live_organization_schema_detects_max_subscription_tiers() {
+    for (kind, rate, expected) in [
+        ("claude_max", "default_claude_max_20x", Some("max_20x")),
+        ("claude_max", "default_claude_max_5x", Some("max_5x")),
+        ("claude_max", "future_rate", Some("max")),
+        ("claude_pro", "default_claude_pro", Some("pro")),
+        ("claude_free", "default", Some("free")),
+        ("future_org", "default_claude_max_20x", None),
+    ] {
+        let profile: ClaudeProfileResponse = serde_json::from_value(serde_json::json!({
+            "account": {},
+            "organization": {"organization_type": kind, "rate_limit_tier": rate,
+                "billing_type": "stripe_subscription", "has_extra_usage_enabled": false}
+        }))
+        .unwrap();
+        assert_eq!(profile.subscription_type().as_deref(), expected);
+    }
+}
+
+#[test]
 fn pkce_verifier_and_challenge_are_different() {
     let (verifier, challenge) = generate_pkce();
     assert_ne!(verifier, challenge);
@@ -148,6 +168,60 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
 }
 
 #[test]
+fn save_claude_tokens_updates_fox_without_touching_otter() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    for (label, email) in [
+        ("claude-otter", "otter@example.invalid"),
+        ("claude-fox", "fox@example.invalid"),
+    ] {
+        let assigned =
+            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                label: label.to_string(),
+                access: format!("synthetic-old-access-{label}"),
+                refresh: format!("synthetic-old-refresh-{label}"),
+                expires: 1,
+                email: Some(email.to_string()),
+                subscription_type: Some("pro".to_string()),
+                scopes: vec!["user:inference".to_string()],
+            })?;
+        assert_eq!(assigned, label);
+    }
+    let mut initial = crate::auth::claude::load_auth_file()?;
+    initial.active_anthropic_account = Some("claude-fox".to_string());
+    crate::auth::claude::save_auth_file(&initial)?;
+    let otter_before = serde_json::to_value(&initial.anthropic_accounts[0])?;
+    let refreshed = OAuthTokens {
+        access_token: "synthetic-new-fox-access".to_string(),
+        refresh_token: "synthetic-new-fox-refresh".to_string(),
+        expires_at: 2,
+        id_token: None,
+        scopes: Vec::new(),
+    };
+    save_claude_tokens_for_account(&refreshed, "claude-fox")?;
+    let saved = crate::auth::claude::load_auth_file()?;
+    assert_eq!(saved.anthropic_accounts.len(), 2);
+    assert_eq!(
+        saved.active_anthropic_account.as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        serde_json::to_value(&saved.anthropic_accounts[0])?,
+        otter_before
+    );
+    let fox = &saved.anthropic_accounts[1];
+    assert_eq!(fox.label, "claude-fox");
+    assert_eq!(fox.access, refreshed.access_token);
+    assert_eq!(fox.refresh, refreshed.refresh_token);
+    assert_eq!(fox.expires, refreshed.expires_at);
+    assert_eq!(fox.email.as_deref(), Some("fox@example.invalid"));
+    assert_eq!(fox.subscription_type.as_deref(), Some("pro"));
+    assert_eq!(fox.scopes, vec!["user:inference".to_string()]);
+    Ok(())
+}
+
+#[test]
 fn claude_oauth_constants() {
     assert!(!claude::CLIENT_ID.is_empty());
     assert_eq!(
@@ -183,9 +257,9 @@ async fn fetch_claude_profile_email_reads_account_email() -> Result<()> {
     let (port, _handle) = mock_token_server(200, &body).await;
 
     let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
-    let email = fetch_claude_profile_email_at_url("token", &url).await?;
+    let email = fetch_claude_profile_at_url("token", &url).await?;
 
-    assert_eq!(email, Some("user@example.com".to_string()));
+    assert_eq!(email.account.email, Some("user@example.com".to_string()));
     Ok(())
 }
 
@@ -198,10 +272,125 @@ async fn fetch_claude_profile_email_handles_missing_email() -> Result<()> {
     let (port, _handle) = mock_token_server(200, &body).await;
 
     let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
-    let email = fetch_claude_profile_email_at_url("token", &url).await?;
+    let email = fetch_claude_profile_at_url("token", &url).await?;
 
-    assert!(email.is_none());
+    assert!(email.account.email.is_none());
+    assert!(email.subscription_type().is_none());
     Ok(())
+}
+
+#[tokio::test]
+async fn claude_profile_subscription_metadata_merges_without_clobbering_tokens() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let label = claude_auth::upsert_account(claude_auth::AnthropicAccount {
+        label: "profile-test".into(),
+        access: "old_access".into(),
+        refresh: "old_refresh".into(),
+        expires: 1,
+        email: Some("old@example.com".into()),
+        subscription_type: Some("pro".into()),
+        scopes: vec!["user:profile".into()],
+    })?;
+
+    let body = serde_json::json!({
+        "account": {"email": "new@example.com"},
+        "organization": {"subscription_type": "max", "rate_limit_tier": "default_claude_max_5x"}
+    })
+    .to_string();
+    let (port, _handle) = mock_token_server(200, &body).await;
+    let profile = fetch_claude_profile_at_url(
+        "old_access",
+        &format!("http://127.0.0.1:{port}/api/oauth/profile"),
+    )
+    .await?;
+    assert_eq!(profile.subscription_type().as_deref(), Some("max"));
+    // A refresh completed while the profile request was in flight.
+    claude_auth::update_account_tokens(&label, "new_access", "new_refresh", 2)?;
+    let subscription_type = profile.subscription_type();
+    claude_auth::update_account_profile_metadata(&label, profile.account.email, subscription_type)?;
+
+    for organization in [
+        serde_json::Value::Null,
+        serde_json::json!({}),
+        serde_json::json!({"subscription_type": null}),
+        serde_json::json!({"subscription_type": "  "}),
+        serde_json::json!({"subscription_type": 42}),
+        serde_json::json!({"subscription_type": {"unexpected": true}}),
+    ] {
+        let profile: ClaudeProfileResponse = serde_json::from_value(serde_json::json!({
+            "account": {}, "organization": organization
+        }))?;
+        assert!(profile.subscription_type().is_none());
+        let subscription_type = profile.subscription_type();
+        claude_auth::update_account_profile_metadata(
+            &label,
+            profile.account.email,
+            subscription_type,
+        )?;
+    }
+    let account = claude_auth::list_accounts()?
+        .into_iter()
+        .find(|account| account.label == label)
+        .unwrap();
+    assert_eq!(account.email.as_deref(), Some("new@example.com"));
+    assert_eq!(account.subscription_type.as_deref(), Some("max"));
+    assert_eq!(account.access, "new_access");
+    assert_eq!(account.refresh, "new_refresh");
+    assert_eq!(account.expires, 2);
+    assert_eq!(account.scopes, vec!["user:profile"]);
+    Ok(())
+}
+
+#[test]
+fn claude_profile_prefetch_throttles_per_home_and_label() {
+    let mut attempts = ClaudeProfilePrefetchAttempts::new();
+    let home = std::path::Path::new("/auth/home-one");
+    let other_home = std::path::Path::new("/auth/home-two");
+    let now = std::time::Instant::now();
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now
+    ));
+    assert!(!reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-fox",
+        now
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        other_home,
+        "claude-otter",
+        now
+    ));
+    assert!(!reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now + CLAUDE_PROFILE_PREFETCH_INTERVAL - Duration::from_secs(1)
+    ));
+    assert!(reserve_claude_profile_prefetch(
+        &mut attempts,
+        home,
+        "claude-otter",
+        now + CLAUDE_PROFILE_PREFETCH_INTERVAL
+    ));
+    assert_eq!(attempts.len(), 1, "expired homes and labels are pruned");
+}
+
+#[test]
+fn claude_profile_prefetch_without_runtime_is_safe() {
+    prefetch_missing_claude_subscription_metadata();
 }
 
 #[tokio::test]
@@ -213,7 +402,7 @@ async fn fetch_claude_profile_email_propagates_http_error() -> Result<()> {
     let (port, _handle) = mock_token_server(401, &body).await;
 
     let url = format!("http://127.0.0.1:{}/api/oauth/profile", port);
-    let err = fetch_claude_profile_email_at_url("token", &url)
+    let err = fetch_claude_profile_at_url("token", &url)
         .await
         .expect_err("Profile fetch should fail")
         .to_string();

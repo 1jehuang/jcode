@@ -2,17 +2,21 @@
 //! synthetic continuation messages (auto-poke, gate digest, ownership,
 //! completion confidence, final response), and their transcript classifiers.
 //!
-//! No storage or runtime dependencies, so the SDK and any embedding client can
-//! use the exact same policy as the TUI.
+//! Policy is independent of the agent runtime. Shared disk readers let the SDK
+//! and embedding clients use the same dependency state as the TUI.
 
 use serde::{Deserialize, Serialize};
 
+pub mod await_dependency;
+pub mod completion_report;
 pub mod followup;
 pub mod store;
 
 pub use followup::{
-    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy, MAX_GATE_ATTEMPTS,
-    TodoEffects, TodoSnapshot, is_incomplete_todo,
+    ConfidenceSummary, Decision, FollowUp, FollowUpKind, FollowUpPolicy,
+    INCOMPLETE_TODO_MAX_ATTEMPTS, IncompleteTodoBudget, MAX_GATE_ATTEMPTS, TodoEffects,
+    TodoSnapshot, goal_cannot_complete, is_incomplete_todo, todo_cannot_complete_reason,
+    todo_goal_cannot_complete, todo_requires_user_auth, todo_waits_on_running_task,
 };
 
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
@@ -30,8 +34,8 @@ pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
-    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
-    TodoPlanField,
+    IterationMaturity, LANE_OWNER_WORKER, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
+    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -206,7 +210,9 @@ const PRE_COMPACT_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow
 /// `delivery_state_passes`. Missing metadata is not evidence of unfinished work,
 /// and staying within the requested scope is not a failure of ownership. The
 /// deferred feedback-loop review already handles validation-quality concerns.
-fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
+/// Whether the goal records a deliberate stop (confirmed plateau, exhausted
+/// constraints or budget) together with the evidence for it.
+fn goal_has_documented_stop(goal: &TodoGoal) -> bool {
     let stopped = matches!(
         goal.iteration_maturity,
         Some(
@@ -219,10 +225,45 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
         .stopping_evidence
         .as_deref()
         .is_some_and(|evidence| !evidence.trim().is_empty());
+    stopped && has_stopping_evidence
+}
+
+/// Completed todos that still merit a "validate further" follow-up.
+///
+/// A todo qualifies when its completion confidence is missing or below the
+/// passing bar, unless its group's goal documents why validation stopped. More
+/// turns cannot lift an exhausted constraint, so asking again only loops: a
+/// session was nudged "Validate further" every few seconds for an item already
+/// marked `constraints_exhausted` with stopping evidence.
+pub fn todos_needing_validation<'a>(
+    todos: &'a [TodoItem],
+    goals: &[TodoGoal],
+) -> Vec<&'a TodoItem> {
+    todos
+        .iter()
+        .filter(|todo| todo_status_is_completed(&todo.status))
+        .filter(|todo| !completion_confidence_passes(todo.completion_confidence))
+        .filter(|todo| {
+            let group = normalized_group(todo.group.as_deref());
+            !goals.iter().any(|goal| {
+                normalized_group(goal.group.as_deref()) == group && goal_has_documented_stop(goal)
+            })
+        })
+        .collect()
+}
+
+/// Follow-up naming exactly the given completed todos as needing validation.
+pub fn build_todo_validation_continuation_message(targets: &[&TodoItem]) -> String {
+    let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
+    append_named_todos(&mut message, "Validate further:", targets);
+    message
+}
+
+fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     // More autonomous work cannot remove an explicitly documented constraint
     // or exhausted budget. Preserve the honest assessment instead of demanding
     // a higher score or repeatedly asking for the unavailable acceptance path.
-    if stopped && has_stopping_evidence {
+    if goal_has_documented_stop(goal) {
         return Vec::new();
     }
 
@@ -239,7 +280,16 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     {
         reasons.push("keep iterating and test the remaining hypotheses.");
     }
-    if stopped && !has_stopping_evidence {
+    // A documented stop returned above, so a stop reaching here lacks evidence.
+    let stopped = matches!(
+        goal.iteration_maturity,
+        Some(
+            IterationMaturity::PlateauConfirmed
+                | IterationMaturity::ConstraintsExhausted
+                | IterationMaturity::BudgetExhausted
+        )
+    );
+    if stopped {
         reasons.push("gather more evidence about whether the work should stop.");
     }
     reasons
@@ -654,6 +704,26 @@ pub fn build_auto_poke_message(incomplete_count: usize) -> String {
     )
 }
 
+/// Name the actionable subset so a model is not nudged to work on other todos
+/// whose background dependencies are still running. Keep the historical prefix
+/// for transcript classification and cap labels like the other gate prompts.
+pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
+    let mut message = build_auto_poke_message(actionable.len());
+    message.push_str("\nActionable todos:");
+    for todo in actionable.iter().take(GATE_NAMED_TODO_LIMIT) {
+        // Names are the public lookup key. Keep the full, escaped name rather
+        // than an internal ID or a truncated label the model cannot reference.
+        message.push_str(&format!("\n- {}", serde_json::json!(todo.content)));
+    }
+    if actionable.len() > GATE_NAMED_TODO_LIMIT {
+        message.push_str(&format!(
+            "\n- {} more actionable todos",
+            actionable.len() - GATE_NAMED_TODO_LIMIT
+        ));
+    }
+    message
+}
+
 /// Longest list of named todos a gate continuation will spell out, so a big
 /// plan cannot turn one nudge into a wall of text.
 const GATE_NAMED_TODO_LIMIT: usize = 6;
@@ -743,9 +813,14 @@ pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> S
 /// reload/resume/remote attach.
 pub fn is_auto_poke_message(message: &str) -> bool {
     let trimmed = message.trim();
+    let Some(first_line) = trimmed.lines().next() else {
+        return false;
+    };
     (trimmed.starts_with("You have ")
-        && trimmed.contains(" incomplete todo")
-        && trimmed.ends_with("update the todo tool."))
+        && first_line.contains(" incomplete todo")
+        && first_line.ends_with("update the todo tool.")
+        && (trimmed == first_line
+            || trimmed[first_line.len()..].starts_with("\nActionable todos:")))
         || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_TODO_REMINDER_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
@@ -789,6 +864,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     let trimmed = message.trim();
     if !is_auto_poke_message(trimmed) {
         return None;
+    }
+    if trimmed.starts_with("You have ") && trimmed.contains("\nActionable todos:") {
+        return Some("Auto-poking: incomplete todos...");
     }
     if trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -863,6 +941,10 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
             .map(str::to_string)
     }
 
+    if let Some(title) = non_empty(plan.title.as_deref()) {
+        return Some(title);
+    }
+
     let current = todos
         .iter()
         .rev()
@@ -889,6 +971,9 @@ pub fn derive_session_title(todos: &[TodoItem], plan: &TodoPlan) -> Option<Strin
 
     non_empty(plan.user_intention.as_deref())
 }
+
+#[cfg(test)]
+mod reminder_tests;
 
 #[cfg(test)]
 #[path = "tests.rs"]

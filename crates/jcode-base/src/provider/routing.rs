@@ -1,4 +1,9 @@
 pub(crate) fn anthropic_oauth_route_availability(model: &str) -> (bool, String) {
+    if crate::auth::AuthStatus::check_fast().anthropic.oauth_state
+        == crate::auth::AuthState::Expired
+    {
+        return (false, "Claude login expired; run /login".to_string());
+    }
     if !anthropic_catalog_allows_route(model, true) {
         return (false, "not in OAuth model catalog".to_string());
     }

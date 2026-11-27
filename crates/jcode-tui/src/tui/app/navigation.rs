@@ -1,4 +1,9 @@
+#[path = "navigation_diagram_fit.rs"]
+mod diagram_fit;
 use super::*;
+#[path = "navigation_repository_links.rs"]
+mod repository_links;
+
 use crate::tui::ui::input_ui;
 use ratatui::layout::Rect;
 
@@ -134,47 +139,6 @@ impl App {
         );
     }
 
-    fn current_visible_diagram_hash(&self) -> Option<u64> {
-        if self.diagram_mode != crate::config::DiagramDisplayMode::Pinned
-            || !self.diagram_pane_enabled
-        {
-            return None;
-        }
-        if self.side_panel.focused_page().is_some()
-            && self.diagram_pane_position == crate::config::DiagramPanePosition::Side
-        {
-            return None;
-        }
-        let diagrams = crate::tui::mermaid::get_active_diagrams();
-        diagrams
-            .get(self.diagram_index.min(diagrams.len().saturating_sub(1)))
-            .map(|diagram| diagram.hash)
-    }
-
-    pub(super) fn reset_diagram_view_to_fit(&mut self) {
-        self.diagram_scroll_x = 0;
-        self.diagram_scroll_y = 0;
-        self.diagram_zoom = 100;
-    }
-
-    pub(super) fn sync_diagram_fit_context(&mut self) {
-        let current_hash = self.current_visible_diagram_hash();
-        if current_hash != self.last_visible_diagram_hash {
-            self.reset_diagram_view_to_fit();
-            self.last_visible_diagram_hash = current_hash;
-        }
-    }
-
-    pub(super) fn handle_diagram_geometry_change(&mut self) {
-        self.reset_diagram_view_to_fit();
-        if self.side_panel.focused_page().is_some() {
-            self.diff_pane_scroll_x = 0;
-        }
-        crate::tui::mermaid::clear_image_state();
-        crate::tui::clear_side_panel_render_caches();
-        self.last_visible_diagram_hash = self.current_visible_diagram_hash();
-    }
-
     /// If a left-click landed on an inline image's `expand` badge or on the
     /// rendered image itself, cycle that image's size and return `true`.
     /// Returns `false` (so the click can fall through to link/selection
@@ -188,6 +152,12 @@ impl App {
         else {
             return false;
         };
+        // A collapsed tool-image label is also a show action. Honor it even
+        // when the global image visibility preference was previously off.
+        if !self.inline_images_visible {
+            self.inline_images_visible = true;
+            super::ui_prefs::save_inline_images_visible(true);
+        }
         let level = self.cycle_image_expand(image_id);
         let size = match level {
             crate::tui::ui::inline_image_ui::ImageExpandLevel::Fit => "fit",
@@ -268,7 +238,35 @@ impl App {
         let Some(msg_idx) = super::super::ui::swarm_expand_target_from_screen(column, row) else {
             return false;
         };
-        self.toggle_swarm_message_expand(msg_idx)
+        let is_dm = |message: &DisplayMessage| {
+            message.effective_role() == "swarm"
+                && message
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("DM from "))
+        };
+        if self.display_messages.get(msg_idx).is_some_and(is_dm) {
+            let collapsed =
+                super::super::ui::is_collapsed_agent_dm(&self.display_messages[msg_idx]);
+            let same_state = |message: &DisplayMessage| {
+                is_dm(message) && super::super::ui::is_collapsed_agent_dm(message) == collapsed
+            };
+            let mut start = msg_idx;
+            while start > 0 && same_state(&self.display_messages[start - 1]) {
+                start -= 1;
+            }
+            let mut end = msg_idx + 1;
+            while end < self.display_messages.len() && same_state(&self.display_messages[end]) {
+                end += 1;
+            }
+            let mut toggled = false;
+            for index in start..end {
+                toggled |= self.toggle_swarm_message_expand(index);
+            }
+            toggled
+        } else {
+            self.toggle_swarm_message_expand(msg_idx)
+        }
     }
 
     /// Toggle the collapsed/expanded state of the swarm notification at
@@ -278,11 +276,22 @@ impl App {
         let Some(message) = self.display_messages.get(msg_idx) else {
             return false;
         };
-        let oauth = message.role == "system" && message.title.as_deref() == Some("OpenAI login");
+        let oauth = crate::tui::ui::is_oauth_login_progress_card(message);
         if message.role != "swarm" && !oauth {
             return false;
         }
-        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let mut normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        if message
+            .title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("DM from "))
+            && jcode_tui_messages::parse_collapsible_swarm_content(&normalized).is_none()
+        {
+            normalized = jcode_tui_messages::encode_collapsible_swarm_content(
+                "Direct message",
+                &message.content,
+            );
+        }
         let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;
@@ -308,14 +317,13 @@ impl App {
     pub(super) fn try_open_link_at(&mut self, column: u16, row: u16) -> bool {
         if let Some(index) = super::super::ui::oauth_login_link_message_from_screen(column, row)
             && let Some(message) = self.display_messages.get(index)
-            && message.role == "system"
-            && message.title.as_deref() == Some("OpenAI login")
+            && crate::tui::ui::is_oauth_login_progress_card(message)
             && let Some(parsed) =
                 jcode_tui_messages::parse_collapsible_swarm_content(&message.content)
-            && let Some(url) = parsed.body.lines().find_map(|line| {
-                line.strip_prefix("[Open OpenAI sign-in](")?
-                    .strip_suffix(')')
-            })
+            && let Some(url) = parsed
+                .body
+                .lines()
+                .find_map(|line| crate::tui::ui::parse_oauth_sign_in_link(line).map(|(_, url)| url))
         {
             let url = url.to_string();
             let opened = Self::open_auth_browser(&url);
@@ -326,7 +334,8 @@ impl App {
             });
             return true;
         }
-        let Some(target) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(target) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -341,77 +350,6 @@ impl App {
         true
     }
 
-    pub(super) fn try_open_repository_markdown_link(&mut self, target: &str) -> bool {
-        if crate::tui::is_ssh_remote() {
-            return false;
-        }
-        let path_target = target.split(['#', '?']).next().unwrap_or(target);
-        let relative = std::path::Path::new(path_target);
-        if relative.is_absolute()
-            || path_target.contains("://")
-            || !relative
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-        {
-            return false;
-        }
-
-        let repository = self
-            .session
-            .working_dir
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::current_dir().ok());
-        let Some(repository) = repository.and_then(|path| path.canonicalize().ok()) else {
-            return false;
-        };
-        let Ok(path) = repository.join(relative).canonicalize() else {
-            self.set_status_notice(format!("Markdown file not found: {}", path_target));
-            return true;
-        };
-        if !path.starts_with(&repository) {
-            self.set_status_notice("Refused to open a Markdown file outside the repository");
-            return true;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) => {
-                self.set_status_notice(format!("Failed to read Markdown file: {}", error));
-                return true;
-            }
-        };
-        let title = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(path_target)
-            .to_string();
-        let id = format!("linked-markdown:{}", path.display());
-        let page = crate::side_panel::SidePanelPage {
-            id: id.clone(),
-            title: title.clone(),
-            file_path: path.to_string_lossy().into_owned(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
-            source: crate::side_panel::SidePanelPageSource::LinkedFile,
-            content,
-            updated_at_ms: 0,
-        };
-
-        let mut snapshot = self.side_panel.clone();
-        if let Some(existing) = snapshot.pages.iter_mut().find(|existing| existing.id == id) {
-            *existing = page;
-        } else {
-            snapshot.pages.push(page);
-        }
-        snapshot.focused_page_id = Some(id);
-        self.side_panel_user_hidden = false;
-        self.apply_side_panel_snapshot(snapshot);
-        self.set_diff_pane_focus(true);
-        self.set_status_notice(format!("Opened Markdown: {}", title));
-        true
-    }
-
     #[cfg(test)]
     pub(super) fn try_open_link_at_with<F, E>(
         &mut self,
@@ -423,7 +361,8 @@ impl App {
         F: FnMut(&str) -> Result<(), E>,
         E: std::fmt::Display,
     {
-        let Some(url) = super::super::ui::link_target_from_screen(column, row) else {
+        let Some(url) = super::super::ui::link_target_from_screen_with_state(column, row, self)
+        else {
             return false;
         };
 
@@ -1150,9 +1089,14 @@ impl App {
             .get(&image_id)
             .copied()
             .unwrap_or_default();
-        let next = ImageExpandLevel::from_index(
+        let mut next = ImageExpandLevel::from_index(
             crate::tui::mermaid::next_distinct_mermaid_inline_level(image_id, current as u8),
         );
+        // Fit is also the default collapsed state for tool images. Even a
+        // width-bound image with identical size caps must be able to open.
+        if current == ImageExpandLevel::Fit && next == ImageExpandLevel::Fit {
+            next = ImageExpandLevel::Large;
+        }
         if matches!(next, ImageExpandLevel::Fit) {
             self.expanded_images.remove(&image_id);
         } else {
@@ -1490,6 +1434,16 @@ impl App {
         let mut terminal_width: u16 = 0;
         let mut terminal_height: u16 = 0;
         if let Some(layout) = layout {
+            if crate::tui::TuiState::status_notice(self).as_deref()
+                == Some(super::super::ui::SIDE_PANEL_DISMISSED_HINT)
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && super::super::ui::side_panel_restore_area().is_some_and(|area| {
+                    super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                })
+            {
+                self.toggle_side_panel();
+                finish_mouse_event!(false, "side_panel_restore");
+            }
             if self.side_panel.focused_page().is_some()
                 && !crate::tui::TuiState::swarm_panel_full_page(self)
                 && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -1559,7 +1513,26 @@ impl App {
             })
         {
             self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            crate::tui::ui::viewport::reset_pinned_todo_scroll();
             finish_mouse_event!(false, "pinned_todos_toggle");
+        }
+
+        if self.pinned_todos_expanded
+            && matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            )
+            && crate::tui::ui::viewport::pinned_todo_scroll_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                -(Self::MOUSE_SCROLL_INTENT_LINES as isize)
+            } else {
+                Self::MOUSE_SCROLL_INTENT_LINES as isize
+            };
+            crate::tui::ui::viewport::scroll_pinned_todos(delta);
+            finish_mouse_event!(false, "pinned_todos_scroll");
         }
 
         // A left press in the composer moves the caret first (native text-field

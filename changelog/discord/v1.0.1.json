@@ -1,0 +1,3 @@
+[
+  "# jcode v1.0.1\n\n**A quick fix release.** Model catalog updates that arrive while an agent is busy are no longer dropped, so newly released models like **GPT-6.2 Sol** show up in the model picker without restarting. Also includes dependency security updates.\n\nDownload: <https://github.com/1jehuang/jcode/releases/tag/v1.0.1>"
+]

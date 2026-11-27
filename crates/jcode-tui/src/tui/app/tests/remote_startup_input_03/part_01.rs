@@ -365,7 +365,7 @@ fn test_paste_again_expands_matching_placeholder_not_newer_same_sized_paste() {
     assert_eq!(app.cursor_pos, first.len());
     let visible_input = app.input().to_string();
     assert_eq!(
-        crate::tui::app::input::expand_paste_placeholders(&mut app, &visible_input),
+        crate::tui::app::input::expand_paste_placeholders(&app, &visible_input),
         format!("{first} {second}")
     );
     assert_eq!(app.pasted_contents, vec![second]);
@@ -1119,6 +1119,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
     ];
     app.pending_soft_interrupt_requests = vec![(17, "already sent two".to_string())];
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "retry me".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: true,
@@ -1166,6 +1167,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
     let session_id = format!("test-reload-inflight-prompt-{}", std::process::id());
 
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice: false,
         content: "finish the refactor".to_string(),
         images: vec![("image/png".to_string(), "abc123".to_string())],
         is_system: false,
@@ -1295,46 +1297,5 @@ fn test_new_for_remote_requeues_restored_pending_soft_interrupts() {
             restored.queued_messages(),
             &["local interleave", "sent one", "sent two", "queued later"]
         );
-    });
-}
-
-#[test]
-fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let session_id = "test-remote-interleave-dispatch";
-
-        app.interleave_message = Some("interrupt after reload".to_string());
-        app.save_input_for_reload(session_id);
-
-        let mut restored = App::new_for_remote(Some(session_id.to_string()));
-        assert!(restored.interleave_message.is_none());
-        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-        assert!(!restored.pending_queued_dispatch);
-        assert!(!restored.is_processing);
-        assert!(matches!(restored.status, ProcessingStatus::Idle));
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        let mut remote = crate::tui::backend::RemoteConnection::dummy();
-        rt.block_on(super::remote::process_remote_followups(
-            &mut restored,
-            &mut remote,
-        ));
-        assert_eq!(restored.queued_messages(), &["interrupt after reload"]);
-        assert!(!restored.is_processing);
-
-        remote.mark_history_loaded();
-        rt.block_on(super::remote::process_remote_followups(
-            &mut restored,
-            &mut remote,
-        ));
-
-        assert!(restored.queued_messages().is_empty());
-        assert!(restored.is_processing);
-        assert!(matches!(restored.status, ProcessingStatus::Sending));
-        assert!(restored.display_messages().iter().any(|message| {
-            message.role == "user" && message.content == "interrupt after reload"
-        }));
     });
 }

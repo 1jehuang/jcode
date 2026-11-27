@@ -11,6 +11,7 @@ use tokio::sync::{RwLock, mpsc};
 const AWAIT_MEMBERS_DIR: &str = "jcode-await-members";
 const FINAL_STATE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const PENDING_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+static STATE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedAwaitMembersResult {
@@ -51,6 +52,10 @@ fn default_true() -> bool {
 }
 
 impl PersistedAwaitMembersState {
+    pub fn dependency_id(&self) -> String {
+        crate::todo::await_dependency::dependency_id(&self.key, self.created_at_unix_ms)
+    }
+
     pub fn is_pending(&self) -> bool {
         self.final_response.is_none()
     }
@@ -166,8 +171,52 @@ pub(super) fn load_state(key: &str) -> Option<PersistedAwaitMembersState> {
 }
 
 pub(crate) fn save_state(state: &PersistedAwaitMembersState) {
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(current) = load_state(&state.key)
+        && (current.created_at_unix_ms > state.created_at_unix_ms
+            || (current.created_at_unix_ms == state.created_at_unix_ms
+                && current.final_response.is_some()))
+    {
+        return;
+    }
+    save_state_unlocked(state);
+}
+
+fn save_state_unlocked(state: &PersistedAwaitMembersState) {
     save_json_state(AWAIT_MEMBERS_DIR, &state.key, state, "await_members state");
     invalidate_pending_scan();
+}
+
+/// Subscribe only to the exact generation validated by the todo tool. A
+/// completion racing this write must never be replaced with pending state.
+pub(crate) fn subscribe_dependency(id: &str, session_id: &str) -> anyhow::Result<()> {
+    set_dependency_delivery(id, session_id, true, true)
+}
+
+pub fn set_dependency_delivery(
+    id: &str,
+    session_id: &str,
+    notify: bool,
+    wake: bool,
+) -> anyhow::Result<()> {
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(dependency) = crate::todo::await_dependency::load(&crate::storage::runtime_dir(), id)
+    else {
+        return Ok(()); // It completed and was replaced after validation.
+    };
+    anyhow::ensure!(
+        dependency.session_id == session_id,
+        "Await dependency belongs to another session"
+    );
+    if let Some(mut state) = load_state(&dependency.key)
+        && state.dependency_id() == id
+        && state.is_pending()
+    {
+        state.notify = notify;
+        state.wake = wake;
+        save_state_unlocked(&state);
+    }
+    Ok(())
 }
 
 /// Snapshot of the await-state directory, reused while the directory is
@@ -206,6 +255,7 @@ pub(super) fn ensure_pending_state(
     notify: bool,
     wake: bool,
 ) -> PersistedAwaitMembersState {
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = load_state(key).filter(PersistedAwaitMembersState::is_pending) {
         return existing;
     }
@@ -217,14 +267,16 @@ pub(super) fn ensure_pending_state(
         target_status: target_status.to_vec(),
         requested_ids: requested_ids.to_vec(),
         mode: mode.map(str::to_string),
-        created_at_unix_ms: now_unix_ms(),
+        created_at_unix_ms: load_state(key)
+            .map(|old| now_unix_ms().max(old.created_at_unix_ms.saturating_add(1)))
+            .unwrap_or_else(now_unix_ms),
         deadline_unix_ms,
         background,
         notify,
         wake,
         final_response: None,
     };
-    save_state(&state);
+    save_state_unlocked(&state);
     state
 }
 
@@ -233,16 +285,28 @@ pub(super) fn persist_final_response(
     completed: bool,
     members: Vec<AwaitedMemberStatus>,
     summary: String,
-) -> PersistedAwaitMembersState {
-    let mut next = state.clone();
+) -> (PersistedAwaitMembersState, bool) {
+    let _guard = STATE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let current = load_state(&state.key);
+    let superseded = current
+        .as_ref()
+        .is_some_and(|current| current.created_at_unix_ms > state.created_at_unix_ms);
+    let mut next = current
+        .filter(|current| current.created_at_unix_ms == state.created_at_unix_ms)
+        .unwrap_or_else(|| state.clone());
+    if next.final_response.is_some() {
+        return (next, false);
+    }
     next.final_response = Some(PersistedAwaitMembersResult {
         completed,
         members,
         summary,
         resolved_at_unix_ms: now_unix_ms(),
     });
-    save_state(&next);
-    next
+    if !superseded {
+        save_state_unlocked(&next);
+    }
+    (next, !superseded)
 }
 
 pub fn pending_await_members_for_session(session_id: &str) -> Vec<PersistedAwaitMembersState> {

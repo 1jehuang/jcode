@@ -416,6 +416,8 @@ mod tests {
 
     fn todo_named(content: &str, status: &str, blocked_by: &[&str]) -> TodoItem {
         TodoItem {
+            lane_after: None,
+            lane_owner: None,
             content: content.to_string(),
             status: status.to_string(),
             priority: "medium".to_string(),
@@ -424,6 +426,9 @@ mod tests {
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
+            waiting_reason: None,
+            requires_user_auth: None,
+            waiting_on: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
             assigned_to: None,
             stage: None,
@@ -474,7 +479,7 @@ mod tests {
     #[test]
     fn low_confidence_completion_is_flagged() {
         let mut done = todo_named("risky refactor", "completed", &[]);
-        done.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(35));
+        done.completion_confidence = Some(crate::todo::ConfidenceState::Speculative);
         let n = build_turn_notification(None, 200.0, &[done], None);
         assert_eq!(n.subtitle.as_deref(), Some("✓ all 1 todos"));
         assert_eq!(n.body, "✓ risky refactor (low conf: speculative)");

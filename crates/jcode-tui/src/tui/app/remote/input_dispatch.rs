@@ -16,14 +16,111 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    begin_remote_send_with_origin(
+        app,
+        remote,
+        content,
+        images,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::tui::app) async fn begin_remote_send_with_origin(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    content: String,
+    images: Vec<(String, String)>,
+    is_system: bool,
+    system_reminder: Option<String>,
+    auto_retry: bool,
+    retry_attempts: u8,
+    jarvis_voice: bool,
+) -> Result<u64> {
+    if let Err(error) = app.prepare_local_tools(remote).await {
+        crate::logging::info(&format!(
+            "RECOVERY_SEND_FAILED session_id={:?} previous_request_id={:?} request_id=unassigned phase=prepare content_bytes={} images={} retry_attempts={}",
+            app.remote_session_id,
+            app.current_message_id,
+            content.len(),
+            images.len(),
+            retry_attempts
+        ));
+        return Err(error);
+    }
+    // Reload delivery is idempotent on the server: an exact repeat of its
+    // hidden reminder is acknowledged with Done without running the agent.
+    // Delivery does not imply successful execution, though. A provider failure
+    // (including a fallback route switch) must resume that accepted turn rather
+    // than replay the original delivery token. Keep the instructions, but mark
+    // this as an execution retry. Do this at the shared send boundary so both
+    // fallback resends and same-route retries behave identically.
+    const EXECUTION_RETRY_PREFIX: &str = "<system-reminder>Retry the interrupted execution of the previous turn. Continue from the current conversation and completed tool results without repeating completed work.</system-reminder>\n\n";
+    let recovery = app.cloud_recovery_reminder();
+    let system_reminder = match (system_reminder, recovery.as_ref()) {
+        (Some(reminder), Some(recovery)) => Some(format!("{reminder}\n\n{recovery}")),
+        (None, Some(recovery)) => Some(recovery.clone()),
+        (reminder, None) => reminder,
+    };
+    // Classify the final wire reminder, including cloud recovery context. A
+    // cloud-only continuation otherwise bypasses the execution-retry marker.
+    let system_reminder = system_reminder.map(|reminder| {
+        if retry_attempts > 0
+            && is_system
+            && content.trim().is_empty()
+            && images.is_empty()
+            && !reminder.starts_with(EXECUTION_RETRY_PREFIX)
+        {
+            format!("{EXECUTION_RETRY_PREFIX}{reminder}")
+        } else {
+            reminder
+        }
+    });
     let msg_id = remote
-        .send_message_with_images_reminder_and_skill(
+        .send_message_with_origin(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
+            jarvis_voice,
         )
-        .await?;
+        .await;
+    let msg_id = match msg_id {
+        Ok(id) => id,
+        Err(error) => {
+            // Errors can contain wire data, so keep diagnostics metadata-only.
+            crate::logging::info(&format!(
+                "RECOVERY_SEND_FAILED session_id={:?} request_id=unassigned previous_request_id={:?} phase=write content_bytes={} images={} retry_attempts={}",
+                app.remote_session_id,
+                app.current_message_id,
+                content.len(),
+                images.len(),
+                retry_attempts
+            ));
+            return Err(error);
+        }
+    };
+    crate::logging::info(&format!(
+        "RECOVERY_SEND_SUBMITTED session_id={:?} request_id={} content_bytes={} images={} retry_attempts={} is_system={}",
+        app.remote_session_id,
+        msg_id,
+        content.len(),
+        images.len(),
+        retry_attempts,
+        is_system
+    ));
+    if !is_system {
+        app.publish_user_image_previews(&images);
+    }
+    if recovery.is_some() {
+        app.cloud_recovery_context = None;
+        app.cloud_recovery_auto_pending = false;
+    }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
@@ -48,6 +145,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        jarvis_voice,
         content,
         images,
         is_system,
@@ -66,6 +164,13 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app: &mut App,
     prepared: input::PreparedInput,
 ) {
+    crate::logging::info(&format!(
+        "RECOVERY_DRAFT_RESTORED session_id={:?} request_id={:?} content_bytes={} images={}",
+        app.remote_session_id,
+        app.current_message_id,
+        prepared.raw_input.len(),
+        prepared.images.len()
+    ));
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
@@ -108,6 +213,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     if app.remote_model_switch_in_flight || app.auth_catalog_refresh_pending {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=model_setup content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.pending_prompt_after_model_switch.is_some()
+        ));
         app.pending_prompt_after_model_switch = Some(prepared);
         app.set_status_notice(if app.auth_catalog_refresh_pending {
             "Prompt queued until model setup completes"
@@ -125,9 +238,14 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // `process_remote_followups` dispatch it once history is loaded - the same
     // gating that startup auto-submit already relies on.
     if !remote.has_loaded_history() {
-        crate::logging::info(
-            "Deferring manually submitted prompt until remote history loads (avoids first-prompt clobber)",
-        );
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_DEFERRED session_id={:?} request_id={:?} reason=history content_bytes={} images={} replacing_pending={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.pending_prompt_before_history.is_some()
+        ));
         app.pending_prompt_before_history = Some(prepared);
         app.set_status_notice("Loading session...");
         return Ok(());
@@ -139,23 +257,55 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     }
 
     app.commit_pending_streaming_assistant_message();
-    // A manually submitted prompt supersedes any armed post-error fallback
-    // offer (and its staged resend): the user chose to continue differently.
+    // This typed turn supersedes any voice reply that is still being prepared.
+    if crate::tui::jarvis::always_on() {
+        app.cancel_jarvis_speech();
+    }
+    // The user chose to continue differently, superseding any post-error fallback.
     app.clear_pending_fallback_offer();
     // Remember the typed prompt so we can restore it to the input box if this turn
     // fails (e.g. "token refresh needed"), instead of dropping it.
     app.last_submitted_input = Some(prepared.raw_input.clone());
-    app.push_display_message(DisplayMessage {
-        role: "user".to_string(),
-        content: prepared.raw_input,
-        tool_calls: vec![],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
-    });
-    let _ = app
-        .begin_remote_send(remote, prepared.expanded, prepared.images, false)
-        .await;
+    app.automatic_failover_targets.clear();
+    app.automatic_failover_stopped = false;
+    let echo_index = app.display_messages().len();
+    app.push_display_message(DisplayMessage::user(prepared.raw_input.clone()));
+    // Keyboard dispatch propagates Err to the TUI event loop. A failed write
+    // is recoverable: keep the consumed composer (including attachments) and
+    // report it here rather than exiting the client or claiming delivery.
+    if let Err(error) = app
+        .begin_remote_send(
+            remote,
+            prepared.expanded.clone(),
+            prepared.images.clone(),
+            false,
+        )
+        .await
+    {
+        crate::logging::info(&format!(
+            "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
+            app.remote_session_id,
+            app.current_message_id,
+            prepared.expanded.len(),
+            prepared.images.len(),
+            app.queued_messages.len()
+        ));
+        app.remove_display_message(echo_index);
+        app.restore_failover_payload(super::super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            raw_input: Some(prepared.raw_input),
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+        });
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to send message: {error}"
+        )));
+        app.set_status_notice("Message not sent; draft restored");
+        return Ok(());
+    }
     Ok(())
 }
 
@@ -173,19 +323,12 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     let raw_input = prepared.raw_input.clone();
 
     if crate::tui::is_ssh_remote() {
-        let trimmed = prepared.expanded.trim();
-        if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
-            return Ok(());
-        }
-        if matches!(
-            trimmed.split_whitespace().next(),
-            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff")
-        ) {
-            app_mod::commands_dispatch::dispatch_local_command(app, trimmed);
-            return Ok(());
-        }
-        // Only the server knows remote skills and their multi-word names.
-        return submit_prepared_remote_input(app, remote, prepared).await;
+        // Box the shared dispatcher because its non-SSH fallback can call
+        // this entry point. The SSH branch terminates in a wire send instead.
+        return Box::pin(super::key_handling::submit_prepared_remote_enter_input(
+            app, remote, prepared,
+        ))
+        .await;
     }
 
     // Text that merely starts with `/` is not necessarily a command. A terminal
@@ -393,6 +536,10 @@ fn queue_transcript_input(app: &mut App) {
 }
 
 fn submit_transcript_input(app: &mut App) {
+    // An armed new-session prompt takes precedence over steering or queueing.
+    if input::route_prompt_to_new_session_local(app) {
+        return;
+    }
     match app.send_action(false) {
         SendAction::Submit => app.submit_input(),
         SendAction::Queue => queue_transcript_input(app),
@@ -428,9 +575,16 @@ async fn submit_remote_transcript_input(
         return Ok(());
     }
 
+    if app.route_next_prompt_to_new_session && app.pending_login.is_none() {
+        let prepared = input::take_prepared_input(app);
+        return route_prepared_input_to_new_remote_session(app, remote, prepared).await;
+    }
+
     match app.send_action(false) {
         SendAction::Submit => {
             let prepared = input::take_prepared_input(app);
+            app.automatic_failover_targets.clear();
+            app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
                 content: prepared.raw_input,
@@ -453,7 +607,7 @@ async fn submit_remote_transcript_input(
     Ok(())
 }
 
-async fn submit_remote_input_shell(
+pub(super) async fn submit_remote_input_shell(
     app: &mut App,
     remote: &mut RemoteConnection,
     raw_input: String,
@@ -625,11 +779,272 @@ pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input:
         return false;
     }
     if app.is_processing && !app.queue_mode {
-        let images = std::mem::take(&mut app.pending_images);
+        let images = app.take_pending_image_payloads();
         input::stage_local_interleave(app, input.to_string(), images);
         return true;
     }
     app.queued_messages.push(input.to_string());
     app.pending_images.clear();
     true
+}
+
+#[cfg(test)]
+mod ssh_slash_tests {
+    use super::*;
+
+    #[test]
+    fn ssh_slash_capability_matrix_covers_entire_registry() {
+        let matrix = include_str!("../../../../../../docs/ssh-slash-commands.md");
+        for command in app_mod::registered_command_names() {
+            assert!(
+                matrix.contains(&format!("`{command}`")),
+                "missing {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_alternate_slash_input_uses_wire_dispatch_not_agent_prompt",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let mut peer = tokio::io::BufReader::new(remote.take_dummy_peer().unwrap());
+            for (command, expected) in [
+                ("/compact", "compact"),
+                ("/rename remote title", "rename_session"),
+                ("/memory on", "set_feature"),
+                ("/model refresh", "refresh_models"),
+                ("/git status", "input_shell"),
+                ("/auth", "runtime_command"),
+                ("/refresh-model-list", "runtime_command"),
+                ("/logout openai", "runtime_command"),
+                ("/context", "runtime_command"),
+                ("/overnight status", "runtime_command"),
+            ] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(std::time::Duration::from_secs(1), peer.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], expected, "{command}: {line}");
+                if command == "/git status" {
+                    assert_eq!(request["command"], "git status --short --branch");
+                }
+                if command == "/logout openai" {
+                    assert_eq!(request["command"], "logout");
+                    assert_eq!(request["args"], serde_json::json!(["openai"]));
+                }
+                assert!(!app.pending_turn);
+            }
+            let next_id = remote.next_request_id_for_test();
+            let images = vec![("image/png".to_string(), "attachment".to_string())];
+            submit_remote_slash_input(
+                &mut app,
+                &mut remote,
+                input::PreparedInput {
+                    raw_input: "/local".to_string(),
+                    expanded: "/local".to_string(),
+                    images: images.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(app.input, "/local");
+            assert_eq!(app.pending_images, images);
+            assert_eq!(remote.next_request_id_for_test(), next_id);
+        });
+    }
+
+    #[test]
+    fn ssh_poke_hotkey_controls_daemon_instead_of_local_todos() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_poke_hotkey_controls_daemon_instead_of_local_todos",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut remote = RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            for (enabled, busy, args) in [
+                (true, false, vec!["off"]),
+                (true, true, vec!["off"]),
+                (false, true, vec!["on"]),
+                (false, false, vec![]),
+            ] {
+                app.auto_poke_incomplete_todos = enabled;
+                app.is_processing = busy;
+                app.handle_remote_key(KeyCode::Char('p'), KeyModifiers::CONTROL, &mut remote)
+                    .await
+                    .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "runtime_command");
+                assert_eq!(request["command"], "poke");
+                assert_eq!(request["args"], serde_json::json!(args));
+                assert!(app.queued_messages.is_empty());
+                assert_eq!(
+                    app.auto_poke_incomplete_todos, enabled,
+                    "wait for daemon acknowledgement"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn ssh_host_loop_and_usage_commands_send_structured_requests() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_host_loop_and_usage_commands_send_structured_requests",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let mut remote = RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = BufReader::new(reader);
+            for (input, command, args) in [
+                ("/config view", "config", vec!["view"]),
+                ("/fast default off", "fast_default", vec!["off"]),
+                ("/open README.md", "open", vec!["README.md"]),
+                ("/poke status", "poke", vec!["status"]),
+                ("/improve plan", "improve", vec!["plan"]),
+                ("/refactor stop", "refactor", vec!["stop"]),
+                ("/fix", "fix", vec![]),
+                ("/usage", "ssh_account", vec!["usage"]),
+                (
+                    "/reset usage limits openai",
+                    "ssh_account",
+                    vec!["reset", "usage", "limits", "openai"],
+                ),
+            ] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: input.into(),
+                        expanded: input.into(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["type"], "runtime_command", "{input}");
+                assert_eq!(request["command"], command, "{input}");
+                assert_eq!(request["args"], serde_json::json!(args), "{input}");
+                assert!(app.pending_prompt_before_history.is_none(), "{input}");
+                assert!(!app.pending_turn, "{input}");
+            }
+        });
+    }
+
+    #[test]
+    fn ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server() {
+        if app_mod::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_registered_unimplemented_command_fails_closed_but_skills_reach_server",
+        ) {
+            return;
+        }
+        let mut app = app_mod::tests::create_test_app();
+        app.is_remote = true;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = RemoteConnection::dummy();
+            // No history makes normal remote prompts queue without a wire
+            // send, providing a direct distinction from rejected commands.
+            for command in [
+                "/desktop",
+                "/workspace",
+                "/ssh other-host",
+                "/onboarding-sim",
+                "/update-rehearsal",
+            ] {
+                let next_id = remote.next_request_id_for_test();
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(app.pending_prompt_before_history.is_none(), "{command}");
+                assert_eq!(remote.next_request_id_for_test(), next_id);
+                assert!(
+                    app.display_messages()
+                        .last()
+                        .unwrap()
+                        .content
+                        .contains("SSH")
+                );
+            }
+            for command in [
+                "/future remote skill /context",
+                "/home/vm/notes",
+                "/improve-custom-skill",
+                "/plan-custom-skill",
+                "/refactor-custom-skill",
+            ] {
+                submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    input::PreparedInput {
+                        raw_input: command.to_string(),
+                        expanded: command.to_string(),
+                        images: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    app.pending_prompt_before_history.take().unwrap().expanded,
+                    command
+                );
+                assert!(!app.pending_turn);
+            }
+        });
+    }
 }

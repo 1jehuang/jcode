@@ -110,7 +110,7 @@ impl ScheduleTarget {
 }
 
 /// A scheduled ambient task
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScheduledItem {
     pub id: String,
     pub scheduled_for: DateTime<Utc>,

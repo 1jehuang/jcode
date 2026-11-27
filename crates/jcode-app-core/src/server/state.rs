@@ -90,6 +90,9 @@ pub struct FileAccess {
     pub intent: Option<String>,
     pub summary: Option<String>,
     pub detail: Option<String>,
+    /// Lines added/removed by this access (0 for reads).
+    pub added: u64,
+    pub removed: u64,
 }
 
 pub(super) fn latest_peer_touches(
@@ -228,7 +231,7 @@ pub struct SwarmMember {
     pub friendly_name: Option<String>,
     /// Session that should receive direct completion report-back for this member, if any.
     pub report_back_to_session_id: Option<String>,
-    /// Latest explicit completion report submitted by this member.
+    /// Latest automatically captured output tail (or a legacy explicit report).
     pub latest_completion_report: Option<String>,
     /// Role: "agent" or "coordinator"
     pub role: String,
@@ -409,36 +412,119 @@ pub(super) async fn unregister_session_event_sender(
     }
 }
 
+/// Send synchronously, moving the original payload into the final live queue.
+/// In particular, a closed queue must not cause a large swarm snapshot clone.
+pub(super) fn send_event_to_targets<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> usize {
+    send_event_to_targets_recover(targets, event).unwrap_or(0)
+}
+
+/// Return the original payload when every queue is closed or rejects delivery.
+/// A caller can then use its fallback without cloning successful events first.
+fn send_event_to_targets_recover<'a>(
+    targets: impl IntoIterator<Item = &'a mpsc::UnboundedSender<ServerEvent>>,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
+    let mut targets = targets.into_iter().filter(|tx| !tx.is_closed()).peekable();
+    let mut delivered = 0;
+    while let Some(tx) = targets.next() {
+        if targets.peek().is_none() {
+            return match tx.send(event) {
+                Ok(()) => Ok(delivered + 1),
+                Err(error) if delivered == 0 => Err(Box::new(error.0)),
+                Err(_) => Ok(delivered),
+            };
+        }
+        delivered += usize::from(tx.send(event.clone()).is_ok());
+    }
+    Err(Box::new(event))
+}
+
+// Keep sends outside the session lock without allocating for the usual single
+// attachment. Multiple recipients retain their original iteration order.
+enum RecipientSnapshot {
+    Empty,
+    One(mpsc::UnboundedSender<ServerEvent>),
+    Many(Vec<mpsc::UnboundedSender<ServerEvent>>),
+}
+
+impl FromIterator<mpsc::UnboundedSender<ServerEvent>> for RecipientSnapshot {
+    fn from_iter<T: IntoIterator<Item = mpsc::UnboundedSender<ServerEvent>>>(iter: T) -> Self {
+        let mut iter = iter.into_iter();
+        let Some(first) = iter.next() else {
+            return Self::Empty;
+        };
+        let Some(second) = iter.next() else {
+            return Self::One(first);
+        };
+        let mut targets = Vec::with_capacity(iter.size_hint().0.saturating_add(2).max(4));
+        targets.push(first);
+        targets.push(second);
+        targets.extend(iter);
+        Self::Many(targets)
+    }
+}
+
+impl RecipientSnapshot {
+    fn as_slice(&self) -> &[mpsc::UnboundedSender<ServerEvent>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(tx) => std::slice::from_ref(tx),
+            Self::Many(targets) => targets,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "state_fanout_tests.rs"]
+mod fanout_tests;
+
+#[cfg(test)]
+#[path = "state_turn_delivery_tests.rs"]
+mod turn_delivery_tests;
+
 pub(super) async fn fanout_session_event(
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     event: ServerEvent,
 ) -> usize {
+    fanout_session_event_recover(swarm_members, session_id, event)
+        .await
+        .unwrap_or(0)
+}
+
+async fn fanout_session_event_recover(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    event: ServerEvent,
+) -> Result<usize, Box<ServerEvent>> {
+    super::live_status::observe(session_id, &event);
     let targets = {
         let mut members = swarm_members.write().await;
         let Some(member) = members.get_mut(session_id) else {
-            return 0;
+            return Err(Box::new(event));
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
+        crate::stream_batching::note_session_targets(session_id, member.event_txs.keys());
 
         if member.event_txs.is_empty() {
-            vec![member.event_tx.clone()]
+            RecipientSnapshot::One(member.event_tx.clone())
         } else {
             if let Some((_, tx)) = member.event_txs.iter().next() {
                 member.event_tx = tx.clone();
             }
-            member.event_txs.values().cloned().collect::<Vec<_>>()
+            member
+                .event_txs
+                .values()
+                .cloned()
+                .collect::<RecipientSnapshot>()
         }
     };
 
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
-        }
-    }
-    delivered
+    send_event_to_targets_recover(targets.as_slice(), event)
 }
 
 pub(super) async fn fanout_live_client_event(
@@ -453,16 +539,14 @@ pub(super) async fn fanout_live_client_event(
         };
 
         member.event_txs.retain(|_, tx| !tx.is_closed());
-        member.event_txs.values().cloned().collect::<Vec<_>>()
+        member
+            .event_txs
+            .values()
+            .cloned()
+            .collect::<RecipientSnapshot>()
     };
 
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
-        }
-    }
-    delivered
+    send_event_to_targets(targets.as_slice(), event)
 }
 
 /// Deliver `event` to every live attachment of `session_id` except the
@@ -484,44 +568,119 @@ pub(super) async fn fanout_peer_client_event(
             .iter()
             .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
             .map(|(_, tx)| tx.clone())
-            .collect::<Vec<_>>()
+            .collect::<RecipientSnapshot>()
     };
-    let mut delivered = 0;
-    for tx in targets {
-        if tx.send(event.clone()).is_ok() {
-            delivered += 1;
+    send_event_to_targets(targets.as_slice(), event)
+}
+
+#[path = "turn_stop_log.rs"]
+mod turn_stop_log;
+
+/// Owns one turn's event queue. Closing or aborting the producer drains all
+/// accepted events before releasing the runtime's publication reservation.
+pub(super) struct TurnEventChannel {
+    tx: mpsc::UnboundedSender<ServerEvent>,
+    close: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TurnEventChannel {
+    pub(super) fn new(
+        session_id: String,
+        members: Arc<RwLock<HashMap<String, SwarmMember>>>,
+        fallback: mpsc::UnboundedSender<ServerEvent>,
+        lease: &crate::agent::TurnLease,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (close, mut closed) = tokio::sync::oneshot::channel();
+        let publication = lease.publication_pin();
+        let identity = lease.identity().clone();
+        let task = tokio::spawn(async move {
+            let _publication = publication;
+            let mut stop_log = turn_stop_log::StopLog::default();
+            // A hard process termination cannot emit TURN_STOP. This paired
+            // marker lets investigators detect a turn with no terminal record.
+            crate::logging::event_info(
+                "TURN_START",
+                [
+                    ("session", session_id.clone()),
+                    ("runtime", identity.runtime_generation.clone()),
+                    ("turn", identity.turn_id.to_string()),
+                ],
+            );
+            let started = ServerEvent::TurnStarted {
+                identity: identity.clone(),
+            };
+            if let Err(started) = fanout_session_event_recover(&members, &session_id, started).await
+            {
+                let _ = fallback.send(*started);
+            }
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = &mut closed => { rx.close(); break; }
+                    event = rx.recv() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                stop_log.observe(&session_id, &identity, &event);
+                match &event {
+                    ServerEvent::ToolExec { name, .. } => {
+                        crate::agents_status::tool_started(&session_id, name)
+                    }
+                    ServerEvent::ToolDone { .. } => crate::agents_status::tool_done(&session_id),
+                    _ => {}
+                }
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                {
+                    let _ = fallback.send(*event);
+                }
+            }
+            while let Some(event) = rx.recv().await {
+                stop_log.observe(&session_id, &identity, &event);
+                let event = ServerEvent::TurnEvent {
+                    identity: identity.clone(),
+                    event: Box::new(event),
+                };
+                if let Err(event) = fanout_session_event_recover(&members, &session_id, event).await
+                {
+                    let _ = fallback.send(*event);
+                }
+            }
+            stop_log.finish(&session_id, &identity);
+        });
+        Self {
+            tx,
+            close: Some(close),
+            task: Some(task),
         }
     }
-    delivered
+
+    pub(super) fn sender(&self) -> mpsc::UnboundedSender<ServerEvent> {
+        self.tx.clone()
+    }
+
+    pub(super) async fn finish(mut self) {
+        self.close.take();
+        if let Some(task) = self.task.take()
+            && let Err(error) = task.await
+        {
+            crate::logging::warn(&format!("Turn event drain failed: {error}"));
+        }
+    }
 }
 
-pub(super) fn session_event_fanout_sender(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let _ = fanout_session_event(&swarm_members, &session_id, event).await;
-        }
-    });
-    tx
-}
-
-pub(super) fn session_event_fanout_sender_with_fallback(
-    session_id: String,
-    swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,
-    fallback_tx: mpsc::UnboundedSender<ServerEvent>,
-) -> mpsc::UnboundedSender<ServerEvent> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            if fanout_session_event(&swarm_members, &session_id, event.clone()).await == 0 {
-                let _ = fallback_tx.send(event);
-            }
-        }
-    });
-    tx
+impl Drop for TurnEventChannel {
+    fn drop(&mut self) {
+        // Dropping JoinHandle detaches the drain task. It must not be aborted:
+        // already queued events still own the runtime publication reservation.
+        self.close.take();
+    }
 }
 
 pub(super) fn enqueue_soft_interrupt(
@@ -600,7 +759,10 @@ impl SessionControlHandle {
     pub fn provider_handle(&self) -> Option<Arc<dyn Provider>> {
         SESSION_PROVIDERS
             .lock()
-            .ok()?
+            .unwrap_or_else(|poisoned| {
+                crate::logging::warn("Recovering poisoned session provider registry");
+                poisoned.into_inner()
+            })
             .get(&self.session_id)?
             .upgrade()
     }
@@ -752,6 +914,7 @@ impl SessionControlHandle {
             "SESSION_CANCEL_SIGNAL_FIRE session={}",
             self.session_id
         ));
+        crate::mobile_push::mark_cancelled(&self.session_id);
         self.stop_current_turn_signal.fire();
         let active_turn_signals =
             crate::turn_cancel_registry::active_turn_signals(&self.session_id);
@@ -863,8 +1026,55 @@ pub(super) async fn queue_soft_interrupt_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    queue_soft_interrupt_with_images_for_session(
+        session_id,
+        content,
+        Vec::new(),
+        urgent,
+        source,
+        queues,
+        sessions,
+    )
+    .await
+}
+
+/// Rewrite a still-queued file-activity notice in place. Returns `false` once the
+/// notice has been delivered (or was never queued live), so the caller queues
+/// a fresh one instead.
+pub(super) async fn replace_pending_soft_interrupt(
+    session_id: &str,
+    previous: &str,
+    content: String,
+    queues: &SessionInterruptQueues,
+) -> bool {
+    let Some(queue) = queues.read().await.get(session_id).cloned() else {
+        return false;
+    };
+    let Ok(mut pending) = queue.lock() else {
+        return false;
+    };
+    match pending.iter_mut().find(|message| {
+        message.source == SoftInterruptSource::FileActivity && message.content == previous
+    }) {
+        Some(message) => {
+            message.content = content;
+            true
+        }
+        None => false,
+    }
+}
+
+pub(super) async fn queue_soft_interrupt_with_images_for_session(
+    session_id: &str,
+    content: String,
+    images: Vec<(String, String)>,
+    urgent: bool,
+    source: SoftInterruptSource,
+    queues: &SessionInterruptQueues,
+    sessions: &super::SessionAgents,
+) -> bool {
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
-        return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
+        return enqueue_soft_interrupt(&queue, content, images, urgent, source);
     }
 
     let queue = {
@@ -879,7 +1089,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
 
     if let Some(queue) = queue {
         register_session_interrupt_queue(queues, session_id, queue.clone()).await;
-        enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source)
+        enqueue_soft_interrupt(&queue, content, images, urgent, source)
     } else {
         let session_exists = {
             let guard = sessions.read().await;
@@ -894,7 +1104,7 @@ pub(super) async fn queue_soft_interrupt_for_session(
             session_id,
             SoftInterruptMessage {
                 content,
-                images: Vec::new(),
+                images,
                 urgent,
                 source,
                 client_id: None,

@@ -58,10 +58,9 @@ async fn queue_soft_interrupt_for_session_uses_registered_queue_when_agent_busy(
     };
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
     register_session_interrupt_queue(&queues, &session_id, queue.clone()).await;
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
 
     let _busy_guard = agent.lock().await;
     let queued = queue_soft_interrupt_for_session(
@@ -97,10 +96,9 @@ async fn queue_soft_interrupt_for_session_registers_queue_on_fallback_lookup() {
         guard.soft_interrupt_queue()
     };
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let sessions = Arc::new(RwLock::new(HashMap::from([(
-        session_id.clone(),
-        agent.clone(),
-    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
 
     let queued = queue_soft_interrupt_for_session(
         &session_id,
@@ -141,7 +139,9 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
         .expect("save session snapshot");
 
     let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
 
     let queued = queue_soft_interrupt_for_session(
         &session_id,
@@ -182,4 +182,82 @@ async fn queue_soft_interrupt_for_session_persists_when_live_queue_is_unavailabl
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[tokio::test]
+async fn file_activity_notices_fold_into_the_pending_one_until_delivered() {
+    use crate::server::file_activity::{FileActivityEntry, deliver_file_activity_notice};
+
+    let agent = test_agent().await;
+    let (session_id, queue) = {
+        let guard = agent.lock().await;
+        (guard.session_id().to_string(), guard.soft_interrupt_queue())
+    };
+    let queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    register_session_interrupt_queue(&queues, &session_id, queue.clone()).await;
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
+    let entry = |agent: &str, path: &str| FileActivityEntry {
+        agent: agent.to_string(),
+        operation: "edited".to_string(),
+        previously: false,
+        path: path.to_string(),
+        added: 2,
+        removed: 1,
+        edits: 1,
+        lines: None,
+        overlap: false,
+        intent: None,
+    };
+    let mut pending = HashMap::new();
+    for (agent, path) in [("moss", "a.rs"), ("moss", "a.rs"), ("fox", "b.rs")] {
+        deliver_file_activity_notice(
+            &session_id,
+            entry(agent, path),
+            &mut pending,
+            &queues,
+            &sessions,
+        )
+        .await;
+    }
+    {
+        let queued = queue.lock().expect("queue lock");
+        assert_eq!(queued.len(), 1, "a burst of edits is one model message");
+        assert_eq!(
+            queued[0].content,
+            "moss edited a.rs +4-2 x2\n\
+             fox edited b.rs +2-1"
+        );
+        assert_eq!(queued[0].source, SoftInterruptSource::FileActivity);
+    }
+
+    // Once the agent has taken the notice, the next edit starts a new one.
+    queue.lock().expect("queue lock").clear();
+    deliver_file_activity_notice(
+        &session_id,
+        entry("moss", "a.rs"),
+        &mut pending,
+        &queues,
+        &sessions,
+    )
+    .await;
+    {
+        let queued = queue.lock().expect("queue lock");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].content, "moss edited a.rs +2-1");
+    }
+    assert_eq!(pending.len(), 1);
+
+    // A session that went away no longer holds an entry in the pending map.
+    queues.write().await.clear();
+    deliver_file_activity_notice(
+        "session_gone",
+        entry("moss", "a.rs"),
+        &mut pending,
+        &queues,
+        &sessions,
+    )
+    .await;
+    assert!(pending.is_empty(), "stale pending notices are pruned");
 }

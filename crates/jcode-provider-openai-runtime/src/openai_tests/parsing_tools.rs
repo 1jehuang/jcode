@@ -134,8 +134,10 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut pending,
     )
     .expect("argument fragments must stream before completion");
-    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta }
-        if id == "call_123" && delta == r#"{"tool_calls":[{"tool":"read"}]"#));
+    assert!(
+        matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta }
+        if id == "call_123" && delta == r#"{"tool_calls":[{"tool":"read"}]"#)
+    );
     assert!(pending.is_empty());
 
     let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
@@ -148,8 +150,12 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut pending,
     )
     .expect("only the unstreamed suffix should be emitted");
-    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta } if id == "call_123" && delta == "}"));
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_123"));
+    assert!(
+        matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta } if id == "call_123" && delta == "}")
+    );
+    assert!(
+        matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_123")
+    );
     assert!(pending.is_empty());
     assert!(streaming_tool_calls.is_empty());
     assert!(completed_tool_items.contains("fc_123"));
@@ -254,9 +260,17 @@ fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
         }
         other => panic!("expected OpenAIReasoning, got {:?}", other),
     }
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingStart)));
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingDelta(text)) if text == "Checked the constraints."));
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ThinkingEnd)));
+    assert!(matches!(
+        pending.pop_front(),
+        Some(StreamEvent::ThinkingStart)
+    ));
+    assert!(
+        matches!(pending.pop_front(), Some(StreamEvent::ThinkingDelta(text)) if text == "Checked the constraints.")
+    );
+    assert!(matches!(
+        pending.pop_front(),
+        Some(StreamEvent::ThinkingEnd)
+    ));
 }
 
 #[test]
@@ -271,7 +285,8 @@ fn test_reasoning_item_done_does_not_replay_summary_after_live_deltas() {
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
 
-    let delta = r#"{"type":"response.reasoning_summary_text.delta","delta":"Checked the constraints."}"#;
+    let delta =
+        r#"{"type":"response.reasoning_summary_text.delta","delta":"Checked the constraints."}"#;
     let event = parse_openai_response_event(
         delta,
         &mut saw_text_delta,
@@ -281,7 +296,9 @@ fn test_reasoning_item_done_does_not_replay_summary_after_live_deltas() {
         &mut pending,
     )
     .expect("expected thinking delta");
-    assert!(matches!(event, StreamEvent::ThinkingDelta(text) if text == "Checked the constraints."));
+    assert!(
+        matches!(event, StreamEvent::ThinkingDelta(text) if text == "Checked the constraints.")
+    );
 
     let reasoning_done = r#"{
         "type":"response.output_item.done",
@@ -361,7 +378,10 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
         } => {
             assert_eq!(id, "ig_test_123");
             assert_eq!(output_format, "png");
-            assert_eq!(revised_prompt.as_deref(), Some("A polished robot painter prompt"));
+            assert_eq!(
+                revised_prompt.as_deref(),
+                Some("A polished robot painter prompt")
+            );
             (path, metadata_path.expect("metadata path"))
         }
         other => panic!("expected GeneratedImage, got {:?}", other),
@@ -374,7 +394,10 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
             assert!(markdown.contains("![Generated image]"));
             assert!(markdown.contains("Metadata saved"));
         }
-        other => panic!("expected generated image markdown TextDelta, got {:?}", other),
+        other => panic!(
+            "expected generated image markdown TextDelta, got {:?}",
+            other
+        ),
     }
 
     let metadata: Value = serde_json::from_slice(
@@ -383,8 +406,14 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
     .expect("metadata json");
     assert_eq!(metadata["schema_version"], serde_json::json!(1));
     assert_eq!(metadata["provider"], serde_json::json!("openai"));
-    assert_eq!(metadata["native_tool"], serde_json::json!("image_generation"));
-    assert_eq!(metadata["revised_prompt"], serde_json::json!("A polished robot painter prompt"));
+    assert_eq!(
+        metadata["native_tool"],
+        serde_json::json!("image_generation")
+    );
+    assert_eq!(
+        metadata["revised_prompt"],
+        serde_json::json!("A polished robot painter prompt")
+    );
     assert!(metadata["response_item"].get("result").is_none());
 
     std::env::set_current_dir(original_dir).expect("restore cwd");
@@ -519,11 +548,14 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
 }
 
 #[test]
-fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
+fn test_build_tools_keeps_strict_for_nested_anyof_object_branches_with_properties() {
     let defs = vec![ToolDefinition {
         name: "schedule".to_string(),
         description: "schedule work".to_string(),
         input_schema: serde_json::json!({
+            "type": "object",
+            "required": ["request"],
+            "properties": { "request": {
             "type": "object",
             "required": ["task"],
             "anyOf": [
@@ -549,29 +581,33 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
                 "wake_in_minutes": { "type": "integer" },
                 "wake_at": { "type": "string" }
             }
-        }),
+        } } }),
         defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
     assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][0]["additionalProperties"],
+        api_tools[0]["parameters"]["properties"]["request"]["anyOf"][0]["additionalProperties"],
         serde_json::json!(false)
     );
     assert_eq!(
-        api_tools[0]["parameters"]["anyOf"][1]["additionalProperties"],
+        api_tools[0]["parameters"]["properties"]["request"]["anyOf"][1]["additionalProperties"],
         serde_json::json!(false)
     );
 }
 
 #[test]
-fn test_parse_text_wrapped_tool_call_prefers_trailing_json_object() {
+fn test_tool_call_example_in_completed_message_stays_text() {
     let text = "Status update\nassistant to=functions.batch commentary {}json\n{\"tool_calls\":[{\"tool\":\"read\",\"file_path\":\"src/main.rs\"}]}";
-    let parsed = parse_text_wrapped_tool_call(text).expect("should parse wrapped tool call");
-    assert_eq!(parsed.1, "batch");
-    assert!(parsed.0.contains("Status update"));
-    let args: Value = serde_json::from_str(&parsed.2).expect("valid args json");
-    assert!(args.get("tool_calls").is_some());
+    let mut pending = VecDeque::new();
+    let event = handle_openai_output_item(
+        serde_json::json!({"type":"message", "content":[{"type":"output_text", "text":text}]}),
+        &mut false,
+        &mut false,
+        &mut pending,
+    );
+    assert!(matches!(event, Some(StreamEvent::TextDelta(actual)) if actual == text));
+    assert!(pending.is_empty());
 }
 
 #[test]
@@ -585,8 +621,13 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
     let mut saw_text_delta = false;
     let mut saw_thinking_delta = false;
     let mut pending = VecDeque::new();
-    let first = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending)
-        .expect("expected tool event");
+    let first = handle_openai_output_item(
+        item,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut pending,
+    )
+    .expect("expected tool event");
 
     match first {
         StreamEvent::ToolUseStart { id, name } => {
@@ -602,11 +643,13 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         }
         _ => panic!("expected ToolInputDeltaFor"),
     }
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_1"));
+    assert!(
+        matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_1")
+    );
 }
 
 #[test]
-fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
+fn test_handle_openai_output_item_preserves_bright_pearl_fixture_as_text() {
     let item = serde_json::json!({
         "type": "message",
         "content": [{
@@ -620,43 +663,26 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
     let mut pending = VecDeque::new();
     let mut events = Vec::new();
 
-    if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending) {
+    if let Some(first) = handle_openai_output_item(
+        item,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut pending,
+    ) {
         events.push(first);
     }
     while let Some(ev) = pending.pop_front() {
         events.push(ev);
     }
 
-    let mut saw_prefix = false;
-    let mut saw_tool = false;
-    let mut saw_input = false;
-
+    let mut rendered = String::new();
     for event in events {
         match event {
-            StreamEvent::TextDelta(text)
-                if text.contains("Status: I detected pre-existing local edits") =>
-            {
-                saw_prefix = true;
-            }
-            StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
-                saw_tool = true;
-            }
-            StreamEvent::ToolInputDeltaFor { delta, .. } => {
-                let args: Value = serde_json::from_str(&delta).expect("valid tool args");
-                let calls = args
-                    .get("tool_calls")
-                    .and_then(|v| v.as_array())
-                    .expect("tool_calls array");
-                assert_eq!(calls.len(), 3);
-                saw_input = true;
-            }
-            _ => {}
+            StreamEvent::TextDelta(text) => rendered.push_str(&text),
+            other => panic!("assistant text must not become a tool event: {other:?}"),
         }
     }
-
-    assert!(saw_prefix);
-    assert!(saw_tool);
-    assert!(saw_input);
+    assert_eq!(rendered, BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE);
 }
 
 #[test]

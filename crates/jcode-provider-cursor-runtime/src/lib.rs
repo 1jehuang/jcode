@@ -7,6 +7,13 @@
 //! The pure model-catalog data (`AVAILABLE_MODELS`, `is_known_model`) stays in
 //! `jcode_base::provider::cursor` because base's model-routing logic needs it
 //! without a runtime.
+//!
+//! Response model attribution is currently unavailable: the decoded ChatService
+//! and AgentService response schemas do not expose a verified served-model
+//! field. Catalog IDs and AgentService's locally resolved request model are
+//! request metadata, not evidence of which model answered. Do not emit
+//! `StreamEvent::ResolvedModel` from those values. Unknown protobuf fields must
+//! not be guessed to contain model identity.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,6 +36,14 @@ pub mod wire;
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
 const MAX_AGENT_MODELS_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROMPT_CHARS: usize = 120_000;
+
+fn canonical_input_payload(model: &str, system: &str, prompt: &str) -> Value {
+    json!({
+        "model": model,
+        "system": (!system.trim().is_empty()).then_some(system),
+        "prompt": prompt,
+    })
+}
 
 fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
     let mut out = String::new();
@@ -242,6 +257,13 @@ struct PersistedCatalog {
     fetched_at_rfc3339: String,
 }
 
+/// Write-only view that keeps the caller's model strings in place.
+#[derive(Serialize)]
+struct PersistedCatalogRef<'a> {
+    models: &'a [String],
+    fetched_at_rfc3339: String,
+}
+
 fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
     let mut merged = Vec::new();
 
@@ -451,8 +473,8 @@ impl CursorCliProvider {
         let Ok(path) = Self::persisted_catalog_path() else {
             return;
         };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
+        let payload = PersistedCatalogRef {
+            models,
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
@@ -528,20 +550,20 @@ impl Provider for CursorCliProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let prompt_items = vec![Value::String(prompt.clone())];
-        let system_value = (!system.trim().is_empty()).then(|| Value::String(system.to_string()));
-        let payload = json!({
-            "model": &model,
-            "system": system_value.as_ref(),
-            "prompt": &prompt,
-        });
+        let payload = canonical_input_payload(&model, system, &prompt);
+        let prompt_items = std::slice::from_ref(
+            payload
+                .get("prompt")
+                .ok_or_else(|| anyhow::anyhow!("canonical payload is missing prompt"))?,
+        );
+        let system_value = payload.get("system").filter(|value| !value.is_null());
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "cursor",
             &model,
             "cursor_cli_prompt",
             &payload,
-            &prompt_items,
-            system_value.as_ref(),
+            prompt_items,
+            system_value,
             None,
             Some(0),
             &[
@@ -701,6 +723,7 @@ impl Provider for CursorCliProvider {
                     "Cursor model catalog refresh failed; keeping fallback list: {}",
                     err
                 ));
+                return Err(err);
             }
         }
 
@@ -854,6 +877,108 @@ async fn run_native_text_command(
             .await
         }
         Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod catalog_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_catalog_matches_owned_json_without_copying_models() {
+        for models in [
+            Vec::<String>::new(),
+            vec![
+                "future-cursor-model-2099".to_string(),
+                "模型-🦀".to_string(),
+                "escaped-\"model\"\\path\n\t".to_string(),
+            ],
+        ] {
+            let timestamp = "2026-11-16T06:29:12.910+00:00";
+            let legacy = PersistedCatalog {
+                models: models.clone(),
+                fetched_at_rfc3339: timestamp.to_string(),
+            };
+            let borrowed = PersistedCatalogRef {
+                models: &models,
+                fetched_at_rfc3339: timestamp.to_string(),
+            };
+            assert_eq!(borrowed.models.as_ptr(), models.as_ptr());
+            for (view, source) in borrowed.models.iter().zip(&models) {
+                assert!(std::ptr::eq(view, source));
+                assert_eq!(view.as_ptr(), source.as_ptr());
+            }
+            assert_eq!(
+                serde_json::to_vec(&borrowed).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec_pretty(&borrowed).unwrap(),
+                serde_json::to_vec_pretty(&legacy).unwrap()
+            );
+            let round_trip: PersistedCatalog =
+                serde_json::from_slice(&serde_json::to_vec(&borrowed).unwrap()).unwrap();
+            assert_eq!(round_trip.models, models);
+            assert_eq!(round_trip.fetched_at_rfc3339, timestamp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod canonical_input_tests {
+    use super::*;
+    use jcode_provider_core::fingerprint::stable_hash_json;
+
+    #[test]
+    fn borrowed_cursor_fingerprint_matches_legacy_payload() {
+        for system in ["", " \t\n", "  系統 🦀\nkeep whitespace  "] {
+            let model = "cursor-test-model";
+            let prompt = build_cli_prompt(system, &[]);
+            let original_prompt = prompt.clone();
+            let original_ptr = prompt.as_ptr();
+            let legacy_items = vec![Value::String(prompt.clone())];
+            let legacy_system =
+                (!system.trim().is_empty()).then(|| Value::String(system.to_string()));
+            let legacy_payload = json!({
+                "model": model,
+                "system": legacy_system.as_ref(),
+                "prompt": &prompt,
+            });
+            let payload = canonical_input_payload(model, system, &prompt);
+            let items = std::slice::from_ref(payload.get("prompt").unwrap());
+            let system_value = payload.get("system").filter(|value| !value.is_null());
+
+            assert_eq!(payload.as_object().unwrap().len(), 3);
+            assert_eq!(payload, legacy_payload);
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap(),
+                serde_json::to_vec(&legacy_payload).unwrap()
+            );
+            assert_eq!(
+                stable_hash_json(&payload),
+                stable_hash_json(&legacy_payload)
+            );
+            assert_eq!(items.len(), 1);
+            assert!(std::ptr::eq(&items[0], &payload["prompt"]));
+            assert_eq!(items, legacy_items);
+            assert_eq!(stable_hash_json(items), stable_hash_json(&legacy_items));
+            assert_eq!(
+                stable_hash_json(&items[0]),
+                stable_hash_json(&legacy_items[0])
+            );
+            assert_eq!(system_value, legacy_system.as_ref());
+            assert_eq!(
+                system_value.map(stable_hash_json),
+                legacy_system.as_ref().map(stable_hash_json)
+            );
+            assert_eq!(payload["system"].is_null(), system.trim().is_empty());
+            assert_eq!(payload["prompt"].as_str(), Some(original_prompt.as_str()));
+            assert_eq!(prompt, original_prompt);
+            assert_eq!(prompt.as_ptr(), original_ptr);
+            // Like the CLI task, the caller can still move the original allocation.
+            let moved_prompt = prompt;
+            assert_eq!(moved_prompt.as_ptr(), original_ptr);
+        }
     }
 }
 

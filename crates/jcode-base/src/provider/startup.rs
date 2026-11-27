@@ -70,6 +70,10 @@ impl MultiProvider {
 
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
+        // A restarted/reexec'd daemon has no usage RAM yet. Restore dated,
+        // account-scoped last-good limits before choosing or binding a route.
+        // Render-time quota accessors remain strictly memory-only.
+        crate::usage::hydrate_persisted_account_usage();
         let cfg = crate::config::config();
         let provider_state = ProviderState::from_parts(cfg, &auth_status);
         let initial_provider = Self::initial_provider_from_env();
@@ -322,7 +326,7 @@ impl MultiProvider {
         // An explicit CLI/environment provider selection owns startup routing.
         // Applying the configured default model here can reactivate its configured
         // provider/profile before the caller pins a dual-auth credential mode.
-        let mut config_default_applied = false;
+        let mut preserve_config_default = false;
         if result.initial_provider.is_none()
             && let Some(model) = provider_state.default_model()
         {
@@ -334,16 +338,22 @@ impl MultiProvider {
                     model, e
                 ));
             } else {
-                config_default_applied = true;
+                preserve_config_default = !result.config_default_allows_pool_selection(
+                    model,
+                    provider_state.default_provider_key(),
+                );
                 crate::logging::info(&format!("Applied default model '{}' from config", model));
             }
         }
 
         result.spawn_anthropic_catalog_refresh_if_needed();
+        crate::auth::oauth::prefetch_missing_claude_subscription_metadata();
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.select_fresh_session_pool_route(config_default_applied);
+        if !preserve_config_default {
+            result.select_fresh_session_pool_route();
+        }
         let route_ms = route_start.elapsed().as_millis();
         crate::logging::info(&format!(
             "[TIMING] provider_init parts: creds={creds_ms}ms, runtimes={runtimes_ms}ms, route={route_ms}ms"
@@ -395,12 +405,67 @@ impl MultiProvider {
         result
     }
 
-    /// Fresh sessions preserve a successfully applied configured default. Without
-    /// one (missing or failed), use the first ready pool route. An explicit
-    /// initial provider owns routing instead. This is deliberately a local
+    /// Classify only a successfully applied default. Explicit model specs take
+    /// precedence over provider hints, just as in `set_config_default_model`.
+    /// Named profiles and API keys are deliberate routes, not pool identities.
+    fn config_default_allows_pool_selection(
+        &self,
+        model: &str,
+        default_provider: Option<&str>,
+    ) -> bool {
+        let model = model.trim();
+        if Self::named_provider_profile_model_prefix(model).is_some() {
+            return false;
+        }
+        let explicit = explicit_model_provider_prefix(model).is_some()
+            || model.split_once(':').is_some_and(|(method, _)| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+            })
+            || Self::openai_compatible_model_prefix(model).is_some();
+        // Never resolve the active provider name as a config hint: an unused
+        // [providers.openai] must not shadow a native bare-model selection.
+        if !explicit
+            && let Some(selection::ConfigProviderSelection::NamedProfile(..)) = default_provider
+                .and_then(|hint| {
+                    Self::resolve_config_provider_selection(hint, crate::config::config())
+                })
+        {
+            return false;
+        }
+
+        let pool = crate::auth::account_pool::AccountPool::load();
+        if self.active_provider() == ActiveProvider::OpenRouter {
+            // A catalog profile can represent a saved login explicitly enrolled
+            // in the pool. User-defined profiles must never inherit membership
+            // merely because they share the OpenRouter execution slot.
+            return ProviderRegistry::new(self)
+                .active_compatible_profile_id()
+                .and_then(|id| crate::provider_catalog::openai_compatible_profile_by_id(&id))
+                .is_some_and(|profile| pool.is_member(profile.id, false));
+        }
+        if self.active_resolved_credential() != Some(jcode_provider_core::ResolvedCredential::Oauth)
+        {
+            return false;
+        }
+        let (provider, active_label) = match self.active_provider() {
+            ActiveProvider::OpenAI => ("openai", auth::codex::active_account_label()),
+            ActiveProvider::Claude => ("claude", auth::claude::active_account_label()),
+            _ => return false,
+        };
+        let label = self.oauth_account_label().or(active_label);
+        pool.is_member(
+            &crate::auth::account_pool::account_key(provider, label.as_deref()),
+            true,
+        )
+    }
+
+    /// Fresh sessions choose the first ready account in priority order. A saved
+    /// default model remains a preference within the selected account, not a
+    /// sticky billing identity. An explicit initial provider owns routing instead.
+    /// This is deliberately a local
     /// model/account binding: never promote the fallback or change active logins.
-    fn select_fresh_session_pool_route(&self, config_default_applied: bool) {
-        if self.initial_provider.is_some() || config_default_applied {
+    fn select_fresh_session_pool_route(&self) {
+        if self.initial_provider.is_some() {
             return;
         }
         // A reconnect burst forks one provider per client. Each choice reads every
@@ -536,9 +601,19 @@ impl MultiProvider {
                     .iter()
                     .filter(|route| route.0 == key && route.3 == ready)
                     .collect();
+                let candidate_models: Vec<&str> = candidates
+                    .iter()
+                    .map(|(_, model, _, _)| model.as_str())
+                    .collect();
+                let provider_key = key.split(':').next().unwrap_or(key);
+                let provider_preferred = crate::auth::lifecycle::preferred_model_for_provider(
+                    provider_key,
+                    &candidate_models,
+                );
                 candidates.sort_by_key(|(_, model, _, _)| {
                     (
                         configured_model != Some(model.as_str()),
+                        provider_preferred.as_deref() != Some(model.as_str()),
                         jcode_provider_core::model_generation_rank(model),
                     )
                 });

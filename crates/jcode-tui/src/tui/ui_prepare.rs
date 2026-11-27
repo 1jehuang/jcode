@@ -1,6 +1,9 @@
 #[path = "ui_prepare/assistant_aux.rs"]
 mod assistant_aux;
 use assistant_aux::*;
+#[path = "ui_prepare_message_rendering.rs"]
+mod message_rendering;
+use message_rendering::render_message_into;
 
 use super::*;
 use crate::tui::ui::{self, WrappedLineMap};
@@ -43,6 +46,23 @@ fn assistant_aux_cache() -> &'static std::sync::Mutex<AssistantAuxCacheState> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<AssistantAuxCacheState>> =
         std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(AssistantAuxCacheState::default()))
+}
+
+/// Diagnostic-only snapshot of unique auxiliary payload allocations.
+pub(super) fn debug_assistant_aux_memory_profile() -> serde_json::Value {
+    let cache = assistant_aux_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    super::memory_estimates::diagnostic_aux_profile(
+        cache.entries.values().map(|value| {
+            (
+                Arc::as_ptr(value) as usize,
+                std::mem::size_of::<AssistantAuxData>(),
+                &value.logical_plain_lines,
+            )
+        }),
+        cache.order.len(),
+    )
 }
 
 fn content_prefers_display_as_logical_lines(content: &str) -> bool {
@@ -132,130 +152,12 @@ fn is_error_copy_content(content: &str) -> bool {
     trimmed.starts_with("Error:") || trimmed.starts_with("error:") || trimmed.starts_with("Failed:")
 }
 
-/// Build the image regions for an image/mermaid placeholder in `wrapped_lines`,
-/// where each placeholder "owns" the run of blank lines that follow it.
-///
-/// Done in a single reverse pass that precomputes, for every line, the length
-/// of the blank run starting at that line. The previous implementation scanned
-/// forward through the trailing blanks for every placeholder, which is O(L^2)
-/// when a message has many placeholders each followed by long blank runs.
-pub(super) fn compute_image_regions(
-    wrapped_lines: &[ratatui::text::Line<'static>],
-) -> Vec<ImageRegion> {
-    fn is_blank_line(line: &ratatui::text::Line<'static>) -> bool {
-        line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].content.is_empty())
-    }
-
-    let len = wrapped_lines.len();
-    // blank_run[i] = number of consecutive blank lines starting at index i.
-    let mut blank_run = vec![0usize; len + 1];
-    for idx in (0..len).rev() {
-        blank_run[idx] = if is_blank_line(&wrapped_lines[idx]) {
-            blank_run[idx + 1] + 1
-        } else {
-            0
-        };
-    }
-
-    let mut image_regions = Vec::new();
-    for (idx, line) in wrapped_lines.iter().enumerate() {
-        if let Some(hash) = super::super::mermaid::parse_image_placeholder(line) {
-            // The placeholder line plus the blank run immediately after it.
-            let height = (1 + blank_run[idx + 1]).min(u16::MAX as usize) as u16;
-            image_regions.push(ImageRegion {
-                abs_line_idx: idx,
-                end_line: idx + height as usize,
-                hash,
-                height,
-                // Mermaid crop regions don't know their rendered width here;
-                // 0 = treat the rows as fully occupied for layout purposes.
-                width: 0,
-                render: jcode_tui_messages::ImageRegionRender::Crop,
-            });
-        } else if let Some((hash, rows, cols)) =
-            super::super::mermaid::parse_inline_image_placeholder(line)
-        {
-            // Inline raster image anchored in the transcript body. The marker
-            // encodes its exact geometry; clamp to the blank run that actually
-            // follows so a wrapped/truncated placeholder can never claim
-            // non-blank lines below it.
-            let available = (1 + blank_run[idx + 1]).min(u16::MAX as usize) as u16;
-            let height = rows.max(1).min(available);
-            image_regions.push(ImageRegion {
-                abs_line_idx: idx,
-                end_line: idx + height as usize,
-                hash,
-                height,
-                width: cols,
-                render: jcode_tui_messages::ImageRegionRender::Fit,
-            });
-        }
-    }
-    image_regions
-}
-
-fn error_copy_target(content: &str, rendered_line_count: usize) -> Option<RawCopyTarget> {
-    copy_target_for_kind(CopyTargetKind::Error, content, rendered_line_count)
-}
-
-fn tool_output_copy_target(content: &str, rendered_line_count: usize) -> Option<RawCopyTarget> {
-    copy_target_for_kind(CopyTargetKind::ToolOutput, content, rendered_line_count)
-}
-
-fn copy_target_for_kind(
-    kind: CopyTargetKind,
-    content: &str,
-    rendered_line_count: usize,
-) -> Option<RawCopyTarget> {
-    let content = content.trim();
-    if content.is_empty() {
-        return None;
-    }
-
-    Some(RawCopyTarget {
-        kind,
-        content: content.to_string(),
-        start_raw_line: 0,
-        end_raw_line: rendered_line_count.max(1),
-        badge_raw_line: 0,
-    })
-}
-
-fn offset_copy_target(target: RawCopyTarget, line_offset: usize) -> RawCopyTarget {
-    RawCopyTarget {
-        kind: target.kind,
-        content: target.content,
-        start_raw_line: target.start_raw_line + line_offset,
-        end_raw_line: target.end_raw_line + line_offset,
-        badge_raw_line: target.badge_raw_line + line_offset,
-    }
-}
-
-fn assistant_message_copy_targets(
-    content: &str,
-    rendered_lines: &[Line<'static>],
-) -> Vec<RawCopyTarget> {
-    if is_error_copy_content(content) {
-        return error_copy_target(content, rendered_lines.len())
-            .into_iter()
-            .collect();
-    }
-
-    crate::tui::markdown::extract_copy_targets_from_rendered_lines(rendered_lines)
-}
-
-fn tool_message_copy_target(
-    msg: &DisplayMessage,
-    rendered_line_count: usize,
-) -> Option<RawCopyTarget> {
-    if is_error_copy_content(&msg.content) {
-        return error_copy_target(&msg.content, rendered_line_count);
-    }
-    if tools_ui::tool_output_looks_failed(&msg.content) {
-        return tool_output_copy_target(&msg.content, rendered_line_count);
-    }
-    None
-}
+#[path = "ui_prepare/copy_targets.rs"]
+mod copy_targets;
+pub(super) use copy_targets::{
+    assistant_message_copy_targets, compute_image_regions, error_copy_target, offset_copy_target,
+    tool_message_copy_target,
+};
 
 /// Build the inline "what changed" delta lines for a `todo` tool message, if it
 /// is a successful write. `messages` is the full transcript and `abs_idx` is the
@@ -299,14 +201,7 @@ fn push_user_prompt_lines(
 ) {
     let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
         + unicode_width::UnicodeWidthStr::width("› ");
-    // Voice prompts carry <transcription> tags for the model. Show the spoken
-    // words with a mic marker instead, like Jcode Desktop.
-    let (visible, transcribed) = jcode_session_types::strip_transcription(content);
-    let content: &str = if transcribed {
-        &format!("🎙 {visible}")
-    } else {
-        content
-    };
+    // Callers supply already projected user-facing content.
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     for (line_idx, content_line) in normalized.split('\n').enumerate() {
         let raw_line = raw_plain_lines.len();
@@ -408,6 +303,19 @@ fn first_mermaid_pending_message(prepared: &PreparedMessages) -> Option<usize> {
     )
 }
 
+fn active_codemode(app: &dyn TuiState) -> Option<crate::message::ToolCall> {
+    // Connection-phase and nested-tool events can replace RunningTool while
+    // the parent call is still live. ToolDone removes it from this list, so
+    // pending tool calls, not the transient status label, own its lifetime.
+    if !app.is_processing() {
+        return None;
+    }
+    app.streaming_tool_calls()
+        .into_iter()
+        .rev()
+        .find(|tool| tools_ui::canonical_tool_name(&tool.name) == "codemode")
+}
+
 fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress> {
     match app.status() {
         ProcessingStatus::RunningTool(name) if name == "batch" => app.batch_progress(),
@@ -416,6 +324,14 @@ fn active_batch_progress(app: &dyn TuiState) -> Option<crate::bus::BatchProgress
 }
 
 pub(super) fn active_batch_progress_hash(app: &dyn TuiState) -> u64 {
+    if let Some(tool) = active_codemode(app) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        tool.id.hash(&mut hasher);
+        tool.input.to_string().hash(&mut hasher);
+        tool.intent.hash(&mut hasher);
+        super::activity_indicator_frame_index(app.animation_elapsed(), 12.5).hash(&mut hasher);
+        return hasher.finish();
+    }
     let Some(progress) = active_batch_progress(app) else {
         return 0;
     };
@@ -507,6 +423,46 @@ fn prepare_active_batch_progress(
     width: u16,
     prefix_blank: bool,
 ) -> PreparedMessages {
+    if let Some(tool) = active_codemode(app) {
+        let block_width = if app.centered_mode() {
+            super::centered_content_block_width(width, 96)
+        } else {
+            width as usize
+        };
+        let row_width = block_width.saturating_sub(1);
+        let spinner = super::activity_indicator(app.animation_elapsed(), 12.5);
+        let mut lines = Vec::new();
+        if prefix_blank {
+            lines.push(Line::from(""));
+        }
+        let mut header = vec![
+            Span::styled(
+                format!("  {spinner} "),
+                Style::default().fg(rgb(255, 193, 94)),
+            ),
+            Span::styled("codemode", Style::default().fg(tool_color())),
+        ];
+        if let Some(intent) = tool
+            .intent
+            .as_deref()
+            .filter(|intent| !intent.trim().is_empty())
+        {
+            header.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            header.push(Span::styled(
+                intent.to_owned(),
+                Style::default().fg(tool_color()),
+            ));
+        }
+        lines.push(super::truncate_line_with_ellipsis_to_width(
+            &Line::from(header),
+            row_width,
+        ));
+        lines.extend(tools_ui::codemode_preview(&tool, row_width));
+        if app.centered_mode() {
+            super::left_pad_lines_to_block_width(&mut lines, width, block_width);
+        }
+        return wrap_lines_with_map(lines, &[], &[], &[], &[], &[], width, &[], &[], &[]);
+    }
     let Some(progress) = active_batch_progress(app) else {
         return empty_prepared_messages();
     };
@@ -595,25 +551,31 @@ pub(super) fn prepare_messages(
     let restage_start = Instant::now();
     super::inline_image_ui::restage_requested_payloads(app);
     super::note_prep_restage(restage_start.elapsed());
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_messages_inner(app, width, height));
     }
 
     let key = FullPrepCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         height,
         diff_mode: app.diff_mode(),
         // Pinning changes which tool messages participate in the transcript.
+        // The live todo payload also owns the trailing blocker explanations.
         messages_version: app
             .display_messages_version()
             .wrapping_mul(2)
-            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos))
+            .wrapping_mul(31)
+            .wrapping_add(super::hash_text_for_cache(
+                app.pinned_todos_payload().unwrap_or(""),
+            )),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
         is_processing: app.is_processing(),
         streaming_text_len: app.streaming_text().len(),
-        streaming_text_hash: super::hash_text_for_cache(app.streaming_text()),
+        streaming_text_hash: app.streaming_text_hash(),
         batch_progress_hash: active_batch_progress_hash(app),
         // An unpinned transcript must not reuse a previously prepared frame
         // containing anchored images. With no images, both modes are visually
@@ -627,6 +589,7 @@ pub(super) fn prepare_messages(
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
+        show_link_urls: crate::config::config().display.show_link_urls,
     };
 
     super::note_full_prep_request();
@@ -642,7 +605,7 @@ pub(super) fn prepare_messages(
             }
         };
         let mut cache = cache;
-        if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+        if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
             // A completed deferred mermaid render does not bump
             // `messages_version`/`streaming_text_hash`, so an exact hit can
             // still bake in a stale "rendering..." placeholder. Fall through
@@ -652,7 +615,7 @@ pub(super) fn prepare_messages(
                 .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
             if !stale {
                 super::note_full_prep_cache_lookup(cache_lookup_start.elapsed());
-                super::note_full_prep_cache_hit(kind, prepared.as_ref());
+                super::note_full_prep_cache_hit(kind, prepared.as_ref(), prepared_bytes);
                 return prepared;
             }
         }
@@ -663,11 +626,13 @@ pub(super) fn prepare_messages(
 
     let build_start = Instant::now();
     let prepared = Arc::new(prepare_messages_inner(app, width, height));
-    super::note_full_prep_built(prepared.as_ref(), build_start.elapsed());
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_chat_frame_bytes(&prepared);
+    super::note_full_prep_built(prepared.as_ref(), prepared_bytes, build_elapsed);
 
     {
         if let Ok(mut cache) = full_prep_cache().lock() {
-            cache.insert(key, prepared.clone());
+            cache.insert_with_bytes(key, prepared.clone(), prepared_bytes);
         }
     }
 
@@ -678,7 +643,7 @@ pub(super) fn prepare_messages(
 /// screen. Derived only from the persistent header height (not suggestions)
 /// so the same value can be re-applied above the header once messages exist,
 /// keeping the header from jumping when the first prompt is sent.
-fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
+pub(crate) fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
     // Input chrome plus the always-pinned session status line below it.
     let input_reserve = 5;
     let available = (height as usize).saturating_sub(input_reserve);
@@ -743,7 +708,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
 
     let batch_start = Instant::now();
-    let has_batch_progress = active_batch_progress(app).is_some();
+    let has_batch_progress = active_batch_progress(app).is_some() || active_codemode(app).is_some();
     let batch_prefix_blank = has_batch_progress && !body_prepared.wrapped_lines.is_empty();
     let batch_progress_prepared = if has_batch_progress {
         Arc::new(prepare_active_batch_progress(
@@ -762,12 +727,20 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     let reasoning_prepared = Arc::new(empty_prepared_messages());
     let has_streaming = app.is_processing() && !app.streaming_text().is_empty();
     let stream_prefix_blank = has_streaming
+        && !(crate::config::config().display.compact_thinking
+            && super::messages::starts_with_reasoning(app.streaming_text()))
         && (!body_prepared.wrapped_lines.is_empty()
             || !batch_progress_prepared.wrapped_lines.is_empty()
             || !reasoning_prepared.wrapped_lines.is_empty());
     let streaming_prepared = if has_streaming {
         Arc::new(prepare_streaming_cached(app, width, stream_prefix_blank))
     } else {
+        // The reply was committed or cleared: its wrapped head is dead weight.
+        STREAMING_HEAD_WRAP.with(|cache| {
+            if cache.borrow().is_some() {
+                *cache.borrow_mut() = None;
+            }
+        });
         Arc::new(empty_prepared_messages())
     };
     let streaming_ms = streaming_start.elapsed().as_secs_f64() * 1000.0;
@@ -839,7 +812,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         // the header at the same screen position when the first prompt
         // arrives; the padding then simply scrolls away as the transcript
         // grows instead of vanishing in one jump.
-        let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+        let pad_top = if app.is_replay() {
+            0
+        } else {
+            initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+        };
         let mut centered = build_top_pad_lines(width, pad_top);
         centered.reserve(wrapped_lines.len());
         centered.extend(wrapped_lines);
@@ -877,7 +854,11 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     // Re-apply the initial-screen centering pad above the header so the
     // transition from the empty screen to the first message does not shift
     // anything. The pad scrolls off naturally as the transcript grows.
-    let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
+    let pad_top = if app.is_replay() {
+        0
+    } else {
+        initial_header_pad_top(height, header_prepared.wrapped_lines.len())
+    };
     let padded_header = if pad_top > 0 {
         let mut lines = build_top_pad_lines(width, pad_top);
         lines.reserve(header_prepared.wrapped_lines.len());
@@ -910,6 +891,10 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         (PreparedSectionKind::BatchProgress, batch_progress_prepared),
         (PreparedSectionKind::Reasoning, reasoning_prepared),
         (PreparedSectionKind::Streaming, streaming_prepared),
+        (
+            PreparedSectionKind::TodoBlockers,
+            Arc::new(prepare_todo_blockers(app, width)),
+        ),
     ]);
     super::note_full_prep_phase_metrics(super::FullPrepPhaseMetrics {
         header_ms,
@@ -919,6 +904,16 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
         compose_ms: compose_start.elapsed().as_secs_f64() * 1000.0,
     });
     frame
+}
+
+fn prepare_todo_blockers(app: &dyn TuiState, width: u16) -> PreparedMessages {
+    wrap_lines(
+        messages::todo_blocker_notes(app.pinned_todos_payload()),
+        &[],
+        &[],
+        &[],
+        width,
+    )
 }
 
 /// TTL + cheap-signature cache for the prepared (built + wrapped) header.
@@ -960,6 +955,13 @@ struct HeaderPrepCacheState {
 fn header_prep_cache() -> &'static std::sync::Mutex<Option<HeaderPrepCacheState>> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
         std::sync::OnceLock::new();
+    // Single-slot cache: a secondary (preview) render must not evict the live
+    // session's header every frame, so it gets a slot of its own.
+    static SECONDARY: std::sync::OnceLock<std::sync::Mutex<Option<HeaderPrepCacheState>>> =
+        std::sync::OnceLock::new();
+    if super::secondary_render_active() {
+        return SECONDARY.get_or_init(|| std::sync::Mutex::new(None));
+    }
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
@@ -1031,7 +1033,7 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
         Arc::new(wrap_lines(all_header_lines, &[], &[], &[], width))
     };
 
-    if cfg!(test) {
+    if app.is_replay() || prep_cache_bypassed() {
         return build();
     }
 
@@ -1057,13 +1059,14 @@ fn prepare_header_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages
 }
 
 fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> {
-    if cfg!(test) {
+    if prep_cache_bypassed() {
         return Arc::new(prepare_body(app, width, false));
     }
 
     super::note_body_request();
 
     let key = BodyCacheKey {
+        compact_thinking: crate::config::config().display.compact_thinking,
         width,
         diff_mode: app.diff_mode(),
         // Pinning changes which tool messages participate in the transcript.
@@ -1080,6 +1083,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         expanded_images_version: app.expanded_images_version(),
         swarm_members_signature: swarm_members_signature(&app.swarm_members_for_transcript()),
         latex_rendering: crate::config::config().display.latex_rendering,
+        show_link_urls: crate::config::config().display.show_link_urls,
     };
     let msg_count = app.display_messages().len();
     let cache_lookup_start = Instant::now();
@@ -1094,7 +1098,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     };
 
     let mut cache = cache;
-    if let Some((prepared, kind)) = cache.get_exact_with_kind(&key) {
+    if let Some((prepared, kind, prepared_bytes)) = cache.get_exact_with_kind(&key) {
         // A deferred mermaid render completing does not bump
         // `messages_version`, so an exact hit can still be stale: it bakes in
         // a "rendering..." placeholder whose background render has since
@@ -1105,7 +1109,7 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
             .is_some_and(|stamp| crate::tui::mermaid::deferred_render_epoch() != stamp);
         if !stale {
             super::note_body_cache_lookup(cache_lookup_start.elapsed());
-            super::note_body_cache_hit(kind, prepared.as_ref());
+            super::note_body_cache_hit(kind, prepared.as_ref(), prepared_bytes);
             return prepared;
         }
     }
@@ -1117,6 +1121,10 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
 
     drop(cache);
 
+    if let Some((base, _, _)) = incremental_base.as_ref() {
+        super::release_frame_refs_to_body(base);
+    }
+
     let build_start = Instant::now();
     let (prepared, build_path) = match incremental_base {
         Some((prev, prev_count, prev_prompt_offset)) => {
@@ -1125,15 +1133,18 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
         None => (Arc::new(prepare_body(app, width, false)), "full"),
     };
 
-    super::note_body_built(prepared.as_ref(), build_start.elapsed(), build_path);
+    let build_elapsed = build_start.elapsed();
+    let prepared_bytes = super::estimate_prepared_messages_bytes(&prepared);
+    super::note_body_built(prepared.as_ref(), prepared_bytes, build_elapsed, build_path);
 
     let mut cache = match body_cache().lock() {
         Ok(c) => c,
         Err(poisoned) => poisoned.into_inner(),
     };
-    cache.insert(
+    cache.insert_with_bytes(
         key,
         prepared.clone(),
+        prepared_bytes,
         msg_count,
         app.compacted_hidden_user_prompts(),
     );
@@ -1243,7 +1254,8 @@ pub(super) fn build_body_from_base(
 /// builders. Holding this in one place keeps the single per-message renderer
 /// (`render_message_into`) free of divergence between the two entry points.
 struct BodyRenderCtx<'a> {
-    app: &'a dyn TuiState,
+    app: Option<&'a dyn TuiState>,
+    diff_mode: crate::config::DiffDisplayMode,
     width: u16,
     centered: bool,
     /// Number rendered next to the first user prompt = global prompt count +
@@ -1256,6 +1268,110 @@ struct BodyRenderCtx<'a> {
     messages: &'a [DisplayMessage],
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
 }
+
+/// Render saved history through the live dispatcher and wrapping pipeline.
+/// No active App is borrowed: expansion state, images and in-flight swarm work
+/// from the session behind the picker must never leak into this transcript.
+#[cfg(test)]
+pub(crate) fn prepare_history_preview(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> PreparedMessages {
+    prepare_history_preview_bounded(messages, hidden_prompts, width, diff_mode, None)
+        .unwrap_or_else(|| preview_fallback::unavailable(width))
+}
+
+#[cfg(test)]
+#[path = "ui_prepare/preview_fallback.rs"]
+mod preview_fallback;
+
+/// Choose scrollbar width without fully rendering overflowing history twice.
+/// The budget excludes caller-owned header and padding rows. The flag is the
+/// wide layout's strict overflow decision, not a second narrow-layout decision.
+#[cfg(test)]
+pub(crate) fn prepare_history_preview_for_viewport(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    wide_width: u16,
+    narrow_width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: usize,
+) -> (PreparedMessages, bool) {
+    if wide_width == narrow_width {
+        let prepared = prepare_history_preview(messages, hidden_prompts, wide_width, diff_mode);
+        let overflow = prepared.wrapped_lines.len() > max_body_rows;
+        return (prepared, overflow);
+    }
+    if let Some(wide) = prepare_history_preview_bounded(
+        messages,
+        hidden_prompts,
+        wide_width,
+        diff_mode,
+        Some(max_body_rows),
+    ) && wide.wrapped_lines.len() <= max_body_rows
+    {
+        return (wide, false);
+    }
+    (
+        prepare_history_preview(messages, hidden_prompts, narrow_width, diff_mode),
+        true,
+    )
+}
+
+#[cfg(test)]
+fn prepare_history_preview_bounded(
+    messages: &[DisplayMessage],
+    hidden_prompts: usize,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    max_body_rows: Option<usize>,
+) -> Option<PreparedMessages> {
+    markdown::with_center_code_blocks(false, || {
+        let ctx = BodyRenderCtx {
+            app: None,
+            diff_mode,
+            width,
+            centered: false,
+            prompt_number_offset: hidden_prompts,
+            total_prompts: messages
+                .iter()
+                .filter(|msg| msg.effective_role() == "user")
+                .count(),
+            pending_count: 0,
+            anchored_images: Arc::new(Default::default()),
+            inline_images_visible: false,
+            messages,
+            swarm_members: Vec::new(),
+        };
+        let mut acc = BodyAcc::default();
+        for (idx, msg) in messages.iter().enumerate() {
+            render_message_into(&ctx, &mut acc, msg, idx);
+            // Wrapping preserves at least one row per input line, including
+            // blanks and zero-width viewports. Equality may still fit.
+            if max_body_rows.is_some_and(|budget| acc.lines.len() > budget) {
+                return None;
+            }
+        }
+        Some(wrap_lines_with_map(
+            acc.lines,
+            &acc.raw_plain_lines,
+            &acc.line_raw_overrides,
+            &acc.line_copy_offsets,
+            &acc.user_line_indices,
+            &acc.user_prompt_texts,
+            width,
+            &acc.edit_tool_line_ranges,
+            &acc.copy_targets,
+            &acc.segments,
+        ))
+    })
+}
+
+#[cfg(test)]
+#[path = "ui_prepare/viewport_preview_tests.rs"]
+mod viewport_preview_tests;
 
 /// Mutable accumulator for one body build. Both `prepare_body` (full) and
 /// `prepare_body_incremental` (tail only) push into one of these via the shared
@@ -1318,401 +1434,6 @@ impl BodyAcc {
     }
 }
 
-/// Render a single transcript message into `acc`. This is the one canonical
-/// per-message renderer; the full and incremental body builders both call it so
-/// their output cannot drift (which previously caused subtle text-selection and
-/// spacing differences on the incremental path).
-fn render_message_into(
-    ctx: &BodyRenderCtx<'_>,
-    acc: &mut BodyAcc,
-    msg: &DisplayMessage,
-    msg_global_idx: usize,
-) {
-    let width = ctx.width;
-    let centered = ctx.centered;
-    let app = ctx.app;
-    let role = msg.effective_role();
-    // The pinned band is the canonical todo presentation while enabled. Keep
-    // todo tool messages in display_messages for history/session fidelity, but
-    // omit their duplicate cards from the prepared transcript.
-    if role == "tool"
-        && crate::config::config().display.pin_todos
-        && msg
-            .tool_data
-            .as_ref()
-            .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
-    {
-        // Hidden messages still occupy a position in the transcript cache.
-        // Without this zero-length boundary, incremental updates compare later
-        // messages against the wrong indices and can truncate earlier content.
-        acc.segments.push((
-            msg.stable_cache_hash(),
-            acc.lines.len(),
-            acc.raw_plain_lines.len(),
-            acc.user_prompt_texts.len(),
-        ));
-        return;
-    }
-    let align = default_message_alignment(role, centered);
-
-    if (acc.body_has_content || !acc.lines.is_empty())
-        && role != "tool"
-        && role != "meta"
-        && role != "swarm"
-    {
-        acc.push_blank();
-    }
-
-    match role {
-        "user" => {
-            acc.prompt_num += 1;
-            acc.user_prompt_texts.push(msg.content.clone());
-            let distance = ctx.total_prompts + ctx.pending_count + 1 - acc.prompt_num;
-            let num_color = rainbow_prompt_color(distance);
-            let displayed_prompt_num = acc.prompt_num + ctx.prompt_number_offset;
-            push_user_prompt_lines(
-                &mut acc.lines,
-                &mut acc.raw_plain_lines,
-                &mut acc.line_raw_overrides,
-                &mut acc.line_copy_offsets,
-                &mut acc.user_line_indices,
-                displayed_prompt_num,
-                num_color,
-                &msg.content,
-                align,
-            );
-            if !crate::session::is_attached_image_label_text(&msg.content) {
-                let ordinal = acc.anchor_prompt_ordinal;
-                acc.anchor_prompt_ordinal += 1;
-                if let Some(items) = ctx.anchored_images.by_prompt.get(&ordinal) {
-                    for line in super::inline_image_ui::anchored_image_lines(
-                        items,
-                        width,
-                        ctx.inline_images_visible,
-                        &super::inline_image_ui::AppExpandLevels(app),
-                    ) {
-                        acc.push_auto(line);
-                    }
-                }
-            }
-        }
-        "assistant" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_assistant_message,
-            );
-            let message_copy_targets = assistant_message_copy_targets(&msg.content, &cached);
-            for target in message_copy_targets {
-                acc.copy_targets
-                    .push(offset_copy_target(target, acc.lines.len()));
-            }
-            let aux = assistant_aux_data(
-                msg,
-                &cached,
-                content_width,
-                centered,
-                app.diff_mode(),
-                align,
-            );
-            let content_line_count = aux.content_line_count;
-            let logical_plain_lines = &aux.logical_plain_lines;
-            let raw_base = acc.raw_plain_lines.len();
-            let content_maps = map_display_lines_to_logical_lines(
-                &cached[..content_line_count],
-                logical_plain_lines,
-                raw_base,
-            );
-            if let Some(maps) = content_maps {
-                // Content lines map back into the logical markdown lines for
-                // text selection; seed those raws contiguously. Trailing
-                // tool-summary lines (idx >= content_line_count) and any line
-                // the mapping could not cover fall back to self-raws via
-                // `push_auto`, keeping `raw_plain_lines` message-contiguous.
-                acc.raw_plain_lines
-                    .extend(logical_plain_lines.iter().cloned());
-                for (idx, line) in cached.into_iter().enumerate() {
-                    let line = align_if_unset(line, align);
-                    if let Some(map) = maps.get(idx).copied() {
-                        acc.lines.push(line);
-                        acc.line_raw_overrides.push(Some(map));
-                        acc.line_copy_offsets.push(0);
-                    } else {
-                        acc.push_auto(line);
-                    }
-                }
-            } else {
-                // Logical mapping failed; every display line uses its own plain
-                // text as the raw, matching the previous wrap-time fallback but
-                // recorded contiguously and in message order.
-                for line in cached {
-                    acc.push_auto(align_if_unset(line, align));
-                }
-            }
-        }
-        "meta" => {
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width = if centered {
-                0
-            } else {
-                unicode_width::UnicodeWidthStr::width("  ")
-            };
-            acc.lines.push(
-                Line::from(vec![
-                    Span::raw(if centered { "" } else { "  " }),
-                    Span::styled(msg.content.clone(), Style::default().fg(dim_color())),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
-        }
-        "tool" => {
-            let tool_start_line = acc.lines.len();
-            let cached = get_cached_message_lines(msg, width, app.diff_mode(), render_tool_message);
-            if let Some(target) = tool_message_copy_target(msg, cached.len()) {
-                acc.copy_targets
-                    .push(offset_copy_target(target, tool_start_line));
-            }
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-            if let Some(member) = spawned_member_for_tool(msg, &ctx.swarm_members) {
-                for line in crate::tui::info_widget::swarm_gallery::render_swarm_chat_card_lines(
-                    std::slice::from_ref(member),
-                    width.saturating_sub(1) as usize,
-                ) {
-                    acc.push_auto(line.alignment(ratatui::layout::Alignment::Left));
-                }
-            }
-            for line in todo_change_lines(ctx.messages, msg_global_idx, msg, width) {
-                acc.push_auto(align_if_unset(line, align));
-            }
-            if let Some(ref tc) = msg.tool_data {
-                let is_edit_tool = tools_ui::is_edit_tool_name(&tc.name);
-                if is_edit_tool {
-                    let file_path = tc
-                        .input
-                        .get("file_path")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or_else(|| {
-                            tc.input
-                                .get("patch_text")
-                                .and_then(|v| v.as_str())
-                                .and_then(|patch_text| {
-                                    match tools_ui::edit_render_name(&tc.name, &tc.input) {
-                                        "apply_patch" => {
-                                            tools_ui::extract_apply_patch_primary_file(patch_text)
-                                        }
-                                        "patch" => {
-                                            tools_ui::extract_unified_patch_primary_file(patch_text)
-                                        }
-                                        _ => None,
-                                    }
-                                })
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-                    // Outside the inline modes the diff body is hidden entirely,
-                    // so any edit with a diff can be expanded into full inline.
-                    let expandable = if app.diff_mode().is_inline() {
-                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
-                    } else {
-                        messages::edit_tool_has_inline_diff(tc, &msg.content)
-                    };
-                    acc.edit_tool_line_ranges.push((
-                        msg_global_idx,
-                        file_path,
-                        tool_start_line,
-                        acc.lines.len(),
-                        expandable,
-                    ));
-                }
-                if let Some(items) = ctx.anchored_images.by_tool.get(&tc.id) {
-                    for line in super::inline_image_ui::anchored_image_lines(
-                        items,
-                        width,
-                        ctx.inline_images_visible,
-                        &super::inline_image_ui::AppExpandLevels(app),
-                    ) {
-                        acc.push_auto(line);
-                    }
-                }
-            }
-        }
-        "system" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_system_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        // Terminal-style clear spacer (Ctrl+L): N blank rows that push the
-        // prior transcript up out of the viewport while keeping it in
-        // scrollback. The separator blank already pushed above counts toward
-        // the requested height.
-        "spacer" => {
-            let rows: usize = msg.content.trim().parse().unwrap_or(0);
-            for _ in 0..rows.saturating_sub(1) {
-                acc.push_blank();
-            }
-        }
-        "reasoning" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_reasoning_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "background_task" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                render_background_task_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "swarm" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_swarm_message);
-            for line in cached {
-                let line = align_if_unset(line, align);
-                let plain = ui::line_plain_text(&line);
-                let (semantic, prefix_width) = semantic_swarm_line_text(plain.as_str());
-                let raw_line = acc.raw_plain_lines.len();
-                let raw_width = unicode_width::UnicodeWidthStr::width(semantic.as_str());
-                acc.raw_plain_lines.push(semantic);
-                acc.lines.push(line);
-                acc.line_raw_overrides.push(Some(WrappedLineMap {
-                    raw_line,
-                    start_col: 0,
-                    end_col: raw_width,
-                }));
-                acc.line_copy_offsets.push(prefix_width);
-            }
-        }
-        "memory" => {
-            let border_style = Style::default().fg(rgb(130, 140, 180));
-            let text_style = Style::default().fg(dim_color());
-            let entries = super::memory_ui::parse_memory_display_entries(&msg.content);
-
-            let count = entries.len();
-            let tiles = group_into_tiles(entries);
-
-            let header_text = if let Some(title) = &msg.title {
-                title.clone()
-            } else if count == 1 {
-                "🧠 1 memory".to_string()
-            } else {
-                format!("🧠 {} memories", count)
-            };
-            let header = Line::from(Span::styled(header_text, border_style)).alignment(align);
-
-            let total_width = if centered {
-                (width.saturating_sub(4) as usize).min(120)
-            } else {
-                width.saturating_sub(2) as usize
-            };
-            let tile_lines =
-                render_memory_tiles(&tiles, total_width, border_style, text_style, Some(header));
-            for line in tile_lines {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "usage" => {
-            let content_width = width.saturating_sub(4);
-            let cached =
-                get_cached_message_lines(msg, content_width, app.diff_mode(), render_usage_message);
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "overnight" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                super::messages::render_overnight_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "todos" => {
-            let content_width = width.saturating_sub(4);
-            let cached = get_cached_message_lines(
-                msg,
-                content_width,
-                app.diff_mode(),
-                super::messages::render_todos_message,
-            );
-            for line in cached {
-                acc.push_auto(align_if_unset(line, align));
-            }
-        }
-        "error" => {
-            let error_start_line = acc.lines.len();
-            if let Some(target) = error_copy_target(&msg.content, 1) {
-                acc.copy_targets
-                    .push(offset_copy_target(target, error_start_line));
-            }
-            let raw_line = acc.raw_plain_lines.len();
-            acc.raw_plain_lines.push(msg.content.clone());
-            let raw_width = unicode_width::UnicodeWidthStr::width(msg.content.as_str());
-            let prefix_width =
-                unicode_width::UnicodeWidthStr::width(if centered { "✗ " } else { "  ✗ " });
-            acc.lines.push(
-                Line::from(vec![
-                    Span::styled(
-                        if centered { "✗ " } else { "  ✗ " },
-                        Style::default().fg(Color::Red),
-                    ),
-                    Span::styled(msg.content.clone(), Style::default().fg(Color::Red)),
-                ])
-                .alignment(align),
-            );
-            acc.line_raw_overrides.push(Some(WrappedLineMap {
-                raw_line,
-                start_col: 0,
-                end_col: raw_width,
-            }));
-            acc.line_copy_offsets.push(prefix_width);
-        }
-        _ => {}
-    }
-
-    acc.segments.push((
-        msg.stable_cache_hash(),
-        acc.lines.len(),
-        acc.raw_plain_lines.len(),
-        acc.user_prompt_texts.len(),
-    ));
-}
-
 pub(super) fn prepare_body_incremental(
     app: &dyn TuiState,
     width: u16,
@@ -1757,7 +1478,8 @@ pub(super) fn prepare_body_incremental(
     };
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -1972,6 +1694,11 @@ pub(super) fn matching_prefix_len(base: &PreparedMessages, messages: &[DisplayMe
     while k < limit && base.message_boundaries[k].msg_hash == messages[k].stable_cache_hash() {
         k += 1;
     }
+    // A DM row depends on its entire adjacent run, including newly appended
+    // messages. Rebuild from the start of that run rather than reuse stale text.
+    while k > 0 && super::messages::is_collapsed_agent_dm(&messages[k - 1]) {
+        k -= 1;
+    }
     k
 }
 
@@ -1988,6 +1715,10 @@ pub(super) fn matching_suffix_len(base: &PreparedMessages, messages: &[DisplayMe
             == messages[msg_n - 1 - s].stable_cache_hash()
     {
         s += 1;
+    }
+    // Never splice into the middle of a row shared by multiple messages.
+    while s > 0 && super::messages::is_collapsed_agent_dm(&messages[msg_n - s]) {
+        s -= 1;
     }
     s
 }
@@ -2017,6 +1748,12 @@ pub(super) fn suffix_reuse_compatible(
     drop_msgs: usize,
     base_prompt_offset: usize,
 ) -> bool {
+    if messages
+        .get(head_count)
+        .is_some_and(super::messages::is_collapsed_agent_dm)
+    {
+        return false;
+    }
     if drop_msgs == 0 || drop_msgs >= base.message_boundaries.len() {
         return false;
     }
@@ -2083,7 +1820,8 @@ pub(super) fn prepare_body_prepended(
     markdown::set_center_code_blocks(centered);
 
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -2304,6 +2042,21 @@ fn prepare_streaming_cached(
         ratatui::layout::Alignment::Left
     };
 
+    // The renderer names the leading lines it did not re-render. They are
+    // only reusable here when a blank line follows them: display recentering
+    // above works on runs of non-blank lines, so a run that crossed the
+    // boundary could have shifted them.
+    let (stable_generation, stable_len) = app.streaming_markdown_stable_prefix();
+    let head_md_lines = if stable_len > 0
+        && md_lines
+            .get(stable_len)
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()))
+    {
+        stable_len
+    } else {
+        0
+    };
+
     let mut lines: Vec<Line<'static>> = Vec::new();
     if prefix_blank {
         lines.push(Line::from(""));
@@ -2312,9 +2065,119 @@ fn prepare_streaming_cached(
         lines.push(align_if_unset(line, align));
     }
 
-    let mut prepared = wrap_lines(lines, &[], &[], &[], width);
+    // Streaming replies need the same copy targets as finalized messages.
+    // Extract before wrapping, then map the ranges after joining the cached
+    // stable head and live tail so targets spanning that boundary stay intact.
+    let copy_targets = markdown::extract_copy_targets_from_rendered_lines(&lines);
+    let mut prepared = if head_md_lines == 0 {
+        wrap_lines(lines, &[], &[], &[], width)
+    } else {
+        let head_len = head_md_lines + usize::from(prefix_blank);
+        let key = StreamingHeadKey {
+            generation: stable_generation,
+            head_len,
+            width,
+            centered,
+            prefix_blank,
+        };
+        let tail_lines = lines.split_off(head_len);
+        let head = STREAMING_HEAD_WRAP.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            match cache.as_ref() {
+                Some((cached_key, head)) if *cached_key == key => Arc::clone(head),
+                _ => {
+                    let head = Arc::new(wrap_lines(lines, &[], &[], &[], width));
+                    *cache = Some((key, Arc::clone(&head)));
+                    head
+                }
+            }
+        });
+        append_wrapped_tail(&head, wrap_lines(tail_lines, &[], &[], &[], width))
+    };
+    prepared.copy_targets = copy_targets
+        .into_iter()
+        .map(|target| {
+            let wrapped_row = |raw_line| {
+                prepared
+                    .wrapped_line_map
+                    .partition_point(|map| map.raw_line < raw_line)
+            };
+            CopyTarget {
+                kind: target.kind,
+                content: target.content,
+                start_line: wrapped_row(target.start_raw_line),
+                end_line: wrapped_row(target.end_raw_line),
+                badge_line: wrapped_row(target.badge_raw_line),
+            }
+        })
+        .collect();
     stamp_mermaid_pending(&mut prepared, mermaid_epoch_before);
     prepared
+}
+
+/// Identifies the wrapped form of the stable head of a streaming reply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct StreamingHeadKey {
+    generation: u64,
+    head_len: usize,
+    width: u16,
+    centered: bool,
+    prefix_blank: bool,
+}
+
+thread_local! {
+    // One entry: only the reply being streamed on this thread is ever asked for.
+    static STREAMING_HEAD_WRAP: std::cell::RefCell<Option<(StreamingHeadKey, Arc<PreparedMessages>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Join two separately wrapped runs of lines into what wrapping them together
+/// would have produced. Only valid for plain lines (no user prompts, edit
+/// ranges or copy targets), which is all `wrap_lines` emits for streaming.
+fn append_wrapped_tail(head: &PreparedMessages, tail: PreparedMessages) -> PreparedMessages {
+    let head_rows = head.wrapped_lines.len();
+    let head_raw = head.raw_plain_lines.len();
+
+    let mut wrapped_lines = Vec::with_capacity(head_rows + tail.wrapped_lines.len());
+    wrapped_lines.extend(head.wrapped_lines.iter().cloned());
+    wrapped_lines.extend(tail.wrapped_lines);
+
+    let mut wrapped_plain_lines = Vec::with_capacity(wrapped_lines.len());
+    wrapped_plain_lines.extend(head.wrapped_plain_lines.iter().cloned());
+    wrapped_plain_lines.extend(tail.wrapped_plain_lines.iter().cloned());
+
+    let mut wrapped_copy_offsets = Vec::with_capacity(wrapped_lines.len());
+    wrapped_copy_offsets.extend(head.wrapped_copy_offsets.iter().copied());
+    wrapped_copy_offsets.extend(tail.wrapped_copy_offsets.iter().copied());
+
+    let mut raw_plain_lines = Vec::with_capacity(head_raw + tail.raw_plain_lines.len());
+    raw_plain_lines.extend(head.raw_plain_lines.iter().cloned());
+    raw_plain_lines.extend(tail.raw_plain_lines.iter().cloned());
+
+    let mut wrapped_line_map = Vec::with_capacity(wrapped_lines.len());
+    wrapped_line_map.extend(head.wrapped_line_map.iter().copied());
+    wrapped_line_map.extend(tail.wrapped_line_map.iter().map(|map| WrappedLineMap {
+        raw_line: map.raw_line + head_raw,
+        ..*map
+    }));
+
+    let mut image_regions = head.image_regions.clone();
+    image_regions.extend(tail.image_regions.iter().map(|region| {
+        let mut region = *region;
+        region.abs_line_idx += head_rows;
+        region.end_line += head_rows;
+        region
+    }));
+
+    PreparedMessages {
+        wrapped_lines,
+        wrapped_plain_lines: Arc::new(wrapped_plain_lines),
+        wrapped_copy_offsets: Arc::new(wrapped_copy_offsets),
+        raw_plain_lines: Arc::new(raw_plain_lines),
+        wrapped_line_map: Arc::new(wrapped_line_map),
+        image_regions,
+        ..tail
+    }
 }
 
 pub(super) fn prepare_body(
@@ -2336,7 +2199,8 @@ pub(super) fn prepare_body(
     let anchored_images = super::inline_image_ui::resolve_anchored_items_cached(app);
     let images_ms = images_start.elapsed().as_millis();
     let ctx = BodyRenderCtx {
-        app,
+        app: Some(app),
+        diff_mode: app.diff_mode(),
         width,
         centered,
         prompt_number_offset: app.compacted_hidden_user_prompts(),
@@ -2392,6 +2256,12 @@ pub(super) fn prepare_body(
         if centered {
             markdown::recenter_structured_blocks_for_display(&mut md_lines, display_width);
         }
+        let line_offset = acc.lines.len();
+        acc.copy_targets.extend(
+            assistant_message_copy_targets(app.streaming_text(), &md_lines)
+                .into_iter()
+                .map(|target| offset_copy_target(target, line_offset)),
+        );
         let align = default_message_alignment("assistant", centered);
         for line in md_lines {
             acc.lines.push(align_if_unset(line, align));
@@ -2524,6 +2394,7 @@ fn wrap_lines(
     }
 
     let image_regions = compute_image_regions(&wrapped_lines);
+    shrink_wrapped_lines(&mut wrapped_lines);
 
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
@@ -2543,6 +2414,16 @@ fn wrap_lines(
         message_boundaries: Vec::new(),
         mermaid_pending_epoch: None,
     }
+}
+
+/// Drop spare span and line capacity before a body is cached. Wrapping builds
+/// lines by pushing spans, so a long session kept ~1.7x the span slots it used,
+/// and these bodies live in the body cache for the session's lifetime.
+fn shrink_wrapped_lines(wrapped_lines: &mut Vec<Line<'static>>) {
+    for line in wrapped_lines.iter_mut() {
+        line.spans.shrink_to_fit();
+    }
+    wrapped_lines.shrink_to_fit();
 }
 
 #[expect(
@@ -2685,6 +2566,7 @@ fn wrap_lines_with_map(
         });
     }
 
+    shrink_wrapped_lines(&mut wrapped_lines);
     let wrapped_plain_lines = Arc::new(wrapped_lines.iter().map(ui::line_plain_text).collect());
 
     // Translate the per-message unwrapped-line boundaries into wrapped-line
@@ -2729,3 +2611,29 @@ fn wrap_lines_with_map(
 #[cfg(test)]
 #[path = "ui_prepare/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    // Thread-local so a probe that opts into the caches does not make tests
+    // running in parallel share (and clobber) its cache entries and metrics.
+    static ENABLE_PREP_CACHE_IN_TESTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tests bypass the prep caches by default for determinism. Perf probes opt in
+/// so they measure the production cached path.
+#[cfg(test)]
+pub(crate) fn set_prep_cache_enabled_for_tests(enabled: bool) {
+    ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.set(enabled));
+}
+
+#[inline]
+fn prep_cache_bypassed() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_PREP_CACHE_IN_TESTS.with(|flag| flag.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}

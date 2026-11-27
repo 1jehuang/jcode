@@ -5,6 +5,103 @@ use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
 #[tokio::test]
+async fn silent_background_task_still_publishes_started_activity() {
+    let mut events = Bus::global().subscribe();
+    BackgroundTaskManager::publish_task_started_activity(
+        "silent-start",
+        "bash",
+        Some("silent work"),
+        "silent-session",
+        false,
+    );
+    let activity = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(BusEvent::UiActivity(activity)) = events.recv().await {
+                if activity.session_id.as_deref() == Some("silent-session") {
+                    break activity;
+                }
+            }
+        }
+    })
+    .await
+    .expect("silent start must be published");
+    assert!(activity.message.contains("`silent-start`"));
+    assert!(activity.message.contains("`silent work`"));
+}
+
+struct SignalDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for SignalDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn assert_adopted_owner_cancelled(reload: bool) -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    // Capture the guard before spawn so even an unpolled task owns its work.
+    let owner = SignalDrop(Some(dropped_tx));
+    let handle = tokio::spawn(async move {
+        let _owner = owner;
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("agentgrep", "cancel-owner", handle).await;
+    if reload {
+        assert_eq!(manager.abort_live_tasks_for_reload().await, 1);
+    } else {
+        assert!(manager.cancel(&info.task_id).await?);
+    }
+    tokio::time::timeout(Duration::from_secs(5), dropped_rx)
+        .await
+        .expect("aborting the background wrapper must drop the adopted owner")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_task_cancellation_drops_actual_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(false).await
+}
+
+#[tokio::test]
+async fn cancel_publishes_background_task_completed_event() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut rx = Bus::global().subscribe();
+    let handle = tokio::spawn(async move {
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("bash", "cancel-bus-event", handle).await;
+    assert!(manager.cancel(&info.task_id).await?);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for BackgroundTaskCompleted");
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(BusEvent::BackgroundTaskCompleted(ev))) if ev.task_id == info.task_id => {
+                assert_eq!(ev.status, BackgroundTaskStatus::Failed);
+                assert_eq!(ev.output_preview, "Cancelled by user");
+                break;
+            }
+            Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+            other => panic!("unexpected bus recv result: {other:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adopted_task_reload_drops_owner() -> Result<()> {
+    assert_adopted_owner_cancelled(true).await
+}
+
+#[tokio::test]
 async fn adopted_task_output_exists_while_running_and_is_replaced_on_completion() -> Result<()> {
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
@@ -83,6 +180,86 @@ async fn spawn_with_notify_emits_started_ui_activity() -> Result<()> {
         "started UI activity event for task {} not received",
         info.task_id
     ))
+}
+
+#[tokio::test]
+async fn delivery_subscription_serializes_with_spawn_and_adopt_completion() -> Result<()> {
+    for adopted in [false, true] {
+        for _ in 0..8 {
+            let tmp = tempdir()?;
+            let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+            let mut events = Bus::global().subscribe();
+            let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+            let info = if adopted {
+                let handle = tokio::spawn(async move {
+                    finish_rx.await?;
+                    Ok(jcode_tool_types::ToolOutput::new("done"))
+                });
+                manager
+                    .adopt_with_options("bash", None, "delivery-race", false, false, handle)
+                    .await
+            } else {
+                manager
+                    .spawn_with_notify(
+                        "bash",
+                        None,
+                        "delivery-race",
+                        false,
+                        false,
+                        |_| async move {
+                            finish_rx.await?;
+                            Ok(TaskResult::completed(Some(0)))
+                        },
+                    )
+                    .await
+            };
+
+            // Queue the subscription before allowing completion. The shared lock
+            // makes this ordering deterministic, rather than relying on disk timing.
+            let guard = manager.progress_updates.lock().await;
+            let delivery = manager.update_delivery(&info.task_id, true, true);
+            tokio::pin!(delivery);
+            assert!(
+                std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(delivery.as_mut().poll(cx).is_pending())
+                })
+                .await
+            );
+            finish_tx.send(()).unwrap();
+            tokio::task::yield_now().await;
+            drop(guard);
+            let updated = delivery.await?.expect("task exists");
+            assert_eq!(updated.status, BackgroundTaskStatus::Running);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(BusEvent::BackgroundTaskCompleted(event)) = events.recv().await
+                        && event.task_id == info.task_id
+                    {
+                        assert!(
+                            event.notify && event.wake,
+                            "accepted subscription must wake"
+                        );
+                        break;
+                    }
+                }
+            })
+            .await?;
+
+            // A late delivery or watchdog update must never resurrect Running.
+            let (delivery, _) = tokio::join!(
+                manager.update_delivery(&info.task_id, true, true),
+                manager.arm_stall_watchdog(&info.task_id, 30),
+            );
+            assert_eq!(delivery?.unwrap().status, BackgroundTaskStatus::Completed);
+            manager.disarm_stall_watchdog(&info.task_id).await;
+            assert_eq!(
+                manager.status(&info.task_id).await.unwrap().status,
+                BackgroundTaskStatus::Completed
+            );
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -857,5 +1034,39 @@ async fn disarm_stall_watchdog_clears_state() -> Result<()> {
     assert_eq!(status.stall_wake_seconds, None);
 
     manager.cancel(&info.task_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sweep_counts_tasks_and_skips_settled_files() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    assert_eq!(manager.sweep().await, 0);
+
+    let handle = tokio::spawn(async move {
+        std::future::pending::<()>().await;
+        Ok(jcode_tool_types::ToolOutput::new("unreachable"))
+    });
+    let info = manager.adopt("bash", "session-count", handle).await;
+    // Output files and unrelated files in the directory are not tasks.
+    std::fs::write(tmp.path().join("notes.txt"), "x")?;
+
+    assert_eq!(manager.sweep().await, manager.list().await.len());
+    assert_eq!(manager.sweep().await, 1);
+    // A running task is re-examined on every pass.
+    assert!(manager.settled.lock().await.is_empty());
+
+    manager.cancel(&info.task_id).await?;
+    assert_eq!(manager.sweep().await, 1);
+    assert_eq!(
+        manager.settled.lock().await.len(),
+        1,
+        "a finished task must not be read again"
+    );
+
+    // Cleaned-up files leave the cache instead of growing it forever.
+    std::fs::remove_file(&info.status_file)?;
+    assert_eq!(manager.sweep().await, 0);
+    assert!(manager.settled.lock().await.is_empty());
     Ok(())
 }

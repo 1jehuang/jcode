@@ -21,6 +21,23 @@ pub fn load_openai_compatible_profile_api_key(
     load_api_key_from_env_or_config(&profile.api_key_env, &profile.env_file)
 }
 
+/// Resolve the shared compatible-transport key from its configured env name and
+/// file. The Muse subscription route stores its minted key in a Jcode-managed
+/// credential file rather than an env file, so credential presence checks must
+/// consult that store too or a signed-in Muse account looks unconfigured.
+pub fn load_runtime_api_key(key_name: &str, env_file: &str) -> Option<String> {
+    if let Some(key) = load_api_key_from_env_or_config(key_name, env_file) {
+        return Some(key);
+    }
+    if key_name == "JCODE_MUSE_SUBSCRIPTION_API_KEY" && env_file == "muse-subscription.env" {
+        crate::auth::muse::ensure_enabled().ok()?;
+        return crate::auth::muse::load_credentials()
+            .ok()
+            .map(|credentials| credentials.api_key);
+    }
+    None
+}
+
 pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile) -> bool {
     // A named profile or unrelated Meta API key must not make this native
     // subscription route appear configured.

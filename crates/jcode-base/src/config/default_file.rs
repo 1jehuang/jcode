@@ -25,6 +25,11 @@ impl Config {
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
 
+[cloud]
+# Scoped local resource access after handoff, in seconds (default: 24 hours).
+# Set to 0 to disable. Disconnecting or switching sessions still revokes access.
+local_access_seconds = 86400
+
 [keybindings]
 # Scroll keys (vim-style by default)
 # Supports: ctrl, alt, shift modifiers + any key
@@ -118,6 +123,24 @@ swarm_panel_focus = "alt+n"
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
 
+[jarvis.speech]
+# Optional external OpenAI-compatible speech endpoint used by `jcode --jarvis`.
+# POST {model, voice, input, response_format: "wav"}; returns audio/wav.
+# Model and voice installation belong to the service, never the Jcode repo.
+# Overrides: JCODE_JARVIS_SPEECH_ENDPOINT. Omit endpoint to use local eSpeak.
+# endpoint = "http://127.0.0.1:8765/v1/audio/speech"
+# model = "piper-jarvis"
+# voice = "jarvis"
+# api_key_env = "MY_SPEECH_API_KEY"
+
+# Experimental `jcode --jarvis-always-on` uses local voice detection, Nari,
+# and a single-shot Jev request gate. Settings alone never open the microphone.
+# [jarvis.listening]
+# max_agent_turns_per_hour = 0 # 0 disables the agent-turn cap
+# action_probability = 0.5  # 0.5..1; Fn tap sends recent speech without the gate
+# trigger_sound = "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"  # "" = silent
+# warm_nari = false  # keep one idle Nari connection ready (no audio sent while idle)
+
 [dictation]
 # External speech-to-text command.
 # The command should record/transcribe speech and print the final transcript to stdout.
@@ -149,8 +172,13 @@ timeout_secs = 90
 # Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
 # nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
 # while a Jcode terminal is focused sends the transcript to that session, even
-# without Jcode Desktop. Empty disables it.
+# without Jcode Desktop. Empty falls back to the keyboards picked in Jcode
+# Desktop ([desktop.voice] global_devices), and disables it if there are none.
 # global_devices = []
+
+# Show live voice input inside the input box: a waveform row above the prompt
+# and the transcript streaming in as ghost text. false uses the status line.
+# composer_preview = true
 
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
@@ -198,6 +226,10 @@ reasoning_display = "full"
 
 # Markdown spacing style: "compact" (chat/TUI) or "document" (docs-like)
 # markdown_spacing = "compact"
+
+# Append destinations after Markdown link labels, e.g. label (https://example.com).
+# Link labels remain visible and styled when disabled (default: false).
+# show_link_urls = false
 
 # LaTeX rendering: "none" (show source), "unicode" (terminal text), or "image" (typeset PNG, default).
 # Image mode uses `latex` + `dvipng`, or `pdflatex` + `pdftocairo` as a fallback.
@@ -250,6 +282,28 @@ prompt_entry_animation = true
 # (default: false). Resume is global by default. Press `s` to cycle filters.
 # resume_project_scope = false
 
+# Highlight just-closed sessions and put them first in Resume for this many
+# seconds (default: 30). Set 0 to disable. Uses the final client socket closing,
+# not the last message time. Reattaching clears it. Explicit detach/switch and
+# server reload are excluded. Applies to local native sessions, including a
+# disconnected SDK client, since the server cannot observe OS windows directly.
+# resume_recent_close_seconds = 30
+
+# What Resume does when the picked session is already open in another local
+# jcode window (default: "off"). Linux only.
+#   "off":     attach a second client, leave the other window alone
+#   "move":    bring the existing window to the current workspace and focus it
+#              (niri). Falls back to "replace" when the window cannot be moved.
+#   "replace": resume as usual and close the other window's client
+# resume_open_elsewhere = "off"
+
+# Which time Resume shows as "x ago" and sorts by (default: "message").
+#   "message":  newest message of any role (prompts, replies, tool results)
+#   "activity": newest of the last message and the last open/resume
+#   "opened":   last time the session was opened, resumed, or attached
+#   "created":  when the session was created
+# resume_time = "message"
+
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -275,6 +329,7 @@ prompt_entry_animation = true
 # copy_badge_alt_label = ""
 
 # Color theme: "auto" (query the terminal background), "dark", or "light".
+# Auto follows light/dark changes during the session (refreshes every 5 seconds).
 # theme = "auto"
 
 # Per-role color overrides. Every color the TUI renders is configurable: the
@@ -286,13 +341,32 @@ prompt_entry_animation = true
 # exactly what to fix. `/colors` lists every role, and `/colors export` prints
 # this section for you.
 #
+# The values below are the complete built-in default palette. Uncomment the
+# section and edit any line to change that role.
+#
 # [display.colors]
 # user = "#8ab4f8"
 # ai = "#81c784"
+# tool = "#787878"
+# file_link = "#b4c8ff"
+# dim = "#505050"
 # accent = "#ba8bff"
+# system = "#ffaadc"
+# queued = "#ffc107"
+# asap = "#6ed2ff"
+# pending = "#8c8c8c"
+# user_text = "#f5f5ff"
+# user_bg = "#232832"
+# ai_text = "#dcdcd7"
+# header_icon = "#78d2e6"
+# header_name = "#bed2eb"
+# header_session = "#ffffff"
 # success = "#64c864"
 # warning = "#ffc864"
 # error = "#ff6464"
+# info = "#8cb4ff"
+# border = "#64646e"
+# selection_bg = "#3c3c50"
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
@@ -307,6 +381,13 @@ mermaid = true
 # Auto-poke: automatically nudge the model to continue when it stops with
 # incomplete todos. /poke on and /poke off still override this per session.
 auto_poke = true
+# Optional automatic todo quality reviews (confidence, ownership, long-session,
+# and aggregate weak-point checks). Disabled by default.
+# Requires auto-poke. Does not control the display-only completion report.
+todo_gate_digest = false
+# Show which disabled end-of-turn gates would have fired in completion reports.
+# Display only. Does not enable gates or follow-up turns.
+todo_gate_diagnostics = false
 # Inject timestamps into user messages and tool results sent to the model
 message_timestamps = true
 # Persist memory injections into session history instead of sending them as request-only ephemeral context
@@ -327,10 +408,10 @@ update_channel = "stable"
 # key. Providers without native search use the local engines below.
 # Anthropic API keys are billed about $10 per 1,000 searches.
 prefer_native = true
-# Local websearch engine: "duckduckgo", "bing", "searxng", "custom", or "native"
+# Local websearch engine: "duckduckgo", "bing", "kagi", "searxng", "custom", or "native"
 # ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
-# Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
+# Local engines to try on errors or empty results. Default falls back to keyless Bing HTML.
 fallback_engines = ["bing"]
 # Bring your own Bing Search API key for primary Bing searches. Prefer using an env var.
 # Fallback Bing searches intentionally use keyless HTML search.
@@ -338,6 +419,11 @@ fallback_engines = ["bing"]
 # bing_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
+# Kagi Search API v1: set engine = "kagi" and prefer_native = false above.
+# Export the API key in this variable. Kagi searches incur API charges.
+# kagi_api_key_env = "KAGI_API_KEY"
+# Set fallback_engines = [] above to keep queries from reaching other backends.
+# Setup and API behavior: docs/kagi-web-search.md
 # SearXNG instance for the "searxng" engine. On some hosts (commonly Linux),
 # DuckDuckGo and Bing block scraped requests via TLS fingerprinting / IP
 # reputation and return an anti-bot page with no results. Pointing at a SearXNG
@@ -373,9 +459,17 @@ bing_market = "en-US"
 # snippet_pointer = "/snippet"
 
 [tools]
+# Opt into Jev browser handoff. Default off, direct browser actions still work.
+# Env override: JCODE_BROWSER_HANDOFF=1 to enable.
+browser_handoff = false
+# Automatically hand long-running tool calls to the background after this many
+# milliseconds. Default: 3000 (3 seconds). Set 0 to disable automatic handoff.
+# Applies to streaming, nonstreaming, and SDK calls. bg wait stays foreground.
+# This does not kill tools or change their own execution timeouts.
+auto_background_timeout_ms = 3000
 # Controls which built-in tools are sent to the model.
-# Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
-# acp keeps core coding tools plus batch for generic ACP clients.
+# Profiles: "full" (default), "minimal"/"lite", or "none".
+# "acp" is a legacy name for "full".
 # minimal keeps core coding tools only: bash, read, write, edit, multiedit,
 # apply_patch, patch, agentgrep, glob, grep, and ls.
 profile = "full"
@@ -398,12 +492,28 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
-# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# Codemode is enabled by default. Adds a `codemode` tool that runs
 # model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
 # other tool (including MCP tools) via `await tools.<name>(args)`, chain and
 # parallelize calls, and keep intermediate results out of the conversation.
-# Env override: JCODE_CODEMODE=1.
-codemode = false
+# Env override: JCODE_CODEMODE=0 to disable.
+codemode = true
+
+[compaction]
+# Reactive uses fixed thresholds. Proactive predicts future growth.
+mode = "reactive"
+# Reactive starts at either threshold, whichever is reached first.
+# Zero disables the absolute token threshold.
+reactive_threshold = 0.80
+reactive_threshold_tokens = 400000
+# Proactive/semantic checks become eligible at either floor, whichever is
+# reached first. This permits prediction, not unconditional compaction.
+proactive_floor = 0.40
+proactive_floor_tokens = 150000
+# Set proactive_floor_tokens = 0 to use only the percentage floor.
+# Per-provider threshold overrides (unset fields inherit from [compaction]):
+# [compaction.providers.gemini]
+# reactive_threshold_tokens = 300000
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -412,7 +522,8 @@ codemode = false
 profile = "standard"
 # Tool profile requested when `jcode acp` starts the daemon itself.
 # Existing daemons keep their current server-wide tool config.
-tool_profile = "acp"
+# ACP clients get the same tools as the TUI. Use "minimal" to cut them down.
+tool_profile = "full"
 
 [provider]
 # Default model (optional, uses provider default if not set)
@@ -431,8 +542,8 @@ tool_profile = "acp"
 openai_reasoning_effort = "low"
 # Anthropic reasoning effort for Claude reasoning models (none|low|medium|high|xhigh|max)
 # xhigh needs Opus 4.7/4.8 or Fable 5; max needs an output_config effort model (Opus/Sonnet 4.6+).
-# Defaults to xhigh for Claude Opus 4.7/4.8 (high on older Opus) when unset; other models keep their own default.
-# anthropic_reasoning_effort = "medium"
+# Defaults to low when unset.
+anthropic_reasoning_effort = "low"
 # OpenAI transport mode (auto|websocket|https)
 # openai_transport = "auto"
 # OpenAI service tier override (priority|ultrafast|flex|off)
@@ -448,8 +559,23 @@ preserve_reasoning_context = true
 # countdown = 3-second countdown before retrying on another provider; press Esc to cancel (default)
 # manual = show a notice and let you switch yourself
 # cross_provider_failover = "manual"
+# Switch immediately only for definitive usage exhaustion (default: true).
+# False preserves the countdown. Manual mode always disables automatic switching.
+exhausted_usage_immediate_failover = true
+# Retry short recoverable Anthropic throttles on the same account (default: true).
+# False yields immediately to the account router when other pool members exist.
+anthropic_retry_recoverable_rate_limits = true
 # Try another account on the same provider before switching providers (default: true)
 # same_provider_account_failover = false
+# Automatically spend earned OpenAI banked resets at an exhausted weekly limit.
+# Retries the waiting request automatically. Never buys credits. Default: true.
+# Set false to disable automatic redemption.
+# openai_auto_banked_reset = false
+# Opt in separately to earned Anthropic Fable weekly resets. Never buys credits.
+# anthropic_auto_fable_reset = true
+# Preserve earned resets while another approved pool route is ready (default: true).
+# Set false to redeem before account/provider failover instead.
+# auto_reset_only_when_no_routes = true
 cross_provider_failover = "countdown"
 # Copilot premium mode: "normal" (default), "one" (first msg only), "zero" (all free)
 # Set to "zero" if you have premium Copilot and want free requests
@@ -500,9 +626,17 @@ wake_mode = "internal"
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
 # session that spawned them. Set a concrete model to change the worker default.
-# An explicit `model` in the swarm tool overrides this default for new workers.
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
+#
+# Agent-selected worker models are disabled by default, even if an allowlist exists.
+# Enable explicitly and list exact model/route strings to permit selection.
+# A bare model does not authorize a provider-prefixed route (or vice versa).
+swarm_model_selection = false
+swarm_model_allowlist = []
+# Example opt-in:
+# swarm_model_selection = true
+# swarm_model_allowlist = ["openai:gpt-5.5", "claude:claude-sonnet-4-6"]
 #
 # Reasoning effort for spawned swarm workers ("low", "medium", "high", ...).
 # Agents cannot choose worker effort through the swarm tool. Unset = "low".
@@ -538,18 +672,6 @@ swarm_max_concurrent_agents = 32
 # Env overrides: JCODE_SWARM_STALL_AFTER_SECS, JCODE_SWARM_STALL_NUDGE
 swarm_stall_after_secs = 600
 # swarm_stall_nudge = false
-#
-# Max percentage (1-90) of the chat height the inline swarm gallery band may use.
-# Unset = built-in default (40%). Lower values keep more transcript visible; set
-# near the minimum to collapse the gallery to a thin strip.
-# swarm_gallery_max_pct = 40
-#
-# Layout of the inline swarm strip above the status line:
-#   "vertical"   - one agent per row (session icon + status + task), capped to
-#                  a few rows with a "+N more" overflow marker (default)
-#   "horizontal" - all agents packed as chips on a single row
-# Env override: JCODE_SWARM_STRIP_LAYOUT
-# swarm_strip_layout = "vertical"
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
 # Provider values: auto, jcode, openrouter, typesafe, laya, aimlapi.
@@ -768,6 +890,42 @@ prevent_sleep_while_streaming = true
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
 
+[companion]
+# `jcode companion` is a per-login helper that handles desktop effects for the
+# shared server. Toggles apply when the companion starts. Restart it
+# (`systemctl --user restart jcode-companion`, or kill it and relaunch Jcode)
+# after changing them.
+# Start it in the background when a Jcode client launches and none is running.
+autostart = true
+# Copilot-key push-to-talk (Linux). Also needs [dictation] global_devices.
+voice = true
+# Live waveform and transcript in the focused Jcode CLI while recording.
+voice_waveform = true
+# Desktop notifications for voice state. When off, recording still needs the
+# waveform to be shown in a Jcode CLI as its visible indicator.
+voice_notifications = true
+# Hold the laptop Fn key to talk to the running always-on Jarvis session
+# (`jcode --jarvis-always-on`) from any window, without changing focus. Needs
+# Fn to reach Linux as KEY_FN on a [dictation] global_devices keyboard (on some
+# laptops via a udev hwdb remap). Fn shortcuts never record.
+jarvis_fn_key = false
+# Key for that: "fn" or "rightshift" (when Fn never reaches Linux). A bare
+# tap sends what Jarvis just heard; Right Shift with another key types normally.
+jarvis_key = "fn"
+# With jarvis_fn_key: when no always-on Jarvis is running, an Fn hold opens one
+# in a new terminal and sends what you said once it is ready.
+jarvis_fn_launch = true
+# Extra flags for that Jarvis, after --jarvis-always-on, e.g. ["--jarvis-screen"].
+jarvis_fn_launch_args = []
+# Open URLs and files for the server. Off: clients use their own opener.
+open = true
+# Open new terminal windows for the server. Off: clients launch locally.
+spawn_terminal = true
+# Lid-close override while agents work (macOS/Windows, see [power]).
+lid = true
+# Hourly browser bridge auto-update.
+browser_updates = true
+
 [menubar]
 # macOS only: show the jcode session count in the menu bar. Set to false to
 # stop the menu bar helper (a running helper exits within a second).
@@ -821,14 +979,14 @@ desktop_notifications = true
 # jade_relay_launch_working_dir = "" # Optional default cwd for launched sessions.
 
 # [sponsors] # Legacy config section name retained for compatibility.
-# Integration discovery (enabled by default; set enabled = false to opt out).
-# When enabled, the agent gains a `discover_tools` tool listing third-party
+# Integration discovery (disabled by default; set enabled = true to opt in).
+# When enabled, the agent gains an `integration_tools` tool listing third-party
 # developer tools from Jcode's hosted integration directory. These providers
 # have integrated with the agent to make setup and use seamless. Some providers
 # may share revenue with Jcode when a referred user becomes a customer, but
 # commercial relationships never influence recommendations.
 # See https://jcode.sh/discovery-tools
-# enabled = true
+# enabled = false
 # endpoint = "https://api.jcode.sh/v1/discovery"
 	"##;
 
@@ -855,8 +1013,18 @@ mod tests {
         let template = Config::default_config_file_contents();
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert!(config.tools.codemode);
+        assert_eq!(config.compaction.reactive_threshold, 0.80);
+        assert_eq!(config.compaction.reactive_threshold_tokens, 400_000);
+        assert_eq!(config.compaction.proactive_floor, 0.40);
+        assert_eq!(config.compaction.proactive_floor_tokens, 150_000);
+        assert_eq!(
+            config.provider.anthropic_reasoning_effort.as_deref(),
+            Some("low")
+        );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
+        assert_eq!(config.tools.auto_background_timeout_ms, 3_000);
         assert_eq!(config.session.hibernation_idle_secs, 1800);
         assert!(
             config.display.show_thinking,
@@ -867,6 +1035,20 @@ mod tests {
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
         );
+    }
+
+    #[test]
+    fn codemode_defaults_on_and_can_be_disabled() {
+        assert!(ToolConfig::default().codemode);
+        for contents in ["", "[tools]\n", "[tools]\ncodemode = true\n"] {
+            let config: Config = toml::from_str(contents).unwrap();
+            assert!(config.tools.codemode);
+        }
+        let disabled: Config = toml::from_str("[tools]\ncodemode = false\n").unwrap();
+        assert!(!disabled.tools.codemode);
+        let encoded = toml::to_string(&disabled).unwrap();
+        let restored: Config = toml::from_str(&encoded).unwrap();
+        assert!(!restored.tools.codemode);
     }
 
     #[test]

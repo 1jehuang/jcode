@@ -5,23 +5,11 @@ use super::{
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
+    let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let saved_env = [
-        "JCODE_HOME",
-        "JCODE_OPENAI_COMPAT_API_BASE",
-        "JCODE_OPENAI_COMPAT_API_KEY_NAME",
-        "JCODE_OPENAI_COMPAT_ENV_FILE",
-        "JCODE_OPENAI_COMPAT_SETUP_URL",
-        "JCODE_OPENAI_COMPAT_DEFAULT_MODEL",
-        "JCODE_OPENAI_COMPAT_LOCAL_ENABLED",
-        "OPENAI_COMPAT_API_KEY",
-    ]
-    .map(|key| (key, std::env::var_os(key)));
+    let saved_env = ["JCODE_HOME"].map(|key| (key, std::env::var_os(key)));
 
     crate::env::set_var("JCODE_HOME", temp.path());
-    for (key, _) in saved_env.iter().skip(1) {
-        crate::env::remove_var(key);
-    }
 
     let result = f();
 
@@ -355,6 +343,11 @@ fn muse_subscription_canonical_success_publishes_untagged_event_and_updates_loca
         }
         let _restore = RestoreOptIn(prev_opt_in);
 
+        // This test exercises returning-user login state. A fresh install
+        // intentionally replaces the ready notice with onboarding guidance.
+        let mut hints = crate::setup_hints::SetupHintsState::load();
+        hints.onboarding_start_choice_shown = true;
+        hints.save()?;
         let mut app = App::new_for_remote(None);
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let approved = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -394,11 +387,11 @@ fn muse_subscription_canonical_success_publishes_untagged_event_and_updates_loca
         // Exactly one canonical untagged event must be published
         let mut canonical_event = None;
         while let Ok(event) = bus_rx.try_recv() {
-            if let crate::bus::BusEvent::LoginCompleted(login) = event {
-                if login.provider == "muse-subscription" {
-                    canonical_event = Some(login);
-                    break;
-                }
+            if let crate::bus::BusEvent::LoginCompleted(login) = event
+                && login.provider == "muse-subscription"
+            {
+                canonical_event = Some(login);
+                break;
             }
         }
         let canonical = canonical_event.expect("canonical untagged event must be published");
@@ -645,11 +638,11 @@ fn muse_subscription_old_success_arriving_after_new_attempt_leaves_new_pending_i
         // Canonical untagged event must be published for the daemon
         let mut canonical_event = None;
         while let Ok(event) = bus_rx.try_recv() {
-            if let crate::bus::BusEvent::LoginCompleted(login) = event {
-                if login.provider == "muse-subscription" {
-                    canonical_event = Some(login);
-                    break;
-                }
+            if let crate::bus::BusEvent::LoginCompleted(login) = event
+                && login.provider == "muse-subscription"
+            {
+                canonical_event = Some(login);
+                break;
             }
         }
         let canonical = canonical_event.expect("canonical untagged event must be published");

@@ -90,7 +90,10 @@ fn test_render_direct_message_as_compact_agent_row() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🦊 Can you take parser tests?"]);
+    assert_eq!(rendered.len(), 1);
+    assert!(rendered[0].starts_with("DM · 🦊 · "));
+    assert!(rendered[0].contains("tok"));
+    assert!(!rendered[0].contains("parser tests"));
     assert!(
         rendered
             .iter()
@@ -122,22 +125,125 @@ fn test_render_swarm_await_as_compact_rail_free_summary() {
     let lines = render_swarm_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 2/2"]);
+    assert_eq!(rendered, vec!["🐝 Swarm await · outcome unknown"]);
     assert!(rendered.iter().all(|line| !line.contains('│')));
+}
+
+#[test]
+fn test_swarm_await_summary_reports_outcomes_not_just_target_matches() {
+    for (statuses, expected) in [
+        (
+            "✓ fox (completed)\n✓ wolf (completed)",
+            "2/2 matched · 2 completed",
+        ),
+        (
+            "✓ fox (failed)\n✓ wolf (stopped)",
+            "2/2 matched · 1 failed, 1 stopped",
+        ),
+        (
+            "✓ fox (ready)\n✗ wolf (running)",
+            "1/2 matched · 1 ready, 1 running",
+        ),
+        (
+            "✓ fox (unknown)\n✓ wolf (future-status)",
+            "0/2 matched · 2 unknown",
+        ),
+        ("✓ fox", "0/1 matched · 1 unknown"),
+        ("", "outcome unknown"),
+    ] {
+        let report = format!(
+            "🐝 **Swarm await finished**\n\nMember statuses:\n{statuses}\n\nRecent outputs:\n✓ transcript (completed)"
+        );
+        assert_eq!(compact_swarm_await_summary(&report), expected);
+    }
+    assert_eq!(
+        compact_swarm_await_summary("All members done."),
+        "outcome unknown"
+    );
+}
+
+#[test]
+fn test_swarm_await_summary_preserves_recovered_wait_counts_and_timeouts() {
+    let recovery = "Await incomplete. Recovered 55 swarm wait(s) after restart: 2 completed, 53 timed out. Missing workers are not confirmed complete.";
+    for (members, expected) in [
+        (
+            "",
+            "recovered 55 waits · 2 completed, 53 timed out · member outcome unknown",
+        ),
+        (
+            "\n\nMember statuses:\n✗ fox (unknown)\n✗ wolf (unknown)",
+            "recovered 55 waits · 2 completed, 53 timed out · 0/2 matched · 2 unknown",
+        ),
+        (
+            "\n\nMember statuses:\n✓ fox (completed)",
+            "recovered 55 waits · 2 completed, 53 timed out · 1/1 matched · 1 completed",
+        ),
+    ] {
+        let report = format!("🐝 **Swarm await finished**\n\n{recovery}{members}");
+        assert_eq!(compact_swarm_await_summary(&report), expected);
+    }
+    assert_eq!(
+        compact_swarm_await_summary(
+            "All members done. Recovered 3 swarm wait(s) after restart: 3 completed, 0 timed out."
+        ),
+        "recovered 3 waits · 3 completed, 0 timed out · member outcome unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary(
+            "Await incomplete. Timed out. Still waiting on: fox\n\nMember statuses:\n✗ fox (unknown)"
+        ),
+        "timed out · 0/1 matched · 1 unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary("Await incomplete. Timed out. Still waiting on: fox"),
+        "timed out · member outcome unknown"
+    );
+    assert_eq!(
+        compact_swarm_await_summary(
+            "All members done.\n\nRecent outputs:\nTimed out. Recovered 55 swarm wait(s) after restart: 0 completed, 55 timed out."
+        ),
+        "outcome unknown"
+    );
+}
+
+#[test]
+fn test_swarm_await_row_is_single_line_and_display_width_safe() {
+    crate::tui::markdown::set_center_code_blocks(false);
+    for content in [
+        "3/3 matched · 3 unknown",
+        "recovered 55 waits · 2 completed, 53 timed out · 0/2 matched · 2 unknown",
+        "✓ 3/3",
+        "finished",
+        "1/1 matched\n界界界 completed",
+    ] {
+        let msg = DisplayMessage::swarm("🐝 Swarm await", content);
+        for width in [0, 1, 2, 3, 8, 16, 24, 40, 80] {
+            let lines = render_swarm_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), usize::from(width > 0));
+            for line in lines {
+                let text = extract_line_text(&line);
+                assert!(!text.contains('\n'));
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(text.as_str()) <= width as usize,
+                    "{width}: {text}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
 fn test_render_swarm_await_wake_message_as_compact_rail_free_summary() {
     crate::tui::markdown::set_center_code_blocks(false);
     let msg = DisplayMessage::background_task(
-        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nCompletion reports:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
+        "🐝 **Swarm await finished**\n\nAll members done. All 1 members are done: sabertooth\n\nMember statuses:\n  ✓ sabertooth (completed)\n\nRecent outputs:\n\n--- sabertooth (completed) ---\nAwait UI demo complete."
             .to_string(),
     );
 
     let lines = render_background_task_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
-    assert_eq!(rendered, vec!["🐝 ✓ 1/1"]);
+    assert_eq!(rendered, vec!["🐝 Swarm await · 1/1 matched · 1 completed"]);
     assert!(rendered.iter().all(|line| !line.contains('│')));
     assert!(!rendered.join("\n").contains("sabertooth"));
 }

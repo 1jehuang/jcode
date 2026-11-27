@@ -39,3 +39,6 @@ mod cases;
 
 #[path = "tool_image_decay.rs"]
 mod tool_image_decay;
+
+mod compaction_elision;
+mod export_sharing;

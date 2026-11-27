@@ -304,11 +304,11 @@ impl Tool for SessionSearchTool {
                 "intent": super::intent_schema_property(),
                 "query": {
                     "type": "string",
-                    "description": "Search query. Use distinctive keywords; stop-word-only queries are rejected."
+                    "description": "Distinctive keywords; stop-word-only queries are rejected."
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Only sessions whose working directory matches this path prefix (case-insensitive)."
+                    "description": "Working directory path prefix, case-insensitive."
                 },
                 "limit": {
                     "type": "integer",
@@ -318,85 +318,85 @@ impl Tool for SessionSearchTool {
                 },
                 "include_current": {
                     "type": "boolean",
-                    "description": "Include the current active session. Defaults to false."
+                    "description": "Include this session. Default false."
                 },
                 "include_tools": {
                     "type": "boolean",
-                    "description": "Include raw tool calls and tool results. Defaults to false to reduce log noise."
+                    "description": "Include raw tool calls/results. Default false; tool intents and todo names are always searched."
                 },
                 "include_system": {
                     "type": "boolean",
-                    "description": "Include system reminders and display/system messages. Defaults to false."
+                    "description": "Include system messages. Default false."
                 },
                 "max_per_session": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_MAX_PER_SESSION,
-                    "description": "Maximum hits to return from one session. Defaults to 1 for result diversity."
+                    "description": "Hits per session. Default 1."
                 },
                 "role": {
                     "type": "string",
                     "enum": ["all", "user", "assistant", "metadata"],
-                    "description": "Restrict results to a role or to metadata-only hits. Defaults to all transcript roles plus metadata."
+                    "description": "Default all."
                 },
                 "provider": {
                     "type": "string",
-                    "description": "Restrict by provider/source substring, e.g. openai, claude, codex, pi, opencode, cursor."
+                    "description": "Provider substring, e.g. openai."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Restrict by model substring."
+                    "description": "Model substring."
                 },
                 "after": {
                     "type": "string",
-                    "description": "Only include sessions/messages at or after this RFC3339 timestamp or YYYY-MM-DD date."
+                    "description": "At or after this RFC3339 time or YYYY-MM-DD date."
                 },
                 "before": {
                     "type": "string",
-                    "description": "Only include sessions/messages at or before this RFC3339 timestamp or YYYY-MM-DD date."
+                    "description": "At or before; same formats as after."
                 },
                 "saved": {
                     "type": "boolean",
-                    "description": "Restrict Jcode sessions by saved/bookmarked flag."
+                    "description": "Filter Jcode sessions by saved flag."
                 },
                 "debug": {
                     "type": "boolean",
-                    "description": "Restrict Jcode sessions by debug/test flag."
+                    "description": "Filter by debug/test flag."
                 },
                 "canary": {
                     "type": "boolean",
-                    "description": "Restrict Jcode sessions by canary flag."
+                    "description": "Filter by canary flag."
                 },
                 "source": {
                     "type": "string",
                     "enum": ["all", "jcode", "claude", "codex", "pi", "opencode", "cursor"],
-                    "description": "Restrict session source. Defaults to all available sources."
+                    "description": "Default all."
                 },
                 "include_external": {
                     "type": "boolean",
-                    "description": "Include external session sources discovered by the session picker. Defaults to true."
+                    "description": "Include non-Jcode sessions. Default true."
                 },
                 "context_before": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": MAX_CONTEXT_MESSAGES,
-                    "description": "Number of preceding messages to include around each hit."
+                    "description": "Messages shown before each hit."
                 },
                 "context_after": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": MAX_CONTEXT_MESSAGES,
-                    "description": "Number of following messages to include around each hit."
+                    "description": "Messages shown after each hit."
                 },
                 "max_scan_sessions": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_MAX_SCAN_SESSIONS,
-                    "description": "Bound the number of recent sessions scanned per source."
+                    "description": "Recent sessions scanned per source."
                 },
                 "exhaustive": {
                     "type": "boolean",
-                    "description": "Search every session instead of the recent indexed subset. Slower; for deep recall."
+                    "description": "Search every session, not just the recent indexed subset. Slower."
                 }
             },
             "required": ["query"]
@@ -532,77 +532,9 @@ impl Tool for SessionSearchTool {
     }
 }
 
-fn validate_bounded_usize(
-    value: Option<i64>,
-    default: usize,
-    min: usize,
-    max: usize,
-    name: &str,
-) -> std::result::Result<usize, String> {
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    if value < min as i64 || value > max as i64 {
-        return Err(format!(
-            "{name} must be between {min} and {max}; received {value}."
-        ));
-    }
-    Ok(value as usize)
-}
-
-fn parse_role_filter(raw: Option<&str>) -> std::result::Result<Option<RoleFilter>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if raw.eq_ignore_ascii_case("all") {
-        return Ok(None);
-    }
-    RoleFilter::parse(raw).map(Some).ok_or_else(|| {
-        format!("role must be one of all, user, assistant, or metadata; received {raw}.")
-    })
-}
-
-fn normalize_optional_filter(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-}
-
-fn normalize_source_filter(raw: Option<&str>) -> std::result::Result<Option<String>, String> {
-    let Some(source) = raw.map(str::trim).filter(|source| !source.is_empty()) else {
-        return Ok(None);
-    };
-    let normalized = source.to_ascii_lowercase();
-    match normalized.as_str() {
-        "all" => Ok(None),
-        "jcode" | "claude" | "claude-code" | "codex" | "pi" | "opencode" | "cursor" => {
-            Ok(Some(normalized.replace("claude-code", "claude")))
-        }
-        _ => Err(format!(
-            "source must be one of all, jcode, claude, codex, pi, opencode, or cursor; received {source}."
-        )),
-    }
-}
-
-fn parse_datetime_filter(
-    raw: Option<&str>,
-    name: &str,
-) -> std::result::Result<Option<DateTime<Utc>>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(Some(dt.with_timezone(&Utc)));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        let Some(naive) = date.and_hms_opt(0, 0, 0) else {
-            return Err(format!("{name} has an invalid date: {raw}."));
-        };
-        return Ok(Some(DateTime::from_naive_utc_and_offset(naive, Utc)));
-    }
-    Err(format!(
-        "{name} must be an RFC3339 timestamp or YYYY-MM-DD date; received {raw}."
-    ))
-}
+#[path = "session_search_filters.rs"]
+mod session_search_filters;
+use session_search_filters::*;
 
 /// Synchronous search across session files with parallel raw pre-filtering and
 /// journal-aware session loading.
@@ -1550,9 +1482,6 @@ fn append_session_results(
         if !options.include_system && is_system_like_message(msg) {
             continue;
         }
-        if is_tool_only_message(msg) && !options.include_tools {
-            continue;
-        }
         if !role_filter_allows_message(msg, options) {
             continue;
         }
@@ -1750,9 +1679,6 @@ fn build_jcode_context(
             if !options.include_system && is_system_like_message(msg) {
                 return None;
             }
-            if !options.include_tools && is_tool_only_message(msg) {
-                return None;
-            }
             let text = searchable_message_text(msg, options.include_tools);
             if text.trim().is_empty() {
                 return None;
@@ -1776,28 +1702,11 @@ fn truncate_context_text(text: &str) -> String {
     }
 }
 
-fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {
-    msg.content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text, .. } => Some(text.clone()),
-            ContentBlock::ToolResult { content, .. } if include_tools => Some(content.clone()),
-            ContentBlock::ToolUse { name, input, .. } if include_tools => {
-                let input = input.to_string();
-                Some(if input == "null" {
-                    format!("[tool call: {name}]")
-                } else {
-                    format!("[tool call: {name}] {input}")
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+mod searchable_text;
+use searchable_text::searchable_message_text;
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
-    msg.display_role.is_some()
+    msg.has_context_display_role()
         || msg
             .content
             .iter()
@@ -1824,16 +1733,15 @@ fn is_tool_only_message(msg: &StoredMessage) -> bool {
 }
 
 fn role_label(msg: &StoredMessage) -> &'static str {
-    if let Some(display_role) = msg.display_role {
-        return match display_role {
-            crate::session::StoredDisplayRole::System => "system",
-            crate::session::StoredDisplayRole::BackgroundTask => "background",
-        };
-    }
-
-    match msg.role {
-        crate::message::Role::User => "user",
-        crate::message::Role::Assistant => "assistant",
+    match msg.display_role {
+        Some(crate::session::StoredDisplayRole::JarvisUser) => "user",
+        Some(crate::session::StoredDisplayRole::System) => "system",
+        Some(crate::session::StoredDisplayRole::BackgroundTask) => "background",
+        Some(crate::session::StoredDisplayRole::FileActivity) => "file_activity",
+        None => match msg.role {
+            crate::message::Role::User => "user",
+            crate::message::Role::Assistant => "assistant",
+        },
     }
 }
 

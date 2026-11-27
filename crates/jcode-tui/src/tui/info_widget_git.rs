@@ -5,7 +5,7 @@
 //! follow-up question instead: *which* files are dirty.
 
 use super::frame::{self, Framed};
-use super::text::truncate_smart;
+use super::text::clip;
 use super::{DirtyFile, GitInfo, InfoWidgetData};
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
@@ -144,8 +144,15 @@ pub(super) fn changes_height(info: &GitInfo) -> u16 {
 /// bottom-right. Every body row is a file. The dirty-file count stays on the
 /// status line.
 pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Framed {
-    if data.dual_git_info.is_some() {
-        return Framed::body(render_git_widget(data, inner)).title(frame::label("Repositories"));
+    if let Some(dual) = &data.dual_git_info {
+        let source = if dual.local_is_source {
+            "local → cloud"
+        } else {
+            "local not source"
+        };
+        return Framed::body(render_git_widget(data, inner))
+            .title(frame::label("Repositories"))
+            .footer(frame::dim(source));
     }
     let Some(info) = &data.git_info else {
         return Framed::default();
@@ -173,8 +180,27 @@ pub(super) fn render_changes_framed(data: &InfoWidgetData, inner: Rect) -> Frame
     }
     if hidden > 0 {
         framed = framed.footer(frame::more(hidden));
+    } else {
+        let directories: std::collections::HashSet<_> = info
+            .dirty_files
+            .iter()
+            .flat_map(|f| f.path.split(" -> "))
+            .map(|path| {
+                std::path::Path::new(path.trim_matches('"'))
+                    .parent()
+                    .unwrap_or(std::path::Path::new(""))
+            })
+            .collect();
+        let count = directories.len();
+        framed = framed.footer(frame::dim(format!(
+            "{count} {}",
+            if count == 1 { "dir" } else { "dirs" }
+        )));
     }
     if let Some(legend) = changes_legend(data, inner.height) {
+        if hidden == 0 {
+            framed.footer = None;
+        }
         framed = framed.footer_right(legend);
     }
     framed
@@ -253,25 +279,7 @@ pub(super) fn render_git_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
 }
 
 fn truncate_cells(text: &str, width: usize) -> String {
-    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-    if text.width() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    let mut used = 0;
-    let mut out = String::new();
-    for ch in text.chars() {
-        let cells = ch.width().unwrap_or(0);
-        if used + cells > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += cells;
-    }
-    out.push('…');
-    out
+    clip(text, width)
 }
 
 fn repo_rows(state: &super::super::cloud_git::RepoState) -> u16 {
@@ -395,7 +403,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
         '?' => (rgb(120, 120, 135), rgb(130, 130, 145)),
         _ => (rgb(240, 200, 80), rgb(170, 170, 180)),
     };
-    // Layout: `M● name…   +84 −12`. Counts are dropped before the name gets
+    // Layout: `M● name   +84 −12`. Counts are dropped before the name gets
     // unreadably short.
     const PREFIX: usize = 3; // letter + agent marker + space
     const MIN_NAME: usize = 8;
@@ -405,7 +413,7 @@ fn changes_file_line(file: &DirtyFile, agent: bool, count_w: usize, width: usize
     } else {
         width.saturating_sub(PREFIX)
     };
-    let name = truncate_smart(&changes_display_path(&file.path), name_w);
+    let name = clip(&changes_display_path(&file.path), name_w);
     let name_len = unicode_width::UnicodeWidthStr::width(name.as_str());
 
     let mut spans = vec![
@@ -468,6 +476,32 @@ pub(super) fn changes_display_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_footer_aggregates_directories_without_repeating_file_counts() {
+        let data = InfoWidgetData {
+            git_info: Some(info(
+                &[('M', "src/a.rs"), ('M', "src/b.rs"), ('?', "tests/c.rs")],
+                3,
+            )),
+            ..Default::default()
+        };
+        let card = render_changes_framed(&data, Rect::new(0, 0, 40, 5));
+        assert_eq!(card.footer.unwrap().to_string(), "2 dirs");
+        let mut dual_data = data;
+        dual_data.dual_git_info = Some(super::super::super::cloud_git::DualGitInfo {
+            local_is_source: true,
+            local: super::super::super::cloud_git::RepoState::Loading,
+            cloud: super::super::super::cloud_git::RepoState::Loading,
+        });
+        assert_eq!(
+            render_changes_framed(&dual_data, Rect::new(0, 0, 40, 5))
+                .footer
+                .unwrap()
+                .to_string(),
+            "local → cloud"
+        );
+    }
 
     fn info(files: &[(char, &str)], total: usize) -> GitInfo {
         GitInfo {

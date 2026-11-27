@@ -91,6 +91,8 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         "ssh-failure",
         "transport",
         "transport-failure",
+        "prepare",
+        "prepare-failure",
         "overlap",
         "join-error",
         "history",
@@ -112,6 +114,7 @@ fn isolated_preflight_and_parallel_preparation_regressions() {
         executable(
             &root.path().join("remote ' binary"),
             r#"#!/bin/sh
+if [ "$3" = --version ]; then echo 'jcode v0.0.0-test'; exit 0; fi
 printf '%s\n' "$*" >> "$JCODE_CLOUD_LATENCY_TEST_ROOT/probes"
 case "$JCODE_CLOUD_LATENCY_TEST_MODE" in
   *failure)
@@ -259,16 +262,47 @@ fn isolated_latency_child() {
         );
         return;
     }
-    let result = target.preflight("latency-test.invalid");
+    let result = if mode.starts_with("prepare") {
+        let mut sess = session::Session::create_with_id("latency-session".into(), None, None);
+        sess.working_dir = Some(root.to_string_lossy().into_owned());
+        sess.save_prepared().unwrap();
+        storage::mark_streaming("latency-session");
+        assert!(storage::streaming_session_ids().contains(&"latency-session".to_string()));
+        let path = session::session_path("latency-session").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = prepare_host(&target);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "preparation must not change the transcript"
+        );
+        assert!(storage::read_session_lease("latency-session").is_none());
+        assert!(
+            !root.join("local-started").exists(),
+            "preparation must not snapshot the repository"
+        );
+        assert!(
+            !baseline_path("latency-session").unwrap().exists(),
+            "preparation must not transfer credentials"
+        );
+        storage::unmark_streaming("latency-session");
+        result.map(|host| assert_eq!(host, "latency-test.invalid"))
+    } else {
+        target.preflight("latency-test.invalid")
+    };
     if mode.ends_with("failure") {
         let error = format!("{:#}", result.unwrap_err());
-        assert!(error.contains("complete cloud handoff protocol"), "{error}");
+        assert!(
+            error.contains("complete cloud handoff protocol")
+                || error.contains("too old for cloud handoff"),
+            "{error}"
+        );
         assert!(error.contains("credentials"), "{error}");
     } else {
         result.unwrap();
     }
     let probes = std::fs::read_to_string(root.join("probes")).unwrap();
-    let expected = if mode.ends_with("failure") { 2 } else { 3 };
+    let expected = if mode.ends_with("failure") { 2 } else { 6 };
     assert_eq!(probes.lines().count(), expected, "{probes}");
     assert!(
         probes
@@ -284,13 +318,34 @@ fn isolated_latency_child() {
             .unwrap()
             .ends_with("cloud credentials --help")
     );
-    if expected == 3 {
+    if expected == 6 {
         assert!(
             probes
                 .lines()
                 .nth(2)
                 .unwrap()
+                .ends_with("cloud router-credentials --help")
+        );
+        assert!(
+            probes
+                .lines()
+                .nth(3)
+                .unwrap()
                 .ends_with("cloud cancel-return --help")
+        );
+        assert!(
+            probes
+                .lines()
+                .nth(4)
+                .unwrap()
+                .ends_with("cloud replace-receive --help")
+        );
+        assert!(
+            probes
+                .lines()
+                .nth(5)
+                .unwrap()
+                .ends_with("cloud group-protocol --help")
         );
     }
     let calls = std::fs::read_to_string(root.join("calls")).unwrap();

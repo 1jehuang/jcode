@@ -543,11 +543,28 @@ fn write_json_inner<T: Serialize + ?Sized>(
     durable: bool,
     secret: bool,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec(value)?;
-    write_bytes_inner(path, &bytes, durable, secret)
+    // Serialize directly into the atomic temporary file. Materializing the
+    // entire JSON document first duplicates large transcripts and picker indexes
+    // on every save and leaves those transient allocations in allocator arenas.
+    write_atomic_inner(path, durable, secret, |writer| {
+        serde_json::to_writer(writer, value)?;
+        Ok(())
+    })
 }
 
 fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> Result<()> {
+    write_atomic_inner(path, durable, secret, |writer| {
+        writer.write_all(bytes)?;
+        Ok(())
+    })
+}
+
+fn write_atomic_inner(
+    path: &Path,
+    durable: bool,
+    secret: bool,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<()>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
         if secret {
@@ -569,7 +586,7 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> 
             jcode_core::fs::set_permissions_owner_only(&tmp_path)?;
         }
         let mut writer = std::io::BufWriter::new(file);
-        writer.write_all(bytes)?;
+        write(&mut writer)?;
         let file = writer
             .into_inner()
             .map_err(|e| anyhow::anyhow!("flush failed: {}", e))?;
@@ -631,6 +648,9 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> 
 
     result
 }
+
+#[cfg(test)]
+mod atomic_write_tests;
 
 pub enum StorageRecoveryEvent<'a> {
     CorruptPrimary {
@@ -777,6 +797,13 @@ mod windows_hardening_tests {
     }
 }
 
+/// Touch a throttle/activity stamp file with a non-empty payload so its mtime
+/// advances reliably on all filesystems (including Windows, where writing `b""`
+/// truncates without issuing a `WriteFile` call).
+pub fn touch_stamp(path: &Path) -> std::io::Result<()> {
+    std::fs::write(path, b"1")
+}
+
 #[cfg(test)]
 mod env_file_tests {
     use super::*;
@@ -797,6 +824,35 @@ mod env_file_tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
+        );
+    }
+
+    #[test]
+    fn touch_stamp_writes_non_empty_payload_and_updates_mtime() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let marker = temp.path().join("throttle.stamp");
+
+        touch_stamp(&marker).expect("touch stamp");
+        let data = std::fs::read(&marker).expect("read stamp");
+        assert!(!data.is_empty(), "stamp payload must be non-empty");
+
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .and_then(|file| file.set_modified(past))
+            .expect("backdate stamp");
+        let old_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("old mtime");
+
+        touch_stamp(&marker).expect("re-touch stamp");
+        let new_mtime = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .expect("new mtime");
+        assert!(
+            new_mtime > old_mtime,
+            "expected mtime to advance after touch_stamp (old={old_mtime:?}, new={new_mtime:?})"
         );
     }
 }

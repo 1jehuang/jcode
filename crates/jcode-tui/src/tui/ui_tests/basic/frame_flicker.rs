@@ -216,8 +216,10 @@ fn test_active_swarm_spinner_keeps_redrawing_at_deep_idle() {
             crate::tui::periodic_redraw_required(&animating),
             "an {status} swarm agent must keep driving redraws at deep idle"
         );
+        // Pinned to the Full tier: the Minimal tier (picked from the host's
+        // load, SSH or WSL) deliberately slows this to the liveness rate.
         assert_eq!(
-            crate::tui::redraw_interval(&animating),
+            crate::tui::redraw_interval_with_policy(&animating, &full_tier_policy()),
             crate::tui::REDRAW_SWARM_SPINNER,
             "an {status} swarm agent should repaint at the spinner cadence"
         );
@@ -831,7 +833,7 @@ fn notification_spans_include_recent_flicker_warning_and_log_hint() {
         "expected log hint in notification line, got: {rendered}"
     );
     assert!(
-        rendered.contains("[Z]"),
+        rendered.contains("[Alt⇧Z]"),
         "expected copy badge in notification line, got: {rendered}"
     );
 

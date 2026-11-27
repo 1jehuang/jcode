@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::process::Command as ProcessCommand;
 
 use crate::{
-    id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
+    build, id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
 };
 
 use super::hot_exec::{execute_requested_action, has_requested_action};
@@ -48,20 +48,8 @@ pub async fn run_client() -> Result<()> {
             Ok(msg_id) => loop {
                 match client.read_event().await {
                     Ok(event) => {
-                        use crate::protocol::ServerEvent;
-                        match event {
-                            ServerEvent::TextDelta { text } => {
-                                print!("{}", crate::output_style::terminal_text(&text));
-                                std::io::stdout().flush()?;
-                            }
-                            ServerEvent::Done { id } if id == msg_id => {
-                                break;
-                            }
-                            ServerEvent::Error { message, .. } => {
-                                eprintln!("Error: {}", message);
-                                break;
-                            }
-                            _ => {}
+                        if emit_terminal_client_event(&mut io::stdout(), event, msg_id)? {
+                            break;
                         }
                     }
                     Err(e) => {
@@ -81,6 +69,71 @@ pub async fn run_client() -> Result<()> {
     Ok(())
 }
 
+fn emit_terminal_client_event(
+    output: &mut impl Write,
+    event: crate::protocol::ServerEvent,
+    message_id: u64,
+) -> Result<bool> {
+    use crate::protocol::ServerEvent;
+    match super::commands::unwrap_turn_event(event) {
+        ServerEvent::TextDelta { text } => {
+            write!(output, "{}", crate::output_style::terminal_text(&text))?;
+            output.flush()?;
+        }
+        ServerEvent::Done { id } if id == message_id => return Ok(true),
+        ServerEvent::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+            return Ok(true);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod turn_envelope_tests {
+    use super::*;
+    use crate::protocol::{ServerEvent, TurnIdentity};
+
+    fn envelope(event: ServerEvent) -> ServerEvent {
+        ServerEvent::TurnEvent {
+            identity: TurnIdentity {
+                runtime_generation: "runtime-test".into(),
+                turn_id: 7,
+            },
+            event: Box::new(event),
+        }
+    }
+
+    #[test]
+    fn terminal_client_prints_wrapped_text_and_honors_wrapped_done() {
+        let mut output = Vec::new();
+        assert!(
+            !emit_terminal_client_event(
+                &mut output,
+                envelope(ServerEvent::TextDelta {
+                    text: "hello".into()
+                }),
+                42
+            )
+            .unwrap()
+        );
+        assert_eq!(output, b"hello");
+        assert!(
+            !emit_terminal_client_event(&mut output, envelope(ServerEvent::Done { id: 41 }), 42)
+                .unwrap()
+        );
+        assert!(
+            emit_terminal_client_event(
+                &mut output,
+                envelope(envelope(ServerEvent::Done { id: 42 })),
+                42
+            )
+            .unwrap()
+        );
+    }
+}
+
 pub async fn run_tui_client(
     resume_session: Option<String>,
     startup_hints: Option<setup_hints::StartupHints>,
@@ -89,6 +142,7 @@ pub async fn run_tui_client(
     remote_working_dir: Option<String>,
     onboarding_sim: bool,
     update_sim: bool,
+    initial_model_spec: Option<String>,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
     let (terminal, tui_runtime) = init_tui_runtime()?;
@@ -105,6 +159,7 @@ pub async fn run_tui_client(
     if !native_ssh {
         spawn_session_signal_watchers();
     }
+    super::companion_autostart::spawn_if_needed(native_ssh);
 
     if native_ssh {
         let host = std::env::var("JCODE_SSH_REMOTE").unwrap_or_default();
@@ -145,6 +200,9 @@ pub async fn run_tui_client(
     startup_profile::mark("terminal_title");
 
     let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
+    if let Some(model_spec) = initial_model_spec {
+        app.set_initial_model_spec(model_spec);
+    }
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }
@@ -182,6 +240,12 @@ pub async fn run_tui_client(
             super::cloud_move::stash_handoff(handoff);
             return Ok(());
         }
+        if let Some(session_id) = run_result.reload_session.as_deref() {
+            // The owning SSH guard closes its transport before the re-exec.
+            // Never hand a remote ID to hot_reload, which resumes locally.
+            super::ssh::stash_client_reload(session_id.to_string());
+            return Ok(());
+        }
         if has_requested_action(&run_result) {
             anyhow::bail!(
                 "local reload/update actions are unavailable during SSH attach; reconnect after updating explicitly"
@@ -200,7 +264,10 @@ pub async fn run_tui_client(
         return Ok(());
     }
 
-    tui_runtime.finish_for_run_result(&run_result, run_result.cloud_handoff.is_some());
+    // A cloud handoff execs a fresh client that does not adopt the inherited
+    // terminal (no JCODE_RESUMING) and prints SSH progress first. Restore fully
+    // so it starts on a clean screen instead of drawing over the stale frame.
+    tui_runtime.finish_for_run_result(&run_result, false);
 
     if let Some(code) = run_result.exit_code {
         std::process::exit(code);
@@ -493,11 +560,61 @@ pub use crate::session_launch::{
     spawn_selfdev_in_new_terminal, spawn_selfdev_in_new_terminal_with_provider,
 };
 
+fn resume_target_cloud_handoff(
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> Option<tui::CloudHandoff> {
+    let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } = target else {
+        return None;
+    };
+    let lease = crate::storage::read_session_lease(session_id)?;
+    Some(tui::CloudHandoff::RemoteResume {
+        session_id: session_id.clone(),
+        host: lease.away_host?,
+        working_dir: lease.repo_root,
+    })
+}
+
+fn cloud_resume_target_args(
+    target: &jcode_tui_session_picker::ResumeTarget,
+) -> Option<Vec<String>> {
+    let tui::CloudHandoff::RemoteResume {
+        session_id,
+        host,
+        working_dir,
+    } = resume_target_cloud_handoff(target)?
+    else {
+        return None;
+    };
+    let mut args = vec!["--ssh".into(), host];
+    if let Ok(binary) = std::env::var("JCODE_CLOUD_REMOTE_BINARY") {
+        args.extend(["--ssh-binary".into(), binary]);
+    }
+    if let Some(dir) = working_dir {
+        args.extend(["--remote-working-dir".into(), dir]);
+    }
+    args.extend(["--resume".into(), session_id]);
+    Some(args)
+}
+
+/// Binary a session picker launches its selection with. A picker window can
+/// sit open for hours while builds move on, and `current_exe()` is the frozen
+/// versioned binary it started from. Resume onto the active channel instead,
+/// the same candidate reload uses, so stale pickers do not revive old builds.
+fn picker_resume_exe() -> Result<std::path::PathBuf> {
+    match build::client_update_candidate(false) {
+        Some((exe, _)) => Ok(exe),
+        None => Ok(std::env::current_exe()?),
+    }
+}
+
 pub fn list_sessions() -> Result<()> {
     fn build_resume_target_command(
         exe: &std::path::Path,
         target: &jcode_tui_session_picker::ResumeTarget,
     ) -> (std::path::PathBuf, Vec<String>) {
+        if let Some(args) = cloud_resume_target_args(target) {
+            return (exe.to_path_buf(), args);
+        }
         match target {
             jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } => (
                 exe.to_path_buf(),
@@ -581,19 +698,38 @@ pub fn list_sessions() -> Result<()> {
             }
         };
         let title = crate::output_style::terminal_text(&title).into_owned();
-        let command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
+        let remote = args.iter().any(|arg| arg == "--ssh");
+        let mut command = crate::terminal_launch::TerminalCommand::new(program, args).title(title);
+        if remote {
+            command = command
+                .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+                .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+        }
         crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
+    }
+
+    /// Apply `display.resume_open_elsewhere`. True when the session's existing
+    /// window was brought here, so no new client should attach.
+    fn moved_existing_window(target: &jcode_tui_session_picker::ResumeTarget) -> bool {
+        let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } = target else {
+            return false;
+        };
+        crate::session_window::apply_resume_open_elsewhere(session_id)
+            == crate::session_window::OpenElsewhereOutcome::Moved
     }
 
     match tui::session_picker::pick_session()? {
         Some(tui::session_picker::PickerResult::TakeOverClaude(target)) => {
             let resolved_target = crate::import::take_over_live_claude_session(&target)?;
+            if let Some(handoff) = resume_target_cloud_handoff(&resolved_target) {
+                return super::cloud_move::exec_handoff(handoff);
+            }
             let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                 &resolved_target
             else {
                 anyhow::bail!("Claude takeover did not produce a Jcode session");
             };
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let mut session_cwd = std::env::current_dir()?;
             if let Ok(sess) = session::Session::load(session_id)
                 && let Some(dir) = sess.working_dir.as_deref()
@@ -613,12 +749,15 @@ pub fn list_sessions() -> Result<()> {
             tui::session_picker::PickerResult::Selected(targets)
             | tui::session_picker::PickerResult::SelectedInCurrentTerminal(targets),
         ) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
 
             if targets.len() == 1 {
                 let target = &targets[0];
                 let resolved_target = crate::import::resolve_resume_target_to_jcode(target)?;
+                if let Some(handoff) = resume_target_cloud_handoff(&resolved_target) {
+                    return super::cloud_move::exec_handoff(handoff);
+                }
                 let mut session_cwd = cwd.clone();
                 if let jcode_tui_session_picker::ResumeTarget::JcodeSession { session_id } =
                     &resolved_target
@@ -627,6 +766,9 @@ pub fn list_sessions() -> Result<()> {
                     && std::path::Path::new(dir).is_dir()
                 {
                     session_cwd = std::path::PathBuf::from(dir);
+                }
+                if moved_existing_window(&resolved_target) {
+                    return Ok(());
                 }
                 let (program, args) = build_resume_target_command(&exe, &resolved_target);
                 let err = crate::platform::replace_process(
@@ -659,6 +801,10 @@ pub fn list_sessions() -> Result<()> {
                         session_cwd = std::path::PathBuf::from(dir);
                     }
 
+                    if moved_existing_window(&resolved_target) {
+                        spawned += 1;
+                        continue;
+                    }
                     match spawn_target_in_new_terminal(&resolved_target, &exe, &session_cwd) {
                         Ok(true) => spawned += 1,
                         Ok(false) => {
@@ -690,7 +836,7 @@ pub fn list_sessions() -> Result<()> {
             }
         }
         Some(tui::session_picker::PickerResult::SelectedInNewTerminal(targets)) => {
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;
@@ -713,6 +859,10 @@ pub fn list_sessions() -> Result<()> {
                     session_cwd = std::path::PathBuf::from(dir);
                 }
 
+                if moved_existing_window(&resolved_target) {
+                    spawned += 1;
+                    continue;
+                }
                 match spawn_target_in_new_terminal(&resolved_target, &exe, &session_cwd) {
                     Ok(true) => spawned += 1,
                     Ok(false) => {
@@ -753,7 +903,7 @@ pub fn list_sessions() -> Result<()> {
                 recovered.len()
             );
 
-            let exe = std::env::current_exe()?;
+            let exe = picker_resume_exe()?;
             let cwd = std::env::current_dir()?;
             let mut spawned = 0usize;
             let mut warned_no_terminal = false;
@@ -807,3 +957,64 @@ pub fn list_sessions() -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cloud_resume_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_cloud_resume_uses_passive_handoff_and_ssh_args() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                if let Some(value) = &self.0 {
+                    crate::env::set_var("JCODE_HOME", value);
+                } else {
+                    crate::env::remove_var("JCODE_HOME");
+                }
+            }
+        }
+        let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+        crate::env::set_var("JCODE_HOME", home.path());
+        let target = jcode_tui_session_picker::ResumeTarget::JcodeSession {
+            session_id: "cloud-picker-test".into(),
+        };
+        assert!(resume_target_cloud_handoff(&target).is_none());
+        assert!(cloud_resume_target_args(&target).is_none());
+        let mut lease = crate::storage::SessionLease {
+            session_id: "cloud-picker-test".into(),
+            epoch: 1,
+            away_host: Some("cloud-box".into()),
+            repo_root: Some("/workspace/project with spaces".into()),
+            last_sync_snapshot: None,
+            last_sync_head: None,
+            updated_at: "2026-10-27T00:00:00Z".into(),
+        };
+        crate::storage::write_session_lease(&lease).unwrap();
+        assert_eq!(
+            resume_target_cloud_handoff(&target),
+            Some(tui::CloudHandoff::RemoteResume {
+                session_id: lease.session_id.clone(),
+                host: "cloud-box".into(),
+                working_dir: lease.repo_root.clone(),
+            })
+        );
+        let args = cloud_resume_target_args(&target).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--ssh", "cloud-box"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "cloud-picker-test"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--remote-working-dir", "/workspace/project with spaces"] })
+        );
+        assert!(!args.iter().any(|arg| arg == "--socket"));
+        lease.away_host = None;
+        crate::storage::write_session_lease(&lease).unwrap();
+        assert!(resume_target_cloud_handoff(&target).is_none());
+        assert!(cloud_resume_target_args(&target).is_none());
+    }
+}

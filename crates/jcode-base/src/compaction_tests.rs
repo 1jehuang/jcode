@@ -5,98 +5,6 @@ use std::time::{Duration, Instant};
 
 struct MockSummaryProvider;
 
-struct UsageOnlyNativeProvider {
-    accounting_attributions: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl Provider for UsageOnlyNativeProvider {
-    fn context_window(&self) -> usize {
-        128_000
-    }
-
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[crate::message::ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> Result<EventStream> {
-        unreachable!("fallback uses simple completion")
-    }
-
-    fn name(&self) -> &str {
-        "mock-native"
-    }
-
-    fn model(&self) -> String {
-        // generate_compaction_artifact asks for model attribution only at its
-        // accounting boundaries, once for each separately billed attempt.
-        self.accounting_attributions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        "mock-model".to_string()
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self {
-            accounting_attributions: self.accounting_attributions.clone(),
-        })
-    }
-
-    async fn native_compact(
-        &self,
-        _messages: &[Message],
-        _existing_summary_text: Option<&str>,
-        _existing_openai_encrypted_content: Option<&str>,
-    ) -> Result<jcode_provider_core::NativeCompactionResult> {
-        Ok(jcode_provider_core::NativeCompactionResult {
-            summary_text: None,
-            openai_encrypted_content: None,
-            usage: Some(jcode_provider_core::SimpleCompletionUsage {
-                input_tokens: Some(120),
-                output_tokens: Some(8),
-                ..Default::default()
-            }),
-        })
-    }
-
-    async fn complete_simple_with_usage(
-        &self,
-        _prompt: &str,
-        _system: &str,
-    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
-        assert_eq!(
-            self.accounting_attributions
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "native attempt must be accounted before starting fallback"
-        );
-        Ok((
-            "fallback summary".to_string(),
-            jcode_provider_core::SimpleCompletionUsage {
-                input_tokens: Some(20),
-                output_tokens: Some(4),
-                ..Default::default()
-            },
-        ))
-    }
-}
-
-#[tokio::test]
-async fn usage_only_native_compaction_accounts_attempt_then_falls_back() {
-    let attributions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let provider = Arc::new(UsageOnlyNativeProvider {
-        accounting_attributions: attributions.clone(),
-    });
-    let result =
-        generate_compaction_artifact(provider, vec![make_text_message(Role::User, "hello")], None)
-            .await
-            .unwrap();
-    assert_eq!(result.summary_text, "fallback summary");
-    assert!(result.openai_encrypted_content.is_none());
-    assert_eq!(attributions.load(std::sync::atomic::Ordering::SeqCst), 2);
-}
-
 #[async_trait::async_trait]
 impl Provider for MockSummaryProvider {
     async fn complete(
@@ -139,231 +47,14 @@ fn make_text_message(role: Role, text: &str) -> Message {
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }
 }
 
-#[test]
-fn test_new_manager() {
-    let manager = CompactionManager::new();
-    assert_eq!(manager.compacted_count, 0);
-    assert!(manager.active_summary.is_none());
-    assert!(!manager.is_compacting());
-}
-
-#[test]
-fn test_notify_message_added() {
-    let mut manager = CompactionManager::new();
-    manager.notify_message_added();
-    manager.notify_message_added();
-    assert_eq!(manager.total_turns, 2);
-}
-
-#[test]
-fn test_restored_messages_do_not_trigger_compaction_immediately() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let mut messages = Vec::new();
-    for i in 0..20 {
-        messages.push(make_text_message(Role::User, &format!("restored {}", i)));
-    }
-    manager.seed_restored_messages(messages.len());
-    manager.update_observed_input_tokens(900);
-
-    assert!(
-        !manager.should_compact_with(&messages),
-        "restored history should not compact until a new message is added"
-    );
-}
-
-#[test]
-fn test_new_message_after_restore_reenables_compaction() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let mut messages = Vec::new();
-    for i in 0..20 {
-        messages.push(make_text_message(Role::User, &format!("restored {}", i)));
-    }
-    manager.seed_restored_messages(messages.len());
-    manager.update_observed_input_tokens(900);
-    assert!(!manager.should_compact_with(&messages));
-
-    messages.push(make_text_message(Role::User, "new turn after restore"));
-    manager.notify_message_added();
-
-    assert!(
-        manager.should_compact_with(&messages),
-        "compaction should resume once a genuinely new message is added"
-    );
-}
-
-#[test]
-fn test_token_estimate() {
-    let manager = CompactionManager::new();
-    // 100 chars = ~25 tokens (plus 18k overhead for full budget)
-    let messages = vec![make_text_message(Role::User, &"x".repeat(100))];
-    let estimate = manager.token_estimate_with(&messages);
-    // With DEFAULT_TOKEN_BUDGET and 18k overhead: 25 + 18000 = 18025
-    assert!((18_000..19_000).contains(&estimate));
-}
-
-#[test]
-fn test_should_compact() {
-    let mut manager = CompactionManager::new().with_budget(100); // Very small budget
-
-    let mut messages = Vec::new();
-    for i in 0..20 {
-        messages.push(make_text_message(
-            Role::User,
-            &format!("Message {} with some content", i),
-        ));
-        manager.notify_message_added();
-    }
-
-    assert!(manager.should_compact_with(&messages));
-}
-
-#[test]
-fn test_context_usage_prefers_observed_tokens() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let messages = vec![make_text_message(Role::User, "short message")];
-    manager.notify_message_added();
-    manager.update_observed_input_tokens(900);
-
-    assert!(manager.context_usage_with(&messages) >= 0.90);
-    assert!(manager.effective_token_count_with(&messages) >= 900);
-}
-
-#[test]
-fn test_should_compact_uses_observed_tokens() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-
-    let mut messages = Vec::new();
-    for _ in 0..12 {
-        messages.push(make_text_message(Role::User, "x"));
-        manager.notify_message_added();
-    }
-    manager.update_observed_input_tokens(850);
-
-    assert!(manager.should_compact_with(&messages));
-}
-
-#[test]
-fn test_messages_for_api_no_summary() {
-    let mut manager = CompactionManager::new();
-    let messages = vec![
-        make_text_message(Role::User, "Hello"),
-        make_text_message(Role::Assistant, "Hi!"),
-    ];
-    manager.notify_message_added();
-    manager.notify_message_added();
-
-    let msgs = manager.messages_for_api_with(&messages);
-    assert_eq!(msgs.len(), 2);
-}
-
-#[tokio::test]
-async fn test_force_compact_applies_summary() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let mut messages = Vec::new();
-    for i in 0..30 {
-        messages.push(make_text_message(
-            Role::User,
-            &format!("Turn {} {}", i, "x".repeat(120)),
-        ));
-        manager.notify_message_added();
-    }
-
-    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-    manager
-        .force_compact_with(&messages, provider)
-        .expect("manual compaction should start");
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        manager.check_and_apply_compaction();
-        if manager.stats().has_summary {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    assert!(
-        manager.stats().has_summary,
-        "summary should be applied after compaction task completes"
-    );
-
-    // After compaction, compacted_count should be > 0
-    assert!(manager.compacted_count > 0);
-
-    let msgs = manager.messages_for_api_with(&messages);
-    assert!(msgs.len() < 30);
-    let first = msgs.first().expect("summary message missing");
-    assert_eq!(first.role, Role::User);
-    match &first.content[0] {
-        ContentBlock::Text { text, .. } => {
-            assert!(text.contains("Previous Conversation Summary"));
-        }
-        _ => panic!("expected text summary block"),
-    }
-}
-
 // ── ensure_context_fits tests ──────────────────────────────
-
-#[tokio::test]
-async fn test_guard_below_80_does_nothing() {
-    let mut manager = CompactionManager::new().with_budget(10_000);
-    let mut messages = Vec::new();
-    for i in 0..15 {
-        messages.push(make_text_message(Role::User, &format!("msg {}", i)));
-        manager.notify_message_added();
-    }
-    // Char estimate is tiny, observed tokens well below 80%
-    manager.update_observed_input_tokens(5_000);
-
-    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-    let action = manager.ensure_context_fits(&messages, provider);
-    assert_eq!(
-        action,
-        CompactionAction::None,
-        "should do nothing below 80%"
-    );
-    assert!(
-        !manager.is_compacting(),
-        "should NOT start background compaction below 80%"
-    );
-    assert_eq!(manager.compacted_count, 0);
-}
-
-#[tokio::test]
-async fn test_guard_between_80_and_95_starts_background_only() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let mut messages = Vec::new();
-    for i in 0..20 {
-        messages.push(make_text_message(Role::User, &format!("msg {}", i)));
-        manager.notify_message_added();
-    }
-    // 85% usage — above 80% threshold but below 95% critical
-    manager.update_observed_input_tokens(850);
-
-    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
-    let action = manager.ensure_context_fits(&messages, provider);
-    assert_eq!(
-        action,
-        CompactionAction::BackgroundStarted {
-            trigger: "reactive".to_string()
-        },
-        "should start background compaction at 85%"
-    );
-    assert!(
-        manager.is_compacting(),
-        "SHOULD start background compaction at 85%"
-    );
-    assert_eq!(
-        manager.compacted_count, 0,
-        "compacted_count should stay 0 (no hard compact)"
-    );
-}
 
 /// Regression: a hard compact that runs while a background (reactive)
 /// compaction is in flight must abort the background task and discard its
@@ -615,7 +306,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -625,7 +317,8 @@ fn test_safe_cutoff_preserves_tool_pairs() {
                 tool_use_id: "tool_1".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -666,7 +359,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 name: "read".to_string(),
                 input: serde_json::json!({"file": "a.txt"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -685,7 +379,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                     input: serde_json::json!({"pattern": "foo"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -695,7 +390,8 @@ fn test_safe_cutoff_handles_chained_tool_dependencies_without_rescan() {
                 tool_use_id: "tool_b".to_string(),
                 content: "foo".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -724,7 +420,8 @@ fn test_emergency_truncate_large_tool_results() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "cat bigfile"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -734,7 +431,8 @@ fn test_emergency_truncate_large_tool_results() {
                 tool_use_id: "tool_1".to_string(),
                 content: big_result.clone(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -771,7 +469,8 @@ fn test_emergency_truncate_skips_small_results() {
             tool_use_id: "tool_1".to_string(),
             content: "small output".to_string(),
             is_error: Some(false),
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1037,10 +736,138 @@ fn test_persisted_state_round_trip_preserves_compacted_view() {
     }
 }
 
+#[test]
+fn persisted_state_restore_and_exports_share_encrypted_body() {
+    let body: Arc<str> = "encrypted-body-".repeat(128 * 1024).into();
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some(body.clone()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let before = serde_json::to_vec(&state).unwrap();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    assert!(Arc::ptr_eq(
+        &body,
+        manager
+            .active_summary
+            .as_ref()
+            .unwrap()
+            .openai_encrypted_content
+            .as_ref()
+            .unwrap()
+    ));
+    let mut exported = manager.persisted_state().unwrap();
+    let second_export = manager.persisted_state().unwrap();
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &body,
+        second_export.openai_encrypted_content.as_ref().unwrap()
+    ));
+    assert_eq!(serde_json::to_vec(&exported).unwrap(), before);
+    exported.summary_text.push_str(" changed");
+    assert!(Arc::ptr_eq(
+        &body,
+        exported.openai_encrypted_content.as_ref().unwrap()
+    ));
+    exported.openai_encrypted_content = None;
+    assert!(manager.persisted_state_matches(Some(&state)));
+    assert_eq!(
+        serde_json::to_vec(&manager.persisted_state().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn test_persisted_state_matches_is_exact_for_every_field_and_absence() {
+    let mut manager = CompactionManager::new();
+    assert!(manager.persisted_state_matches(None));
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(128 * 1024).into()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    manager.restore_persisted_state(&state, 10);
+    assert!(!manager.persisted_state_matches(None));
+    assert!(manager.persisted_state_matches(Some(&state)));
+    let mut variants = vec![state.clone(); 6];
+    variants[0].summary_text.push('!');
+    variants[1].openai_encrypted_content = Some(
+        format!(
+            "{}!",
+            variants[1].openai_encrypted_content.as_ref().unwrap()
+        )
+        .into(),
+    );
+    variants[2].openai_encrypted_content = None;
+    variants[3].covers_up_to_turn += 1;
+    variants[4].original_turn_count += 1;
+    variants[5].compacted_count += 1;
+    for candidate in variants.iter().chain(std::iter::once(&state)) {
+        assert_eq!(
+            manager.persisted_state_matches(Some(candidate)),
+            manager.persisted_state().as_ref() == Some(candidate),
+        );
+    }
+    // Restoration may clamp the compacted count. Compare the exported view,
+    // not the original input or just the summary text.
+    manager.restore_persisted_state(&state, 1);
+    assert!(!manager.persisted_state_matches(Some(&state)));
+    assert!(manager.persisted_state_matches(manager.persisted_state().as_ref()));
+    let mut text_only = state;
+    text_only.openai_encrypted_content = None;
+    manager.restore_persisted_state(&text_only, 10);
+    assert!(manager.persisted_state_matches(Some(&text_only)));
+}
+
+#[test]
+#[ignore = "optional large-payload comparison timing probe, not RSS"]
+fn persisted_state_comparison_probe() {
+    let state = crate::session::StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: Some("encrypted".repeat(1024 * 1024).into()),
+        covers_up_to_turn: 3,
+        original_turn_count: 7,
+        compacted_count: 2,
+    };
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(&state, 10);
+    let iterations = 128;
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert_eq!(
+            std::hint::black_box(manager.persisted_state()).as_ref(),
+            Some(&state)
+        );
+    }
+    let owned_us = start.elapsed().as_micros();
+    let start = std::time::Instant::now();
+    for _ in 0..iterations {
+        assert!(manager.persisted_state_matches(Some(std::hint::black_box(&state))));
+    }
+    let borrowed_us = start.elapsed().as_micros();
+    eprintln!(
+        "payload_bytes={} comparisons={} owned_export_us={} borrowed_exact_us={}",
+        state.openai_encrypted_content.as_ref().unwrap().len(),
+        iterations,
+        owned_us,
+        borrowed_us
+    );
+}
+
 // ── context_usage accuracy ──────────────────────────────────────
 
 #[test]
 fn test_context_usage_with_both_estimate_and_observed() {
+    let _lock = crate::storage::lock_test_env();
     let mut manager = CompactionManager::new().with_budget(200_000);
     // Build messages totalling ~50k chars = ~12.5k token estimate
     let mut messages = Vec::new();
@@ -1151,7 +978,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 name: "bash".to_string(),
                 input: serde_json::json!({ "command": "cat big.log" }),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -1162,7 +990,8 @@ fn test_recover_within_budget_truncates_when_tail_still_too_large() {
                 tool_use_id: id,
                 content: format!("huge {} {}", i, "y".repeat(20_000)),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         });
@@ -1230,6 +1059,31 @@ fn max_context_tokens_zero_means_no_cap() {
 }
 
 #[test]
+fn proactive_floor_accepts_tokens_or_percentage() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.compaction_config = crate::config::CompactionConfig::default();
+    manager.turns_since_last_compact = 10;
+    manager.token_history = [100_000, 120_000, 149_999].into_iter().collect();
+    manager.update_observed_input_tokens(149_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(150_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 0;
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(400_000);
+    assert!(!manager.anti_signals_block(&[]));
+
+    manager.compaction_config.proactive_floor_tokens = 150_000;
+    manager.set_budget(200_000);
+    manager.update_observed_input_tokens(79_999);
+    assert!(manager.anti_signals_block(&[]));
+    manager.update_observed_input_tokens(80_000);
+    assert!(!manager.anti_signals_block(&[]));
+}
+
+#[test]
 fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     let _lock = crate::storage::lock_test_env();
     struct RestoreHome(Option<std::ffi::OsString>);
@@ -1268,4 +1122,117 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     cfg.save().unwrap();
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
+
+    // An override replaces the global ceiling, but never exceeds the model.
+    cfg.compaction.max_context_tokens = 10_000;
+    cfg.save().unwrap();
+    manager.set_context_cap_override(Some(200_000));
+    assert_eq!(manager.context_cap_override(), Some(200_000));
+    assert_eq!(manager.token_budget(), 128_000);
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), 200_000);
+    cfg.compaction.max_context_tokens = 5_000;
+    cfg.save().unwrap();
+    manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
+    assert_eq!(manager.token_budget(), 200_000);
+    manager.set_context_cap_override(Some(2_000));
+    assert_eq!(manager.token_budget(), 2_000);
+    manager.set_budget(1_000);
+    assert_eq!(manager.token_budget(), 1_000);
+    assert_eq!(manager.context_cap_override(), Some(2_000));
+    manager.set_budget(128_000);
+    manager.set_context_cap_override(Some(0));
+    assert_eq!(manager.context_cap_override(), None);
+    assert_eq!(manager.token_budget(), 5_000);
+    manager.set_context_cap_override(Some(30_000));
+    manager.set_context_cap_override(None);
+    assert_eq!(manager.token_budget(), 5_000);
 }
+
+#[path = "compaction_native_usage_tests.rs"]
+mod native_usage;
+
+#[test]
+fn compaction_summary_rejects_refusals_and_empty_text_issue_2089() {
+    for bad in [
+        "",
+        "   ",
+        "I'm sorry, but I cannot assist with that request.",
+        "I\u{2019}m sorry, but I can\u{2019}t help with that.",
+        "I can't assist with that.",
+    ] {
+        assert!(
+            validate_compaction_summary(bad.to_string()).is_err(),
+            "{bad:?}"
+        );
+    }
+    let real = "## Task\nThe user is fixing compaction. Earlier the assistant said \"I can't help with that\" about a deploy, then continued. ".repeat(4);
+    assert!(validate_compaction_summary(real).is_ok());
+}
+
+struct RefusingSummaryProvider;
+
+#[async_trait::async_trait]
+impl Provider for RefusingSummaryProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[crate::message::ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Ok(Box::pin(futures::stream::iter(vec![
+            Ok(crate::message::StreamEvent::TextDelta(
+                "I'm sorry, but I cannot assist with that request.".into(),
+            )),
+            Ok(crate::message::StreamEvent::MessageEnd {
+                stop_reason: Some("content_filter".into()),
+            }),
+        ])))
+    }
+
+    fn name(&self) -> &str {
+        "refusing"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(RefusingSummaryProvider)
+    }
+}
+
+#[tokio::test]
+async fn refused_compaction_keeps_original_messages_issue_2089() {
+    let messages: Vec<Message> = (0..28)
+        .map(|i| {
+            make_text_message(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("turn {i}"),
+            )
+        })
+        .collect();
+    let err =
+        generate_compaction_artifact(Arc::new(RefusingSummaryProvider), messages.clone(), None)
+            .await
+            .err()
+            .expect("refused summary must fail");
+    assert!(format!("{err:#}").contains("guardrail"), "{err:#}");
+
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    manager.seed_restored_messages(messages.len());
+    manager.update_observed_input_tokens(10_000);
+    let _ = manager.force_compact_with(&messages, Arc::new(RefusingSummaryProvider));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.is_compacting() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        manager.check_and_apply_compaction_with(&messages);
+    }
+    assert_eq!(manager.compacted_count(), 0);
+    assert_eq!(manager.summary_chars(), 0);
+}
+
+#[path = "compaction_tests_additional_tests.rs"]
+mod additional_test_new_manager;

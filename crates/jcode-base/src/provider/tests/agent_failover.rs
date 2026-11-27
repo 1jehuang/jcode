@@ -3,14 +3,14 @@ fn agent_failover_set_default_model(model: &str) -> anyhow::Result<()> {
 }
 
 fn agent_failover_catalog(provider: &MultiProvider, routes: Vec<ModelRoute>) {
-    *provider.routes_memo.lock().unwrap() = Some(RoutesMemoEntry {
+    *provider.routes_memo.lock().unwrap() = Some(Arc::new(RoutesMemoEntry {
         built_at: std::time::Instant::now(),
         scope_key: provider.routes_memo_key(),
         auth_generation: pricing::auth_pricing_generation(),
         catalog_generation: catalog_generation(),
         listable_models: listable_model_names_from_routes(&routes),
         routes,
-    });
+    }));
 }
 
 fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
@@ -24,6 +24,7 @@ fn agent_failover_fixture(models: &[&str]) -> MultiProvider {
     crate::auth::account_pool::AccountPool {
         members: vec!["claude:claude-otter".into(), "openai-api".into()],
         excluded: vec![],
+        ..Default::default()
     }
     .save()
     .unwrap();
@@ -59,6 +60,164 @@ fn agent_failover_target(provider: &MultiProvider, tokens: usize, reason: &str) 
             tokens,
         )
         .and_then(|prompt| prompt.target_route)
+}
+
+#[test]
+fn automatic_reset_request_routes_first_for_live_and_cached_failures() {
+    for cached in [false, true] {
+        for split in [false, true] {
+            with_clean_provider_test_env(|| {
+                enter_test_runtime().block_on(async {
+                    let mut config = crate::config::Config::load();
+                    config.provider.openai_auto_banked_reset = true;
+                    config.save().unwrap();
+                    let (provider, attempts, _cleanup) =
+                        account_routing_fixture(&[("openai-otter", "usage exhausted")]);
+                    if cached {
+                        models::record_provider_unavailable_for_account_label(
+                            "openai",
+                            Some("openai-otter"),
+                            "usage exhausted",
+                        );
+                    }
+                    let result = if split {
+                        provider
+                            .complete_split(&[], &[], "static", "dynamic", None)
+                            .await
+                    } else {
+                        provider.complete(&[], &[], "system", None).await
+                    };
+                    let error = result
+                        .err()
+                        .expect("alternate route must precede reset spending");
+                    let prompt = parse_failover_prompt_message(&error.to_string())
+                        .expect("preserve exact structured prompt");
+                    assert_eq!(
+                        prompt.target_route.as_deref(),
+                        Some("openai-oauth@openai-fox:gpt-5.4")
+                    );
+                    assert!(prompt.reason.starts_with("usage exhausted"));
+                    assert!(
+                        !prompt.reason.contains("[jcode-provider-failover]"),
+                        "do not nest a routing prompt"
+                    );
+                    assert_eq!(attempts.lock().unwrap().len(), usize::from(!cached));
+                    assert_eq!(
+                        auth::codex::active_account_label().as_deref(),
+                        Some("openai-otter")
+                    );
+                });
+            });
+        }
+    }
+}
+
+#[test]
+fn automatic_reset_defers_to_ready_pool_route_before_any_redemption() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let mut config = crate::config::Config::load();
+        config.provider.anthropic_auto_fable_reset = true;
+        config.save().unwrap();
+        let provider = agent_failover_fixture(&["gpt-5.4"]);
+        let error = rt
+            .block_on(provider.try_auto_banked_reset(
+                ActiveProvider::Claude,
+                "usage exhausted",
+                &[],
+                &[],
+                CompletionMode::Unified { system: "" },
+            ))
+            .err()
+            .expect("ready alternate must route, not redeem");
+        assert!(error.to_string().contains("openai-api:gpt-5.4"));
+        assert!(
+            models::provider_unavailability_detail_for_account_label(
+                "claude",
+                Some("claude-otter"),
+            )
+            .is_some(),
+            "failed source must not immediately route back"
+        );
+        models::clear_claude_provider_unavailability_for_account_label(Some("claude-otter"));
+    });
+}
+
+#[test]
+fn automatic_reset_route_guard_respects_pool_cooldown_and_override() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&["gpt-5.4"]);
+        let guard = || {
+            provider.auto_reset_route_prompt(
+                ActiveProvider::Claude,
+                "usage exhausted",
+                &[],
+                &[],
+                CompletionMode::Unified { system: "" },
+            )
+        };
+        assert!(guard().is_some());
+
+        record_provider_unavailable_for_account("openai-api", "usage exhausted");
+        // Invalidate the fixture memo after changing account availability.
+        agent_failover_catalog(
+            &provider,
+            vec![build_openai_api_key_route("gpt-5.4", true, "")],
+        );
+        assert!(
+            guard().is_none(),
+            "cooling-down routes must not block recovery"
+        );
+        clear_provider_unavailable_for_account("openai-api");
+        agent_failover_catalog(
+            &provider,
+            vec![build_openai_api_key_route("gpt-5.4", true, "")],
+        );
+
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        pool.excluded.push("openai-api".into());
+        pool.save().unwrap();
+        assert!(guard().is_none(), "excluded routes must not block recovery");
+        pool.excluded.clear();
+        pool.save().unwrap();
+        assert!(guard().is_some());
+
+        let mut config = crate::config::Config::load();
+        config.provider.auto_reset_only_when_no_routes = false;
+        config.save().unwrap();
+        agent_failover_catalog(
+            &provider,
+            vec![build_openai_api_key_route("gpt-5.4", true, "")],
+        );
+        assert!(guard().is_none(), "explicit reset-first override wins");
+    });
+}
+
+#[test]
+fn automatic_reset_route_guard_preserves_same_provider_account_rotation() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let (provider, _attempts, _cleanup) = account_routing_fixture(&[]);
+        let prompt = provider
+            .auto_reset_route_prompt(
+                ActiveProvider::OpenAI,
+                "usage exhausted",
+                &[],
+                &[],
+                CompletionMode::Unified { system: "" },
+            )
+            .expect("another saved login should preserve the earned reset");
+        assert!(
+            prompt
+                .target_route
+                .unwrap()
+                .starts_with("openai-oauth@openai-fox:")
+        );
+    });
 }
 
 #[test]
@@ -117,6 +276,109 @@ fn agent_failover_curated_order_beats_larger_context_window() {
                 "272K preferred model outranks a 1M less-preferred model when both fit"
             );
         }
+    });
+}
+
+#[test]
+fn agent_failover_api_capacity_does_not_inherit_codex_limits() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&["gpt-5.4", "gpt-6.1-sol"]);
+        models::persist_openai_model_catalog_for_scope(
+            "openai-fox",
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 500_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-6.1-sol".into()),
+            "a Codex catalog must not cap the platform API route"
+        );
+
+        let scope = models::openai_catalog_scope_for_credential(
+            false,
+            &std::env::var("OPENAI_API_KEY").unwrap(),
+        );
+        models::persist_openai_model_catalog_for_scope(
+            &scope,
+            &models::OpenAIModelCatalog {
+                available_models: vec!["gpt-6.1-sol".into(), "gpt-5.4".into()],
+                context_limits: HashMap::from([("gpt-6.1-sol".into(), 128_000)]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-api:gpt-5.4".into()),
+            "capacity advertised by this API credential remains authoritative"
+        );
+    });
+}
+
+#[test]
+fn agent_failover_context_limits_follow_exact_saved_account() {
+    with_clean_provider_test_env(|| {
+        let rt = enter_test_runtime();
+        let _guard = rt.enter();
+        let provider = agent_failover_fixture(&[]);
+        let mut pool = crate::auth::account_pool::AccountPool::load();
+        for (account, limit) in [("openai-fox", 500_000), ("openai-otter", 900_000)] {
+            auth::codex::upsert_account_from_tokens(account, "fresh", "refresh", None, None)
+                .unwrap();
+            pool.members.push(format!("openai:{account}"));
+            models::persist_openai_model_catalog_for_scope(
+                account,
+                &models::OpenAIModelCatalog {
+                    available_models: vec!["gpt-6.1-sol".into()],
+                    context_limits: HashMap::from([("gpt-6.1-sol".into(), limit)]),
+                    ..Default::default()
+                },
+            );
+        }
+        pool.save().unwrap();
+        agent_failover_catalog(
+            &provider,
+            ["openai-fox", "openai-otter"]
+                .into_iter()
+                .map(|account| ModelRoute {
+                    api_method: format!("openai-oauth@{account}"),
+                    ..build_openai_oauth_route("gpt-6.1-sol", true, "")
+                })
+                .collect(),
+        );
+        assert_eq!(
+            agent_failover_target(&provider, 625_657, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-otter:gpt-6.1-sol".into()),
+            "do not borrow a larger or smaller window from another login"
+        );
+        let messages = [Message::user_with_images(
+            "Run the benchmark",
+            vec![
+                ("image/png".into(), "a".repeat(844_300)),
+                ("image/png".into(), "b".repeat(908_712)),
+            ],
+        )];
+        let tools = [ToolDefinition::new(
+            "unloaded_catalog_tool",
+            "x".repeat(700_000),
+            serde_json::json!({"type": "object"}),
+        )
+        .deferred()];
+        let (_, tokens) = MultiProvider::estimate_request_input(
+            &messages,
+            &tools,
+            CompletionMode::Unified { system: "" },
+        );
+        assert!(tokens < 10_000, "images and unloaded schemas are not text");
+        assert_eq!(
+            agent_failover_target(&provider, tokens, "429 rate limit exceeded"),
+            Some("openai-oauth@openai-fox:gpt-6.1-sol".into()),
+            "the screenshot-shaped request must fit the preferred modern OAuth route"
+        );
     });
 }
 
@@ -285,6 +547,7 @@ fn agent_failover_pool_order_beats_global_model_quality_and_configured_identity(
                 "openai-api".into(),
             ],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();
@@ -400,6 +663,7 @@ fn agent_failover_bedrock_without_tools_is_rejected_at_countdown_recheck() {
         crate::auth::account_pool::AccountPool {
             members: vec!["bedrock".into()],
             excluded: vec![],
+            ..Default::default()
         }
         .save()
         .unwrap();

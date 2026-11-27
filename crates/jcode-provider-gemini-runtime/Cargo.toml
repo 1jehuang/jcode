@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 # default-features = false: the top-level binary decides heavy optional base
 # features (embeddings/bedrock). Runtime crates must not re-enable them via

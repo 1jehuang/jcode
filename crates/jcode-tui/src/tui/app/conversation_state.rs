@@ -183,7 +183,7 @@ impl App {
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
-            manager.set_budget(context_budget);
+            manager.set_budget_for_provider(context_budget, self.provider.name());
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
@@ -199,9 +199,8 @@ impl App {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
+            self.session.compaction = manager.persisted_state().map(Arc::new);
             if let Err(err) = self.session.save() {
                 crate::logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -236,18 +235,18 @@ impl App {
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let provider_messages = self.materialized_provider_messages();
         let context_budget = self.context_limit as usize;
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(context_budget);
+            manager.set_budget_for_provider(context_budget, self.provider.name());
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
 
@@ -316,7 +315,11 @@ impl App {
     pub(super) fn handle_compaction_event(&mut self, event: CompactionEvent) {
         self.commit_pending_streaming_assistant_message();
         self.invalidate_kv_cache_after_compaction();
-        if let Err(err) = self.session.save() {
+        // Remote clients hold a transcript-stripped stub; the server owns the
+        // session file and already persisted the compaction.
+        if !self.is_remote
+            && let Err(err) = self.session.save()
+        {
             crate::logging::warn(&format!(
                 "Failed to persist provider session reset after compaction for session {}: {}",
                 self.session.id, err
@@ -340,6 +343,7 @@ impl App {
         // pre-compaction request that completes later cannot restore stale state.
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
+        self.kv_cache.kv_cache_tail.reset();
         self.token_accounting.cache_next_optimal_input_tokens = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
         self.provider_session_id = None;
@@ -730,14 +734,14 @@ impl App {
                 };
                 let inserted_message = Message {
                     role: Role::User,
-                    content: vec![tool_block.clone()],
+                    content: vec![tool_block.clone()].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 };
                 let stored_message = crate::session::StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -795,6 +799,7 @@ impl App {
         // re-registering them if we cleared the registry here.
         self.clear_streaming_render_state();
         self.queued_messages.clear();
+        self.queued_images.clear();
         self.pasted_contents.clear();
         self.pending_images.clear();
         self.active_skill = None;
@@ -816,7 +821,7 @@ impl App {
             }
             self.add_provider_message(Message {
                 role: role.clone(),
-                content: kept_blocks.clone(),
+                content: kept_blocks.clone().into(),
                 timestamp: None,
                 tool_duration_ms: None,
             });

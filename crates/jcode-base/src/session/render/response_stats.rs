@@ -5,7 +5,7 @@ use jcode_session_types::{ResponseStats, StoredMessage};
 
 fn is_user_prompt(message: &StoredMessage) -> bool {
     matches!(message.role, Role::User)
-        && message.display_role.is_none()
+        && !message.has_context_display_role()
         && !super::is_internal_system_reminder(message)
         && !super::is_auto_poke_user_message(message)
         && !super::super::is_scheduled_task_message(message)
@@ -96,7 +96,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: text.into(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -110,6 +111,7 @@ mod tests {
             output_tokens: 2,
             cache_read_input_tokens: Some(3),
             cache_creation_input_tokens: Some(4),
+            request_elapsed_ms: None,
         })
     }
     fn row(index: usize) -> RenderedMessage {
@@ -120,6 +122,7 @@ mod tests {
             tool_calls: vec![],
             tool_data: None,
             response_stats: None,
+            tool_duration_ms: None,
         }
     }
     fn tool_call(message: &mut StoredMessage) {
@@ -128,7 +131,8 @@ mod tests {
             name: "read".into(),
             input: serde_json::json!({}),
             thought_signature: None,
-        }];
+        }]
+        .into();
     }
 
     #[test]
@@ -146,7 +150,8 @@ mod tests {
             tool_use_id: "tool".into(),
             content: "result".into(),
             is_error: None,
-        }];
+        }]
+        .into();
         messages[2].tool_duration_ms = Some(1234);
         let mut rows = vec![row(3), row(5)];
         attach(&messages, &mut rows);
@@ -164,6 +169,28 @@ mod tests {
         let mut tail = vec![row(3)];
         attach(&messages, &mut tail);
         assert_eq!(tail[0].response_stats, rows[0].response_stats);
+    }
+
+    #[test]
+    fn jarvis_user_starts_a_separate_historical_turn() {
+        let mut messages = vec![
+            text(Role::User, "typed", None),
+            text(Role::Assistant, "first", usage(10)),
+            text(Role::User, "voice", None),
+            text(Role::Assistant, "second", usage(20)),
+        ];
+        messages[2].display_role = Some(jcode_session_types::StoredDisplayRole::JarvisUser);
+        assert!(super::super::stored_message_is_user_turn(&messages[2]));
+        let mut rows = vec![row(1), row(3)];
+        attach(&messages, &mut rows);
+        assert_eq!(
+            rows[0].response_stats.as_ref().unwrap().input_tokens,
+            Some(10)
+        );
+        assert_eq!(
+            rows[1].response_stats.as_ref().unwrap().input_tokens,
+            Some(20)
+        );
     }
 
     #[test]

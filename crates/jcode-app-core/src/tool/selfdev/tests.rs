@@ -79,6 +79,7 @@ fn request_fixture(
         session_id: "session-history-test".to_string(),
         session_short_name: None,
         session_title: None,
+        release_notes: None,
         reason: request_id.to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -100,28 +101,6 @@ fn request_fixture(
         status_file: None,
         attached_to_request_id: None,
     }
-}
-
-#[test]
-fn build_lock_is_removed_on_drop_and_can_be_reacquired() {
-    let _env_lock = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("temp jcode home");
-    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
-    let scope = format!("lock-drop-{}", std::process::id());
-    let path = SelfDevTool::build_lock_path(&scope).expect("lock path");
-
-    let first = SelfDevTool::try_acquire_build_lock(&scope)
-        .expect("first lock attempt")
-        .expect("first lock acquired");
-    assert!(path.exists(), "lock file should exist while held");
-    drop(first);
-    assert!(!path.exists(), "lock file should be removed on drop");
-
-    let second = SelfDevTool::try_acquire_build_lock(&scope)
-        .expect("second lock attempt")
-        .expect("lock should be reacquirable after drop");
-    drop(second);
-    assert!(!path.exists(), "reacquired lock should also clean up");
 }
 
 #[test]
@@ -328,7 +307,26 @@ fn test_recovery_directive_prefers_reload_context_when_present() {
         directive.reconnect_notice.as_deref(),
         Some("Reloaded with build new-build")
     );
-    assert!(directive.continuation_message.contains("Reload succeeded"));
+    assert!(
+        directive
+            .continuation_message
+            .starts_with("Reload complete. Resuming your task.\n\n")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("Build: old-build → new-build.")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("check whether it already completed or is still running")
+    );
+    assert!(
+        directive
+            .continuation_message
+            .contains("unless genuinely blocked")
+    );
     assert!(
         directive
             .continuation_message
@@ -359,34 +357,11 @@ fn test_recovery_directive_returns_none_when_no_reload_recovery_needed() {
     assert!(ReloadContext::recovery_directive(None, false, "", None).is_none());
 }
 
-#[test]
-fn reload_timeout_secs_defaults_to_15() {
-    let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::remove("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS");
-    assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
-}
+#[path = "reload_manifest_tests.rs"]
+mod reload_manifest;
 
-#[test]
-fn reload_timeout_secs_honors_valid_env_override() {
-    let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "27");
-    assert_eq!(SelfDevTool::reload_timeout_secs(), 27);
-}
-
-#[test]
-fn reload_timeout_secs_ignores_empty_invalid_and_zero_values() {
-    let _storage_guard = crate::storage::lock_test_env();
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "   ");
-    assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
-    drop(_guard);
-
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "abc");
-    assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
-    drop(_guard);
-
-    let _guard = EnvVarGuard::set("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", "0");
-    assert_eq!(SelfDevTool::reload_timeout_secs(), 15);
-}
+#[path = "reload_timeout_tests.rs"]
+mod reload_timeout;
 
 #[test]
 fn schema_only_advertises_core_selfdev_fields() {
@@ -400,6 +375,7 @@ fn schema_only_advertises_core_selfdev_fields() {
     assert!(props.contains_key("prompt"));
     assert!(props.contains_key("context"));
     assert!(props.contains_key("reason"));
+    assert!(props.contains_key("release_notes"));
     assert!(props.contains_key("target"));
     assert!(props.contains_key("command"));
     assert!(props.contains_key("request_id"));
@@ -542,15 +518,8 @@ async fn do_reload_returns_after_ack_in_direct_mode() {
     assert_eq!(ack.hash, "direct-hash");
 }
 
-#[test]
-fn reload_repo_resolver_uses_working_dir_when_primary_detection_fails() {
-    let repo = create_repo_fixture();
-    let nested = repo.path().join("crates").join("jcode-build-support");
-    std::fs::create_dir_all(&nested).expect("nested dir");
-
-    let resolved = reload::resolve_selfdev_reload_repo_dir_from(None, Some(&nested));
-    assert_eq!(resolved.as_deref(), Some(repo.path()));
-}
+#[path = "working_dir_resolver_tests.rs"]
+mod working_dir_resolver;
 
 #[tokio::test]
 async fn enter_creates_selfdev_session_in_test_mode() {
@@ -572,13 +541,16 @@ async fn enter_creates_selfdev_session_in_test_mode() {
             cache_control: None,
         }],
     );
-    parent.compaction = Some(session::StoredCompactionState {
-        summary_text: "summary".to_string(),
-        openai_encrypted_content: None,
-        covers_up_to_turn: 1,
-        original_turn_count: 1,
-        compacted_count: 1,
-    });
+    parent.compaction = Some(
+        session::StoredCompactionState {
+            summary_text: "summary".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 1,
+            original_turn_count: 1,
+            compacted_count: 1,
+        }
+        .into(),
+    );
     parent.record_replay_display_message("system", None, "remember this context");
     parent.save().expect("save parent session");
 
@@ -785,6 +757,30 @@ async fn build_requires_reason() {
 }
 
 #[tokio::test]
+async fn build_actions_reject_missing_or_blank_notes_before_creating_queue() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home_guard = EnvVarGuard::set("JCODE_HOME", home.path());
+    let _test_guard = EnvVarGuard::set("JCODE_TEST_SESSION", "1");
+    let repo = create_repo_fixture();
+    let mut session = session::Session::create(None, None);
+    session.is_canary = true;
+    session.save().unwrap();
+    for action in ["build", "build-reload"] {
+        for notes in [None, Some(""), Some(" \t\n")] {
+            let mut input = json!({"action": action, "reason": "private reason"});
+            if let Some(notes) = notes {
+                input["release_notes"] = json!(notes);
+            }
+            let ctx = create_test_context(&session.id, Some(repo.path().to_owned()));
+            let error = SelfDevTool::new().execute(input, ctx).await.unwrap_err();
+            assert!(error.to_string().contains("nonblank `release_notes`"));
+            assert!(!home.path().join("selfdev-build-requests").exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn build_queues_background_tasks_and_reports_queue_status() {
     let _storage_guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
@@ -803,24 +799,36 @@ async fn build_queues_background_tasks_and_reports_queue_status() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "first reason"}),
+            json!({"action": "build", "reason": "first reason", "release_notes": "First highlight"}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "second reason"}),
+            json!({"action": "build", "reason": "second reason", "release_notes": "From attached session"}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("second build should queue");
 
+    for output in [&first.output, &second.output] {
+        assert!(output.contains(crate::tool::BACKGROUND_WAIT_GUIDANCE));
+        assert!(!output.contains("Use `bg"));
+    }
     let first_meta = first.metadata.expect("first metadata");
     let second_meta = second.metadata.expect("second metadata");
     let first_task_id = first_meta["task_id"].as_str().expect("first task id");
     let second_task_id = second_meta["task_id"].as_str().expect("second task id");
 
+    let parent = BuildRequest::load(first_meta["request_id"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(parent.release_notes.as_deref(), Some("First highlight"));
+    assert_eq!(
+        parent.public_build_notes().as_deref(),
+        Some("First highlight\nFrom attached session")
+    );
     assert_eq!(first_meta["queue_position"].as_u64(), Some(1));
     assert_eq!(second_meta["deduped"].as_bool(), Some(true));
     assert!(
@@ -893,7 +901,7 @@ async fn build_reload_waits_for_build_then_reloads() {
     let tool = SelfDevTool::new();
     let output = tool
         .execute(
-            json!({"action": "build-reload", "reason": "combined build and reload"}),
+            json!({"action": "build-reload", "reason": "private coordination", "context": "private context", "release_notes": " Public highlight "}),
             create_test_context(&session.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -916,6 +924,15 @@ async fn build_reload_waits_for_build_then_reloads() {
         .expect("load request")
         .expect("request exists");
     assert_eq!(request.state, BuildRequestState::Completed);
+    assert_eq!(request.release_notes.as_deref(), Some("Public highlight"));
+    let mut legacy = serde_json::to_value(&request).unwrap();
+    legacy.as_object_mut().unwrap().remove("release_notes");
+    assert!(
+        serde_json::from_value::<BuildRequest>(legacy)
+            .unwrap()
+            .release_notes
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -937,14 +954,14 @@ async fn build_dedupes_identical_reason_and_version_with_attached_watcher() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "same reason"}),
+            json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "same reason"}),
+            json!({"action": "build", "reason": "same reason", "release_notes": "No user-visible changes."}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -997,14 +1014,14 @@ async fn cancel_build_marks_request_cancelled_and_removes_it_from_queue() {
     let tool = SelfDevTool::new();
     let first = tool
         .execute(
-            json!({"action": "build", "reason": "keep building"}),
+            json!({"action": "build", "reason": "keep building", "release_notes": "No user-visible changes."}),
             create_test_context(&session_one.id, Some(repo.path().to_path_buf())),
         )
         .await
         .expect("first build should queue");
     let second = tool
         .execute(
-            json!({"action": "build", "reason": "cancel me"}),
+            json!({"action": "build", "reason": "cancel me", "release_notes": "No user-visible changes."}),
             create_test_context(&session_two.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -1059,6 +1076,7 @@ fn status_output_prunes_stale_pending_requests() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
+        release_notes: None,
         reason: "stale reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1127,6 +1145,7 @@ fn freshly_queued_request_survives_reconcile_before_task_metadata_exists() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Fresh Build".to_string()),
+        release_notes: None,
         reason: "fresh reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1212,6 +1231,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
         session_id: stale_session.id.clone(),
         session_short_name: stale_session.short_name.clone(),
         session_title: Some("Stale Build".to_string()),
+        release_notes: None,
         reason: "stale blocker".to_string(),
         repo_dir: repo.path().display().to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1246,7 +1266,7 @@ async fn build_ignores_stale_pending_requests_when_computing_queue_position() {
     let tool = SelfDevTool::new();
     let output = tool
         .execute(
-            json!({"action": "build", "reason": "fresh build"}),
+            json!({"action": "build", "reason": "fresh build", "release_notes": "No user-visible changes."}),
             create_test_context(&live_session.id, Some(repo.path().to_path_buf())),
         )
         .await
@@ -1313,6 +1333,7 @@ fn reconcile_pending_state_maps_superseded_background_status() {
         session_id: session.id.clone(),
         session_short_name: session.short_name.clone(),
         session_title: Some("Superseded Build".to_string()),
+        release_notes: None,
         reason: "superseded reason".to_string(),
         repo_dir: "/tmp/jcode".to_string(),
         repo_scope: source.repo_scope.clone(),
@@ -1354,107 +1375,11 @@ fn reconcile_pending_state_maps_superseded_background_status() {
     );
 }
 
-#[test]
-fn reconcile_keeps_running_request_not_yet_registered_in_live_task_map() {
-    // Regression: spawn_with_notify writes the Running status file and starts
-    // the build future *before* inserting the task into the in-process task
-    // map. The build's own first wait_for_turn iteration (or another agent's
-    // queue poll) could then see status=Running + is_live_task=false and prune
-    // the request instantly: "Queued build request disappeared". Within the
-    // bootstrap grace window a Running-but-unregistered task must survive.
-    let _storage_guard = crate::storage::lock_test_env();
-    let temp_home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", temp_home.path());
+#[path = "reconcile_bootstrap_tests.rs"]
+mod reconcile_bootstrap;
 
-    let mut session = session::Session::create(None, Some("Racing Build".to_string()));
-    session.save().expect("save session");
+#[path = "repo_resolver_tests.rs"]
+mod repo_resolver;
 
-    let status_path = temp_home.path().join("racing.status.json");
-    storage::write_json(
-        &status_path,
-        &background::TaskStatusFile {
-            task_id: "racing-task-not-in-live-map".to_string(),
-            tool_name: "selfdev-build".to_string(),
-            display_name: Some("selfdev build".to_string()),
-            session_id: session.id.clone(),
-            status: BackgroundTaskStatus::Running,
-            exit_code: None,
-            error: None,
-            started_at: Utc::now().to_rfc3339(),
-            completed_at: None,
-            duration_secs: None,
-            pid: None,
-            owner_pid: None,
-            owner_instance: None,
-            detached: false,
-            notify: true,
-            wake: true,
-            progress: None,
-            event_history: Vec::new(),
-            stall_wake_seconds: None,
-        },
-    )
-    .expect("write running status file");
-
-    let source = test_source_state(std::path::Path::new("/tmp/jcode"));
-    let request = BuildRequest {
-        request_id: "racing-request".to_string(),
-        background_task_id: Some("racing-task-not-in-live-map".to_string()),
-        session_id: session.id.clone(),
-        session_short_name: session.short_name.clone(),
-        session_title: Some("Racing Build".to_string()),
-        reason: "racing reason".to_string(),
-        repo_dir: "/tmp/jcode".to_string(),
-        repo_scope: source.repo_scope.clone(),
-        worktree_scope: source.worktree_scope.clone(),
-        command: "scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode".to_string(),
-        requested_at: Utc::now().to_rfc3339(),
-        started_at: None,
-        completed_at: None,
-        state: BuildRequestState::Queued,
-        version: Some("racing-build".to_string()),
-        dedupe_key: Some("racing-dedupe".to_string()),
-        requested_source: Some(source.clone()),
-        built_source: None,
-        published_version: None,
-        last_progress: Some("queued".to_string()),
-        validated: false,
-        error: None,
-        output_file: None,
-        status_file: Some(status_path.display().to_string()),
-        attached_to_request_id: None,
-    };
-    request.save().expect("save racing request");
-
-    let pending =
-        BuildRequest::pending_requests_for_scope(&source.worktree_scope).expect("pending requests");
-    assert!(
-        pending
-            .iter()
-            .any(|request| request.request_id == "racing-request"),
-        "running-but-unregistered request must stay pending during bootstrap grace"
-    );
-
-    let reloaded = BuildRequest::load("racing-request")
-        .expect("load racing request")
-        .expect("racing request exists");
-    assert_eq!(reloaded.state, BuildRequestState::Queued);
-    assert!(reloaded.error.is_none());
-}
-
-/// The reload must publish from the same checkout the build used. A primary
-/// repo derived from the running binary's compile location (another worktree)
-/// used to win, which published a stale binary from that worktree.
-#[test]
-fn reload_repo_resolver_prefers_session_working_dir_over_binary_origin() {
-    let session_repo = create_repo_fixture();
-    let other_worktree = create_repo_fixture();
-    let nested = session_repo.path().join("crates");
-    std::fs::create_dir_all(&nested).expect("nested dir");
-
-    let resolved = reload::resolve_selfdev_reload_repo_dir_from(
-        Some(other_worktree.path().to_path_buf()),
-        Some(&nested),
-    );
-    assert_eq!(resolved.as_deref(), Some(session_repo.path()));
-}
+#[path = "tests_additional_tests.rs"]
+mod additional_build_lock_is_removed_on_drop_and_can_be_reacquired;

@@ -26,6 +26,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
+bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
@@ -34,6 +35,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 serde_yaml = "0.9"
 toml = "0.8"
+toml_edit = "0.20"
 
 # File operations
 
@@ -43,7 +45,7 @@ anyhow = "1"
 libc = "0.2"             # Unix system calls (flock)
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
 proctitle = "0.1"
@@ -95,7 +97,7 @@ jcode-usage-types = { path = "../jcode-usage-types" }
 # NOTE: no terminal crates (crossterm, ratatui, qrcode). Interactive login
 # prompts and QR rendering are client concerns: the CLI installs a presenter
 # from `jcode-terminal-prompt` into `auth::login_ui`.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }  # Provider formats and mobile GIF/WebP thumbnails. Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.
@@ -147,7 +149,7 @@ embeddings = ["dep:jcode-embedding"]
 bedrock = ["jcode-provider-bedrock/aws-sdk"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"

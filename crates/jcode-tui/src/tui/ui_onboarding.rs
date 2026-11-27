@@ -125,6 +125,52 @@ fn yes_no_pill_line(yes_highlighted: bool, align: Alignment) -> Line<'static> {
     Line::from(spans).alignment(align)
 }
 
+/// Build the 4-option first-run login choice pills (OpenAI, Claude, API key,
+/// Skip). Fits on a single row at 46+ columns and gracefully stacks into two
+/// balanced rows on narrower terminals so pills never clip or wrap mid-cap.
+fn login_choice_pill_lines(
+    selected: crate::tui::OnboardingLoginChoice,
+    width: u16,
+    align: Alignment,
+) -> Vec<Line<'static>> {
+    use crate::tui::OnboardingLoginChoice as Choice;
+    if width >= 46 {
+        let mut spans = Vec::new();
+        for (i, option) in Choice::ALL.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            spans.extend(lozenge_pill_spans(option.label(), option == selected));
+        }
+        vec![Line::from(spans).alignment(align)]
+    } else {
+        let mut top = Vec::new();
+        top.extend(lozenge_pill_spans(
+            Choice::OpenAi.label(),
+            selected == Choice::OpenAi,
+        ));
+        top.push(Span::raw("  "));
+        top.extend(lozenge_pill_spans(
+            Choice::Claude.label(),
+            selected == Choice::Claude,
+        ));
+        let mut bottom = Vec::new();
+        bottom.extend(lozenge_pill_spans(
+            Choice::ApiKey.label(),
+            selected == Choice::ApiKey,
+        ));
+        bottom.push(Span::raw("  "));
+        bottom.extend(lozenge_pill_spans(
+            Choice::Skip.label(),
+            selected == Choice::Skip,
+        ));
+        vec![
+            Line::from(top).alignment(align),
+            Line::from(bottom).alignment(align),
+        ]
+    }
+}
+
 /// A rounded "Continue" pill button. Rendered above the import list so the user
 /// can reach the commit action just by arrowing up out of the rows (no need to
 /// read a "Press Enter" instruction). Uses the same lozenge style as the Yes/No
@@ -155,18 +201,17 @@ fn import_summary_pills_line(
     Line::from(spans).alignment(align)
 }
 
-/// The telemetry settings sub-page: three stacked pills, most sharing first,
-/// each with a dim one-line consequence caption. Reached from the "Telemetry
-/// settings" pill on the import summary; Esc returns without changing anything.
+/// The telemetry settings sub-page: a preselected "Continue" pill on top, then
+/// one checkbox per telemetry category with a dim caption. Reached from the
+/// "Telemetry settings" pill on the import summary; Esc returns unchanged.
 fn telemetry_settings_lines(
-    highlighted: crate::tui::TelemetryChoice,
+    page: crate::tui::TelemetryPage,
     env_forced_off: bool,
     align: Alignment,
 ) -> Vec<Line<'static>> {
-    use crate::tui::TelemetryChoice as Choice;
+    use crate::telemetry::TelemetryCategory;
     let dim = Style::default().fg(dim_color());
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(
+    let mut lines: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
             "Telemetry settings",
             Style::default()
@@ -174,31 +219,91 @@ fn telemetry_settings_lines(
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(align),
-    );
-    lines.push(Line::from(""));
-
-    let options = [
-        (
-            Choice::Everything,
-            "Share full transcripts (30-day retention)",
-            "Includes provider account email, prompts, responses, reasoning, code, and tool input/output",
-        ),
-        (
-            Choice::NoContent,
-            "No prompts or transcripts",
-            "Usage stats, provider account email, and crash reports. No content",
-        ),
-        (
-            Choice::Nothing,
-            "Send nothing",
-            "We stop seeing crashes and can't fix them",
-        ),
+        Line::from(""),
+        Line::from(lozenge_pill_spans("Continue", page.cursor == 0)).alignment(align),
+        Line::from(""),
     ];
-    for (choice, label, caption) in options {
-        lines.push(Line::from(lozenge_pill_spans(label, choice == highlighted)).alignment(align));
-        lines.push(Line::from(Span::styled(caption, dim)).alignment(align));
-        lines.push(Line::from(""));
+
+    // Same Yes/No two-column layout as the "Import less" page: a header row,
+    // then one row per category with a filled dot under the chosen column and
+    // a dim caption beneath. Every row is padded to one block width so the
+    // centered block stays left-aligned internally.
+    use unicode_width::UnicodeWidthStr;
+    const COL_W: usize = 5;
+    const GAP: &str = "  ";
+    let center_cell = |s: &str| {
+        let total = COL_W.saturating_sub(s.width());
+        let left = total / 2;
+        format!("{}{}{}", " ".repeat(left), s, " ".repeat(total - left))
+    };
+    let left_width = TelemetryCategory::ALL
+        .iter()
+        .map(|c| c.label().width())
+        .max()
+        .unwrap_or(0);
+    // Layout: "> " gutter, Yes column, gap, No column, gap, label.
+    let row_width = 2 + COL_W * 2 + GAP.len() * 2 + left_width;
+    let block_width = row_width;
+    let pad = |used: usize| " ".repeat(block_width.saturating_sub(used));
+
+    let filled = Style::default()
+        .fg(rgb(126, 211, 159))
+        .add_modifier(Modifier::BOLD);
+    let empty = dim;
+    let header_style = dim.add_modifier(Modifier::BOLD);
+    lines.push(
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(center_cell("Yes"), header_style),
+            Span::raw(GAP),
+            Span::styled(center_cell("No"), header_style),
+            Span::raw(pad(2 + COL_W * 2 + GAP.len())),
+        ])
+        .alignment(align),
+    );
+    for (i, category) in TelemetryCategory::ALL.into_iter().enumerate() {
+        let focused = page.cursor == i + 1;
+        let checked = page.checked[i];
+        let label_style = if checked {
+            Style::default().fg(rgb(210, 210, 210))
+        } else {
+            dim
+        };
+        let (yes_glyph, yes_style, no_glyph, no_style) = if checked {
+            ("●", filled, "○", empty)
+        } else {
+            ("○", empty, "●", filled)
+        };
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    if focused { "> " } else { "  " },
+                    Style::default().fg(welcome_accent()),
+                ),
+                Span::styled(center_cell(yes_glyph), yes_style),
+                Span::raw(GAP),
+                Span::styled(center_cell(no_glyph), no_style),
+                Span::raw(GAP),
+                Span::styled(category.label(), label_style),
+                Span::raw(pad(2
+                    + COL_W * 2
+                    + GAP.len() * 2
+                    + category.label().width())),
+            ])
+            .alignment(align),
+        );
     }
+    // Describe only the focused category, in one dim line under the list, so
+    // the rows stay compact. Always reserve the line so nothing jumps.
+    lines.push(Line::from(""));
+    let description = page
+        .cursor
+        .checked_sub(1)
+        .and_then(|i| TelemetryCategory::ALL.get(i))
+        .map(|c| c.caption())
+        .unwrap_or("");
+    lines.push(Line::from(Span::styled(description, dim)).alignment(align));
+    lines.push(Line::from(""));
 
     if env_forced_off {
         lines.push(
@@ -211,7 +316,7 @@ fn telemetry_settings_lines(
     }
     lines.push(
         Line::from(Span::styled(
-            "Esc goes back. Change this later with /telemetry.",
+            "Left/Right pick Yes/No. Esc goes back. Change later with /telemetry.",
             dim,
         ))
         .alignment(align),
@@ -226,6 +331,12 @@ fn import_summary_lines(prompt: &crate::tui::LoginImportPrompt) -> Vec<Line<'sta
     let check_style = Style::default()
         .fg(rgb(126, 211, 159))
         .add_modifier(Modifier::BOLD);
+    // Pad every row to the widest so the centered block is left-aligned.
+    use unicode_width::UnicodeWidthStr;
+    let row_width = |row: &crate::tui::LoginImportRow| {
+        2 + row.provider_summary.width() + 3 + row.source_name.width()
+    };
+    let block_width = prompt.rows.iter().map(row_width).max().unwrap_or(0);
     prompt
         .rows
         .iter()
@@ -240,6 +351,7 @@ fn import_summary_lines(prompt: &crate::tui::LoginImportPrompt) -> Vec<Line<'sta
                     format!(" ({})", row.source_name),
                     Style::default().fg(dim_color()),
                 ),
+                Span::raw(" ".repeat(block_width - row_width(row))),
             ])
             .alignment(Alignment::Center)
         })
@@ -371,7 +483,7 @@ fn keyboard_hint_line() -> Line<'static> {
 
 /// The phase-specific body of the welcome screen (everything below the title and
 /// keyboard hint), so this no longer emits the title itself.
-fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
+fn welcome_body_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let align = Alignment::Center;
     let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -475,9 +587,9 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                 Some(prompt) if !prompt.choosing => {
                     // Telemetry settings sub-page takes over the body while
                     // it is open, then returns to the summary below.
-                    if let Some(choice) = prompt.telemetry {
+                    if let Some(page) = prompt.telemetry {
                         lines.extend(telemetry_settings_lines(
-                            choice,
+                            page,
                             prompt.telemetry_env_forced_off,
                             align,
                         ));
@@ -535,10 +647,10 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
             push_esc_skip_hint(&mut lines, align);
             return lines;
         }
-        OnboardingWelcomeKind::LoginOpenAi { yes_highlighted } => {
+        OnboardingWelcomeKind::LoginOpenAi { choice } => {
             lines.push(
                 Line::from(Span::styled(
-                    "Log in to OpenAI?",
+                    "How would you like to log in?",
                     Style::default()
                         .fg(welcome_accent())
                         .add_modifier(Modifier::BOLD),
@@ -547,11 +659,9 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
             );
             lines.push(Line::from(""));
 
-            // Rounded Yes/No lozenge pills; the selection is shown visually (the
-            // filled capsule), so no instruction sentence is needed.
-            lines.push(yes_no_pill_line(yes_highlighted, align));
-            // The Esc hint below already says you can log in later with /login,
-            // so we don't repeat a "choose No to skip" line here.
+            // Rounded lozenge pills for the 4 primary choices; selection is
+            // carried by fill + BOLD so monochrome terminals stay legible.
+            lines.extend(login_choice_pill_lines(choice, width, align));
             push_esc_skip_hint(&mut lines, align);
             return lines;
         }
@@ -644,12 +754,12 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
     if area.width < 4 || area.height < 6 {
         // Too small for the full treatment: fall back to a minimal welcome.
         let mut lines = vec![welcome_title_line()];
-        lines.extend(welcome_body_lines(app));
+        lines.extend(welcome_body_lines(app, area.width));
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
 
-    let body = welcome_body_lines(app);
+    let body = welcome_body_lines(app, area.width);
     let body_h = body.len() as u16;
     const TITLE_H: u16 = 1;
     const HINT_H: u16 = 1;

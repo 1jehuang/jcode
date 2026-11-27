@@ -11,6 +11,32 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
+
+/// Opening sentences of the Jcode Cloud account failures. The cloud CLI prints
+/// them and the TUI recognizes them to show onboarding steps instead of a
+/// generic failure, so keep each one a stable prefix of its full message.
+pub const CLOUD_ACCOUNT_REQUIRED: &str = "Jcode Cloud needs a Jcode account.";
+pub const CLOUD_SIGN_IN_EXPIRED: &str = "Your Jcode sign-in expired.";
+pub const CLOUD_NOT_ENTITLED: &str = "Jcode Cloud requires an active paid Jcode subscription.";
+
+/// Signed out: how to get an account from a shell.
+pub fn cloud_account_required_message() -> String {
+    format!(
+        "{CLOUD_ACCOUNT_REQUIRED} Run `jcode account login` to sign in or create one. A paid plan includes your Jcode Cloud machine: {JCODE_PRICING_URL}"
+    )
+}
+
+/// The saved account key was rejected.
+pub fn cloud_sign_in_expired_message() -> String {
+    format!("{CLOUD_SIGN_IN_EXPIRED} Run `jcode account login` again.")
+}
+
+/// Signed in, but the plan does not include the managed machine.
+pub fn cloud_not_entitled_message() -> String {
+    format!(
+        "{CLOUD_NOT_ENTITLED} See plans at {JCODE_PRICING_URL} or change yours with `jcode account manage`."
+    )
+}
 /// User-facing runtime identity. Keep "Subscription" in the name so picker,
 /// header, status, and diagnostics never resemble a generic model host.
 pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";
@@ -45,12 +71,12 @@ impl JcodeTier {
     }
 
     pub fn usable_budget_usd(self) -> f64 {
-        f64::from(self.retail_price_usd()) * 2.0
+        f64::from(self.retail_price_usd()) * 4.0
     }
 
-    /// Provider-price inference included with the monthly plan. The included
-    /// portion is billed at 50%, so every subscription dollar buys two dollars
-    /// of inference. Usage after this allowance is billed at provider API price.
+    /// Provider-price inference included with the monthly plan. Every
+    /// subscription dollar buys four dollars of inference. Usage after this
+    /// allowance is billed at provider API price.
     pub fn included_inference_usd(self) -> f64 {
         self.usable_budget_usd()
     }
@@ -119,7 +145,7 @@ pub struct CuratedModel {
 }
 
 pub const CURATED_MODELS: &[CuratedModel] = &[
-    // Only supported Claude 5.5 and GPT 6.1 models are offered.
+    // Preserve existing selections while also accepting exact deployed router IDs.
     CuratedModel {
         id: "claude-opus-5-5",
         display_name: "Claude Opus 5.5",
@@ -165,6 +191,20 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
         note: "Frontier model; routed server-side to OpenAI by the jcode router.",
+    },
+    CuratedModel {
+        id: "claude-sonnet-4-6",
+        display_name: "Claude Sonnet 4.6",
+        aliases: &[
+            "claude-sonnet-4-6",
+            "sonnet-4-6",
+            "sonnet 4.6",
+            "claude sonnet 4.6",
+        ],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Deployed managed model; routed server-side to Anthropic by the jcode router.",
     },
 ];
 
@@ -390,6 +430,7 @@ mod tests {
         "claude-sonnet-5-5",
         "claude-haiku-5-5",
         "gpt-6.1-sol",
+        "claude-sonnet-4-6",
     ];
 
     #[test]
@@ -415,13 +456,43 @@ mod tests {
     }
 
     #[test]
+    fn deployed_sonnet_id_is_preserved_for_managed_selection() {
+        for selection in [
+            "claude-sonnet-4-6",
+            "sonnet 4.6",
+            "Claude Sonnet 4.6",
+            "claude-sonnet-4-6@anthropic",
+            "claude-sonnet-4-6[1m]",
+        ] {
+            assert_eq!(canonical_model_id(selection), Some("claude-sonnet-4-6"));
+            assert!(is_model_allowed_for_current_tier(selection));
+        }
+        let model = find_curated_model("claude-sonnet-4-6").unwrap();
+        assert_eq!(model.routing_policy, UpstreamRoutingPolicy::ServerManaged);
+        assert_eq!(model.min_tier, JcodeTier::Plus);
+        let route = crate::provider::ModelRoute {
+            model: model.id.to_string(),
+            provider: JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+            api_method: JCODE_ROUTE_API_METHOD.to_string(),
+            available: true,
+            detail: routing_policy_detail(model),
+            usage: None,
+            cheapness: None,
+        };
+        let selection = jcode_provider_core::RouteSelection::from_model_route(&route);
+        assert_eq!(selection.routed_model_spec(), "claude-sonnet-4-6");
+        assert_eq!(
+            selection.runtime_key,
+            jcode_provider_core::RuntimeKey::JcodeSubscription
+        );
+    }
+
+    #[test]
     fn retired_models_and_unsupported_generations_are_not_curated() {
         for model in [
             "claude-opus-4-8",
             "opus 4.8",
             "claude-opus-5",
-            "claude-sonnet-4-6",
-            "sonnet 4.6",
             "claude-fable-5",
             "gpt-5.4",
             "gpt-5.5",
@@ -499,7 +570,7 @@ mod tests {
                 .iter()
                 .all(|model| model.min_tier != JcodeTier::Flagship)
         );
-        assert_eq!(CURATED_MODELS.len(), 4);
+        assert_eq!(CURATED_MODELS.len(), 5);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());
@@ -510,11 +581,11 @@ mod tests {
     #[test]
     fn tier_pricing_matches_launched_plans() {
         let expected = [
-            (JcodeTier::Plus, "plus", "Plus", 10, 20.00),
-            (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
-            (JcodeTier::Max, "max", "Max", 100, 200.00),
-            (JcodeTier::Ultra, "ultra", "Ultra", 200, 400.00),
-            (JcodeTier::Flagship, "flagship", "Solo", 1000, 2000.00),
+            (JcodeTier::Plus, "plus", "Plus", 10, 40.00),
+            (JcodeTier::Pro, "pro", "Pro", 20, 80.00),
+            (JcodeTier::Max, "max", "Max", 100, 400.00),
+            (JcodeTier::Ultra, "ultra", "Ultra", 200, 800.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 4000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));

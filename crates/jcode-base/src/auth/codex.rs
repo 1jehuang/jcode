@@ -322,11 +322,20 @@ pub fn update_account_tokens(
     {
         account.access_token = access_token.to_string();
         account.refresh_token = refresh_token.to_string();
-        account.id_token = id_token.clone();
-        account.account_id =
-            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id));
+        // Refresh grants may omit id_token. Keep identity hints from login so
+        // cloud return can still verify the same account after token rotation.
+        if let Some(email) = id_token.as_deref().and_then(extract_email) {
+            account.email = Some(email);
+        }
+        if let Some(identity) =
+            account_id.or_else(|| id_token.as_deref().and_then(extract_account_id))
+        {
+            account.account_id = Some(identity);
+        }
+        if id_token.is_some() {
+            account.id_token = id_token;
+        }
         account.expires_at = expires_at;
-        account.email = id_token.as_deref().and_then(extract_email);
         save_auth_file(&auth)?;
         Ok(())
     } else {
@@ -597,6 +606,18 @@ pub fn extract_email(id_token: &str) -> Option<String> {
         .get("email")
         .and_then(|value| value.as_str())
         .map(|value| value.to_string())
+}
+
+/// Read plan metadata as a routing hint, never as proof of authorization.
+pub fn extract_subscription_type(token: &str) -> Option<String> {
+    let payload = decode_jwt_payload(token)?;
+    payload
+        .get("https://api.openai.com/auth")?
+        .get("chatgpt_plan_type")?
+        .as_str()
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(str::to_owned)
 }
 
 fn decode_jwt_payload(token: &str) -> Option<Value> {

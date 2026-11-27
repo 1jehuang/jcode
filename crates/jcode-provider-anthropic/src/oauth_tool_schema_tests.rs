@@ -50,7 +50,7 @@ fn oauth_bash_forwards_registered_schema_and_timeout_units() {
         let formatted = format_tools(std::slice::from_ref(&registry_bash), is_oauth, false);
         assert_eq!(formatted.len(), 1, "Bash must be advertised exactly once");
         let bash = &formatted[0];
-        assert_eq!(bash.name, if is_oauth { "Bash" } else { "bash" });
+        assert_eq!(bash.name, "bash");
         assert_eq!(bash.input_schema, registry_bash.input_schema);
         assert_eq!(bash.description, registry_bash.description);
         assert!(
@@ -87,8 +87,8 @@ fn oauth_schedule_wakeup_forwards_the_real_schedule_schema() {
     let formatted = format_tools(&registry, true, false);
     let scheduled = formatted
         .iter()
-        .find(|t| t.name == "ScheduleWakeup")
-        .expect("schedule must be advertised under its OAuth name");
+        .find(|t| t.name == "schedule")
+        .expect("schedule must be advertised under its own name");
 
     let props = scheduled.input_schema["properties"]
         .as_object()
@@ -99,10 +99,7 @@ fn oauth_schedule_wakeup_forwards_the_real_schedule_schema() {
         "fabricated schema leaked back in: {props:?}"
     );
     assert_eq!(
-        formatted
-            .iter()
-            .filter(|t| t.name == "ScheduleWakeup")
-            .count(),
+        formatted.iter().filter(|t| t.name == "schedule").count(),
         1,
         "schedule must not be advertised twice"
     );
@@ -115,7 +112,7 @@ fn oauth_bash_schema_advertises_the_justification_escape_hatch() {
     let formatted = format_tools(&[bash_registry_definition()], true, false);
     let bash = formatted
         .iter()
-        .find(|t| t.name == "Bash")
+        .find(|t| t.name == "bash")
         .expect("Bash must be advertised");
     assert!(
         bash.input_schema["properties"]
@@ -131,12 +128,12 @@ fn oauth_builtins_forward_registry_schemas_including_intent() {
     // The OAuth route used to swap in hand-curated Claude-Code schemas for
     // Edit/Write/Read/..., which silently dropped registry options such as
     // `intent`. Every route must advertise the registry definition verbatim,
-    // only renamed.
+    // under the same name.
     for (local, oauth) in [
-        ("edit", "Edit"),
-        ("write", "Write"),
-        ("read", "Read"),
-        ("bash", "Bash"),
+        ("edit", "edit"),
+        ("write", "write"),
+        ("read", "read"),
+        ("bash", "bash"),
     ] {
         let def = ToolDefinition {
             name: local.to_string(),

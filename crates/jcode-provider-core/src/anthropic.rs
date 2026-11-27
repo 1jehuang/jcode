@@ -1,8 +1,13 @@
-/// Claude Code OAuth beta headers used by the Anthropic transport.
-pub const ANTHROPIC_OAUTH_BETA_HEADERS: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24";
+/// Anthropic betas used on Claude subscription (OAuth) requests.
+///
+/// `claude-code-20250219` used to be first in this list to look like the
+/// official Claude Code CLI. Live probes on 2026-11-05 showed it is not needed
+/// for acceptance, billing or caching, so it was removed. `oauth-2025-04-20` is
+/// required. See docs/ANTHROPIC_OAUTH_IDENTITY_PROBE_2026_11_05.md.
+pub const ANTHROPIC_OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24";
 
-/// Claude Code OAuth beta headers with Anthropic's explicit 1M context beta.
-pub const ANTHROPIC_OAUTH_BETA_HEADERS_1M: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,context-1m-2025-08-07";
+/// OAuth betas plus Anthropic's explicit 1M context beta.
+pub const ANTHROPIC_OAUTH_BETA_HEADERS_1M: &str = "oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,context-1m-2025-08-07";
 
 /// How a Claude model exposes its 1M-token long-context window.
 ///
@@ -146,7 +151,8 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
 
 /// Models whose adaptive thinking is mandatory. Match normalized versions, not
 /// prefixes, so Opus 5 and Fable 5 keep their existing optional-thinking behavior.
-/// Verified against the Opus 5.5 migration guide (2026-09-22).
+/// Verified against the Opus 5.5 migration guide (2026-09-22). Fable 5.2 was
+/// probed live on 2026-11-11: `thinking: {type: disabled}` is a 400.
 pub fn anthropic_thinking_always_on(model: &str) -> bool {
     let base = normalized_claude_caps_key(model);
     if !base.starts_with("claude-") {
@@ -154,7 +160,7 @@ pub fn anthropic_thinking_always_on(model: &str) -> bool {
     }
     matches!(
         parse_claude_family_version(&base),
-        (Some("opus"), Some((5, 5))) | (Some("fable"), Some((5, 1)))
+        (Some("opus"), Some((5, 5))) | (Some("fable"), Some((5, 1) | (5, 2)))
     )
 }
 
@@ -180,6 +186,7 @@ pub fn anthropic_max_output_tokens(model: &str) -> u32 {
         "claude-opus-4-6",
         "claude-opus-4.6",
         "claude-sonnet-5",
+        "claude-haiku-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4.6",
         "claude-fable-5-1",
@@ -380,22 +387,21 @@ pub fn anthropic_reasoning_caps(model: &str) -> AnthropicReasoningCaps {
     }
 }
 
+/// Tool name sent to Anthropic on the OAuth path.
+///
+/// Jcode used to rename its tools to Claude Code's PascalCase names (`bash` to
+/// `Bash`, `subagent` to `Agent`, ...) on the way out. Live probes on
+/// 2026-11-05 showed OAuth requests with Jcode's own tool names are accepted,
+/// so tools now go out under their real names. Kept as a function so call
+/// sites don't churn. [`anthropic_map_tool_name_from_oauth`] still accepts the
+/// old PascalCase names, so a model that emits them out of habit, or a resumed
+/// transcript that contains them, still resolves.
 pub fn anthropic_map_tool_name_for_oauth(name: &str) -> String {
-    match name {
-        "bash" => "Bash",
-        "read" => "Read",
-        "write" => "Write",
-        "edit" => "Edit",
-        "glob" => "Glob",
-        "grep" => "Grep",
-        "subagent" => "Agent",
-        "schedule" => "ScheduleWakeup",
-        "skill_manage" => "Skill",
-        _ => name,
-    }
-    .to_string()
+    name.to_string()
 }
 
+/// Map a tool name returned by Anthropic back to Jcode's local name. Accepts
+/// the legacy Claude Code PascalCase names for compatibility.
 pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
     match name {
         "Bash" => "bash",
@@ -410,23 +416,6 @@ pub fn anthropic_map_tool_name_from_oauth(name: &str) -> String {
         _ => name,
     }
     .to_string()
-}
-
-pub fn anthropic_stainless_arch() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        other => other,
-    }
-}
-
-pub fn anthropic_stainless_os() -> &'static str {
-    match std::env::consts::OS {
-        "linux" => "Linux",
-        "macos" => "MacOS",
-        "windows" => "Windows",
-        other => other,
-    }
 }
 
 #[cfg(test)]
@@ -459,6 +448,8 @@ mod tests {
         }
         assert!(anthropic_thinking_always_on("claude-fable-5-1"));
         assert!(anthropic_thinking_always_on("claude-fable-5.1-20260828"));
+        assert!(anthropic_thinking_always_on("claude-fable-5-2"));
+        assert!(anthropic_thinking_always_on("claude-fable-5.2"));
         for model in [
             "claude-opus-5",
             "claude-fable-5",
@@ -493,24 +484,26 @@ mod tests {
     }
 
     #[test]
-    fn oauth_tool_name_mapping_is_reversible_for_known_tools() {
-        for (local, oauth) in [
+    fn oauth_tool_names_go_out_unchanged_and_legacy_names_map_back() {
+        for (local, legacy) in [
             ("bash", "Bash"),
             ("read", "Read"),
             ("subagent", "Agent"),
             ("schedule", "ScheduleWakeup"),
             ("skill_manage", "Skill"),
         ] {
-            assert_eq!(anthropic_map_tool_name_for_oauth(local), oauth);
-            assert_eq!(anthropic_map_tool_name_from_oauth(oauth), local);
+            assert_eq!(anthropic_map_tool_name_for_oauth(local), local);
+            assert_eq!(anthropic_map_tool_name_from_oauth(legacy), local);
+            assert_eq!(anthropic_map_tool_name_from_oauth(local), local);
         }
         assert_eq!(anthropic_map_tool_name_for_oauth("custom"), "custom");
     }
 
     #[test]
-    fn stainless_labels_are_non_empty() {
-        assert!(!anthropic_stainless_arch().is_empty());
-        assert!(!anthropic_stainless_os().is_empty());
+    fn oauth_betas_do_not_claim_claude_code() {
+        assert!(ANTHROPIC_OAUTH_BETA_HEADERS.contains("oauth-2025-04-20"));
+        assert!(!ANTHROPIC_OAUTH_BETA_HEADERS.contains("claude-code-"));
+        assert!(!ANTHROPIC_OAUTH_BETA_HEADERS_1M.contains("claude-code-"));
     }
 
     #[test]

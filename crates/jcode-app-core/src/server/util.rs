@@ -67,102 +67,40 @@ pub(crate) async fn get_shared_mcp_pool(
         .clone()
 }
 
-pub(crate) fn server_update_candidate(is_selfdev_session: bool) -> Option<(PathBuf, &'static str)> {
-    build::shared_server_update_candidate(is_selfdev_session)
+#[path = "reload_exec_target.rs"]
+mod reload_exec_target;
+pub(crate) use reload_exec_target::{reload_exec_target, server_update_candidate};
+
+/// Capability marker. `jcode cloud runtime reload` greps the running daemon's
+/// executable for it to decide whether an in-place session-preserving handoff
+/// will land on the managed selection, or whether only a restart can.
+pub const MANAGED_CLOUD_LIVE_RELOAD_MARKER: &str = "jcode-managed-cloud-live-reload-v1";
+
+/// Launcher link the managed cloud updater repoints at the selected runtime.
+pub(crate) const MANAGED_CLOUD_LAUNCHER: &str = "/opt/jcode-cloud/jcode";
+const MANAGED_CLOUD_RELEASES: &str = "/opt/jcode-cloud/releases/";
+
+fn managed_cloud_reload_target(running: Option<&Path>) -> Option<(PathBuf, &'static str)> {
+    managed_cloud_reload_target_in(
+        running,
+        Path::new(MANAGED_CLOUD_LAUNCHER),
+        MANAGED_CLOUD_RELEASES,
+    )
 }
 
-/// Resolve the binary the reload should actually exec into, with a hard
-/// no-downgrade guard.
-///
-/// `server_update_candidate` can legitimately return an *older* binary (e.g. a
-/// `shared-server` channel that an update never advanced, or a leftover self-dev
-/// promotion synced from another machine). A forced reload bypasses
-/// `server_has_newer_binary`, so without this guard it would silently exec into
-/// that older binary and downgrade every connected client.
-///
-/// We never block a same-or-newer candidate (so self-dev builds, which are
-/// freshly written and therefore newer by mtime, still apply). When the
-/// candidate is *strictly older* than the running executable we refuse it and
-/// re-exec into the current executable instead: same code, fresh process and
-/// socket handoff, but no downgrade. Any mtime uncertainty is treated as "do
-/// not downgrade".
-///
-/// Crucially, the candidate is the *newest* reload candidate across BOTH
-/// self-dev flavors, not just the one matching `is_selfdev_session`. This keeps
-/// the reload target consistent with `server_has_newer_binary`, which also scans
-/// both flavors. Without this, a self-dev/canary daemon whose `shared-server`
-/// channel is pinned to an *old* self-dev build would advertise
-/// `server_has_update = true` (the normal-flavor probe self-heals to the freshly
-/// installed release) yet reload into that same old pinned build -> the server
-/// reports an update it can never apply, so the client upgrades while the server
-/// stays stale and the auto-reload loops until it is suppressed. Selecting the
-/// newest candidate across flavors still preserves a deliberately-pinned self-dev
-/// build whenever that build is the freshest one on disk (the case the pin is
-/// meant to protect).
-pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &'static str)> {
-    let candidate = newest_reload_candidate(is_selfdev_session)?;
-    // On Linux a self-dev rebuild rewrites the running binary in place (a dirty
-    // build reuses the same `versions/<hash>` path), which unlinks the running
-    // inode. `current_exe()` then resolves `/proc/self/exe` to a path with a
-    // trailing " (deleted)" marker that is NOT a real file. If we keep that
-    // marker we (a) fail the "same binary" fast-path below, (b) read no mtime so
-    // the freshly-built candidate looks like a downgrade, and (c) fall back to
-    // re-execing the bogus " (deleted)" path, which does not exist -> the server
-    // exits without a replacement and strands every connected client. Strip the
-    // marker so we compare against (and can re-exec) the real on-disk path.
-    let current_exe = running_server_binary();
-
-    // Identity/mtime comparisons must look through release wrapper scripts to
-    // the payload that actually runs (see `build::resolve_binary_payload`):
-    // the running exe is the `.bin` payload while channel candidates are tiny
-    // wrapper scripts, and comparing wrapper-vs-payload mtimes turned every
-    // release install into a phantom "downgrade"/"update". The exec target
-    // stays the original candidate path (the wrapper), which is what sets up
-    // `LD_LIBRARY_PATH` correctly.
-    let candidate_canonical = build::resolve_binary_payload(&candidate.0);
-    let current_canonical = current_exe
-        .as_ref()
-        .map(|p| build::resolve_binary_payload(p));
-
-    let current_mtime = current_canonical.as_deref().and_then(binary_mtime);
-    let candidate_mtime = binary_mtime(candidate_canonical.as_path());
-
-    match guarded_reload_target(
-        candidate.clone(),
-        candidate_canonical.as_path(),
-        current_exe.as_deref(),
-        current_canonical.as_deref(),
-        current_mtime,
-        candidate_mtime,
-    ) {
-        ReloadTargetDecision::UseCandidate(target) => Some(target),
-        ReloadTargetDecision::DowngradeBlockedUseCurrent(target) => {
-            // Never strand clients by re-execing a binary that is gone from disk.
-            // If the running exe was unlinked (e.g. an in-place rebuild) but the
-            // candidate still exists, prefer the candidate over refusing to
-            // reload. The candidate may be older, but a live downgrade beats a
-            // dead server with no replacement.
-            if !target.0.exists() && candidate_canonical.exists() {
-                crate::logging::warn(&format!(
-                    "reload downgrade guard: current binary {:?} is missing on disk; falling back to candidate {:?} to avoid stranding clients",
-                    target.0, candidate.0,
-                ));
-                return Some(candidate);
-            }
-            crate::logging::warn(&format!(
-                "reload downgrade guard: refusing to exec into older candidate; re-execing current binary {:?} instead",
-                target.0,
-            ));
-            Some(target)
-        }
-        ReloadTargetDecision::DowngradeUnverifiable(target) => {
-            crate::logging::warn(&format!(
-                "reload downgrade guard: older candidate {:?} detected but current exe is unavailable; proceeding with candidate",
-                target.0,
-            ));
-            Some(target)
-        }
+fn managed_cloud_reload_target_in(
+    running: Option<&Path>,
+    launcher: &Path,
+    releases_prefix: &str,
+) -> Option<(PathBuf, &'static str)> {
+    let running = running?.to_str()?;
+    if !running.starts_with(releases_prefix) {
+        return None;
     }
+    // Exec the resolved release, not the link, so the new process pins the
+    // runtime it actually started from even if the link moves again.
+    let target = std::fs::canonicalize(launcher).ok()?;
+    target.is_file().then_some((target, "managed-cloud"))
 }
 
 fn binary_mtime(path: &Path) -> Option<std::time::SystemTime> {
@@ -299,7 +237,24 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     RUNNING
-        .get_or_init(|| std::env::current_exe().ok().map(resolve_launch_path))
+        .get_or_init(|| match std::env::current_exe() {
+            Ok(exe) => {
+                let resolved = resolve_launch_path(exe);
+                if build::is_dynamic_loader_path(&resolved) {
+                    crate::logging::warn(&format!(
+                        "running server binary resolved to dynamic loader {:?}; suppressing mtime-based update checks",
+                        resolved
+                    ));
+                    None
+                } else {
+                    Some(resolved)
+                }
+            }
+            Err(error) => {
+                crate::logging::warn(&format!("cannot identify running server binary: {error}"));
+                None
+            }
+        })
         .clone()
 }
 
@@ -307,6 +262,52 @@ pub(crate) fn running_server_binary() -> Option<PathBuf> {
 fn resolve_launch_path(exe: PathBuf) -> PathBuf {
     let exe = strip_deleted_suffix(exe);
     std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+#[cfg(all(test, unix))]
+mod managed_cloud_target_tests {
+    use super::managed_cloud_reload_target_in;
+
+    #[test]
+    fn managed_daemon_reloads_onto_the_selected_release_even_if_older() {
+        let dir = tempfile::tempdir().unwrap();
+        let releases = dir.path().join("releases");
+        let old = releases.join("aaa/jcode-linux-x86_64");
+        let new = releases.join("bbb/jcode-linux-x86_64");
+        for binary in [&old, &new] {
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(binary, b"bin").unwrap();
+        }
+        let launcher = dir.path().join("jcode");
+        std::os::unix::fs::symlink(&new, &launcher).unwrap();
+        let prefix = format!("{}/", std::fs::canonicalize(&releases).unwrap().display());
+        let running = std::fs::canonicalize(&old).unwrap();
+        let (target, label) =
+            managed_cloud_reload_target_in(Some(&running), &launcher, &prefix).unwrap();
+        assert_eq!(target, std::fs::canonicalize(&new).unwrap());
+        assert_eq!(label, "managed-cloud");
+        // Repointing to an older pinned release is still followed.
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink(&old, &launcher).unwrap();
+        let (target, _) =
+            managed_cloud_reload_target_in(Some(&running), &launcher, &prefix).unwrap();
+        assert_eq!(target, running);
+    }
+
+    #[test]
+    fn unmanaged_daemons_keep_channel_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = dir.path().join("jcode");
+        std::fs::write(&launcher, b"bin").unwrap();
+        let local = dir.path().join("builds/versions/x/jcode");
+        assert!(
+            managed_cloud_reload_target_in(Some(&local), &launcher, "/opt/jcode-cloud/releases/")
+                .is_none()
+        );
+        assert!(
+            managed_cloud_reload_target_in(None, &launcher, "/opt/jcode-cloud/releases/").is_none()
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

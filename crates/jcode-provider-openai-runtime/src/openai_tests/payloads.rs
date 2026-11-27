@@ -247,7 +247,8 @@ fn websocket_delta_removes_only_matched_previous_response_output() {
 fn websocket_delta_preserves_unmatched_nontext_assistant_content() {
     let previous = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"previous"}]});
     let injected = serde_json::json!({"type":"message", "role":"assistant", "content":[{"type":"refusal", "refusal":"different"}]});
-    let (delta, skipped) = persistent_ws_incremental_items(&[injected.clone()], 0, &[previous]);
+    let (delta, skipped) =
+        persistent_ws_incremental_items(std::slice::from_ref(&injected), 0, &[previous]);
     assert_eq!(delta, vec![injected]);
     assert_eq!(skipped, 0);
 }
@@ -269,9 +270,8 @@ fn websocket_delta_does_not_replay_custom_tool_calls_as_functions() {
         let callback = serde_json::json!({
             "type":"function_call_output", "call_id":"call_1", "output":"done",
         });
-        let (delta, skipped) = persistent_ws_incremental_items(
-            &[replay, callback.clone()], 0, &[output],
-        );
+        let (delta, skipped) =
+            persistent_ws_incremental_items(&[replay, callback.clone()], 0, &[output]);
         assert_eq!(delta, vec![callback]);
         assert_eq!(skipped, 1);
     }
@@ -309,7 +309,9 @@ fn websocket_delta_preserves_modified_custom_tool_calls() {
             "type":"function_call", "call_id":id, "name":name, "arguments":arguments,
         });
         let (delta, skipped) = persistent_ws_incremental_items(
-            &[replay.clone()], 0, std::slice::from_ref(&output),
+            std::slice::from_ref(&replay),
+            0,
+            std::slice::from_ref(&output),
         );
         assert_eq!(delta, vec![replay]);
         assert_eq!(skipped, 0);
@@ -362,7 +364,11 @@ fn websocket_empty_terminal_output_preserves_calls_for_next_delta() {
         "type":"function_call_output", "call_id":"call_1", "output":"spawned",
     });
     let (delta, skipped) = persistent_ws_incremental_items(&[call, callback.clone()], 0, &output);
-    assert_eq!(delta, vec![callback], "only the tool result is new to the provider");
+    assert_eq!(
+        delta,
+        vec![callback],
+        "only the tool result is new to the provider"
+    );
     assert_eq!(skipped, 1);
 }
 
@@ -380,7 +386,10 @@ fn websocket_nonempty_terminal_output_remains_authoritative() {
         r#"{"type":"response.completed","response":{"output":[]}}"#,
         &mut output,
     );
-    assert!(output.is_empty(), "no output must not fabricate a prior response");
+    assert!(
+        output.is_empty(),
+        "no output must not fabricate a prior response"
+    );
 }
 
 #[test]
@@ -501,6 +510,57 @@ fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
     assert_eq!(request["reasoning"]["effort"], serde_json::json!("low"));
 }
 
+#[test]
+fn response_request_places_instructions_by_model() {
+    use serde_json::json;
+
+    let system = "Base instructions\n\nProject-specific overlay";
+    let history = [
+        json!({"role": "user", "content": "first turn"}),
+        json!({"role": "assistant", "content": "first reply"}),
+        json!({"role": "user", "content": "follow-up"}),
+    ];
+    for (model, developer_first) in [
+        ("gpt-6.2-astra", true),
+        ("gpt-6.2-sol", true),
+        ("gpt-6.1-astra", false),
+        ("gpt-6.1-sol", false),
+        ("gpt-5.4", false),
+    ] {
+        for oauth in [false, true] {
+            let request = OpenAIProvider::build_response_request(
+                model,
+                system.into(),
+                &history,
+                &[],
+                oauth,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            let input = request["input"].as_array().unwrap();
+            if developer_first {
+                assert_eq!(request["instructions"], "", "{model}, oauth={oauth}");
+                let (first, rest) = input.split_first().unwrap();
+                assert_eq!(first["role"], "developer", "{model}, oauth={oauth}");
+                let content = &first["content"];
+                assert!(
+                    content == system
+                        || content == &json!([{"type": "input_text", "text": system}]),
+                    "unexpected developer content for {model}, oauth={oauth}: {content}"
+                );
+                assert_eq!(rest, &history, "{model}, oauth={oauth}");
+            } else {
+                assert_eq!(request["instructions"], system, "{model}, oauth={oauth}");
+                assert_eq!(input.as_slice(), &history, "{model}, oauth={oauth}");
+            }
+        }
+    }
+}
+
 /// Regression guard for issue #203: prompt overlays (`AGENTS.md`,
 /// `.jcode/prompt-overlay.md`) were silently dropped in ChatGPT/Codex OAuth
 /// mode because the provider replaced the caller's fully-built system prompt
@@ -542,7 +602,8 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
     );
-    for mode in ["swarm"] {
+    {
+        let mode = "swarm";
         provider.set_reasoning_effort(mode).unwrap();
         for (configured, expected) in [
             ("low", "low"),
@@ -575,7 +636,8 @@ async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
         "gpt-5.6".to_string(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for mode in ["swarm"] {
+    {
+        let mode = "swarm";
         let effort = provider.api_reasoning_effort_with_swarm_root(Some(mode), Some("none"));
         let request = OpenAIProvider::build_response_request(
             "gpt-5.6",
@@ -635,7 +697,8 @@ fn configured_swarm_root_effort_reads_real_config() {
         "gpt-5.6".into(),
         vec!["none".into(), "low".into(), "max".into()],
     );
-    for (mode, expected) in [("swarm", "low")] {
+    {
+        let (mode, expected) = ("swarm", "low");
         provider.set_reasoning_effort(mode).unwrap();
         let effort = provider.api_reasoning_effort(provider.reasoning_effort().as_deref());
         let request = OpenAIProvider::build_response_request(

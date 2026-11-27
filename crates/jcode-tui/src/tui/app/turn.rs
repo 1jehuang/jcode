@@ -1,4 +1,9 @@
+#[path = "turn_system_reminder.rs"]
+pub(super) mod system_reminder;
 use super::*;
+#[path = "turn_prepared_turn.rs"]
+mod prepared_turn;
+
 use crate::message::ToolDefinition;
 
 /// Keep raw JSON separate for every in-flight call. Unkeyed providers address
@@ -11,27 +16,6 @@ struct PendingStreamingTools {
 impl PendingStreamingTools {
     fn start(&mut self, tool: ToolCall) {
         self.calls.push((tool, String::new()));
-    }
-
-    fn input(&mut self, id: Option<&str>, delta: &str) {
-        let call = match id {
-            Some(id) => self.calls.iter_mut().find(|(tool, _)| tool.id == id),
-            None => self.calls.last_mut(),
-        };
-        if let Some((_, input)) = call {
-            input.push_str(delta);
-        }
-    }
-
-    fn finish(&mut self, id: Option<&str>) -> Option<ToolCall> {
-        let index = match id {
-            Some(id) => self.calls.iter().position(|(tool, _)| tool.id == id)?,
-            None => self.calls.len().checked_sub(1)?,
-        };
-        let (mut tool, input) = self.calls.remove(index);
-        tool.input = ToolCall::parse_streamed_input_to_object(&input);
-        tool.refresh_intent_from_input();
-        Some(tool)
     }
 
     fn signature(&mut self, id: &str, signature: &str) {
@@ -58,29 +42,6 @@ impl PendingStreamingTools {
 }
 
 impl App {
-    /// Append a hidden `<system-reminder>` message after the turn's prompt.
-    /// Per-turn reminders must never go in the system prompt: it precedes the
-    /// whole conversation, so changing it invalidates every cached message.
-    pub(super) fn append_turn_system_reminder(&mut self, reminder: Option<String>) {
-        let Some(reminder) = reminder
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-        let text = format!("<system-reminder>\n{reminder}\n</system-reminder>");
-        self.add_provider_message(Message::user(&text));
-        self.session.add_message_with_display_role(
-            Role::User,
-            vec![ContentBlock::Text {
-                text,
-                cache_control: None,
-            }],
-            Some(crate::session::StoredDisplayRole::System),
-        );
-    }
-
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)
     pub(super) async fn run_turn_interactive(
         &mut self,
@@ -95,6 +56,7 @@ impl App {
         let mut status_spinner_renderer = super::run_shell::StatusSpinnerRenderer::default();
 
         'turn_loop: loop {
+            self.streaming.response_output.reset();
             // Mark the turn as in-flight work: from here until the turn ends,
             // missing progress beats mean a real hang, not an idle client.
             let _turn_work = crate::logging::watchdog::begin_work("turn.request");
@@ -436,7 +398,7 @@ impl App {
                                                 let content_clone = content_blocks.clone();
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -499,7 +461,7 @@ impl App {
                                             if !content_blocks.is_empty() {
                                                 self.add_provider_message(Message {
                                                     role: Role::Assistant,
-                                                    content: content_blocks,
+                                                    content: content_blocks.into(),
                                                     timestamp: Some(chrono::Utc::now()),
                                                     tool_duration_ms: None,
                                                 });
@@ -601,6 +563,7 @@ impl App {
                                 }
                                 match event {
                                     StreamEvent::TextDelta(text) => {
+                                        self.streaming.response_output.text(&text);
                                         if !text.is_empty() {
                                             self.usage_reset.openai_quota_rejected = false;
                                         }
@@ -649,6 +612,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::ToolUseStart { id, name } => {
+                                        self.streaming.response_output.tool();
                                         self.usage_reset.openai_quota_rejected = false;
                                         // Tool input JSON is still provider-generated output and is
                                         // included in provider output-token usage. Keep the TPS timer
@@ -811,6 +775,7 @@ impl App {
                                         self.update_terminal_title();
                                     }
                                     StreamEvent::ConnectionPhase { phase } => {
+                                        self.stream_message_ended = false;
                                         let was_connecting = matches!(
                                             self.status,
                                             ProcessingStatus::Connecting(_)
@@ -832,7 +797,7 @@ impl App {
                                         }
                                     }
                                     StreamEvent::StatusDetail { detail } => {
-                                        self.status_detail = Some(detail);
+                                        self.apply_status_detail(detail);
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
@@ -842,7 +807,8 @@ impl App {
                                         self.status_detail = Some(format!("Provider tier: {tier}"));
                                     }
                                     StreamEvent::TextDone => {}
-                    StreamEvent::MessageEnd { .. } => {
+                    StreamEvent::MessageEnd { stop_reason } => {
+                                        self.streaming.response_output.finish(stop_reason.as_deref());
                                         self.pause_streaming_tps(true);
                                         self.stream_message_ended = true;
                                         saw_message_end = true;
@@ -850,7 +816,17 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
+                                    StreamEvent::ResolvedModel { model } => {
+                                        call_usage.resolved_model = jcode_provider_core::nonempty_response_model(Some(&model)).map(str::to_string);
+                                    }
                                     StreamEvent::RetryRollback { attempt, max } => {
+                                        // Account for any observed failed-attempt usage, then
+                                        // clear its response model before the next attempt.
+                                        crate::telemetry::record_simple_completion_usage(
+                                            Some(&self.session.id), &provider_name, &model_at_request_start,
+                                            crate::telemetry::UsageSource::Agent,
+                                            std::mem::take(&mut call_usage),
+                                        );
                                         // Transient transport fault mid-stream; the provider is
                                         // replaying the request from the top. Discard the partial
                                         // attempt (accumulators + on-screen streaming render) so
@@ -1051,6 +1027,7 @@ impl App {
                                         if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
                                             dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
                                         }) {
+                                            dm.duration_secs = DisplayMessage::tool_duration_from_output(&content);
                                             dm.content = content.clone();
                                             self.bump_display_messages_version();
                                         }
@@ -1292,7 +1269,7 @@ impl App {
                 let content_clone = content_blocks.clone();
                 self.add_provider_message(Message {
                     role: Role::Assistant,
-                    content: content_blocks,
+                    content: content_blocks.into(),
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
                 });
@@ -1369,7 +1346,7 @@ impl App {
                     for blocks in generated_image_contexts.drain(..) {
                         self.add_provider_message(Message {
                             role: Role::User,
-                            content: blocks.clone(),
+                            content: blocks.clone().into(),
                             timestamp: Some(chrono::Utc::now()),
                             tool_duration_ms: None,
                         });
@@ -1426,6 +1403,9 @@ impl App {
                         sdk_content.clone()
                     };
                     let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    if let Some(seconds) = DisplayMessage::tool_duration_from_output(&sdk_content) {
+                        self.set_latest_tool_duration(&tc.id, seconds);
+                    }
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
@@ -1437,7 +1417,8 @@ impl App {
                             tool_use_id: tc.id.clone(),
                             content: sdk_content,
                             is_error: if sdk_is_error { Some(true) } else { None },
-                        }],
+                        }]
+                        .into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });
@@ -1668,6 +1649,7 @@ impl App {
                     output.clone(),
                 );
 
+                self.set_latest_tool_duration(&tc.id, tool_duration_ms as f32 / 1000.0);
                 self.add_provider_message(Message::tool_result_with_duration(
                     &tc.id,
                     &output,
@@ -1693,7 +1675,7 @@ impl App {
                 for blocks in generated_image_contexts.drain(..) {
                     self.add_provider_message(Message {
                         role: Role::User,
-                        content: blocks.clone(),
+                        content: blocks.clone().into(),
                         timestamp: Some(chrono::Utc::now()),
                         tool_duration_ms: None,
                     });

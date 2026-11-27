@@ -1,6 +1,16 @@
 use super::*;
+
+mod cloud_directories;
+mod codemode_preview;
+mod compact_agent_dms;
+mod preview_redraw_schedule;
+mod queued_reminders;
+mod resume_parity;
 use crate::tui::session_picker;
 use crate::tui::ui::tools_ui;
+
+#[path = "../session_picker/live_chrome_parity_tests.rs"]
+mod picker_chrome_parity;
 
 /// Delegates to the single shared render-state lock so viewport-snapshot tests
 /// serialize against every other rendering test, not just each other (#593).
@@ -110,6 +120,8 @@ fn native_scrollbar_visibility_requires_overflow() {
 
 #[derive(Clone, Default)]
 struct TestState {
+    session_picker: Option<std::rc::Rc<std::cell::RefCell<session_picker::SessionPicker>>>,
+    unfocused: bool,
     input: String,
     cursor_pos: usize,
     provider_name: Option<String>,
@@ -120,6 +132,7 @@ struct TestState {
     display_messages: Vec<DisplayMessage>,
     messages_version: u64,
     streaming_text: String,
+    streaming_tools: Vec<ToolCall>,
     batch_progress: Option<crate::bus::BatchProgress>,
     queued_messages: Vec<String>,
     pending_soft_interrupts: Vec<String>,
@@ -128,9 +141,12 @@ struct TestState {
     queue_mode: bool,
     active_skill: Option<String>,
     centered_mode: bool,
+    diff_mode_override: Option<crate::config::DiffDisplayMode>,
     anim_elapsed: f32,
     now_ms: u64,
     time_since_activity: Option<Duration>,
+    /// `Some(pending)` overrides the trait's conservative default.
+    stream_reveal_pending: Option<bool>,
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
     inline_interactive_state: Option<crate::tui::InlineInteractiveState>,
@@ -143,6 +159,7 @@ struct TestState {
     side_pane_images: Vec<crate::session::RenderedImage>,
     pin_images: bool,
     inline_images_visible: bool,
+    image_expand_level: Option<crate::tui::ImageExpandLevel>,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
     openai_reset_hint: Option<&'static str>,
     status_notice: Option<String>,
@@ -152,10 +169,17 @@ struct TestState {
     swarm_panel_selected: usize,
     swarm_panel_focused: bool,
     pinned_todos_payload: Option<String>,
+    justrust_status: Option<crate::tui::justrust_status::StatusRow>,
     swarm_panel_full_page: bool,
 }
 
 impl crate::tui::TuiState for TestState {
+    fn client_focused(&self) -> bool {
+        !self.unfocused
+    }
+    fn justrust_status(&self) -> Option<&crate::tui::justrust_status::StatusRow> {
+        self.justrust_status.as_ref()
+    }
     fn pinned_todos_payload(&self) -> Option<&str> {
         self.pinned_todos_payload.as_deref()
     }
@@ -182,6 +206,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn side_pane_images(&self) -> Vec<crate::session::RenderedImage> {
         self.side_pane_images.clone()
+    }
+    fn image_expand_level(&self, _id: u64) -> crate::tui::ImageExpandLevel {
+        self.image_expand_level.unwrap_or_default()
     }
     fn display_messages_version(&self) -> u64 {
         self.messages_version
@@ -248,7 +275,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn streaming_tool_calls(&self) -> Vec<ToolCall> {
-        Vec::new()
+        self.streaming_tools.clone()
     }
     fn elapsed(&self) -> Option<Duration> {
         None
@@ -271,6 +298,9 @@ impl crate::tui::TuiState for TestState {
     fn time_since_activity(&self) -> Option<Duration> {
         self.time_since_activity
     }
+    fn stream_reveal_pending(&self) -> bool {
+        self.stream_reveal_pending.unwrap_or(true)
+    }
     fn total_session_tokens(&self) -> Option<(u64, u64)> {
         None
     }
@@ -284,7 +314,8 @@ impl crate::tui::TuiState for TestState {
         false
     }
     fn diff_mode(&self) -> crate::config::DiffDisplayMode {
-        crate::config::DiffDisplayMode::Inline
+        self.diff_mode_override
+            .unwrap_or(crate::config::DiffDisplayMode::Inline)
     }
     fn current_session_id(&self) -> Option<String> {
         None
@@ -448,7 +479,7 @@ impl crate::tui::TuiState for TestState {
         None
     }
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>> {
-        None
+        self.session_picker.as_deref()
     }
     fn login_picker_overlay(
         &self,
@@ -512,11 +543,14 @@ fn reset_prompt_viewport_state_for_test() {
 
 #[path = "pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
+mod todo_blocker_notes;
 
 #[path = "basic.rs"]
 mod basic;
 #[path = "diagrams.rs"]
 mod diagrams;
+#[path = "expanded_diff.rs"]
+mod expanded_diff;
 #[path = "inline_picker.rs"]
 mod inline_picker;
 #[path = "onboarding.rs"]

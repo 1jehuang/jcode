@@ -171,6 +171,9 @@ pub struct CompactionManager {
     /// can restore the budget without switching models.
     model_token_budget: usize,
 
+    /// Per-session ceiling, replacing the global cap when set.
+    context_cap_override: Option<usize>,
+
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
@@ -184,6 +187,9 @@ pub struct CompactionManager {
 
     /// Config snapshot for mode-specific parameters
     compaction_config: crate::config::CompactionConfig,
+
+    /// Active provider name for resolving `[compaction.providers.<name>]` overrides
+    active_provider: Option<String>,
 
     // ── Proactive mode state ───────────────────────────────────────────────
     /// Rolling window of observed token counts, one entry per turn snapshot.
@@ -224,10 +230,12 @@ impl CompactionManager {
             suppress_compaction_until_new_message: false,
             token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
             model_token_budget: DEFAULT_TOKEN_BUDGET,
+            context_cap_override: None,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
             compaction_config: cfg,
+            active_provider: None,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
             turns_since_last_compact: 0,
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
@@ -252,10 +260,60 @@ impl CompactionManager {
         self.refresh_context_cap();
     }
 
+    /// Update the active provider name used to resolve `[compaction.providers.<name>]` overrides.
+    pub fn set_provider(&mut self, provider: &str) {
+        let trimmed = provider.trim();
+        let next = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        if self.active_provider != next {
+            self.active_provider = next;
+        }
+        self.refresh_context_cap();
+    }
+
+    /// Convenience helper to update both token budget and active provider together.
+    pub fn set_budget_for_provider(&mut self, budget: usize, provider: &str) {
+        let trimmed = provider.trim();
+        self.active_provider = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self.model_token_budget = budget;
+        self.refresh_context_cap();
+    }
+
+    pub fn active_provider(&self) -> Option<&str> {
+        self.active_provider.as_deref()
+    }
+
+    /// Set the per-session context ceiling. `None` or zero restores the global cap.
+    pub fn set_context_cap_override(&mut self, cap: Option<usize>) {
+        self.context_cap_override = cap.filter(|cap| *cap > 0);
+        self.refresh_context_cap();
+    }
+
+    /// Return the session override, not the effective model-limited budget.
+    pub fn context_cap_override(&self) -> Option<usize> {
+        self.context_cap_override
+    }
+
     fn refresh_context_cap(&mut self) {
-        self.compaction_config.max_context_tokens =
-            crate::config::config().compaction.max_context_tokens;
-        self.token_budget = Self::capped_budget(&self.compaction_config, self.model_token_budget);
+        let live_cfg = &crate::config::config().compaction;
+        self.compaction_config.max_context_tokens = live_cfg.max_context_tokens;
+        self.compaction_config.providers = live_cfg.providers.clone();
+        let cap = self.context_cap_override.unwrap_or_else(|| {
+            self.compaction_config
+                .effective_max_context_tokens(self.active_provider.as_deref())
+        });
+        self.token_budget = if cap > 0 {
+            self.model_token_budget.min(cap)
+        } else {
+            self.model_token_budget
+        };
     }
 
     /// Apply `[compaction] max_context_tokens` so a large-window model cannot
@@ -266,6 +324,26 @@ impl CompactionManager {
         } else {
             budget
         }
+    }
+
+    fn effective_reactive_threshold(&self) -> f32 {
+        self.compaction_config
+            .effective_reactive_threshold(self.active_provider.as_deref())
+    }
+
+    fn effective_reactive_threshold_tokens(&self) -> usize {
+        self.compaction_config
+            .effective_reactive_threshold_tokens(self.active_provider.as_deref())
+    }
+
+    fn effective_proactive_floor(&self) -> f32 {
+        self.compaction_config
+            .effective_proactive_floor(self.active_provider.as_deref())
+    }
+
+    fn effective_proactive_floor_tokens(&self) -> usize {
+        self.compaction_config
+            .effective_proactive_floor_tokens(self.active_provider.as_deref())
     }
 
     /// Get current token budget
@@ -398,6 +476,25 @@ impl CompactionManager {
         );
     }
 
+    /// Compare the persisted view exactly without cloning its potentially large
+    /// encrypted payload. This must track every field exported by persisted_state.
+    pub fn persisted_state_matches(
+        &self,
+        state: Option<&crate::session::StoredCompactionState>,
+    ) -> bool {
+        match (self.active_summary.as_ref(), state) {
+            (None, None) => true,
+            (Some(summary), Some(state)) => {
+                summary.text == state.summary_text
+                    && summary.openai_encrypted_content == state.openai_encrypted_content
+                    && summary.covers_up_to_turn == state.covers_up_to_turn
+                    && summary.original_turn_count == state.original_turn_count
+                    && self.compacted_count == state.compacted_count
+            }
+            _ => false,
+        }
+    }
+
     /// Export the currently active compacted view for persistence.
     pub fn persisted_state(&self) -> Option<crate::session::StoredCompactionState> {
         self.active_summary
@@ -491,9 +588,13 @@ impl CompactionManager {
             return true;
         }
 
-        // 2. Context below the proactive floor — too early regardless of trend.
+        // 2. Either the percentage or absolute token floor permits prediction.
         let usage = self.context_usage_with(all_messages);
-        if usage < cfg.proactive_floor {
+        let proactive_floor = self.effective_proactive_floor();
+        let proactive_floor_tokens = self.effective_proactive_floor_tokens();
+        let token_floor_reached = proactive_floor_tokens > 0
+            && self.effective_token_count_with(all_messages) >= proactive_floor_tokens;
+        if usage < proactive_floor && !token_floor_reached {
             return true;
         }
 
@@ -862,8 +963,13 @@ impl CompactionManager {
         let active = self.active_messages(all_messages);
         match self.mode {
             CompactionMode::Reactive => {
+                let reactive_threshold = self.effective_reactive_threshold();
+                let reactive_threshold_tokens = self.effective_reactive_threshold_tokens();
                 self.pending_task.is_none()
-                    && self.context_usage_with(all_messages) >= COMPACTION_THRESHOLD
+                    && (self.context_usage_with(all_messages) >= reactive_threshold
+                        || (reactive_threshold_tokens > 0
+                            && self.effective_token_count_with(all_messages)
+                                >= reactive_threshold_tokens))
                     && active.len() > RECENT_TURNS_TO_KEEP
             }
             CompactionMode::Proactive => {
@@ -945,7 +1051,9 @@ impl CompactionManager {
 
     /// Ensure context fits before an API call.
     ///
-    /// Starts background compaction if above 80%. If context is critically full
+    /// Starts background compaction when the configured strategy triggers.
+    /// Reactive defaults to 80% or 400K tokens, whichever comes first.
+    /// If context is critically full
     /// (>=95%), also performs an immediate hard-compact (drops old messages) so
     /// the next API call doesn't fail with "prompt too long".
     pub fn ensure_context_fits(
@@ -1216,7 +1324,7 @@ impl CompactionManager {
                     .sum();
                 let summary = Summary {
                     text: result.summary_text,
-                    openai_encrypted_content: result.openai_encrypted_content,
+                    openai_encrypted_content: result.openai_encrypted_content.map(Into::into),
                     covers_up_to_turn: result.covers_up_to_turn,
                     original_turn_count: self.pending_cutoff,
                 };
@@ -1322,7 +1430,7 @@ impl CompactionManager {
                     .openai_encrypted_content
                     .as_ref()
                     .map(|encrypted_content| ContentBlock::OpenAICompaction {
-                        encrypted_content: encrypted_content.clone(),
+                        encrypted_content: encrypted_content.to_string(),
                     })
                     .unwrap_or_else(|| ContentBlock::Text {
                         text: compacted_summary_text_block(&summary.text),
@@ -1333,7 +1441,7 @@ impl CompactionManager {
 
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content: vec![summary_block].into(),
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -1691,142 +1799,15 @@ impl Default for CompactionManager {
     }
 }
 
-/// Generate summary using the provider
-async fn generate_compaction_artifact(
-    provider: Arc<dyn Provider>,
-    messages: Vec<Message>,
-    mut existing_summary: Option<Summary>,
-) -> Result<CompactionResult> {
-    let start = Instant::now();
-    if let Some(summary) = existing_summary.as_mut()
-        && let Some(encrypted_content) = summary.openai_encrypted_content.as_ref()
-        && !openai_encrypted_content_is_sendable(encrypted_content)
-    {
-        let encrypted_content_len = encrypted_content.len();
-        crate::logging::warn(&format!(
-            "[compaction] Existing OpenAI native compaction payload is oversized ({} chars); falling back to text summary",
-            encrypted_content_len,
-        ));
-        summary.openai_encrypted_content = None;
-        let fallback = openai_encrypted_content_fallback_summary(encrypted_content_len);
-        if summary.text.trim().is_empty() {
-            summary.text = fallback;
-        } else if !summary
-            .text
-            .contains("OpenAI native compaction state was discarded")
-        {
-            summary.text.push_str("\n\n");
-            summary.text.push_str(&fallback);
-        }
-    }
+#[path = "compaction/summary_generation.rs"]
+mod summary_generation;
+use summary_generation::generate_compaction_artifact;
+#[cfg(test)]
+use summary_generation::validate_compaction_summary;
 
-    if let Ok(native) = provider
-        .native_compact(
-            &messages,
-            existing_summary
-                .as_ref()
-                .map(|summary| summary.text.as_str()),
-            existing_summary
-                .as_ref()
-                .and_then(|summary| summary.openai_encrypted_content.as_deref()),
-        )
-        .await
-    {
-        if let Some(usage) = native.usage {
-            crate::telemetry::record_simple_completion_usage(
-                None,
-                provider.name(),
-                &provider.model(),
-                crate::telemetry::UsageSource::Compaction,
-                usage,
-            );
-        }
-        if let Some(encrypted_content) = native.openai_encrypted_content.as_ref()
-            && !openai_encrypted_content_is_sendable(encrypted_content)
-        {
-            crate::logging::warn(&format!(
-                "[compaction] OpenAI native compaction returned oversized encrypted_content ({} chars); falling back to text summary",
-                encrypted_content.len(),
-            ));
-        } else if native.openai_encrypted_content.is_some() || native.summary_text.is_some() {
-            return Ok(CompactionResult {
-                summary_text: native.summary_text.unwrap_or_default(),
-                openai_encrypted_content: native.openai_encrypted_content,
-                covers_up_to_turn: messages.len(),
-                duration_ms: start.elapsed().as_millis() as u64,
-                summarized_messages: messages.len(),
-            });
-        }
-    }
-
-    let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
-    let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
-
-    // Generate summary using simple completion
-    let (summary, usage) = provider
-        .complete_simple_with_usage(
-            &prompt,
-            "You are a helpful assistant that summarizes conversations.",
-        )
-        .await
-        .inspect_err(|error| {
-            crate::telemetry::record_simple_completion_failure_usage(
-                None,
-                crate::telemetry::UsageSource::Compaction,
-                error,
-            );
-        })?;
-    crate::telemetry::record_simple_completion_usage(
-        None,
-        provider.name(),
-        &provider.model(),
-        crate::telemetry::UsageSource::Compaction,
-        usage,
-    );
-
-    Ok(CompactionResult {
-        summary_text: summary,
-        openai_encrypted_content: None,
-        covers_up_to_turn: messages.len(),
-        duration_ms: start.elapsed().as_millis() as u64,
-        summarized_messages: messages.len(),
-    })
-}
-
-pub async fn build_transfer_compaction_state(
-    provider: Arc<dyn Provider>,
-    messages: Vec<Message>,
-    existing_state: Option<crate::session::StoredCompactionState>,
-) -> Result<Option<crate::session::StoredCompactionState>> {
-    let existing_summary = existing_state.as_ref().map(|state| Summary {
-        text: state.summary_text.clone(),
-        openai_encrypted_content: state.openai_encrypted_content.clone(),
-        covers_up_to_turn: state.covers_up_to_turn,
-        original_turn_count: state.original_turn_count,
-    });
-
-    if messages.is_empty() {
-        return Ok(existing_state.map(|mut state| {
-            state.compacted_count = 0;
-            state
-        }));
-    }
-
-    let prior_turns = existing_state
-        .as_ref()
-        .map(|state| state.original_turn_count.max(state.covers_up_to_turn))
-        .unwrap_or(0);
-    let result = generate_compaction_artifact(provider, messages.clone(), existing_summary).await?;
-    let total_turns = prior_turns + messages.len();
-
-    Ok(Some(crate::session::StoredCompactionState {
-        summary_text: result.summary_text,
-        openai_encrypted_content: result.openai_encrypted_content,
-        covers_up_to_turn: total_turns,
-        original_turn_count: total_turns,
-        compacted_count: 0,
-    }))
-}
+#[path = "compaction_transfer.rs"]
+mod transfer;
+pub use transfer::build_transfer_compaction_state;
 
 #[cfg(test)]
 #[path = "compaction_tests.rs"]

@@ -1,0 +1,15 @@
+alloc tiny Baseline len=63 cap=128 calls=1 requested=128 retained=128 peak=128
+alloc tiny Shrink len=63 cap=63 calls=2 requested=191 retained=63 peak=128
+alloc tiny Growth len=63 cap=128 calls=1 requested=128 retained=128 peak=128
+alloc escaped Baseline len=396033 cap=524288 calls=13 requested=1048448 retained=524288 peak=524288
+alloc escaped Shrink len=396033 cap=396033 calls=14 requested=1444481 retained=396033 peak=524288
+alloc escaped Growth len=396033 cap=425553 calls=21 requested=1276407 retained=425553 peak=425553
+alloc nested Baseline len=175604 cap=262144 calls=12 requested=524160 retained=262144 peak=262144
+alloc nested Shrink len=175604 cap=175604 calls=13 requested=699764 retained=175604 peak=262144
+alloc nested Growth len=175604 cap=224916 calls=19 requested=674426 retained=224916 peak=224916
+alloc noisy Baseline len=1073732 cap=2097152 calls=15 requested=4194176 retained=2097152 peak=2097152
+alloc noisy Shrink len=1073732 cap=1073732 calls=16 requested=5267908 retained=1073732 peak=2097152
+alloc noisy Growth len=1073732 cap=1534452 calls=24 requested=4603070 retained=1534452 peak=1534452
+alloc large Baseline len=1099188 cap=1392384 calls=9 requested=2774018 retained=1392384 peak=1392384
+alloc large Shrink len=1099188 cap=1099188 calls=10 requested=3873206 retained=1099188 peak=1392384
+alloc large Growth len=1099188 cap=1411326 calls=14 requested=4212355 retained=1411326 peak=1411326

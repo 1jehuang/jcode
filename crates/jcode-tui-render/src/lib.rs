@@ -117,7 +117,7 @@ pub fn truncate_line_with_ellipsis_to_width(line: &Line<'static>, width: usize) 
         return line.clone();
     }
     if width == 1 {
-        return Line::from(Span::raw("…"));
+        return Line::from(Span::raw("…")).style(line.style);
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -154,7 +154,7 @@ pub fn truncate_line_with_ellipsis_to_width(line: &Line<'static>, width: usize) 
     }
 
     spans.push(Span::styled("…", ellipsis_style));
-    let mut truncated = Line::from(spans);
+    let mut truncated = Line::from(spans).style(line.style);
     truncated.alignment = line.alignment;
     truncated
 }

@@ -93,12 +93,14 @@ fn load_cache() -> Option<Arc<PricingCache>> {
     Some(cache)
 }
 
-fn save_cache(cache: &PricingCache) {
+fn save_cache(cache: PricingCache) -> Arc<PricingCache> {
     let path = cache_path();
+    let cache = Arc::new(cache);
     if let Ok(mut memory) = MEMORY_CACHE.lock() {
-        *memory = Some((path.clone(), Arc::new(cache.clone())));
+        *memory = Some((path.clone(), Arc::clone(&cache)));
     }
-    let _ = crate::storage::write_json(&path, cache);
+    let _ = crate::storage::write_json(&path, cache.as_ref());
+    cache
 }
 
 /// Translate a jcode provider key (runtime key, activity source key, or
@@ -379,7 +381,7 @@ async fn refresh_now() -> anyhow::Result<()> {
     }
     let body = response.text().await?;
     let cache = parse_api_response(&body)?;
-    save_cache(&cache);
+    let cache = save_cache(cache);
     crate::logging::info(&format!(
         "models.dev pricing refreshed: {} providers, {} priced models",
         cache.providers.len(),
@@ -389,39 +391,86 @@ async fn refresh_now() -> anyhow::Result<()> {
 }
 
 fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
-    let json: serde_json::Value = serde_json::from_str(body)?;
-    let top = json
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("expected top-level provider object"))?;
+    // The catalog contains much more than prices (capabilities, limits,
+    // modalities, documentation, ...). Building a Value tree for all of it
+    // leaves tens of MiB of freed nodes resident in allocator arenas after
+    // a refresh. Borrow the provider/model envelopes and deserialize only
+    // the fields we retain. RawValue still validates the skipped JSON.
+    use serde_json::value::RawValue;
+
+    #[derive(Deserialize)]
+    struct ProviderPrices<'a> {
+        #[serde(borrow)]
+        models: Option<&'a RawValue>,
+    }
+
+    #[derive(Deserialize)]
+    struct ModelPrice<'a> {
+        #[serde(borrow)]
+        cost: Option<&'a RawValue>,
+    }
+
+    #[derive(Deserialize)]
+    struct PriceFields<'a> {
+        #[serde(borrow)]
+        input: Option<&'a RawValue>,
+        #[serde(borrow)]
+        output: Option<&'a RawValue>,
+        #[serde(borrow)]
+        cache_read: Option<&'a RawValue>,
+        #[serde(borrow)]
+        cache_write: Option<&'a RawValue>,
+    }
+
+    fn number(raw: Option<&RawValue>) -> Option<f64> {
+        match serde_json::from_str(raw?.get()) {
+            Ok(value) => Some(value),
+            // Catalog fields with a nonnumeric type are intentionally absent,
+            // matching the previous Value::as_f64 projection.
+            Err(error) if error.is_data() => None,
+            Err(error) => {
+                crate::logging::debug(&format!("Cannot decode pricing numeric field: {error}"));
+                None
+            }
+        }
+    }
+
+    let top: HashMap<String, &RawValue> = serde_json::from_str(body)?;
 
     let mut providers: HashMap<String, HashMap<String, ModelCost>> = HashMap::new();
     for (provider_id, provider) in top {
-        let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
+        let Ok(ProviderPrices {
+            models: Some(models),
+        }) = serde_json::from_str(provider.get())
+        else {
+            continue;
+        };
+        let Ok(models) = serde_json::from_str::<HashMap<String, &RawValue>>(models.get()) else {
             continue;
         };
         let mut parsed_models = HashMap::new();
         for (model_id, model) in models {
-            let Some(cost) = model.get("cost") else {
+            let Ok(ModelPrice { cost: Some(cost) }) = serde_json::from_str(model.get()) else {
                 continue;
             };
-            let (Some(input), Some(output)) = (
-                cost.get("input").and_then(|v| v.as_f64()),
-                cost.get("output").and_then(|v| v.as_f64()),
-            ) else {
+            let Ok(cost) = serde_json::from_str::<PriceFields<'_>>(cost.get()) else {
+                continue;
+            };
+            let (Some(input), Some(output)) = (number(cost.input), number(cost.output)) else {
                 continue;
             };
             parsed_models.insert(
-                model_id.clone(),
+                model_id,
                 ModelCost {
                     input_usd_per_mtok: input,
                     output_usd_per_mtok: output,
-                    cache_read_usd_per_mtok: cost.get("cache_read").and_then(|v| v.as_f64()),
-                    cache_write_usd_per_mtok: cost.get("cache_write").and_then(|v| v.as_f64()),
+                    cache_read_usd_per_mtok: number(cost.cache_read),
+                    cache_write_usd_per_mtok: number(cost.cache_write),
                 },
             );
         }
         if !parsed_models.is_empty() {
-            providers.insert(provider_id.clone(), parsed_models);
+            providers.insert(provider_id, parsed_models);
         }
     }
 
@@ -443,7 +492,7 @@ pub(crate) fn save_test_cache(entries: &[(&str, &str, ModelCost)]) {
             .or_default()
             .insert((*model).to_string(), *cost);
     }
-    save_cache(&PricingCache {
+    save_cache(PricingCache {
         cached_at_unix_secs: now_unix_secs(),
         providers,
     });
@@ -459,6 +508,73 @@ pub(crate) fn clear_memory_cache_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_cache_moves_backing_allocations_and_preserves_disk_and_lookup() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        let cache = parse_api_response(
+            r#"{"deepseek":{"models":{"future-model":{"cost":{"input":0.25,"output":1.5,"cache_read":0.05}}}}}"#,
+        )
+        .expect("parsed");
+        let expected_json = serde_json::to_vec(&cache).expect("serialize original cache");
+        let (provider, models) = cache.providers.get_key_value("deepseek").expect("provider");
+        let (model, cost) = models.get_key_value("future-model").expect("model");
+        // Entry addresses witness the outer and inner HashMap allocations,
+        // while string pointers witness both keys' separate backing buffers.
+        let provider_entry = provider as *const String;
+        let provider_bytes = provider.as_ptr();
+        let model_entry = model as *const String;
+        let model_bytes = model.as_ptr();
+        let expected_cost = *cost;
+
+        let saved = save_cache(cache);
+        let (provider, models) = saved.providers.get_key_value("deepseek").expect("provider");
+        let (model, _) = models.get_key_value("future-model").expect("model");
+        assert_eq!(provider as *const String, provider_entry);
+        assert_eq!(provider.as_ptr(), provider_bytes);
+        assert_eq!(model as *const String, model_entry);
+        assert_eq!(model.as_ptr(), model_bytes);
+        assert!(Arc::ptr_eq(&saved, &load_cache().expect("published cache")));
+        assert_eq!(
+            std::fs::read(cache_path()).expect("disk JSON"),
+            expected_json
+        );
+        assert_eq!(
+            lookup_with_provenance("openai-compatible:deepseek", "future-model"),
+            Some((expected_cost, PricingMatch::ProviderTable))
+        );
+        assert_eq!(lookup("deepseek", "missing-model"), None);
+
+        clear_memory_cache_for_tests();
+        assert_eq!(lookup("deepseek", "future-model"), Some(expected_cost));
+
+        // A disk failure must not prevent publication of the moved cache.
+        clear_memory_cache_for_tests();
+        std::fs::remove_file(cache_path()).expect("remove cache file");
+        std::fs::create_dir(cache_path()).expect("block disk write with directory");
+        let saved = save_cache(PricingCache {
+            cached_at_unix_secs: now_unix_secs(),
+            providers: HashMap::new(),
+        });
+        assert!(Arc::ptr_eq(
+            &saved,
+            &load_cache().expect("published despite disk failure")
+        ));
+        assert!(cache_path().is_dir());
+        assert_eq!(lookup("deepseek", "future-model"), None);
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
 
     #[test]
     fn resellers_fall_back_to_vendor_pricing_seen_elsewhere() {
@@ -813,6 +929,98 @@ mod tests {
             .expect("fable");
         assert!((fable.input_usd_per_mtok - 10.0).abs() < 1e-9);
         assert_eq!(fable.cache_write_usd_per_mtok, Some(12.5));
+    }
+
+    #[test]
+    fn pricing_parser_skips_malformed_entries_without_losing_valid_prices() {
+        let body = r#"{
+            "not-a-provider": false,
+            "missing-models": {},
+            "null-models": {"models": null},
+            "array-models": {"models": []},
+            "future-provider": {"models": {
+                "not-a-model": 1,
+                "missing-cost": {},
+                "null-cost": {"cost": null},
+                "array-cost": {"cost": []},
+                "missing-output": {"cost": {"input": 1}},
+                "string-input": {"cost": {"input": "1", "output": 2}},
+                "object-output": {"cost": {"input": 1, "output": {"usd": 2}}},
+                "future-model": {"cost": {
+                    "input": 1.25, "output": 2,
+                    "cache_read": "unknown", "cache_write": false,
+                    "future-tier": {"input": 100, "output": 200}
+                }},
+                "free-model": {"cost": {
+                    "input": 0, "output": 0, "cache_read": 0, "cache_write": null
+                }}
+            }}
+        }"#;
+        let cache = parse_api_response(body).expect("valid prices survive malformed siblings");
+        assert_eq!(cache.providers.len(), 1);
+        let models = &cache.providers["future-provider"];
+        assert_eq!(models.len(), 2);
+        assert_eq!(
+            models["future-model"],
+            ModelCost {
+                input_usd_per_mtok: 1.25,
+                output_usd_per_mtok: 2.0,
+                cache_read_usd_per_mtok: None,
+                cache_write_usd_per_mtok: None,
+            }
+        );
+        assert_eq!(models["free-model"].cache_read_usd_per_mtok, Some(0.0));
+        assert_eq!(models["free-model"].cache_write_usd_per_mtok, None);
+    }
+
+    #[test]
+    fn pricing_parser_ignores_large_metadata_and_decodes_escaped_ids() {
+        let metadata = "unrelated catalog documentation ".repeat(16_384);
+        let body = serde_json::json!({
+            "future-provider-\"quoted\"": {
+                "documentation": metadata,
+                "models": {
+                    "future-model-\\escaped": {
+                        "capabilities": {"documentation": metadata},
+                        "cost": {
+                            "input": 1.25,
+                            "output": 5,
+                            "cache_read": 0.125,
+                            "cache_write": 1.5,
+                            "unrelated_metadata": metadata
+                        }
+                    }
+                }
+            }
+        })
+        .to_string();
+        let cache = parse_api_response(&body).expect("unknown metadata is ignored");
+        assert_eq!(cache.providers.len(), 1);
+        let models = &cache.providers["future-provider-\"quoted\""];
+        assert_eq!(models.len(), 1);
+        assert_eq!(
+            models["future-model-\\escaped"],
+            ModelCost {
+                input_usd_per_mtok: 1.25,
+                output_usd_per_mtok: 5.0,
+                cache_read_usd_per_mtok: Some(0.125),
+                cache_write_usd_per_mtok: Some(1.5),
+            }
+        );
+    }
+
+    #[test]
+    fn pricing_parser_validates_json_even_in_ignored_metadata() {
+        assert!(parse_api_response(
+            r#"{"provider":{"models":{"model":{"cost":{"input":1,"output":2}}},"ignored":[1,]}}"#
+        )
+        .is_err());
+        assert!(
+            parse_api_response(
+                r#"{"provider":{"models":{"model":{"cost":{"input":1,"output":2}}}}} trailing"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

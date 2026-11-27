@@ -57,6 +57,14 @@ pub const CHARS_PER_TOKEN: usize = 4;
 /// We charge a flat, slightly conservative per-image token budget instead.
 pub const IMAGE_TOKEN_COST: usize = 1_600;
 
+/// Approximate token cost charged for an OpenAI native compaction payload.
+///
+/// The payload is opaque ciphertext whose length bears no relation to the
+/// tokens the provider replays: a 1.1M-char payload was observed costing far
+/// less than 30k tokens while `len / 4` reported ~285k, so compaction appeared
+/// to *grow* the context. Charge a flat, conservative budget instead.
+pub const OPENAI_COMPACTION_TOKEN_COST: usize = 8_000;
+
 /// Fixed token overhead for system prompt + tool definitions.
 /// These are not counted in message content but do count toward the context limit.
 /// Estimated conservatively: ~8k tokens for system prompt + ~10k for 50+ tools.
@@ -88,7 +96,7 @@ Be concise but preserve important details. You can search the full conversation 
 #[derive(Debug, Clone)]
 pub struct Summary {
     pub text: String,
-    pub openai_encrypted_content: Option<String>,
+    pub openai_encrypted_content: Option<std::sync::Arc<str>>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
 }
@@ -352,7 +360,7 @@ pub fn content_char_count(content: &[ContentBlock]) -> usize {
             // overestimates context by ~100x and triggers spurious repeated
             // compactions.
             ContentBlock::Image { .. } => IMAGE_TOKEN_COST * CHARS_PER_TOKEN,
-            ContentBlock::OpenAICompaction { encrypted_content } => encrypted_content.len(),
+            ContentBlock::OpenAICompaction { .. } => OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN,
             // The provider expands a reference into the full definition, but
             // that definition is already accounted for by the tool catalog.
             ContentBlock::ToolReference { tool_name, .. } => tool_name.len() + 20,
@@ -367,7 +375,7 @@ pub fn summary_payload_char_count(summary: &Summary) -> usize {
     summary
         .openai_encrypted_content
         .as_ref()
-        .map(|value| value.len())
+        .map(|_| OPENAI_COMPACTION_TOKEN_COST * CHARS_PER_TOKEN)
         .unwrap_or_else(|| summary.text.len())
 }
 
@@ -526,12 +534,21 @@ pub fn build_emergency_summary_text(
         summary_parts.push(existing.to_string());
     }
 
+    let reason = if pre_tokens >= token_budget as u64 {
+        format!(
+            "The conversation had ~{}k tokens which exceeded the {}k limit.",
+            pre_tokens / 1000,
+            token_budget / 1000,
+        )
+    } else {
+        format!(
+            "The conversation had ~{}k tokens when the provider rejected it for context overflow.",
+            pre_tokens / 1000,
+        )
+    };
     summary_parts.push(format!(
-        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. \
-         The conversation had ~{}k tokens which exceeded the {}k limit.",
-        dropped_count,
-        pre_tokens / 1000,
-        token_budget / 1000,
+        "**[Emergency compaction]**: {} messages were dropped to recover from context overflow. {}",
+        dropped_count, reason,
     ));
 
     let mut file_mentions = Vec::new();
@@ -609,7 +626,12 @@ pub fn emergency_truncate_tool_results(messages: &mut [Message], max_chars: usiz
     let mut truncated = 0;
 
     for msg in messages.iter_mut() {
-        for block in msg.content.iter_mut() {
+        for index in 0..msg.content.len() {
+            if !matches!(&msg.content[index], ContentBlock::ToolResult { content, .. } if content.len() > max_chars)
+            {
+                continue;
+            }
+            let block = &mut msg.content[index];
             match block {
                 ContentBlock::ToolResult { content, .. } if content.len() > max_chars => {
                     *content = emergency_truncated_tool_result(content, max_chars);
@@ -631,7 +653,16 @@ pub fn emergency_truncate_large_payloads(
     let mut truncated = 0;
 
     for msg in messages.iter_mut() {
-        for block in msg.content.iter_mut() {
+        for index in 0..msg.content.len() {
+            let needs_truncation = match &msg.content[index] {
+                ContentBlock::ToolResult { content, .. } => content.len() > max_tool_result_chars,
+                ContentBlock::Image { data, .. } => data.len() > max_image_chars,
+                _ => false,
+            };
+            if !needs_truncation {
+                continue;
+            }
+            let block = &mut msg.content[index];
             match block {
                 ContentBlock::ToolResult { content, .. }
                     if content.len() > max_tool_result_chars =>
@@ -673,6 +704,7 @@ pub fn is_image_rejection_error(error: &str) -> bool {
         || lower.contains("image.source")
         || lower.contains("could not process image")
         || lower.contains("invalid image")
+        || lower.contains("does not represent a valid image")
         || lower.contains("unsupported image")
         || lower.contains("image_parse_error")
         || lower.contains("invalid_image");
@@ -686,10 +718,16 @@ pub fn is_image_rejection_error(error: &str) -> bool {
 /// Replace every inline image with a short text note. Used after a provider
 /// rejected an image so the retried request carries none. Returns the number
 /// of images replaced.
-pub fn strip_all_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+pub fn strip_all_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
+) -> usize {
     let mut stripped = 0;
     for content in contents.iter_mut() {
-        for block in content.iter_mut() {
+        for index in 0..content.as_ref().len() {
+            if !matches!(&content.as_ref()[index], ContentBlock::Image { .. }) {
+                continue;
+            }
+            let block = &mut content.as_mut()[index];
             if let ContentBlock::Image { media_type, .. } = block {
                 let media_type = media_type.clone();
                 *block = ContentBlock::Text {
@@ -748,16 +786,15 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
 ///
 /// Returns the number of images that were replaced with text markers.
 pub fn emergency_strip_large_images(messages: &mut [Message], target_total_chars: usize) -> usize {
-    let mut contents: Vec<&mut Vec<ContentBlock>> =
-        messages.iter_mut().map(|m| &mut m.content).collect();
+    let mut contents: Vec<_> = messages.iter_mut().map(|m| &mut m.content).collect();
     strip_large_images_in_contents(&mut contents, target_total_chars)
 }
 
 /// Core of [`emergency_strip_large_images`], operating directly on a slice of
 /// content-block vectors so it can be reused for both provider `Message`s and
 /// the session's stored-message representation (which share `ContentBlock`).
-pub fn strip_large_images_in_contents(
-    contents: &mut [&mut Vec<ContentBlock>],
+pub fn strip_large_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
     target_total_chars: usize,
 ) -> usize {
     // Collect (content_index, block_index, payload_len) for every inline image,
@@ -765,7 +802,7 @@ pub fn strip_large_images_in_contents(
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {
-        for (bi, block) in content.iter().enumerate() {
+        for (bi, block) in content.as_ref().iter().enumerate() {
             if let ContentBlock::Image { data, .. } = block {
                 images.push((ci, bi, data.len()));
                 total = total.saturating_add(data.len());
@@ -785,7 +822,7 @@ pub fn strip_large_images_in_contents(
         if total <= target_total_chars {
             break;
         }
-        let block = &mut contents[ci][bi];
+        let block = &mut contents[ci].as_mut()[bi];
         if let ContentBlock::Image { media_type, data } = block {
             let original_len = data.len();
             let media_type = media_type.clone();
@@ -803,20 +840,8 @@ pub fn strip_large_images_in_contents(
     stripped
 }
 
-/// Inline tool-result images (computer-use and browser screenshots) are decayed
-/// once the transcript holds more than this many of them. See
-/// [`decay_old_tool_images_in_contents`].
-pub const TOOL_IMAGE_DECAY_TRIGGER_COUNT: usize = 12;
-
-/// Inline tool-result images are also decayed once their combined base64
-/// payload exceeds this many characters.
+/// Trigger on actual byte pressure, not image count, to preserve cached history.
 pub const TOOL_IMAGE_DECAY_TRIGGER_CHARS: usize = 48 * 1024 * 1024;
-
-/// After decay, at most this many of the newest tool-result images keep their
-/// inline data. The gap to the trigger count is hysteresis: decay rewrites
-/// older messages (invalidating provider prompt caches and forcing a full
-/// snapshot write), so it only runs every few screenshots instead of on each.
-pub const TOOL_IMAGE_DECAY_KEEP_COUNT: usize = 6;
 
 /// After decay, the retained tool-result images fit within this many base64
 /// characters, except that the newest image is always kept regardless of size.
@@ -827,24 +852,26 @@ pub const TOOL_IMAGE_DECAY_KEEP_CHARS: usize = 24 * 1024 * 1024;
 ///
 /// Only images in messages that carry a `ToolResult` are considered, so images
 /// the user pasted are untouched. Nothing happens until the tool images exceed
-/// [`TOOL_IMAGE_DECAY_TRIGGER_COUNT`] or [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`].
-/// Then every tool image except the newest [`TOOL_IMAGE_DECAY_KEEP_COUNT`]
-/// (that also fit within [`TOOL_IMAGE_DECAY_KEEP_CHARS`]) is replaced with a
-/// short text marker. The newest image always survives so the model still sees
-/// the screenshot it just asked for.
+/// [`TOOL_IMAGE_DECAY_TRIGGER_CHARS`]. Older images outside the retained byte
+/// budget ([`TOOL_IMAGE_DECAY_KEEP_CHARS`]) are replaced with a short text
+/// marker. The newest image always survives so the model still sees the
+/// screenshot it just asked for.
 ///
 /// Returns the number of images replaced.
-pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+pub fn decay_old_tool_images_in_contents<C: AsRef<[ContentBlock]> + AsMut<[ContentBlock]>>(
+    contents: &mut [&mut C],
+) -> usize {
     let mut images: Vec<(usize, usize, usize)> = Vec::new();
     let mut total: usize = 0;
     for (ci, content) in contents.iter().enumerate() {
         if !content
+            .as_ref()
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
         {
             continue;
         }
-        for (bi, block) in content.iter().enumerate() {
+        for (bi, block) in content.as_ref().iter().enumerate() {
             if let ContentBlock::Image { data, .. } = block {
                 images.push((ci, bi, data.len()));
                 total = total.saturating_add(data.len());
@@ -852,23 +879,22 @@ pub fn decay_old_tool_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]
         }
     }
 
-    if images.len() <= TOOL_IMAGE_DECAY_TRIGGER_COUNT && total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
+    if total <= TOOL_IMAGE_DECAY_TRIGGER_CHARS {
         return 0;
     }
 
-    let mut kept_count = 0usize;
+    let mut kept_any = false;
     let mut kept_chars = 0usize;
     let mut stripped = 0usize;
     for (ci, bi, payload_len) in images.into_iter().rev() {
-        let keep = kept_count == 0
-            || (kept_count < TOOL_IMAGE_DECAY_KEEP_COUNT
-                && kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS);
+        let keep =
+            !kept_any || kept_chars.saturating_add(payload_len) <= TOOL_IMAGE_DECAY_KEEP_CHARS;
         if keep {
-            kept_count += 1;
+            kept_any = true;
             kept_chars = kept_chars.saturating_add(payload_len);
             continue;
         }
-        let block = &mut contents[ci][bi];
+        let block = &mut contents[ci].as_mut()[bi];
         if let ContentBlock::Image { media_type, data } = block {
             let text = format!(
                 "[Older tool screenshot omitted from history to bound transcript size: media_type={media_type}, original_base64_chars={}. Rely on adjacent tool text, or take a new screenshot if visual details are needed.]",
@@ -909,515 +935,8 @@ pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reusable_cache_boundary_excludes_only_split_uncached_tail() {
-        for provider in ["Claude", "anthropic", "unknown"] {
-            assert_eq!(
-                reusable_cache_tokens_from_usage(provider, 2_482, Some(615_629), Some(1_375)),
-                617_004
-            );
-        }
-        for provider in ["openai", "openai-api", "codex"] {
-            assert_eq!(
-                reusable_cache_tokens_from_usage(provider, 619_486, Some(615_629), Some(1_375)),
-                619_486
-            );
-        }
-        assert_eq!(
-            reusable_cache_tokens_from_usage("Claude", 2_482, Some(0), Some(0)),
-            0
-        );
-        assert_eq!(
-            reusable_cache_tokens_from_usage("Claude", 0, Some(615_629), Some(1_375)),
-            617_004
-        );
-    }
-
-    #[test]
-    fn compaction_text_keeps_native_search_query_and_urls() {
-        let messages = vec![Message {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::ProviderNative {
-                    provider: "anthropic".to_string(),
-                    item: serde_json::json!({"type": "server_tool_use", "id": "srvtoolu_1",
-                        "name": "web_search", "input": {"query": "rust news"}}),
-                },
-                ContentBlock::ProviderNative {
-                    provider: "anthropic".to_string(),
-                    item: serde_json::json!({"type": "web_search_tool_result",
-                        "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result",
-                        "url": "https://blog.rust-lang.org/", "title": "Rust Blog",
-                        "encrypted_content": "ENC"}]}),
-                },
-            ],
-            timestamp: None,
-            tool_duration_ms: None,
-        }];
-        let text = build_compaction_conversation_text(&messages, None);
-        assert!(text.contains("rust news"), "{text}");
-        assert!(text.contains("https://blog.rust-lang.org/"), "{text}");
-        assert!(!text.contains("ENC"), "{text}");
-    }
-
-    #[test]
-    fn effective_context_split_accounting_adds_cache_counters() {
-        // Anthropic-style: input is the uncached remainder.
-        assert_eq!(
-            effective_context_tokens_from_usage("anthropic", 10_000, Some(300_000), Some(5_000)),
-            315_000
-        );
-        assert_eq!(
-            effective_context_tokens_from_usage("Claude", 10_000, Some(300_000), None),
-            310_000
-        );
-    }
-
-    #[test]
-    fn effective_context_subset_accounting_does_not_double_count() {
-        // OpenAI-style: prompt_tokens already includes cached tokens.
-        assert_eq!(
-            effective_context_tokens_from_usage("openai", 400_000, Some(390_000), None),
-            400_000
-        );
-        assert_eq!(
-            effective_context_tokens_from_usage("openai-api", 10_000, Some(6_000), Some(2_000)),
-            10_000
-        );
-        // No cache info at all: pass through.
-        assert_eq!(
-            effective_context_tokens_from_usage("opencode-go", 396_000, None, None),
-            396_000
-        );
-    }
-
-    #[test]
-    fn effective_context_infers_split_accounting_from_counter_shape() {
-        // cache_read > input implies input can't already contain it.
-        assert_eq!(
-            effective_context_tokens_from_usage("unknown", 10_000, Some(500_000), None),
-            510_000
-        );
-        // Any cache_creation implies split accounting.
-        assert_eq!(
-            effective_context_tokens_from_usage("unknown", 10_000, Some(2_000), Some(1_000)),
-            13_000
-        );
-    }
-
-    #[test]
-    fn effective_context_zero_uncached_input_preserves_cached_prompt() {
-        assert_eq!(
-            effective_context_tokens_from_usage("anthropic", 0, Some(300_000), Some(5_000)),
-            305_000
-        );
-    }
-
-    #[test]
-    fn builds_compaction_prompt_with_summary_and_truncated_tool_result() {
-        let summary = Summary {
-            text: "prior work".to_string(),
-            openai_encrypted_content: None,
-            covers_up_to_turn: 1,
-            original_turn_count: 1,
-        };
-        let message = Message::user("hello");
-        let prompt = build_compaction_prompt(&[message], Some(&summary), 10_000);
-        assert!(prompt.contains("## Previous Summary"));
-        assert!(prompt.contains("prior work"));
-        assert!(prompt.contains("**User:**"));
-        assert!(prompt.contains(SUMMARY_PROMPT));
-    }
-
-    #[test]
-    fn truncates_on_utf8_boundary() {
-        assert_eq!(truncate_str_boundary("éabc", 1), "");
-        assert_eq!(truncate_str_boundary("éabc", 2), "é");
-    }
-
-    #[test]
-    fn mean_embedding_is_normalized() {
-        let a = vec![1.0, 0.0];
-        let b = vec![0.0, 1.0];
-        let mean = mean_embedding(&[&a, &b], 2);
-        let norm = (mean[0] * mean[0] + mean[1] * mean[1]).sqrt();
-        assert!((norm - 1.0).abs() < 0.0001);
-    }
-
-    #[test]
-    fn safe_cutoff_keeps_tool_use_with_tool_result() {
-        let tool_use = Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "read".to_string(),
-                input: serde_json::json!({"file":"src/lib.rs"}),
-                thought_signature: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        };
-        let tool_result = Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".to_string(),
-                content: "ok".to_string(),
-                is_error: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        };
-        let messages = vec![
-            Message::user("old"),
-            tool_use,
-            tool_result,
-            Message::user("new"),
-        ];
-
-        assert_eq!(safe_compaction_cutoff(&messages, 2), 1);
-    }
-
-    #[test]
-    fn estimates_tokens_with_large_budget_overhead() {
-        let summary = Summary {
-            text: "abcd".repeat(100),
-            openai_encrypted_content: None,
-            covers_up_to_turn: 1,
-            original_turn_count: 1,
-        };
-
-        assert_eq!(estimate_compaction_tokens(Some(&summary), 0, 1000), 100);
-        assert_eq!(
-            estimate_compaction_tokens(Some(&summary), 0, DEFAULT_TOKEN_BUDGET),
-            100 + SYSTEM_OVERHEAD_TOKENS
-        );
-    }
-
-    #[test]
-    fn image_token_cost_is_bounded_not_base64_length() {
-        // Regression: a large base64 image payload must not be counted as ~len/4
-        // tokens. Doing so inflated the estimate ~100x and caused repeated
-        // back-to-back compactions.
-        let huge_base64 = "A".repeat(1_400_000);
-        let mut image_msg = Message::user("");
-        image_msg.content = vec![ContentBlock::Image {
-            media_type: "image/png".to_string(),
-            data: huge_base64.clone(),
-        }];
-
-        let chars = message_char_count(&image_msg);
-        // Flat per-image cost in char-equivalents, far below the raw payload.
-        assert_eq!(chars, IMAGE_TOKEN_COST * CHARS_PER_TOKEN);
-        assert!(
-            chars < huge_base64.len() / 10,
-            "image should not be charged anywhere near its base64 length"
-        );
-
-        // The token estimate for four such images stays small.
-        let tokens = estimate_compaction_tokens_from_chars(chars * 4, DEFAULT_TOKEN_BUDGET);
-        assert!(
-            tokens < SYSTEM_OVERHEAD_TOKENS + 4 * IMAGE_TOKEN_COST + 10,
-            "four images should cost ~{} tokens, got {}",
-            SYSTEM_OVERHEAD_TOKENS + 4 * IMAGE_TOKEN_COST,
-            tokens
-        );
-    }
-
-    #[test]
-    fn builds_semantic_text_from_relevant_content() {
-        let message = Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "hello world".to_string(),
-                    cache_control: None,
-                },
-                ContentBlock::ToolResult {
-                    tool_use_id: "call_1".to_string(),
-                    content: "tool output".to_string(),
-                    is_error: None,
-                },
-            ],
-            timestamp: None,
-            tool_duration_ms: None,
-        };
-
-        assert_eq!(semantic_message_text(&message), "hello world");
-        assert_eq!(semantic_goal_text(&[message]), "hello world tool output");
-        assert_eq!(semantic_cache_key("stable"), semantic_cache_key("stable"));
-    }
-
-    #[test]
-    fn builds_emergency_summary_with_tools_and_files() {
-        let messages = vec![
-            Message {
-                role: Role::Assistant,
-                content: vec![ContentBlock::ToolUse {
-                    id: "call_1".to_string(),
-                    name: "read".to_string(),
-                    input: serde_json::json!({"file":"src/lib.rs"}),
-                    thought_signature: None,
-                }],
-                timestamp: None,
-                tool_duration_ms: None,
-            },
-            Message::user("Edited src/compaction.rs and Cargo.toml, ignored https://example.com"),
-        ];
-
-        let summary =
-            build_emergency_summary_text(Some("previous"), 2, 201_000, 200_000, &messages);
-        assert!(summary.contains("previous"));
-        assert!(summary.contains("2 messages were dropped"));
-        assert!(summary.contains("Tools used: read"));
-        assert!(summary.contains("Files referenced: Cargo.toml, src/compaction.rs"));
-        assert!(!summary.contains("https://example.com"));
-    }
-
-    #[test]
-    fn emergency_truncation_is_utf8_safe() {
-        let original = format!("{}middle{}", "é".repeat(20), "尾".repeat(20));
-        let truncated = emergency_truncated_tool_result(&original, 25);
-        assert!(truncated.contains("chars truncated for context recovery"));
-        assert!(truncated.is_char_boundary(truncated.len()));
-    }
-
-    #[test]
-    fn emergency_truncation_replaces_large_images_with_text_marker() {
-        let mut messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: "a".repeat(2048),
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        }];
-
-        let truncated = emergency_truncate_large_payloads(&mut messages, 4000, 1024);
-        assert_eq!(truncated, 1);
-        match &messages[0].content[0] {
-            ContentBlock::Text { text, .. } => {
-                assert!(text.contains("Image omitted during emergency context recovery"));
-                assert!(text.contains("original_base64_chars=2048"));
-            }
-            other => panic!("expected image to be replaced with text marker, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn detects_request_payload_too_large_errors() {
-        // Image rejections are a different class.
-        assert!(is_image_rejection_error(
-            "Anthropic API error (400 Bad Request): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.720.content.0.tool_result.content.1.image.source.base64.media_type: Input should be 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'\"}}"
-        ));
-        assert!(is_image_rejection_error(
-            "400 invalid_request_error: messages.3.content.1.image.source.base64: Could not process image"
-        ));
-        assert!(!is_image_rejection_error(
-            "Anthropic API error (413 Payload Too Large): image too big request_too_large"
-        ));
-        assert!(!is_image_rejection_error(
-            "400 invalid_request_error: messages.5: `tool_use` ids were found without `tool_result` blocks"
-        ));
-        assert!(!is_image_rejection_error("rate limit exceeded"));
-
-        assert!(is_request_payload_too_large_error(
-            "Anthropic API error (413 Payload Too Large): {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
-        ));
-        assert!(is_request_payload_too_large_error(
-            "413 Request Entity Too Large"
-        ));
-        assert!(is_request_payload_too_large_error("request too large"));
-        // Not a payload error — should not match.
-        assert!(!is_request_payload_too_large_error(
-            "rate limit exceeded, retry after 20s"
-        ));
-        // Embedded digits must not trip the standalone 413 check.
-        assert!(!is_request_payload_too_large_error(
-            "model version 4130 is unavailable"
-        ));
-    }
-
-    fn image_msg(data_len: usize) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: "a".repeat(data_len),
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        }
-    }
-
-    #[test]
-    fn strip_large_images_drops_oldest_until_under_budget() {
-        // Four 1000-char images = 4000 total; budget 2500 should drop the two
-        // oldest (leaving 2000 <= 2500), keeping the two most recent.
-        let mut messages = vec![
-            image_msg(1000),
-            image_msg(1000),
-            image_msg(1000),
-            image_msg(1000),
-        ];
-
-        let stripped = emergency_strip_large_images(&mut messages, 2500);
-        assert_eq!(stripped, 2);
-        // Oldest two replaced with text markers.
-        assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
-        assert!(matches!(messages[1].content[0], ContentBlock::Text { .. }));
-        // Most recent two preserved as images.
-        assert!(matches!(messages[2].content[0], ContentBlock::Image { .. }));
-        assert!(matches!(messages[3].content[0], ContentBlock::Image { .. }));
-        if let ContentBlock::Text { text, .. } = &messages[0].content[0] {
-            assert!(text.contains("Image omitted during request-size recovery"));
-            assert!(text.contains("original_base64_chars=1000"));
-        }
-    }
-
-    fn tool_image_msg(data_len: usize) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::ToolResult {
-                    tool_use_id: "call".to_string(),
-                    content: "Captured main display".to_string(),
-                    is_error: None,
-                },
-                ContentBlock::Image {
-                    media_type: "image/png".to_string(),
-                    data: "a".repeat(data_len),
-                },
-            ],
-            timestamp: None,
-            tool_duration_ms: None,
-        }
-    }
-
-    fn decay(messages: &mut [Message]) -> usize {
-        let mut contents: Vec<&mut Vec<ContentBlock>> =
-            messages.iter_mut().map(|m| &mut m.content).collect();
-        decay_old_tool_images_in_contents(&mut contents)
-    }
-
-    fn is_image(message: &Message) -> bool {
-        message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Image { .. }))
-    }
-
-    #[test]
-    fn tool_image_decay_waits_for_trigger_then_keeps_newest() {
-        let mut messages: Vec<Message> = (0..TOOL_IMAGE_DECAY_TRIGGER_COUNT)
-            .map(|_| tool_image_msg(10))
-            .collect();
-        assert_eq!(
-            decay(&mut messages),
-            0,
-            "at the trigger count nothing decays"
-        );
-
-        messages.push(tool_image_msg(10));
-        let total = messages.len();
-        assert_eq!(decay(&mut messages), total - TOOL_IMAGE_DECAY_KEEP_COUNT);
-        for (index, message) in messages.iter().enumerate() {
-            assert_eq!(
-                is_image(message),
-                index >= total - TOOL_IMAGE_DECAY_KEEP_COUNT
-            );
-            // The tool_result itself is preserved for tool_use pairing.
-            assert!(matches!(
-                message.content[0],
-                ContentBlock::ToolResult { .. }
-            ));
-        }
-        let ContentBlock::Text { text, .. } = &messages[0].content[1] else {
-            panic!("decayed image must become a text marker");
-        };
-        assert!(text.contains("Older tool screenshot omitted"));
-        assert!(text.contains("original_base64_chars=10"));
-        // Stable after decay: nothing more to do until the trigger is hit again.
-        assert_eq!(decay(&mut messages), 0);
-    }
-
-    #[test]
-    fn tool_image_decay_bounds_bytes_but_keeps_newest_huge_image() {
-        let huge = TOOL_IMAGE_DECAY_KEEP_CHARS + 1;
-        let mut messages = vec![
-            tool_image_msg(huge),
-            tool_image_msg(huge),
-            tool_image_msg(huge),
-        ];
-        assert_eq!(decay(&mut messages), 2);
-        assert!(!is_image(&messages[0]));
-        assert!(!is_image(&messages[1]));
-        assert!(
-            is_image(&messages[2]),
-            "newest screenshot must still be sent"
-        );
-    }
-
-    #[test]
-    fn tool_image_decay_ignores_user_pasted_images() {
-        let mut messages = vec![image_msg(10)];
-        messages.extend((0..TOOL_IMAGE_DECAY_TRIGGER_COUNT + 5).map(|_| tool_image_msg(10)));
-        decay(&mut messages);
-        assert!(
-            is_image(&messages[0]),
-            "user images are not tool screenshots"
-        );
-    }
-
-    #[test]
-    fn strip_large_images_noop_when_under_budget() {
-        let mut messages = vec![image_msg(500), image_msg(500)];
-        let stripped = emergency_strip_large_images(&mut messages, 4000);
-        assert_eq!(stripped, 0);
-        assert!(matches!(messages[0].content[0], ContentBlock::Image { .. }));
-        assert!(matches!(messages[1].content[0], ContentBlock::Image { .. }));
-    }
-
-    #[test]
-    fn strip_large_images_strips_all_when_single_image_exceeds_budget() {
-        // Even a lone over-budget image is stripped (better than re-sending an
-        // oversized request that the provider will reject again).
-        let mut messages = vec![image_msg(8000)];
-        let stripped = emergency_strip_large_images(&mut messages, 2000);
-        assert_eq!(stripped, 1);
-        assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
-    }
-}
+mod tests;
 
 #[cfg(test)]
-mod image_rejection_tests {
-    use super::*;
-
-    #[test]
-    fn strip_all_images_replaces_every_image_with_a_note() {
-        let mut a = vec![
-            ContentBlock::Text {
-                text: "keep".into(),
-                cache_control: None,
-            },
-            ContentBlock::Image {
-                media_type: "image/bmp".into(),
-                data: "Qk0=".into(),
-            },
-        ];
-        let mut b = vec![ContentBlock::Image {
-            media_type: "image/png".into(),
-            data: "iVBO".into(),
-        }];
-        let mut contents = vec![&mut a, &mut b];
-        assert_eq!(strip_all_images_in_contents(&mut contents), 2);
-        assert!(matches!(&a[0], ContentBlock::Text { text, .. } if text == "keep"));
-        assert!(
-            matches!(&a[1], ContentBlock::Text { text, .. } if text.contains("media_type=image/bmp"))
-        );
-        assert!(matches!(&b[0], ContentBlock::Text { .. }));
-    }
-}
+#[path = "image_rejection_tests.rs"]
+mod image_rejection_tests;

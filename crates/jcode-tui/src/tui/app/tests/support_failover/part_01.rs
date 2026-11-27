@@ -189,7 +189,13 @@ pub(crate) fn create_test_app() -> App {
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    // Keep background-task semantics without allocating a host-sized worker
+    // pool per fixture (hosted machines can expose dozens of CPU cores).
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -203,7 +209,11 @@ fn create_named_provider_test_app(name: &'static str, model: &'static str) -> Ap
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(NamedMockProvider { name, model });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -229,7 +239,11 @@ fn create_refresh_summary_test_app(summary: crate::provider::ModelCatalogRefresh
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(RefreshSummaryProvider { summary });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -246,7 +260,11 @@ fn create_openrouter_spec_capture_test_app() -> (App, StdArc<StdMutex<Vec<String
     let provider: Arc<dyn Provider> = Arc::new(OpenRouterSpecCaptureProvider {
         set_model_calls: set_model_calls.clone(),
     });
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
     let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
     let mut app = App::new_for_test_harness(provider, registry);
     app.queue_mode = false;
@@ -316,6 +334,27 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
             .unwrap_or(&Vec::new())
             .is_empty()
     );
+}
+
+#[test]
+fn debug_state_exposes_pending_interrupt_lifecycle() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.current_message_id = Some(88);
+    app.pending_soft_interrupts = vec!["correction".to_string()];
+    app.pending_soft_interrupt_requests = vec![(89, "correction".to_string())];
+    app.pending_queued_dispatch = true;
+    app.remote_session_id = Some("session_test".to_string());
+
+    let state: serde_json::Value =
+        serde_json::from_str(&app.handle_debug_command("state")).unwrap();
+    assert_eq!(state["processing"], true);
+    assert_eq!(state["current_message_id"], 88);
+    assert_eq!(state["pending_soft_interrupts"], 1);
+    assert_eq!(state["pending_soft_interrupt_requests"], 1);
+    assert_eq!(state["pending_queued_dispatch"], true);
+    assert_eq!(state["remote_session_id"], "session_test");
+    assert!(state["processing_status"].is_string());
 }
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
@@ -443,6 +482,7 @@ impl Drop for EnvRestoreGuard {
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
+    let _provider_env = ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
     let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -563,7 +603,9 @@ fn test_handle_turn_error_failover_prompt_manual_mode_shows_system_notice() {
 #[test]
 fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
     with_temp_jcode_home(|| {
-        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        write_test_config(
+            "[provider]\ncross_provider_failover = \"countdown\"\nexhausted_usage_immediate_failover = false\n",
+        );
         let (mut app, active_provider) = create_switchable_test_app("claude");
         let prompt = crate::provider::ProviderFailoverPrompt {
             from_provider: "claude".to_string(),
@@ -612,6 +654,18 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(app.pending_turn);
         assert_eq!(active_provider.lock().unwrap().as_str(), "openai");
         assert_eq!(app.session.model.as_deref(), Some("gpt-5.4"));
+        // Cause, switch and retry collapse into one line.
+        let added = &app.display_messages[before..];
+        assert_eq!(added.len(), 1, "{added:?}");
+        assert!(
+            added[0]
+                .content
+                .starts_with("✓ Usage limit reached. Switched to model: gpt-5.4"),
+            "{}",
+            added[0].content
+        );
+        assert!(added[0].content.ends_with(". Retrying."));
+        assert!(!added[0].content.contains('\n'));
         let last = app.display_messages.last().expect("display message");
         assert!(!last.content.contains("cross_provider_failover"));
         assert!(last.content.lines().count() <= 2);
@@ -622,6 +676,49 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
             "countdown line should be dropped once the switch happens"
         );
     });
+}
+
+#[test]
+fn test_first_failure_immediate_switch_and_manual_safety() {
+    for (mode, enabled, reason, immediate) in [
+        ("countdown", true, "OAuth usage exhausted", true),
+        ("countdown", false, "OAuth usage exhausted", false),
+        ("manual", true, "OAuth usage exhausted", false),
+        (
+            "countdown",
+            true,
+            "429 rate_limit_error: This request would exceed your account's rate limit. Please try again later.",
+            true,
+        ),
+    ] {
+        with_temp_jcode_home(|| {
+            write_test_config(&format!(
+                "[provider]\ncross_provider_failover = \"{mode}\"\nexhausted_usage_immediate_failover = {enabled}\n"
+            ));
+            let (mut app, active) = create_switchable_test_app("claude");
+            app.handle_turn_error(failover_error_message(
+                &crate::provider::ProviderFailoverPrompt {
+                    from_provider: "claude".into(),
+                    from_label: "Anthropic".into(),
+                    to_provider: "openai".into(),
+                    to_label: "OpenAI".into(),
+                    target_route: Some("openai-oauth@openai-fox:gpt-5.4".into()),
+                    reason: reason.into(),
+                    estimated_input_chars: 400,
+                    estimated_input_tokens: 100,
+                },
+            ));
+            assert_eq!(
+                active.lock().unwrap().as_str(),
+                if immediate { "openai" } else { "claude" }
+            );
+            assert_eq!(app.pending_turn, immediate);
+            assert_eq!(
+                app.pending_provider_failover.is_some(),
+                !immediate && mode == "countdown"
+            );
+        });
+    }
 }
 
 /// A new session must start with auto-poke off when the config says so, and

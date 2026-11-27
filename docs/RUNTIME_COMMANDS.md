@@ -48,7 +48,7 @@ session's runtime host, including SSH and managed remote runtimes.
   OpenAI models. See [OpenAI Ultrafast](OPENAI_ULTRAFAST.md) for opt-in costs
   and API versus Codex access restrictions.
   Providers that cannot apply it return their actual error.
-- `telemetry`: show status or persist everything/no-prompts/nothing, honoring
+- `telemetry`: show status, `all`/`none`, or `<category> on|off` (content, usage, crashes, features, cost, accounts), honoring
   environment-forced opt-out.
 - `subscription`: actual live hosted account usage when signed in. No credentials
   are returned. Network/auth failures are errors, not invented status.

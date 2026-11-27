@@ -16,29 +16,23 @@
   Run dozens of agents in parallel without melting your machine. More agents, less RAM, no lag.
 </p>
 
-[![Last Commit](https://badgen.net/github/last-commit/1jehuang/jcode/master?icon=github)](https://github.com/1jehuang/jcode/commits/master)
-[![GitHub Stars](https://badgen.net/github/stars/1jehuang/jcode?icon=github)](https://github.com/1jehuang/jcode/stargazers)
-[![GitHub Downloads](https://img.shields.io/github/downloads/1jehuang/jcode/total?style=flat-square)](https://github.com/1jehuang/jcode/releases)
+[![Last Commit](https://img.shields.io/github/last-commit/1jehuang/jcode/master?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/commits/master)
+[![GitHub Stars](https://img.shields.io/github/stars/1jehuang/jcode?style=flat-square&logo=github)](https://github.com/1jehuang/jcode/stargazers)
+[![GitHub Downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2F1jehuang%2Fjcode%2Fmaster%2Fdocs%2Fbadges%2Fdownloads.json&style=flat-square&logo=github)](https://github.com/1jehuang/jcode/releases)
+
 [![Discord](https://img.shields.io/badge/Discord-Join%20Community-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/nBe9vGyK9a)
+[![Y Combinator](https://img.shields.io/badge/Y%20Combinator-S26-F26625?style=flat-square&logo=ycombinator&logoColor=white)](https://www.ycombinator.com/companies/jcode)
+[![X (Twitter)](https://img.shields.io/badge/follow-%401jehuang-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/1jehuang)
 
 </div>
 
 <div align="center">
 
-## Screenshots
+  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
+    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
+  </a>
 
-[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
-
-<table>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-read.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-read.webp" alt="Jcode rendering an image inline after reading it" width="440" /></a><br>Inline images</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/deep-swarm-investigation.webp"><img src="https://jcode.sh/screenshots/thumbs/deep-swarm-investigation.webp" alt="Jcode coordinating a deep swarm investigation" width="440" /></a><br>Deep swarm investigation</td>
-  </tr>
-  <tr>
-    <td align="center"><a href="https://jcode.sh/screenshots/latex-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
-    <td align="center"><a href="https://jcode.sh/screenshots/info-widgets.webp"><img src="https://jcode.sh/screenshots/thumbs/info-widgets.webp" alt="Jcode showing information widgets beside an active session" width="440" /></a><br>Info widgets</td>
-  </tr>
-</table>
+  <p><em>jcode performance demonstration (1x speed)</em></p>
 
 <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
   <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
@@ -57,6 +51,14 @@
 curl -fsSL https://jcode.sh/install | bash
 ```
 
+Want to switch to prereleases (Linux x86_64) and live-update running sessions? Run:
+
+```bash
+curl -fsSL https://jcode.sh/install | bash -s -- --prerelease
+```
+
+Already on a recent build? You can also run `jcode update --prerelease` (or `/update prerelease` inside jcode), and switch back anytime with `jcode update --stable` (or `/update stable`). See [Update channels](docs/UPDATE_CHANNELS.md) and [Linux self-dev prereleases](RELEASING.md#linux-self-dev-prereleases).
+
 <div align="center">
 
 ## Benches
@@ -67,11 +69,11 @@ curl -fsSL https://jcode.sh/install | bash
 
 | Tool | First session | Each additional session | Comparison (additional) |
 |---|---|---|---|
-| **jcode** | **32.9 MB** | **~6.4 MB** | baseline |
-| **OpenCode** | 637.1 MB | ~5.9 MB | about the same |
-| **pi** | 84.0 MB | ~79.6 MB | **12.4× more RAM** |
-| **Claude Code** | 272.9 MB | ~169.3 MB | **26.5× more RAM** |
-| **Codex CLI** | 398.6 MB | ~194.1 MB | **30.3× more RAM** |
+| **jcode** | **71.3 MB** | **~3.3 MB** | baseline |
+| **OpenCode** | 637.1 MB | ~5.9 MB | **1.8× more RAM** |
+| **pi** | 84.0 MB | ~79.6 MB | **24.1× more RAM** |
+| **Claude Code** | 272.9 MB | ~169.3 MB | **51.3× more RAM** |
+| **Codex CLI** | 398.6 MB | ~194.1 MB | **58.8× more RAM** |
 
 [Reproduce](scripts/bench_headless_memory.py).
 
@@ -81,21 +83,30 @@ Time until typed text appears on screen, across 10 interactive launches.
 
 | Tool | Time to first input | Comparison |
 |---|---|---|
-| **jcode** | **48.7 ms** | baseline |
-| **pi** | 596.4 ms | **12.2× slower** |
-| **Codex CLI** | 905.8 ms | **18.6× slower** |
-| **OpenCode** | 1047.9 ms | **21.5× slower** |
-| **Claude Code** | 3512.8 ms | **72.2× slower** |
+| **jcode** | **19.1 ms** | baseline |
+| **pi** | 596.4 ms | **31.2× slower** |
+| **Codex CLI** | 905.8 ms | **47.4× slower** |
+| **OpenCode** | 1047.9 ms | **54.9× slower** |
+| **Claude Code** | 3512.8 ms | **183.9× slower** |
 
 Full numbers on [jcode.sh](https://jcode.sh).
 
 <div align="center">
 
-  <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10.mp4">
-    <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-performance-demo-2026-10-30fps.webp" alt="jcode performance demonstration" width="900">
-  </a>
+## Screenshots
 
-  <p><em>jcode performance demonstration</em></p>
+[Browse the interactive gallery on jcode.sh](https://jcode.sh/#screenshots).
+
+<table>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/inline-image-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/inline-image-rendering.webp" alt="Jcode rendering screenshots inline after reading image files" width="440" /></a><br>Inline images</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/resume-menu.webp"><img src="https://jcode.sh/screenshots/thumbs/resume-menu.webp" alt="Jcode resume menu with a session list and preview" width="440" /></a><br>Resume menu</td>
+  </tr>
+  <tr>
+    <td align="center"><a href="https://jcode.sh/screenshots/latex-math-rendering.webp"><img src="https://jcode.sh/screenshots/thumbs/latex-math-rendering.webp" alt="Jcode rendering LaTeX mathematics inline" width="440" /></a><br>Inline LaTeX</td>
+    <td align="center"><a href="https://jcode.sh/screenshots/cache-cold-notification.webp"><img src="https://jcode.sh/screenshots/thumbs/cache-cold-notification.webp" alt="Jcode warning that the prompt cache went cold" width="440" /></a><br>Cache cold notification</td>
+  </tr>
+</table>
 
 </div>
 

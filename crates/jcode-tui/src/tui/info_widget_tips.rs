@@ -73,11 +73,7 @@ pub(crate) fn occasional_status_tip(max_width: usize, elapsed_secs: u64) -> Opti
     }
 
     let tip = current_tip(available);
-    Some(format!(
-        "{}{}",
-        prefix,
-        truncate_smart(&tip.text, available)
-    ))
+    Some(format!("{}{}", prefix, clip(&tip.text, available)))
 }
 
 fn wrap_tip_text(text: &str, width: usize) -> Vec<String> {
@@ -119,8 +115,22 @@ pub(super) fn render_tips_widget(inner: Rect) -> super::frame::Framed {
         })
         .collect();
 
-    super::frame::Framed::body(lines).title(Line::from(vec![
-        Span::styled("💡 ", Style::default().fg(rgb(255, 210, 80))),
-        super::frame::label("Did you know?"),
-    ]))
+    super::frame::Framed::body(lines)
+        .title(Line::from(vec![
+            Span::styled("💡 ", Style::default().fg(rgb(255, 210, 80))),
+            super::frame::label("Did you know?"),
+        ]))
+        .footer(super::frame::dim(format!("rotates {TIP_CYCLE_SECONDS}s")))
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn tip_footer_explains_rotation_not_content() {
+        let card = render_tips_widget(Rect::new(0, 0, 40, 10));
+        assert_eq!(card.footer.unwrap().to_string(), "rotates 15s");
+        assert!(!card.lines.is_empty());
+    }
 }

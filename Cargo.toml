@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.99.0"
+version = "1.1.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -10,6 +10,7 @@ members = [
     ".",
     "crates/jcode-agent-runtime",
     "crates/jcode-app-core",
+    "crates/jcode-docs-data",
     "crates/jcode-base",
     "crates/jcode-tui",
     "crates/jcode-build-meta",
@@ -96,6 +97,8 @@ members = [
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
+    "vendor/ratatui-jcode/ratatui-core",
+    "vendor/ratatui-jcode/ratatui-widgets",
 ]
 
 [lib]
@@ -149,8 +152,9 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["raw_value"] }
+uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 
 # CLI
@@ -185,6 +189,7 @@ unicode-width = "0.2"
 
 # PDF parsing (behind feature flag)
 jcode-build-meta = { path = "crates/jcode-build-meta" }
+jcode-docs-data = { path = "crates/jcode-docs-data" }
 # Tiny leaf helpers (console/env/fs/id) used directly by the cli layer.
 # Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
 # compiled as a separate rustc unit. It re-exports the application core
@@ -443,6 +448,17 @@ opt-level = 3
 [profile.test.package.compact_str]
 opt-level = 3
 
+# The streaming markdown path re-renders every text delta in the focused TUI.
+# Live clients run selfdev builds, so keep it optimized there. Measured with
+# the ignored stream_cost_probe test (9k-char reply, per update late in the
+# reply): 0.219 ms at opt-level 0, 0.059 ms with these three at opt-level 3.
+[profile.selfdev.package.pulldown-cmark]
+opt-level = 3
+[profile.selfdev.package."jcode-tui-markdown"]
+opt-level = 3
+[profile.selfdev.package."jcode-render-core"]
+opt-level = 3
+
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
 #
 # cosmic-text + rustybuzz + ttf-parser + swash + yazi do all of the desktop
@@ -634,3 +650,9 @@ jcode-provider-core = { path = "crates/jcode-provider-core" }
 jcode-tui = { path = "crates/jcode-tui", default-features = false, features = ["test-support"] }
 
 [build-dependencies]
+
+# ratatui-jcode: in-tree fork of ratatui-core / ratatui-widgets tuned for
+# jcode's per-frame hot paths. See vendor/ratatui-jcode/README.md.
+[patch.crates-io]
+ratatui-core = { path = "vendor/ratatui-jcode/ratatui-core" }
+ratatui-widgets = { path = "vendor/ratatui-jcode/ratatui-widgets" }

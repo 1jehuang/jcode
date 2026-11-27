@@ -1,10 +1,70 @@
 use crate::message::ToolCall;
+#[path = "ui_tools_browser_summary.rs"]
+mod browser_summary;
+use browser_summary::browser_summary;
 
 use super::{dim_color, rgb, tool_color, truncate_line_preserving_suffix_to_width};
 use ratatui::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(super) use jcode_tui_tool_display::concise_tool_error_summary;
+/// Source is a dedicated body, independent of the optional technical summary.
+/// Bound visual rows, not source lines: agents frequently submit one long line.
+pub(super) fn codemode_preview(tool: &ToolCall, width: usize) -> Vec<Line<'static>> {
+    if canonical_tool_name(&tool.name) != "codemode" {
+        return Vec::new();
+    }
+    let Some(code) = tool.input.get("code").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    if code.trim().is_empty() || width == 0 {
+        return Vec::new();
+    }
+    const MAX_ROWS: usize = 6;
+    let indent = width.saturating_sub(1).min(4);
+    let inner_width = width.saturating_sub(indent).max(1);
+    let mut rows = Vec::new();
+    let mut source = code.lines().peekable();
+    while let Some(line) = source.next() {
+        let source_line = Line::from(super::markdown::highlight_line(
+            &line.replace('\t', "    "),
+            Some("js"),
+        ));
+        let wrapped = super::markdown::wrap_lines(vec![source_line], inner_width);
+        let available = MAX_ROWS.saturating_sub(rows.len());
+        let continued = wrapped.len() > available;
+        for mut row in wrapped.into_iter().take(available) {
+            row = super::truncate_line_with_ellipsis_to_width(&row, inner_width);
+            row.spans.insert(0, Span::raw(" ".repeat(indent)));
+            rows.push(row);
+        }
+        if rows.len() == MAX_ROWS {
+            let remaining = source.count();
+            let label = if continued {
+                Some("… code continues".to_string())
+            } else if remaining > 0 {
+                Some(format!(
+                    "… {remaining} more line{}",
+                    if remaining == 1 { "" } else { "s" }
+                ))
+            } else {
+                None
+            };
+            if let Some(label) = label {
+                rows.push(super::truncate_line_with_ellipsis_to_width(
+                    &Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(label, Style::default().fg(dim_color())),
+                    ]),
+                    width,
+                ));
+            }
+            break;
+        }
+    }
+    rows
+}
+
+pub(super) use jcode_tui_tool_display::parse_tool_failure;
 pub(crate) use jcode_tui_tool_display::{
     canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,
     tool_output_looks_failed,
@@ -127,71 +187,12 @@ pub(super) use batch::parse_batch_sub_outputs;
 pub(crate) use batch::{batch_subcall_intent, batch_subcall_params};
 pub(super) use batch::{parse_batch_completion_counts, parse_batch_sub_outputs_by_index};
 
-pub(super) fn summarize_unified_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("--- ")
-            .or_else(|| line.strip_prefix("+++ "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if path.is_empty() || path == "/dev/null" {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
-
-pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
-    let lines = patch_text.lines().count();
-    let mut files: Vec<String> = Vec::new();
-
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if path.is_empty() {
-            continue;
-        }
-        if !files.iter().any(|f| f == path) {
-            files.push(path.to_string());
-        }
-    }
-
-    if files.len() == 1 {
-        format!("{} ({} lines)", files[0], lines)
-    } else if !files.is_empty() {
-        format!("{} files ({} lines)", files.len(), lines)
-    } else {
-        format!("({} lines)", lines)
-    }
-}
+#[path = "ui_tools/patch_summary.rs"]
+mod patch_summary;
+pub(crate) use patch_summary::{
+    extract_apply_patch_primary_file, extract_unified_patch_primary_file,
+};
+pub(super) use patch_summary::{summarize_apply_patch_input, summarize_unified_patch_input};
 
 fn parse_agentgrep_smart_subject_relation(
     input: &serde_json::Value,
@@ -228,48 +229,6 @@ fn parse_agentgrep_smart_subject_relation(
     }
 
     (subject, relation)
-}
-
-pub(crate) fn extract_apply_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let trimmed = line.trim();
-        let path = trimmed
-            .strip_prefix("*** Add File: ")
-            .or_else(|| trimmed.strip_prefix("*** Update File: "))
-            .or_else(|| trimmed.strip_prefix("*** Delete File: "))
-            .map(str::trim)
-            .unwrap_or("");
-
-        if !path.is_empty() {
-            return Some(path.to_string());
-        }
-    }
-
-    None
-}
-
-pub(crate) fn extract_unified_patch_primary_file(patch_text: &str) -> Option<String> {
-    for line in patch_text.lines() {
-        let Some(rest) = line
-            .strip_prefix("+++ ")
-            .or_else(|| line.strip_prefix("--- "))
-        else {
-            continue;
-        };
-
-        let without_tab_suffix = rest.split('\t').next().unwrap_or(rest);
-        let path_token = without_tab_suffix.split_whitespace().next().unwrap_or("");
-        let path = path_token
-            .strip_prefix("a/")
-            .or(path_token.strip_prefix("b/"))
-            .unwrap_or(path_token);
-
-        if !path.is_empty() && path != "/dev/null" {
-            return Some(path.to_string());
-        }
-    }
-
-    None
 }
 
 fn display_prefix_by_width(s: &str, max_width: usize) -> &str {
@@ -417,7 +376,7 @@ fn summarize_swarm_tool_action(tool: &ToolCall, bounded: &dyn Fn(usize) -> usize
     truncate_end_display(summary.as_str(), bounded(42))
 }
 
-fn truncate_path_display(path: &str, max_width: usize) -> String {
+pub(super) fn truncate_path_display(path: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(path) <= max_width {
         return path.to_string();
     }
@@ -503,151 +462,6 @@ fn browser_target_summary(
         (Some(x), Some(y)) => Some(format!("@{:.0},{:.0}", x, y)),
         _ => None,
     }
-}
-
-fn browser_summary(tool: &ToolCall, max_width: Option<usize>) -> String {
-    let bounded = |preferred: usize| max_width.unwrap_or(preferred);
-    let action = tool
-        .input
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("browser");
-
-    let summary = match action {
-        "open" | "new_tab" => {
-            let label = action.replace('_', " ");
-            let url = tool.input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-            if url.is_empty() {
-                label
-            } else {
-                format!("{} {}", label, truncate_url_display(url, bounded(44)))
-            }
-        }
-        "snapshot" | "interactables" | "screenshot" => {
-            if let Some(target) = browser_target_summary(tool, max_width, true) {
-                format!("{} {}", action, target)
-            } else {
-                action.to_string()
-            }
-        }
-        "get_content" => {
-            let format_name = tool
-                .input
-                .get("format")
-                .and_then(|v| v.as_str())
-                .unwrap_or("text");
-            if let Some(target) = browser_target_summary(tool, max_width, true) {
-                format!("content {} {}", format_name, target)
-            } else {
-                format!("content {}", format_name)
-            }
-        }
-        "click" | "wait" | "hover" | "select" => {
-            if let Some(target) = browser_target_summary(tool, max_width, action != "select") {
-                format!("{} {}", action, target)
-            } else {
-                action.to_string()
-            }
-        }
-        "type" => {
-            let chars = tool
-                .input
-                .get("text")
-                .and_then(|v| v.as_str())
-                .map(|text| text.chars().count());
-            match (browser_target_summary(tool, max_width, false), chars) {
-                (Some(target), Some(chars)) => format!("type {} ({} chars)", target, chars),
-                (Some(target), None) => format!("type {}", target),
-                (None, Some(chars)) => format!("type ({} chars)", chars),
-                (None, None) => "type".to_string(),
-            }
-        }
-        "fill_form" => {
-            let count = tool
-                .input
-                .get("fields")
-                .and_then(|v| v.as_array())
-                .map(|fields| fields.len())
-                .unwrap_or(0);
-            format!("fill {} field{}", count, if count == 1 { "" } else { "s" })
-        }
-        "upload" => {
-            let path = tool
-                .input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let target = browser_target_summary(tool, max_width, false);
-            let file = if path.is_empty() {
-                None
-            } else {
-                Some(truncate_path_display(path, bounded(28)))
-            };
-            match (target, file) {
-                (Some(target), Some(file)) => format!("upload {} ← {}", target, file),
-                (Some(target), None) => format!("upload {}", target),
-                (None, Some(file)) => format!("upload {}", file),
-                (None, None) => "upload".to_string(),
-            }
-        }
-        "eval" => {
-            let script = tool
-                .input
-                .get("script")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if script.is_empty() {
-                "eval".to_string()
-            } else {
-                format!("eval {}", truncate_middle_display(script, bounded(42)))
-            }
-        }
-        "scroll" => {
-            if let Some(position) = tool.input.get("position").and_then(|v| v.as_str()) {
-                format!("scroll {}", position)
-            } else if let Some(scroll_to) = tool.input.get("scroll_to") {
-                let x = scroll_to.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let y = scroll_to.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                format!("scroll to {:.0},{:.0}", x, y)
-            } else {
-                let x = tool.input.get("x").and_then(|v| v.as_f64());
-                let y = tool.input.get("y").and_then(|v| v.as_f64());
-                match (x, y) {
-                    (Some(x), Some(y)) => format!("scroll {:.0},{:.0}", x, y),
-                    _ => "scroll".to_string(),
-                }
-            }
-        }
-        "press" => {
-            let key = tool.input.get("key").and_then(|v| v.as_str());
-            match (key, browser_target_summary(tool, max_width, false)) {
-                (Some(key), Some(target)) => format!("press {} on {}", key, target),
-                (Some(key), None) => format!("press {}", key),
-                (None, Some(target)) => format!("press {}", target),
-                (None, None) => "press".to_string(),
-            }
-        }
-        "provider_command" => tool
-            .input
-            .get("provider_action")
-            .and_then(|v| v.as_str())
-            .map(|value| format!("provider {}", truncate_middle_display(value, bounded(36))))
-            .unwrap_or_else(|| "provider".to_string()),
-        "status" | "setup" | "list_tabs" | "get_active_tab" | "list_frames" => {
-            action.replace('_', " ")
-        }
-        "select_tab" => tool
-            .input
-            .get("tab_id")
-            .and_then(|v| v.as_i64())
-            .map(|tab_id| format!("select tab {}", tab_id))
-            .unwrap_or_else(|| "select tab".to_string()),
-        _ => action.replace('_', " "),
-    };
-
-    max_width
-        .map(|width| truncate_end_display(summary.as_str(), width))
-        .unwrap_or(summary)
 }
 
 fn truncate_path_with_suffix(path: &str, suffix: &str, max_width: usize) -> String {
@@ -831,11 +645,14 @@ fn truncate_identifier_display(value: &str, max_width: usize) -> String {
 }
 
 pub(super) fn batch_subcall_index(id: &str) -> Option<usize> {
-    id.strip_prefix("batch-")?
-        .split('-')
-        .next()?
-        .parse::<usize>()
-        .ok()
+    let index = id.strip_prefix("batch-")?.split('-').next()?;
+    match index.parse::<usize>() {
+        Ok(index) => Some(index),
+        Err(error) => {
+            crate::logging::debug(&format!("Invalid batch subcall index: {error}"));
+            None
+        }
+    }
 }
 
 pub(super) fn is_memory_store_tool(tc: &ToolCall) -> bool {
@@ -1572,6 +1389,54 @@ pub(super) fn get_tool_summary_with_budget(
     }
 }
 
+/// Keep timing and token usage together as one compact metadata group.
+/// Older transcript entries can lack timing; never invent a duration for them.
+pub(super) fn tool_usage_label(tokens: &str, seconds: Option<f32>, output: &str) -> String {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output))
+        .map(|seconds| {
+            crate::message::Message::format_duration((seconds as f64 * 1000.0).round() as u64)
+        });
+    match duration {
+        Some(duration) => format!("{duration}, {tokens}"),
+        None => tokens.to_owned(),
+    }
+}
+
+/// Style elapsed time independently from output token volume.
+pub(super) fn tool_usage_spans(
+    label: String,
+    token_color: Color,
+    seconds: Option<f32>,
+    output: &str,
+) -> Vec<Span<'static>> {
+    let duration = seconds
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .or_else(|| jcode_tui_messages::DisplayMessage::tool_duration_from_output(output));
+    let Some(seconds) = duration else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let Some((duration_label, tokens)) = label.split_once(", ") else {
+        return vec![Span::styled(label, Style::default().fg(token_color))];
+    };
+    let duration_color = if seconds >= 60.0 {
+        rgb(224, 118, 118)
+    } else if seconds >= 10.0 {
+        rgb(214, 184, 92)
+    } else {
+        rgb(118, 118, 118)
+    };
+    vec![
+        Span::styled(
+            duration_label.to_owned(),
+            Style::default().fg(duration_color),
+        ),
+        Span::styled(", ", Style::default().fg(dim_color())),
+        Span::styled(tokens.to_owned(), Style::default().fg(token_color)),
+    ]
+}
+
 pub(super) fn render_batch_subcall_line(
     tool: &ToolCall,
     icon: &str,
@@ -1588,7 +1453,14 @@ pub(super) fn render_batch_subcall_line(
             crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
             crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
         };
-        (crate::util::format_approx_token_count(tokens), color)
+        (
+            tool_usage_label(
+                &crate::util::format_approx_token_count(tokens),
+                None,
+                content,
+            ),
+            color,
+        )
     });
     let intent = tool
         .intent
@@ -1610,10 +1482,7 @@ pub(super) fn render_batch_subcall_line(
             UnicodeWidthStr::width(format!(" · {label}").as_str())
         });
     let summary_budget = max_width.map(|w| w.saturating_sub(reserved));
-    let error_summary = output_content.and_then(concise_tool_error_summary);
-    let is_error = error_summary.is_some();
-    let summary = error_summary
-        .unwrap_or_else(|| get_tool_summary_with_budget(tool, bash_max_chars, summary_budget));
+    let summary = get_tool_summary_with_budget(tool, bash_max_chars, summary_budget);
 
     let mut spans = vec![
         Span::styled(format!("    {} ", icon), Style::default().fg(icon_color)),
@@ -1625,9 +1494,7 @@ pub(super) fn render_batch_subcall_line(
             intent.clone(),
             Style::default().fg(tool_color()),
         ));
-        // Error summaries always render so failures stay diagnosable even
-        // when technical details are hidden.
-        let show_detail = show_tool_call_details() || is_error;
+        let show_detail = show_tool_call_details();
         if show_detail && !summary.is_empty() && summary != intent {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
             spans.push(Span::styled(summary, Style::default().fg(dim_color())));
@@ -1639,10 +1506,14 @@ pub(super) fn render_batch_subcall_line(
         ));
     }
     let token_suffix = token_badge.map(|(label, color)| {
-        Line::from(vec![
-            Span::styled(" · ", Style::default().fg(dim_color())),
-            Span::styled(label, Style::default().fg(color)),
-        ])
+        let mut spans = vec![Span::styled(" · ", Style::default().fg(dim_color()))];
+        spans.extend(tool_usage_spans(
+            label,
+            color,
+            None,
+            output_content.unwrap_or_default(),
+        ));
+        Line::from(spans)
     });
 
     if let (Some(max_width), Some(token_suffix)) = (max_width, token_suffix.as_ref()) {

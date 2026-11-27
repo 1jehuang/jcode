@@ -55,12 +55,16 @@ mod shell {
             r#"#!/bin/sh
 set -eu
 [ -z "${{JCODE_RUNTIME_RELEASE_SEMVER:-}}" ] || exit 97
+printf '%s\n' "$*" >> "$HOME/probes"
 if [ {fail_after_switch} = true ] && [ "$0" = "$HOME/opt/jcode" ]; then exit 96; fi
 case "$*" in
   '--no-update --no-selfdev --version') echo 'jcode {version} (test)' ;;
   '--no-update --no-selfdev cloud receive --help') exit 0 ;;
   '--no-update --no-selfdev cloud cancel-return --help') exit 0 ;;
+  '--no-update --no-selfdev cloud replace-receive --help') exit 0 ;;
+  '--no-update --no-selfdev cloud group-protocol --help') exit 0 ;;
   '--no-update --no-selfdev cloud credentials --help') {credentials} ;;
+  '--no-update --no-selfdev cloud router-credentials --help') {credentials} ;;
   *) exit 95 ;;
 esac
 "#
@@ -86,6 +90,12 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 printf '%s\n' "$url" >> "$HOME/downloads"
+if [ "$url" = https://github.com/1jehuang/jcode/releases/latest ]; then
+  if [ -f "$HOME/latest-url" ]; then cat "$HOME/latest-url"; else
+    printf %s https://github.com/1jehuang/jcode/releases/tag/v0.99.123
+  fi
+  exit 0
+fi
 cp "$HOME/fixtures/${url##*/}" "$dest"
 "#,
             );
@@ -161,21 +171,38 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
         }
 
         fn run(&self, target: Option<&str>) -> std::process::Output {
-            let script =
-                prepare_script_for_paths("", target, self.backend().to_str().unwrap(), false);
+            self.run_candidate(target, None)
+        }
+
+        fn run_candidate(
+            &self,
+            target: Option<&str>,
+            candidate: Option<&str>,
+        ) -> std::process::Output {
+            let script = prepare_script_for_paths_with_candidate(
+                "",
+                target,
+                self.backend().to_str().unwrap(),
+                false,
+                candidate,
+            );
             let path = self.dir.path().join("prepare.sh");
             std::fs::write(&path, script).unwrap();
-            Command::new("sh")
-                .arg(path)
+            self.prepared_command().output().unwrap()
+        }
+
+        fn prepared_command(&self) -> Command {
+            let mut command = Command::new("sh");
+            command
+                .arg(self.dir.path().join("prepare.sh"))
                 .env("HOME", self.dir.path())
                 .env(
                     "PATH",
                     format!("{}:/usr/bin:/bin", self.dir.path().join("mocks").display()),
                 )
                 .env("JCODE_RUNTIME_RELEASE_SEMVER", "9.9.9")
-                .env_remove("JCODE_CLOUD_FORCE_UPGRADE")
-                .output()
-                .unwrap()
+                .env_remove("JCODE_CLOUD_FORCE_UPGRADE");
+            command
         }
 
         fn assert_old(&self) {
@@ -201,6 +228,201 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
     }
 
     #[test]
+    fn warm_preparation_reuses_only_verified_unchanged_capabilities() {
+        let f = Fixture::new();
+        f.installed(true);
+        let start = Instant::now();
+        let cold = f.run(Some("v0.99.1"));
+        let cold_elapsed = start.elapsed();
+        assert!(
+            cold.status.success(),
+            "{}",
+            String::from_utf8_lossy(&cold.stderr)
+        );
+        let probes = f.dir.path().join("probes");
+        let cold_probes = std::fs::read_to_string(&probes).unwrap();
+        let cache = f
+            .dir
+            .path()
+            .join(".local/share/jcode/cloud-releases/.capabilities-ok");
+        let cold_evidence = std::fs::read(&cache).unwrap();
+        assert_eq!(
+            cold_probes.lines().filter(|l| l.contains("cloud ")).count(),
+            18
+        );
+        std::fs::write(&probes, "").unwrap();
+        let start = Instant::now();
+        let warm = f.run(Some("v0.99.1"));
+        let warm_elapsed = start.elapsed();
+        assert!(
+            warm.status.success(),
+            "{}",
+            String::from_utf8_lossy(&warm.stderr)
+        );
+        let warm_probes = std::fs::read_to_string(&probes).unwrap();
+        assert_eq!(
+            warm_probes.lines().filter(|l| l.contains("cloud ")).count(),
+            0
+        );
+        assert_eq!(
+            warm_probes
+                .lines()
+                .filter(|l| l.contains("--version"))
+                .count(),
+            2
+        );
+        let stderr = String::from_utf8_lossy(&warm.stderr);
+        assert!(stderr.contains("capability cache warm=1"));
+        assert_eq!(std::fs::read(&cache).unwrap(), cold_evidence);
+        for stage in [
+            "lock_wait",
+            "cache_verification",
+            "runtime_policy_and_preparation",
+            "final_verification",
+        ] {
+            assert!(stderr.contains(&format!("[cloud prepare timing] {stage} ")));
+        }
+        eprintln!(
+            "representative generated-shell fixture: cold={cold_elapsed:?} (18 capability executions), warm={warm_elapsed:?} (0 capability executions, 2 version checks)"
+        );
+
+        // Adjacent library changes invalidate wrapper evidence as well.
+        std::fs::write(f.dir.path().join("opt/libfixture.so"), "changed").unwrap();
+        let changed = f.run(Some("v0.99.1"));
+        assert!(changed.status.success());
+        assert!(String::from_utf8_lossy(&changed.stderr).contains("capability cache warm=0"));
+
+        // The release policy is still evaluated on a warm host.
+        f.artifact(true, false, None);
+        let upgraded = f.run(Some("v0.99.123"));
+        assert!(
+            upgraded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&upgraded.stderr)
+        );
+        assert!(f.backend().is_symlink());
+    }
+
+    #[test]
+    fn concurrent_remote_preparation_probes_once_then_reuses_verified_install() {
+        let f = Fixture::new();
+        f.installed(true);
+        assert!(f.run(Some("v0.99.1")).status.success());
+        std::fs::remove_file(
+            f.dir
+                .path()
+                .join(".local/share/jcode/cloud-releases/.capabilities-ok"),
+        )
+        .unwrap();
+        std::fs::write(f.dir.path().join("probes"), "").unwrap();
+        let outputs = std::thread::scope(|scope| {
+            let first = scope.spawn(|| f.prepared_command().output().unwrap());
+            let second = scope.spawn(|| f.prepared_command().output().unwrap());
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        for output in &outputs {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_eq!(
+            outputs
+                .iter()
+                .filter(|o| String::from_utf8_lossy(&o.stderr).contains("capability cache warm=1"))
+                .count(),
+            1
+        );
+        let probes = std::fs::read_to_string(f.dir.path().join("probes")).unwrap();
+        assert_eq!(probes.lines().filter(|l| l.contains("cloud ")).count(), 18);
+    }
+
+    #[test]
+    fn warm_preparation_expiry_corruption_and_failure_invalidate_evidence() {
+        let f = Fixture::new();
+        f.installed(true);
+        assert!(f.run(Some("v0.99.1")).status.success());
+        let cache = f
+            .dir
+            .path()
+            .join(".local/share/jcode/cloud-releases/.capabilities-ok");
+        let saved = std::fs::read_to_string(&cache).unwrap();
+        let (_, snapshot) = saved.split_once('\n').unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(&cache, format!("{}\n{snapshot}", now - 121)).unwrap();
+        let past_handoff_marker = f.run(Some("v0.99.1"));
+        assert!(past_handoff_marker.status.success());
+        assert!(
+            String::from_utf8_lossy(&past_handoff_marker.stderr)
+                .contains("capability cache warm=1")
+        );
+        std::fs::write(&cache, format!("{}\n{snapshot}", now - 601)).unwrap();
+        let expired = f.run(Some("v0.99.1"));
+        assert!(expired.status.success());
+        assert!(String::from_utf8_lossy(&expired.stderr).contains("capability cache warm=0"));
+        for stamp in ["0", "invalid", "9999999999"] {
+            let saved = std::fs::read_to_string(&cache).unwrap();
+            let (_, snapshot) = saved.split_once('\n').unwrap();
+            std::fs::write(&cache, format!("{stamp}\n{snapshot}")).unwrap();
+            let output = f.run(Some("v0.99.1"));
+            assert!(output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("capability cache warm=0"));
+        }
+        // A changed binary may not inherit prior capability evidence.
+        executable(&f.backend(), &binary("v0.99.1", false, false));
+        executable(
+            &f.dir.path().join("opt/runtime-update"),
+            "#!/bin/sh\nexit 1\n",
+        );
+        assert!(!f.run(Some("v0.99.1")).status.success());
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn managed_policy_keeps_capable_runtime_despite_newer_client_release() {
+        let f = Fixture::new();
+        f.installed(true);
+        executable(
+            &f.dir.path().join("opt/runtime-update"),
+            "#!/bin/sh\necho unexpected-policy-change >&2\nexit 98\n",
+        );
+        let result = f.run(Some("v99.0.0"));
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        f.assert_old();
+        assert!(!f.dir.path().join("downloads").exists());
+    }
+
+    #[test]
+    fn managed_policy_rejects_implicit_dev_upload_and_missing_capabilities() {
+        let f = Fixture::new();
+        f.installed(false);
+        executable(
+            &f.dir.path().join("opt/runtime-update"),
+            "#!/bin/sh\n[ \"$1\" = check ] || exit 98\necho checked >> \"$HOME/policy-checks\"\n",
+        );
+        let result = f.run(None);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("selected cloud runtime lacks"));
+        assert!(f.dir.path().join("policy-checks").exists());
+        assert!(!f.dir.path().join("downloads").exists());
+        let result = f.run_candidate(None, Some("jcode"));
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("explicitly select a compatible package")
+        );
+        f.assert_old();
+    }
+
+    #[test]
     fn development_keeps_capable_cli_without_downloading() {
         let f = Fixture::new();
         f.installed(true);
@@ -215,14 +437,166 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
     }
 
     #[test]
-    fn development_rejects_receive_only_cli_without_downloading() {
+    fn development_candidate_is_probed_and_installed_without_a_release() {
+        for capable in [true, false] {
+            let f = Fixture::new();
+            f.installed(false);
+            let candidate = f.dir.path().join("native ' development");
+            executable(&candidate, &binary("v0.99.256-dev", capable, false));
+            let result = f.run_candidate(None, candidate.to_str());
+            assert_eq!(
+                result.status.success(),
+                capable,
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(!f.dir.path().join("downloads").exists());
+            if capable {
+                let installed = std::fs::read_link(f.backend()).unwrap();
+                assert!(
+                    std::fs::read_to_string(installed)
+                        .unwrap()
+                        .contains("v0.99.256-dev")
+                );
+                // A second preflight uses capabilities, not equality with a
+                // published version, so it does not upload/install again.
+                assert!(f.run(None).status.success());
+                assert!(!f.dir.path().join("downloads").exists());
+            } else {
+                f.assert_old();
+            }
+        }
+    }
+
+    #[test]
+    fn development_bundle_keeps_wrapper_binary_and_private_libraries_together() {
         let f = Fixture::new();
         f.installed(false);
+        f.artifact(true, false, None);
+        let candidate = f.dir.path().join("payload/jcode-linux-x86_64");
+        let result = f.run_candidate(None, candidate.to_str());
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let installed = std::fs::read_link(f.backend()).unwrap();
+        assert!(installed.with_extension("bin").is_file());
+        assert!(installed.parent().unwrap().join("libssl.so.10").is_file());
+        assert!(!f.dir.path().join("downloads").exists());
+    }
+
+    #[test]
+    fn development_candidate_rolls_back_when_effective_cli_is_broken() {
+        let f = Fixture::new();
+        f.installed(false);
+        executable(&f.cli(), &binary("v0.99.0-dev", false, false));
+        let candidate = f.dir.path().join("native-development");
+        executable(&candidate, &binary("v0.99.256-dev", true, false));
+        let result = f.run_candidate(None, candidate.to_str());
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("restored previous CLI"));
+        assert!(!f.backend().is_symlink());
+        assert!(
+            std::fs::read_to_string(f.backend())
+                .unwrap()
+                .contains("v0.99.1")
+        );
+    }
+
+    #[test]
+    fn development_upgrades_incompatible_cli_to_verified_latest() {
+        let f = Fixture::new();
+        f.installed(false);
+        f.artifact(true, false, None);
+        let result = f.run(None);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(f.backend().is_symlink());
+        let downloads = std::fs::read_to_string(f.dir.path().join("downloads")).unwrap();
+        assert!(downloads.contains("/releases/latest"));
+        assert!(downloads.contains("/v0.99.123/jcode-linux-x86_64.tar.gz"));
+        let result = f.run(None);
+        assert!(result.status.success());
+        assert_eq!(
+            std::fs::read_to_string(f.dir.path().join("downloads")).unwrap(),
+            downloads
+        );
+    }
+
+    #[test]
+    fn development_rejects_invalid_latest_redirects_without_switching() {
+        for latest in [
+            "https://evil.example/releases/tag/v0.99.123",
+            "https://github.com/1jehuang/jcode/releases/tag/v01.2.3",
+            "https://github.com/1jehuang/jcode/releases/tag/v0.99.123\nv1.2.3",
+            "https://github.com/1jehuang/jcode/releases/tag/v0.99.123-dev",
+        ] {
+            let f = Fixture::new();
+            f.installed(false);
+            std::fs::write(f.dir.path().join("latest-url"), latest).unwrap();
+            let result = f.run(None);
+            assert!(!result.status.success(), "{latest}");
+            assert!(String::from_utf8_lossy(&result.stderr).contains("JCODE_CLOUD_RELEASE"));
+            f.assert_old();
+        }
+    }
+
+    #[test]
+    fn missing_replace_or_group_capability_triggers_development_upgrade() {
+        for command in ["replace-receive", "group-protocol"] {
+            let f = Fixture::new();
+            f.installed(true);
+            let old = binary("v0.99.999", true, false).replace(
+                &format!("cloud {command} --help') exit 0"),
+                &format!("cloud {command} --help') exit 2"),
+            );
+            executable(&f.backend(), &old);
+            f.artifact(true, false, None);
+            let result = f.run(None);
+            assert!(
+                result.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(f.backend().is_symlink(), "{command}");
+        }
+    }
+
+    #[test]
+    fn latest_without_required_replace_capability_never_switches_backend() {
+        let f = Fixture::new();
+        f.installed(false);
+        f.artifact(true, false, None);
+        let payload = f.dir.path().join("payload");
+        let candidate = binary("v0.99.123", true, false).replace(
+            "cloud replace-receive --help') exit 0",
+            "cloud replace-receive --help') exit 2",
+        );
+        executable(&payload.join("jcode-linux-x86_64.bin"), &candidate);
+        assert!(
+            Command::new("tar")
+                .arg("czf")
+                .arg(f.dir.path().join("fixtures/jcode-linux-x86_64.tar.gz"))
+                .arg("-C")
+                .arg(&payload)
+                .args([
+                    "jcode-linux-x86_64",
+                    "jcode-linux-x86_64.bin",
+                    "libssl.so.10"
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        f.checksum();
         let result = f.run(None);
         assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("JCODE_CLOUD_RELEASE"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("required protocol capabilities"));
         f.assert_old();
-        assert!(!f.dir.path().join("downloads").exists());
     }
 
     #[test]

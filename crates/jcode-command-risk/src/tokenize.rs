@@ -181,6 +181,23 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                 // destructive; only a single `>` clobbers.
                 if chars.peek() == Some(&'>') {
                     chars.next();
+                } else if chars.peek() == Some(&'&') {
+                    // `>&N` / `>&-` duplicate or close a file descriptor and
+                    // never name a file to truncate. Consume the FD word.
+                    chars.next();
+                    let mut fd = String::new();
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() || d == '-' {
+                            fd.push(d);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    if fd.is_empty() {
+                        // `>& file` (bash: redirect stdout+stderr) truncates.
+                        pending_redirect = true;
+                    }
                 } else {
                     if chars.peek() == Some(&'|') {
                         chars.next();

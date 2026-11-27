@@ -28,6 +28,8 @@ pub use types::{
 pub struct MarkdownConfigSnapshot {
     pub diagram_mode: DiagramDisplayMode,
     pub markdown_spacing: MarkdownSpacingMode,
+    /// Append link destinations after labels. Disabled by default.
+    pub show_link_urls: bool,
     pub mermaid_enabled: bool,
     pub latex_rendering: LatexRenderingMode,
 }
@@ -37,6 +39,7 @@ impl Default for MarkdownConfigSnapshot {
         Self {
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
+            show_link_urls: false,
             mermaid_enabled: true,
             latex_rendering: LatexRenderingMode::default(),
         }
@@ -133,13 +136,18 @@ mod render_lazy;
 #[path = "markdown_render_support.rs"]
 mod render_support;
 
+mod markdown_links;
+pub use markdown_links::markdown_link_target;
+
 mod render_core_adapter;
 pub use render_core_adapter::{
     document_to_lines, render_markdown_via_core, render_markdown_via_core_wrapped,
     styled_line_to_line,
 };
 
-pub use render_full::{render_markdown_with_width, thread_render_count};
+pub use render_full::{
+    render_markdown_with_width, render_markdown_with_width_and_prose_color, thread_render_count,
+};
 pub use render_lazy::render_markdown_lazy;
 pub use render_support::extract_copy_targets_from_rendered_lines;
 
@@ -1009,27 +1017,6 @@ fn is_closing_fence(line: &str, fence_char: char, min_len: usize) -> bool {
     trimmed[fence_len..].trim().is_empty()
 }
 
-fn count_unescaped_double_dollar(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0usize;
-    let mut ix = 0usize;
-
-    while ix + 1 < bytes.len() {
-        if bytes[ix] == b'\\' {
-            ix += 2;
-            continue;
-        }
-        if bytes[ix] == b'$' && bytes[ix + 1] == b'$' {
-            count += 1;
-            ix += 2;
-            continue;
-        }
-        ix += 1;
-    }
-
-    count
-}
-
 fn math_inline_span(math: &str) -> Span<'static> {
     let rendered = jcode_render_core::render_inline_latex(math);
     math_copy::register_inline_math(&rendered, math);
@@ -1208,22 +1195,12 @@ pub fn debug_stats_json() -> Option<serde_json::Value> {
     serde_json::to_value(debug_stats()).ok()
 }
 
-/// Render markdown with optional width constraint for tables
-pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_line(line, width, repeated_gutter_prefix)
-}
-
-pub fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
-    wrap::wrap_lines(lines, width, repeated_gutter_prefix)
-}
-
-pub fn progress_bar(progress: f32, width: usize) -> String {
-    wrap::progress_bar(progress, width)
-}
-
-pub fn progress_line(label: &str, progress: f32, width: usize) -> Line<'static> {
-    wrap::progress_line(label, progress, width)
-}
+#[path = "display_helpers.rs"]
+mod display_helpers;
+pub use display_helpers::progress_bar;
+pub use display_helpers::progress_line;
+pub use display_helpers::wrap_line;
+pub use display_helpers::wrap_lines;
 
 #[cfg(test)]
 #[path = "markdown_tests/mod.rs"]

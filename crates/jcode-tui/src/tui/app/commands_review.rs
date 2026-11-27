@@ -68,7 +68,8 @@ fn judge_transcript_text_message(role: Role, text: String) -> StoredMessage {
         content: vec![ContentBlock::Text {
             text,
             cache_control: None,
-        }],
+        }]
+        .into(),
         display_role: None,
         timestamp: None,
         tool_duration_ms: None,
@@ -322,6 +323,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.swarm_plan_version = None;
     app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
+    app.queued_images.clear();
     app.queued_commands.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();

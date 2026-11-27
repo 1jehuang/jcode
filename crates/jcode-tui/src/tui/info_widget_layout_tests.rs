@@ -240,21 +240,99 @@ fn overview_suppresses_mergeable_widgets_under_contention() {
     }
 }
 
-/// (c) The swarm dock widget is gated on managed members: a session that
-/// manages agents (spawn subtree) gets the dock in layout, while plain swarm
-/// presence data (session counts/names) must never place it. The inline strip
-/// stands down while the dock is visible so agents never render twice.
 #[test]
-fn swarm_status_dock_requires_managed_members() {
-    // With managed members (contended_data has them) the dock is eligible and
-    // can be placed. The inline strip avoids double-rendering by standing
-    // down while the dock is visible (see ui.rs swarm_strip_lines gating).
-    let data = contended_data();
+fn high_usage_is_not_duplicated_when_overview_can_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 60);
+    let margins = margins_for(40, 60, false);
     assert!(
-        data.has_data_for(WidgetKind::SwarmStatus),
-        "SwarmStatus dock must be eligible while this session manages agents"
+        data.effective_priority(WidgetKind::UsageLimits)
+            < data.effective_priority(WidgetKind::Overview)
     );
-    assert!(data.available_widgets().contains(&WidgetKind::SwarmStatus));
+
+    // Exercise both a fresh priority-promoted card and a standalone card
+    // carried from a previous frame before Overview had a place.
+    let usage_anchor = WidgetAnchor {
+        placement: WidgetPlacement {
+            kind: WidgetKind::UsageLimits,
+            rect: Rect::new(60, 55, 40, 5),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: margins.scroll_top + 55,
+    };
+    for anchors in [Vec::new(), vec![usage_anchor]] {
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+        assert_placements_sane("high usage", area, &outcome.visible);
+        assert!(
+            outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !outcome
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+        assert!(
+            !outcome
+                .anchors
+                .iter()
+                .any(|a| a.placement.kind == WidgetKind::UsageLimits)
+        );
+        let steady = calculate_placements_anchored(area, &margins, &data, true, &outcome.anchors);
+        assert!(
+            steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::Overview)
+        );
+        assert!(
+            !steady
+                .visible
+                .iter()
+                .any(|p| p.kind == WidgetKind::UsageLimits)
+        );
+    }
+}
+
+#[test]
+fn high_usage_stays_visible_when_overview_cannot_fit() {
+    let mut data = contended_data();
+    data.usage_info.as_mut().unwrap().seven_day = 0.94;
+    let area = Rect::new(0, 0, 100, 7);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 7, false), &data, true, &[]);
+    assert!(
+        !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview)
+    );
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::UsageLimits)
+    );
+}
+
+/// Managed agents stay in the progress view, never in a redundant margin dock.
+#[test]
+fn swarm_status_widget_is_never_available() {
+    let data = contended_data();
+    assert!(!data.has_data_for(WidgetKind::SwarmStatus));
+    assert!(!data.available_widgets().contains(&WidgetKind::SwarmStatus));
+    let area = Rect::new(0, 0, 100, 40);
+    let outcome = calculate_placements_anchored(area, &margins_for(40, 40, true), &data, true, &[]);
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .all(|p| p.kind != WidgetKind::SwarmStatus)
+    );
 
     // Without managed members the widget stays out of layout entirely, no
     // matter how rich the rest of swarm_info is (legacy session-list data).

@@ -31,8 +31,13 @@ pub fn todos_exist(session_id: &str) -> Result<bool> {
 
 /// Save a session's todos and mirror the change across any swarm lane links.
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
-    write_todos(session_id, todos)?;
-    sync_lanes_after_save(session_id, todos);
+    let todos = jcode_todo_policy::store::canonicalize_worker_todos(
+        &storage::jcode_dir()?,
+        session_id,
+        todos,
+    );
+    write_todos(session_id, &todos)?;
+    sync_lanes_after_save(session_id, &todos);
     Ok(())
 }
 
@@ -40,6 +45,7 @@ pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
 fn write_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"
@@ -114,6 +120,38 @@ pub fn load_goals(session_id: &str) -> Result<Vec<TodoGoal>> {
     storage::read_json(&path).or_else(|_| Ok(Vec::new()))
 }
 
+/// Summary of a session's persisted todo state for picker display and search.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SessionTodoSummary {
+    pub title: Option<String>,
+    pub user_intention: Option<String>,
+    pub todo_statuses: Vec<String>,
+}
+
+/// Load todo state for a session once and derive its title hint, user intention,
+/// and non-cancelled todo statuses.
+pub fn load_session_todo_summary(session_id: &str) -> SessionTodoSummary {
+    let todos = load_todos(session_id).unwrap_or_default();
+    let plan = load_plan(session_id).unwrap_or_default();
+    let title = derive_session_title(&todos, &plan);
+    let user_intention = plan
+        .user_intention
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let todo_statuses = todos
+        .into_iter()
+        .filter(|todo| !todo_status_is_cancelled(&todo.status))
+        .map(|todo| todo.status)
+        .collect();
+    SessionTodoSummary {
+        title,
+        user_intention,
+        todo_statuses,
+    }
+}
+
 /// Load todo state for a session and derive its best title hint.
 pub fn load_session_title(session_id: &str) -> Option<String> {
     let todos = load_todos(session_id).ok()?;
@@ -123,7 +161,17 @@ pub fn load_session_title(session_id: &str) -> Option<String> {
 
 pub fn save_goals(session_id: &str, goals: &[TodoGoal]) -> Result<()> {
     let path = goals_path(session_id)?;
-    storage::write_json_fast(&path, goals)
+    storage::write_json_fast(&path, goals)?;
+    publish_stored(session_id);
+    Ok(())
+}
+
+/// Tell client connections that this session's stored todo state changed, so
+/// they push a snapshot instead of each window polling for one.
+fn publish_stored(session_id: &str) {
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::TodoStateStored(
+        session_id.to_string(),
+    ));
 }
 
 fn goals_path(session_id: &str) -> Result<PathBuf> {
@@ -143,6 +191,7 @@ pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
 pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
     let path = plan_path(session_id)?;
     storage::write_json_fast(&path, plan)?;
+    publish_stored(session_id);
     if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
         crate::logging::warn(&format!(
             "Failed to refresh indexed todo title for {session_id}: {error}"
@@ -300,10 +349,15 @@ mod tests {
             priority: "high".to_string(),
             id: content.to_ascii_lowercase().replace(' ', "-"),
             group: group.map(str::to_string),
+            lane_after: None,
+            lane_owner: None,
             confidence: None,
             completion_confidence: None,
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
+            requires_user_auth: None,
+            waiting_reason: None,
+            waiting_on: Vec::new(),
             assigned_to: None,
             stage: None,
             details: None,
@@ -390,11 +444,25 @@ mod tests {
 // ---------------------------------------------------------------------------
 
 fn load_lane_links(session_id: &str) -> Vec<stages::LaneLink> {
-    todo_state_path(session_id, TodoFile::LaneLinks)
-        .ok()
-        .filter(|path| path.exists())
-        .and_then(|path| storage::read_json(&path).ok())
-        .unwrap_or_default()
+    let path = match todo_state_path(session_id, TodoFile::LaneLinks) {
+        Ok(path) => path,
+        Err(error) => {
+            crate::logging::warn(&format!("Cannot locate todo lane links: {error}"));
+            return Vec::new();
+        }
+    };
+    match storage::read_json(&path) {
+        Ok(links) => links,
+        Err(error) => {
+            if path.exists() {
+                crate::logging::warn(&format!(
+                    "Cannot read todo lane links {}: {error}",
+                    path.display()
+                ));
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn save_lane_links(session_id: &str, links: &[stages::LaneLink]) -> Result<()> {
@@ -445,9 +513,22 @@ fn sync_lanes_after_save(session_id: &str, todos: &[TodoItem]) {
                 }
             })
         } else if link.coordinator == session_id {
-            let lane = stages::lane_todos_for_worker(todos, &link.lane);
+            let mut lane = stages::lane_todos_for_worker(todos, &link.lane);
             load_todos(&link.worker).and_then(|current| {
-                if lane.is_empty() || current == lane {
+                for todo in &mut lane {
+                    (todo.waiting_on, todo.waiting_reason) = current
+                        .iter()
+                        .find(|old| old.id == todo.id)
+                        .map(|old| (old.waiting_on.clone(), old.waiting_reason.clone()))
+                        .unwrap_or_default();
+                }
+                // A stale link must never clear a worker that has moved to another lane.
+                if current == lane
+                    || (lane.is_empty()
+                        && current
+                            .iter()
+                            .any(|item| stages::lane_id(item) != link.lane))
+                {
                     return Ok(());
                 }
                 write_todos(&link.worker, &lane)?;
@@ -559,30 +640,34 @@ mod lane_sync_tests {
 
         let boss = "session_boss_1";
         let fox = "session_fox_2";
-        save_todos(
-            boss,
-            &[
-                laned("p1", 1, "parser"),
-                laned("u1", 1, "ui"),
-                laned("p2", 1, "parser"),
-            ],
-        )
-        .unwrap();
+        let mut initial = vec![
+            laned("p1", 1, "parser"),
+            laned("u1", 1, "ui"),
+            laned("p2", 1, "parser"),
+        ];
+        initial[0].waiting_on = vec!["boss-task".into()];
+        save_todos(boss, &initial).unwrap();
 
         // Seeding: the worker's todo list becomes exactly its lane.
         let seeded = link_worker_lane(boss, fox, "lane:1:parser").unwrap();
         assert_eq!(seeded.len(), 2);
         assert_eq!(load_todos(fox).unwrap(), seeded);
+        assert!(seeded.iter().all(|todo| todo.waiting_on.is_empty()));
 
         // Worker edits flow back to the coordinator, in place, tagged.
         let mut mine = load_todos(fox).unwrap();
         mine[0].status = "completed".into();
         mine[1].status = "in_progress".into();
+        mine[0].waiting_on = vec!["fox-task-1".into()];
+        mine[1].waiting_on = vec!["fox-task-2".into()];
         mine.push(TodoItem {
             id: "p3".into(),
             content: "add lexer tests".into(),
             status: "pending".into(),
             priority: "high".into(),
+            requires_user_auth: None,
+            waiting_reason: None,
+            waiting_on: vec!["fox-new-task".into()],
             ..Default::default()
         });
         save_todos(fox, &mine).unwrap();
@@ -590,6 +675,12 @@ mod lane_sync_tests {
         let ids: Vec<&str> = boss_view.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["p1", "p2", "p3", "u1"]);
         assert_eq!(boss_view[0].status, "completed");
+        assert_eq!(boss_view[0].waiting_on, vec!["boss-task"]);
+        assert!(
+            boss_view[1..3]
+                .iter()
+                .all(|todo| todo.waiting_on.is_empty())
+        );
         assert_eq!(boss_view[2].group.as_deref(), Some("parser"));
         assert!(
             boss_view[..3]
@@ -601,11 +692,26 @@ mod lane_sync_tests {
         let mut edited = load_todos(boss).unwrap();
         edited[2].content = "add lexer + parser tests".into();
         edited[3].status = "completed".into(); // other lane: worker unaffected
+        edited.swap(0, 1); // references must follow IDs, not list positions
         save_todos(boss, &edited).unwrap();
         let worker_view = load_todos(fox).unwrap();
         assert_eq!(worker_view.len(), 3);
         assert_eq!(worker_view[2].content, "add lexer + parser tests");
         assert!(worker_view.iter().all(|t| t.id != "u1"));
+        for (id, dependency) in [
+            ("p1", "fox-task-1"),
+            ("p2", "fox-task-2"),
+            ("p3", "fox-new-task"),
+        ] {
+            assert_eq!(
+                worker_view
+                    .iter()
+                    .find(|todo| todo.id == id)
+                    .unwrap()
+                    .waiting_on,
+                vec![dependency]
+            );
+        }
         // No echo: the coordinator list is exactly what it saved.
         assert_eq!(load_todos(boss).unwrap(), edited);
         assert_eq!(
@@ -613,6 +719,78 @@ mod lane_sync_tests {
             "changed: add lexer + parser tests"
         );
 
+        // Withdrawing the entire lane must clear the worker's active plan too.
+        let remaining: Vec<_> = edited.into_iter().filter(|todo| todo.id == "u1").collect();
+        save_todos(boss, &remaining).unwrap();
+        assert!(load_todos(fox).unwrap().is_empty());
+        assert_eq!(load_todos(boss).unwrap(), remaining);
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn worker_replacement_save_persists_assigned_lane_and_phase_on_both_sides() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let root = "session_canonical_root";
+        let worker = "session_canonical_worker";
+        let assigned = laned("assigned", 2, "automatic assignment reports");
+        let unrelated = laned("unrelated", 3, "other lane");
+        save_todos(root, &[assigned.clone(), unrelated.clone()]).unwrap();
+        link_worker_lane(root, worker, &stages::lane_id(&assigned)).unwrap();
+
+        // A worker-authored full phases replacement changes ids, lane and phase.
+        let mut replacement = vec![
+            laned("replacement", 9, "server output reports"),
+            laned("added", 10, "another worker lane"),
+        ];
+        replacement[0].content = "updated worker task".into();
+        replacement[0].status = "completed".into();
+        replacement[0].details = Some("keep worker details".into());
+        replacement[0].waiting_on = vec!["worker-local-task".into()];
+        replacement[1].status = "in_progress".into();
+        save_todos(worker, &replacement).unwrap();
+
+        let worker_saved = load_todos(worker).unwrap();
+        let root_saved = load_todos(root).unwrap();
+        let expected_worker: Vec<TodoItem> = replacement
+            .iter()
+            .map(|todo| TodoItem {
+                group: assigned.group.clone(),
+                stage: assigned.stage,
+                ..todo.clone()
+            })
+            .collect();
+        assert_eq!(worker_saved, expected_worker);
+        assert_eq!(root_saved.len(), 3);
+        assert_eq!(root_saved[2], unrelated);
+        for (root_todo, worker_todo) in root_saved[..2].iter().zip(&worker_saved) {
+            assert_eq!(root_todo.group, worker_todo.group);
+            assert_eq!(root_todo.stage, Some(2));
+            assert_eq!(root_todo.content, worker_todo.content);
+            assert_eq!(root_todo.status, worker_todo.status);
+            assert_eq!(root_todo.details, worker_todo.details);
+            assert_eq!(root_todo.assigned_to.as_deref(), Some(worker));
+            assert!(root_todo.waiting_on.is_empty());
+        }
+        assert_eq!(
+            jcode_todo_policy::store::load_snapshot(dir.path(), worker).todos,
+            worker_saved
+        );
+        assert_eq!(
+            jcode_todo_policy::store::load_snapshot(dir.path(), root).todos,
+            root_saved
+        );
+
+        save_todos("session_unlinked", &replacement).unwrap();
+        assert_eq!(load_todos("session_unlinked").unwrap(), replacement);
+        assert_eq!(load_todos(root).unwrap(), root_saved);
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
             None => crate::env::remove_var("JCODE_HOME"),

@@ -1,50 +1,20 @@
+#[path = "tui_lifecycle_keybindings.rs"]
+mod keybindings;
 #[path = "tui_lifecycle_reload_input.rs"]
 mod reload_input;
 
 use super::state_ui::RestoredReloadInput;
+#[path = "tui_lifecycle_remote_startup.rs"]
+mod remote_startup;
+
 use super::*;
 use crate::tui::{backend, keybind};
 
-impl App {
-    /// Re-parse keybinding snapshots when the config cache has reloaded.
-    ///
-    /// The parsed bindings are cached on `App` for cheap per-keystroke lookup,
-    /// so without this poll a config.toml keybinding edit would only take
-    /// effect after a restart. Called from the idle tick in both local and
-    /// remote run loops, and again immediately before dispatching a key press
-    /// so an edit lands on the very next keystroke even when the run loop is
-    /// sitting at the 5s deep-idle cadence. The generation check makes the
-    /// no-change path a single atomic load. Returns true when bindings were
-    /// re-parsed.
-    pub(super) fn refresh_keybindings_if_config_reloaded(&mut self) -> bool {
-        // config() performs the throttled file-fingerprint staleness check and
-        // bumps the reload generation when config.toml changed on disk.
-        crate::config::config();
-        let generation = crate::config::config_reload_generation();
-        if generation == self.keybindings_config_generation {
-            return false;
-        }
-        self.keybindings_config_generation = generation;
-        self.model_switch_keys = keybind::load_model_switch_keys();
-        self.effort_switch_keys = keybind::load_effort_switch_keys();
-        self.speed_switch_keys = keybind::load_speed_switch_keys();
-        self.centered_toggle_keys = keybind::load_centered_toggle_key();
-        self.toggle_keys = keybind::load_toggle_keys();
-        self.workspace_navigation_keys = keybind::load_workspace_navigation_keys();
-        self.dictation_key = keybind::load_dictation_key();
-        self.new_terminal_key = keybind::load_new_terminal_key();
-        self.open_resume_key = keybind::load_open_resume_key();
-        self.voice_input_key = keybind::load_voice_input_key();
-        self.fallback_switch_key = keybind::load_fallback_switch_key();
-        self.scroll_keys = keybind::load_scroll_keys();
-        crate::logging::info("KEYBINDINGS: reloaded from config change");
-        // Confirm the pickup to the user. Without this, an edit that is
-        // already live is indistinguishable from one that silently did
-        // nothing, which is the main source of "did that actually apply?".
-        self.set_status_notice("Config reloaded from disk");
-        true
-    }
+#[cfg(test)]
+#[path = "tui_lifecycle_terminal_retry_tests.rs"]
+mod terminal_retry_tests;
 
+impl App {
     pub(super) async fn begin_remote_send(
         &mut self,
         remote: &mut backend::RemoteConnection,
@@ -82,10 +52,20 @@ impl App {
         force: bool,
     ) -> bool {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            self.log_recovery_event(
+                crate::logging::LogLevel::Warn,
+                "RECOVERY_NETWORK_WAIT_SKIPPED",
+                "no_pending_turn",
+            );
             return false;
         };
         if force {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Warn,
+                    "RECOVERY_NETWORK_WAIT_STOPPED",
+                    "retry_budget_exhausted",
+                );
                 return false;
             }
             pending.retry_attempts = pending.retry_attempts.saturating_add(1);
@@ -94,6 +74,11 @@ impl App {
             if force {
                 pending.auto_retry = true;
             } else {
+                self.log_recovery_event(
+                    crate::logging::LogLevel::Info,
+                    "RECOVERY_NETWORK_WAIT_SKIPPED",
+                    "auto_retry_disabled",
+                );
                 return false;
             }
         }
@@ -107,6 +92,15 @@ impl App {
             listener: plan.listener_summary.clone(),
         };
         self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.log_recovery_event(
+            crate::logging::LogLevel::Info,
+            "RECOVERY_NETWORK_WAIT_ARMED",
+            if force {
+                "provider_network_failure"
+            } else {
+                "offline_probe"
+            },
+        );
 
         let content = format!(
             "📡 Network appears offline - waiting to retry automatically. {} - {}",
@@ -136,86 +130,6 @@ impl App {
         true
     }
 
-    pub(super) fn schedule_pending_remote_retry_with_limit(
-        &mut self,
-        reason: &str,
-        max_attempts: u8,
-    ) -> bool {
-        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
-            return false;
-        };
-        if !pending.auto_retry {
-            return false;
-        }
-        let outcome = {
-            let current_attempts = pending.retry_attempts;
-            if current_attempts >= max_attempts {
-                Err(current_attempts)
-            } else {
-                pending.retry_attempts += 1;
-                let retry_attempts = pending.retry_attempts;
-                let backoff_secs = Self::AUTO_RETRY_BASE_DELAY_SECS * u64::from(retry_attempts);
-                let retry_at = Instant::now() + Duration::from_secs(backoff_secs);
-                pending.retry_at = Some(retry_at);
-                Ok((retry_attempts, backoff_secs, retry_at))
-            }
-        };
-
-        match outcome {
-            Err(current_attempts) => {
-                self.rate_limit_pending_message = None;
-                self.rate_limit_reset = None;
-                self.push_display_message(DisplayMessage::error(format!(
-                    "{} Auto-retry limit reached after {} attempt{}. Use `/poke` again to retry manually.",
-                    reason,
-                    current_attempts,
-                    if current_attempts == 1 { "" } else { "s" }
-                )));
-                false
-            }
-            Ok((retry_attempts, backoff_secs, retry_at)) => {
-                self.rate_limit_reset = Some(retry_at);
-                let content = format!(
-                    "⚡ Connection lost - retrying (attempt {}/{}, in {}s) - {}",
-                    retry_attempts,
-                    max_attempts,
-                    backoff_secs,
-                    reason
-                        .trim()
-                        .trim_start_matches("⚡ ")
-                        .trim_start_matches("Connection lost")
-                        .trim_start_matches('(')
-                        .trim_end_matches('.')
-                        .trim()
-                );
-                if let Some(idx) = self.display_messages.iter().rposition(|message| {
-                    message.role == "system"
-                        && (message.title.as_deref() == Some("Connection")
-                            || message
-                                .content
-                                .starts_with("⚡ Server reload in progress - waiting for handoff")
-                            || message.content.starts_with("⚡ Connection lost"))
-                }) {
-                    self.replace_display_message_title_and_content(
-                        idx,
-                        Some("Connection".to_string()),
-                        content,
-                    );
-                } else {
-                    self.push_display_message(DisplayMessage {
-                        role: "system".to_string(),
-                        content,
-                        tool_calls: Vec::new(),
-                        duration_secs: None,
-                        title: Some("Connection".to_string()),
-                        tool_data: None,
-                    });
-                }
-                true
-            }
-        }
-    }
-
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
@@ -227,10 +141,15 @@ impl App {
     /// the same loop again at turn end), puts the user's prompt back in the
     /// input box, and explains why the turn paused.
     pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_AUTO_RESUME_STOPPED",
+            "retry_budget_exhausted",
+        );
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         super::commands::disable_auto_poke(self);
         self.overnight_auto_poke = None;
-        self.restore_failed_input_to_box();
         self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
         self.set_status_notice(notice);
     }
@@ -266,7 +185,13 @@ impl App {
     /// auto-poke/queued-retry loops logged thousands of 401s in a single
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
+        self.log_recovery_event(
+            crate::logging::LogLevel::Warn,
+            "RECOVERY_CREDENTIAL_BREAKER_STOPPED",
+            "repeated_auth_failure",
+        );
         let failures = self.consecutive_credential_failures;
+        self.restore_terminal_remote_retry_input();
         self.clear_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
@@ -293,7 +218,6 @@ impl App {
             }
         )));
         self.set_status_notice("Stopped: repeated auth failures");
-        self.restore_failed_input_to_box();
         self.consecutive_credential_failures = 0;
     }
 
@@ -369,6 +293,7 @@ impl App {
             display_edit_line_counts: (0, 0),
             terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
+            recent_history_paging: Default::default(),
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
@@ -385,6 +310,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -401,10 +327,15 @@ impl App {
             last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,
+            deferred_stream_done_identity: None,
+            remote_turn_fence: Default::default(),
+            remote_queue_retry_not_before: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
+            scheduled_reload_recoveries: HashSet::new(),
+            reload_recovery_dispatch_pending: false,
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -424,10 +355,13 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
             pending_provider_failover: None,
+            automatic_failover_targets: Vec::new(),
+            automatic_failover_stopped: false,
             pending_fallback_offer: None,
             pending_fallback_resend: None,
             pending_merge_offer: None,
@@ -461,8 +395,16 @@ impl App {
             hibernate_exit_requested: None,
             cloud_handoff_requested: None,
             cloud_job: None,
+            pending_cloud_handoff: None,
+            cloud_interrupt_sent_for: None,
+            cloud_remote_interrupt_pending: false,
+            cloud_recovery_context: None,
+            cloud_recovery_auto_pending: false,
+            cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -487,6 +429,7 @@ impl App {
             copy_selection_dragging: false,
             copy_selection_goal_column: None,
             copy_selection_edge_autoscroll: None,
+            input_selection_scroll: None,
             debug_tx: None,
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
@@ -504,6 +447,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -530,6 +474,7 @@ impl App {
             is_remote: false,
             runtime_mode: AppRuntimeMode::TestHarness,
             pending_remote_rewind_notice: None,
+            ssh_sessions: remote::ssh_sessions::State::default(),
             remote_history_wait_started: None,
             remote_history_recovery_attempts: 0,
             remote_history_recovery_last_attempt: None,
@@ -542,10 +487,16 @@ impl App {
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
             remote_session_id: None,
+            cloud_environment: Default::default(),
+            jarvis_speech: None,
+            jarvis_listener: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            remote_swarm_members_received_at: None,
+            swarm_last_message_at: std::collections::HashMap::new(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -601,8 +552,14 @@ impl App {
             todos_view_markdown: String::new(),
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
+            remote_todos_payload: None,
+            remote_todos_cache: Default::default(),
+            remote_todos_requested_at: None,
+            remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
+            todo_completion_report: Default::default(),
             pinned_todos_payload: None,
+            justrust_status: Default::default(),
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
             pinned_todos_expanded: false,
@@ -634,12 +591,15 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            pending_account_switch_target: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             speed_switch_keys: keybind::load_speed_switch_keys(),
@@ -652,6 +612,7 @@ impl App {
             voice_input_key: keybind::load_voice_input_key(),
             voice_input: None,
             voice_input_last_press: None,
+            external_voice: None,
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
@@ -682,6 +643,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
@@ -700,12 +663,14 @@ impl App {
             tab_completion_state: None,
             command_suggestion_selected: 0,
             app_started: Instant::now(),
-            client_focused: true,
+            client_focused: crate::tui::focus_carryover::initial_focus(),
+            client_focus_confirmed: crate::tui::focus_carryover::initial_confirmed(),
             runtime_memory_log,
             idle_heap_release: Default::default(),
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -743,6 +708,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            usage_provider_filter: None,
             usage_reset: Default::default(),
             productivity_refreshing: false,
             last_overnight_card_refresh: None,
@@ -852,6 +818,7 @@ impl App {
             display_edit_line_counts: (0, 0),
             terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
+            recent_history_paging: Default::default(),
             pending_history_anchor: None,
             pending_resize_anchor: None,
             input: String::new(),
@@ -868,6 +835,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             upstream_provider: None,
@@ -884,10 +852,15 @@ impl App {
             last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,
+            deferred_stream_done_identity: None,
+            remote_turn_fence: Default::default(),
+            remote_queue_retry_not_before: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
             remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
+            scheduled_reload_recoveries: HashSet::new(),
+            reload_recovery_dispatch_pending: false,
             status: ProcessingStatus::default(),
             subagent_status: None,
             batch_progress: None,
@@ -907,10 +880,13 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
             pending_provider_failover: None,
+            automatic_failover_targets: Vec::new(),
+            automatic_failover_stopped: false,
             pending_fallback_offer: None,
             pending_fallback_resend: None,
             pending_merge_offer: None,
@@ -944,8 +920,16 @@ impl App {
             hibernate_exit_requested: None,
             cloud_handoff_requested: None,
             cloud_job: None,
+            pending_cloud_handoff: None,
+            cloud_interrupt_sent_for: None,
+            cloud_remote_interrupt_pending: false,
+            cloud_recovery_context: None,
+            cloud_recovery_auto_pending: false,
+            cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
+            detached_images: Default::default(),
+            prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
@@ -970,6 +954,7 @@ impl App {
             copy_selection_dragging: false,
             copy_selection_goal_column: None,
             copy_selection_edge_autoscroll: None,
+            input_selection_scroll: None,
             debug_tx: None,
             remote_client_instance_id: crate::id::new_id("client"),
             remote_provider_name: None,
@@ -987,6 +972,7 @@ impl App {
             startup_display_snapshot: None,
             advertised_history_base: None,
             model_catalog_after_history: false,
+            pending_initial_model_spec: None,
             remote_reasoning_effort: None,
             remote_service_tier: None,
             remote_available_service_tiers: None,
@@ -1013,6 +999,7 @@ impl App {
             is_remote: false,
             runtime_mode: AppRuntimeMode::TestHarness,
             pending_remote_rewind_notice: None,
+            ssh_sessions: remote::ssh_sessions::State::default(),
             remote_history_wait_started: None,
             remote_history_recovery_attempts: 0,
             remote_history_recovery_last_attempt: None,
@@ -1025,10 +1012,16 @@ impl App {
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
             remote_session_id: None,
+            cloud_environment: Default::default(),
+            jarvis_speech: None,
+            jarvis_listener: Default::default(),
             remote_sessions: Vec::new(),
             remote_side_pane_images: Vec::new(),
             side_pane_images_signature_cache: std::cell::Cell::new(None),
             remote_swarm_members: Vec::new(),
+            remote_swarm_members_received_at: None,
+            swarm_last_message_at: std::collections::HashMap::new(),
+            file_activity_stack: None,
             swarm_plan_items: Vec::new(),
             swarm_plan_version: None,
             swarm_plan_swarm_id: None,
@@ -1084,8 +1077,14 @@ impl App {
             todos_view_markdown: String::new(),
             todos_view_updated_at_ms: 0,
             todos_view_rendered_hash: 0,
+            remote_todos_payload: None,
+            remote_todos_cache: Default::default(),
+            remote_todos_requested_at: None,
+            remote_todos_pushed: false,
             todo_card_rendered_hash: 0,
+            todo_completion_report: Default::default(),
             pinned_todos_payload: None,
+            justrust_status: Default::default(),
             pinned_todos_rendered_hash: 0,
             pinned_todos_checked_at: None,
             pinned_todos_expanded: false,
@@ -1117,12 +1116,15 @@ impl App {
             pending_route_selection: None,
             pending_automatic_failover_route: None,
             pending_automatic_failover_request_id: None,
+            pending_automatic_failover_started: None,
             pending_reasoning_effort: None,
+            suppress_next_reasoning_effort_message: false,
             remote_model_switch_in_flight: false,
             pending_prompt_after_model_switch: None,
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            pending_account_switch_target: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             speed_switch_keys: keybind::load_speed_switch_keys(),
@@ -1135,6 +1137,7 @@ impl App {
             voice_input_key: keybind::load_voice_input_key(),
             voice_input: None,
             voice_input_last_press: None,
+            external_voice: None,
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
@@ -1165,6 +1168,8 @@ impl App {
             interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_requests: Vec::new(),
+            sent_soft_interrupts: Vec::new(),
+            soft_interrupt_recovery: None,
             autoreview_after_current_turn: false,
             autojudge_after_current_turn: false,
             pending_split_startup_message: None,
@@ -1183,12 +1188,14 @@ impl App {
             tab_completion_state: None,
             command_suggestion_selected: 0,
             app_started: Instant::now(),
-            client_focused: true,
+            client_focused: crate::tui::focus_carryover::initial_focus(),
+            client_focus_confirmed: crate::tui::focus_carryover::initial_confirmed(),
             runtime_memory_log,
             idle_heap_release: Default::default(),
             idle_hibernation: Default::default(),
             client_binary_mtime: std::env::current_exe()
                 .ok()
+                .filter(|p| !crate::build::is_dynamic_loader_path(p))
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
@@ -1226,6 +1233,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            usage_provider_filter: None,
             usage_reset: Default::default(),
             productivity_refreshing: false,
             last_overnight_card_refresh: None,
@@ -1463,167 +1471,21 @@ impl App {
         Self::new_for_remote_with_options(resume_session, false)
     }
 
-    pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
-        let new_start = Instant::now();
-        let mut lap = Instant::now();
-        let mut laps: Vec<(&'static str, u128)> = Vec::new();
-        let mut mark = |name: &'static str, laps: &mut Vec<(&'static str, u128)>| {
-            laps.push((name, lap.elapsed().as_millis()));
-            lap = Instant::now();
-        };
-        // Kick the background git probe first so its ~20ms of subprocess work
-        // overlaps with the rest of client setup. `run_remote` gives it a short
-        // bounded wait before the first paint.
-        let _ = super::helpers::gather_git_info();
-        mark("git_kick", &mut laps);
-        let provider: Arc<dyn Provider> =
-            Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
-        let registry = Registry::empty();
-        let session = resume_session
-            .as_ref()
-            .filter(|_| !crate::tui::is_ssh_remote())
-            .and_then(|session_id| Session::load_startup_stub(session_id).ok())
-            .unwrap_or_else(|| Session::create(None, None));
-        mark("stub", &mut laps);
-        let mut app = Self::new_minimal_with_session(provider, registry, session);
-        mark("minimal", &mut laps);
-        app.is_remote = true;
-        app.runtime_mode = AppRuntimeMode::RemoteClient;
-        app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
-        app.remote_startup_phase_started = Some(Instant::now());
-
-        if let Some(host) = crate::tui::ssh_remote_host() {
-            // The server supplies history, credentials, models and project state.
-            // Local reload files can belong to an unrelated session with the same id.
-            app.onboarding_startup_checked = true;
-            app.auto_server_reload = false;
-            app.session.working_dir = None;
-            app.resume_session_id = resume_session;
-            app.set_status_notice(format!("SSH: {host} (remote server)"));
-            // `/cloud` hands a mid-task session over and asks the new runtime
-            // to keep going without the user retyping anything. One-shot.
-            if let Ok(message) = std::env::var("JCODE_CLOUD_CONTINUE_MESSAGE") {
-                crate::env::remove_var("JCODE_CLOUD_CONTINUE_MESSAGE");
-                if !message.trim().is_empty() {
-                    app.hidden_queued_system_messages.push(message);
-                    app.set_status_notice(format!("Continuing on {host}"));
-                }
-            }
-            return app;
-        }
-
-        // Minimal local clients start with empty skill registries. Load global
-        // metadata once so autocomplete works before the first History event.
-        // SSH clients above must use only the remote server's skill metadata.
-        app.refresh_skills_snapshot();
-        mark("skills", &mut laps);
-
-        let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        // One-shot handoff flag. A later ordinary resume in the same process
-        // must retain the existing eager local-history behavior.
-        crate::env::remove_var("JCODE_RELOAD_FAST_START");
-
-        // Load session to get canary status (for "client self-dev" badge)
-        if let Some(ref session_id) = resume_session {
-            if reload_fast_start {
-                crate::logging::info(&format!(
-                    "Remote reload fast start: rendering persisted transcript for {} in background",
-                    session_id
-                ));
-                // The server can take seconds to answer History while dozens
-                // of clients reconnect after a reload. Parse and render the
-                // local copy off the UI thread and show it as soon as it is
-                // ready; server History still replaces it when it arrives.
-                let (tx, rx) = std::sync::mpsc::channel();
-                let (base_tx, base_rx) = std::sync::mpsc::channel();
-                let id = session_id.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("jcode-startup-transcript".to_string())
-                    .spawn(move || {
-                        let start = Instant::now();
-                        let Ok(session) = Session::load_for_remote_startup(&id) else {
-                            return;
-                        };
-                        let (rendered, images) =
-                            crate::session::render_messages_and_images(&session);
-                        drop(session);
-                        // Same shape as server History messages, so the
-                        // server can verify this prefix and send only the
-                        // tail (delta History).
-                        let mut fingerprinter = crate::protocol::HistoryFingerprinter::default();
-                        for message in &rendered {
-                            fingerprinter.push(crate::protocol::HistoryMessageRef {
-                                role: &message.role,
-                                content: &message.content,
-                                tool_calls: &message.tool_calls,
-                                tool_data: message.tool_data.as_ref(),
-                            });
-                        }
-                        if fingerprinter.count() > 0 {
-                            let mut base = fingerprinter.base();
-                            base.images_fingerprint =
-                                Some(crate::protocol::history_images_fingerprint(&images));
-                            let _ = base_tx.send((id.clone(), base));
-                        }
-                        drop(base_tx);
-                        let display =
-                            jcode_tui_messages::display_messages_from_rendered_messages(rendered);
-                        crate::logging::info(&format!(
-                            "[TIMING] startup_transcript_background: session={}, messages={}, total={}ms",
-                            id,
-                            display.len(),
-                            start.elapsed().as_millis()
-                        ));
-                        let _ = tx.send((id, display, images));
-                    });
-                if spawned.is_ok() {
-                    app.pending_startup_transcript = Some(rx);
-                    if !crate::tui::is_ssh_remote() {
-                        app.pending_history_base = Some(base_rx);
-                    }
-                }
-                mark("transcript_spawn", &mut laps);
-            } else {
-                app.restore_remote_startup_history(session_id);
-                mark("transcript_sync", &mut laps);
-            }
-            if fresh_spawn && !reload_fast_start {
-                crate::logging::info(&format!(
-                    "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
-                    session_id
-                ));
-            }
-            let restored_input = Self::restore_input_for_reload(session_id);
-            mark("input_read", &mut laps);
-            if let Some(restored) = restored_input {
-                app.apply_restored_reload_input(restored);
-            }
-            mark("input_apply", &mut laps);
-        }
-
-        app.resume_session_id = resume_session;
-        // After `resume_session_id`: the hint needs to know whether this is a
-        // new session (configured effort applies) or a resumed one.
-        app.apply_remote_header_hint();
-        mark("header_hint", &mut laps);
-        crate::logging::info(&format!(
-            "[TIMING] app_new_for_remote: total={}ms, {}",
-            new_start.elapsed().as_millis(),
-            laps.iter()
-                .map(|(name, ms)| format!("{name}={ms}ms"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        app
-    }
-
     /// Mark that a server was just spawned - run_remote will retry initial connection
     /// instead of failing fatally, allowing the TUI to show while the server starts.
     pub fn set_server_spawning(&mut self) {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+
+    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
+    /// after connecting to an already-running shared server.
+    pub fn set_initial_model_spec(&mut self, model_spec: String) {
+        self.pending_initial_model_spec = Some(model_spec);
+    }
+
+    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
+        self.pending_initial_model_spec.take()
     }
 }

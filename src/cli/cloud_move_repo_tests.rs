@@ -1,6 +1,6 @@
 use super::*;
 
-fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
+pub(super) fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
     let root = tempfile::tempdir().unwrap();
     let stage = tempfile::tempdir().unwrap();
     git(root.path(), &["init", "--quiet"]).unwrap();
@@ -29,37 +29,73 @@ fn repository() -> (tempfile::TempDir, tempfile::TempDir, RepoManifest) {
 }
 
 #[test]
-fn cloud_conflict_identifies_earlier_session_and_preserves_changes() {
-    let (root, stage, repo) = repository();
+fn snapshot_index_copy_errors_are_reported_without_mutating_real_index() {
+    let (root, _stage, _) = repository();
+    let scratch = tempfile::tempdir().unwrap();
+    let index_path = root.path().join(".git/index");
+    let original_index = std::fs::read(&index_path).unwrap();
+    for name in ["snapshot.index", "ours.index"] {
+        std::fs::create_dir(scratch.path().join(name)).unwrap();
+    }
+    let error = prepare_repo_snapshot(root.path(), "copy-error", scratch.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("failed to copy Git index"));
+    let error = snapshot_worktree_tree(root.path(), scratch.path()).unwrap_err();
+    assert!(format!("{error:#}").contains("failed to copy Git index"));
+    assert_eq!(std::fs::read(index_path).unwrap(), original_index);
+}
+
+#[test]
+fn snapshot_rebuilds_a_missing_git_index_without_creating_the_real_index() {
+    let (root, _stage, _) = repository();
+    let scratch = tempfile::tempdir().unwrap();
+    let index_path = root.path().join(".git/index");
+    std::fs::remove_file(&index_path).unwrap();
+    let tree = snapshot_worktree_tree(root.path(), scratch.path()).unwrap();
+    assert_eq!(
+        tree,
+        git(root.path(), &["rev-parse", "HEAD^{tree}"]).unwrap()
+    );
+    assert!(!index_path.exists());
+}
+
+#[test]
+fn cloud_unreturned_work_is_rescued_and_move_proceeds() {
+    let (root, _earlier_stage, _) = repository();
+    let stage = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "new-session", stage.path())
+        .unwrap()
+        .unwrap();
     std::fs::write(root.path().join("file.txt"), "valuable cloud work\n").unwrap();
     std::fs::write(root.path().join("untracked.txt"), "also valuable\n").unwrap();
-    let head = git(root.path(), &["rev-parse", "HEAD"]).unwrap();
-    let status = git(root.path(), &["status", "--porcelain"]).unwrap();
-    let error = restore_repo(
+    restore_repo(
         &repo,
         &stage.path().join("repo.bundle"),
         &stage.path().join("ignored.tar"),
         "new-session",
     )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        error.contains("cloud return --session earlier-session"),
-        "{error}"
-    );
-    assert!(error.contains("refusing to overwrite"), "{error}");
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
-        "valuable cloud work\n"
+        "original\n"
+    );
+    let rescued = git(
+        root.path(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/jcode-cloud/rescued",
+        ],
+    )
+    .unwrap();
+    let rescued = rescued.lines().next().expect("rescue ref");
+    assert!(rescued.ends_with("-new-session"), "{rescued}");
+    assert_eq!(
+        git(root.path(), &["show", &format!("{rescued}:file.txt")]).unwrap(),
+        "valuable cloud work"
     );
     assert_eq!(
-        std::fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
-        "also valuable\n"
-    );
-    assert_eq!(git(root.path(), &["rev-parse", "HEAD"]).unwrap(), head);
-    assert_eq!(
-        git(root.path(), &["status", "--porcelain"]).unwrap(),
-        status
+        git(root.path(), &["show", &format!("{rescued}:untracked.txt")]).unwrap(),
+        "also valuable"
     );
 }
 
@@ -166,4 +202,33 @@ fn cloud_restore_rejects_missing_bundle_prerequisite_before_checkout_changes() {
         ""
     );
     assert!(!dest.path().join("file.txt").exists());
+}
+
+#[test]
+fn returned_session_state_does_not_block_a_new_session() {
+    let (root, _stage, _repo) = repository();
+    let incoming = tempfile::tempdir().unwrap();
+    let repo = snapshot_repo(root.path(), "new-session", incoming.path())
+        .unwrap()
+        .unwrap();
+    let stage = incoming;
+    // The earlier session edited files on the cloud and was then returned:
+    // export recorded exactly this working state as its outgoing snapshot.
+    std::fs::write(root.path().join("file.txt"), "returned cloud work\n").unwrap();
+    std::fs::write(root.path().join("untracked.txt"), "also returned\n").unwrap();
+    let returned = tempfile::tempdir().unwrap();
+    snapshot_repo(root.path(), "earlier-session", returned.path())
+        .unwrap()
+        .unwrap();
+    restore_repo(
+        &repo,
+        &stage.path().join("repo.bundle"),
+        &stage.path().join("ignored.tar"),
+        "new-session",
+    )
+    .expect("state already returned by another session must not block a new move");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("file.txt")).unwrap(),
+        "original\n"
+    );
 }

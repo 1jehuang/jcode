@@ -35,6 +35,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 123,
             output: 45,
             cache_read_input: None,
@@ -72,7 +73,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
 }
 
 #[test]
-fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
+fn test_remote_done_settles_visible_timer_without_client_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -83,6 +84,8 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -95,6 +98,9 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -111,14 +117,13 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
             app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
 
         assert!(needs_redraw);
-        assert!(app.pending_queued_dispatch);
+        assert!(!app.pending_queued_dispatch);
 
-        app.pending_queued_dispatch = false;
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
 
-        assert_eq!(app.visible_turn_started, Some(started));
-        assert!(app.is_processing);
-        assert!(app.current_message_id.is_some());
+        assert!(app.visible_turn_started.is_none());
+        assert!(!app.is_processing);
+        assert!(app.current_message_id.is_none());
         assert!(!app.display_messages().iter().any(|msg| {
             msg.role == "user"
                 && msg
@@ -129,8 +134,9 @@ fn test_remote_auto_poke_followup_preserves_visible_timer_and_stays_hidden() {
 }
 
 #[test]
-fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
+fn test_remote_done_leaves_confidence_spike_challenge_to_daemon() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -138,6 +144,8 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -147,11 +155,14 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Speculative),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
                 confidence_history: vec![
-                    crate::todo::ConfidenceState::from_legacy_score(0),
-                    crate::todo::ConfidenceState::from_legacy_score(100),
+                    crate::todo::ConfidenceState::Speculative,
+                    crate::todo::ConfidenceState::Verified,
                 ],
             }],
         )
@@ -177,26 +188,16 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         app.current_message_id = Some(42);
         app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
         assert!(app.auto_poke_incomplete_todos);
-        assert!(app.todo_confidence_spike_challenged);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages.len(), 1);
-        assert!(
-            app.queued_messages[0]
-                .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
-        );
-        // The continuation names the specific todo whose confidence jumped.
-        assert!(app.queued_messages[0].contains("Finished work"));
-        assert!(
-            app.display_messages()
-                .iter()
-                .any(|msg| { msg.content.contains("Double-checking confidence jumps") })
-        );
+        assert!(!app.todo_confidence_spike_challenged);
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
     });
 }
 
 #[test]
-fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working() {
+fn test_remote_done_leaves_completion_confidence_gate_to_daemon() {
     with_temp_jcode_home(|| {
+        write_test_config("[features]\ntodo_gate_digest = true\n");
         let mut app = create_test_app();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -204,6 +205,8 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -213,9 +216,12 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
+                completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -240,17 +246,8 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         app.current_message_id = Some(42);
         app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
         assert!(app.auto_poke_incomplete_todos);
-        assert!(app.pending_queued_dispatch);
-        assert_eq!(app.queued_messages.len(), 1);
-        assert!(
-            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
-        );
-        assert!(app.queued_messages[0].contains("Needs validation"));
-        assert!(
-            app.display_messages()
-                .iter()
-                .any(|msg| { msg.content.contains("Double-checking confidence") })
-        );
+        assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
     });
 }
 
@@ -265,6 +262,8 @@ fn test_remote_poke_status_and_off_update_state() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -277,6 +276,9 @@ fn test_remote_poke_status_and_off_update_state() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -296,25 +298,27 @@ fn test_remote_poke_status_and_off_update_state() {
         app.cursor_pos = app.input.len();
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/poke status should succeed remotely");
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("Auto-poke: ON. 1 incomplete todo.")
-                && msg.content.contains("A follow-up poke is queued.")
-                && msg.content.contains("A turn is currently running.")
-        }));
+        assert_eq!(app.status_notice(), Some("Requested remote poke".into()));
+        assert!(app.auto_poke_incomplete_todos);
 
         app.input = "/poke off".to_string();
         app.cursor_pos = app.input.len();
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/poke off should succeed remotely");
 
+        // State changes only when the daemon acknowledges its control.
+        assert!(app.auto_poke_incomplete_todos);
+        assert_eq!(app.status_notice(), Some("Requested remote poke".into()));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::RuntimeCommandResult {
+                id: 2,
+                command: "poke".into(),
+                data: serde_json::json!({"poke_enabled": false}),
+                message: "Auto-poke disabled by daemon".into(),
+            },
+            &mut remote,
+        );
         assert!(!app.auto_poke_incomplete_todos);
-        assert!(!app.pending_queued_dispatch);
-        assert!(app.queued_messages().is_empty());
-        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content.contains("Auto-poke disabled.")
-                && msg.content.contains("Cleared 1 queued poke follow-up")
-        }));
     });
 }
 
@@ -328,7 +332,7 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     app.is_remote = true;
     app.session.messages.clear();
     app.push_display_message(DisplayMessage::user("hello"));
-    app.push_display_message(DisplayMessage::assistant("hi there"));
+    app.push_display_message(DisplayMessage::assistant("hi\nthere"));
 
     app.input = "/rewind".to_string();
     app.cursor_pos = app.input.len();
@@ -339,6 +343,29 @@ fn test_remote_rewind_lists_display_history_when_session_transcript_is_empty() {
     assert!(last.content.contains("Conversation history:"));
     assert!(last.content.contains("1 👤 User - hello"));
     assert!(last.content.contains("2 🤖 Assistant - hi there"));
+    assert_eq!(last.title.as_deref(), Some("Rewind"));
+    let rows: Vec<String> =
+        crate::tui::ui::render_system_message(last, 100, crate::config::DiffDisplayMode::default())
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+    let first = rows
+        .iter()
+        .position(|row| row.contains("1 👤 User - hello"))
+        .expect("first entry visible");
+    let second = rows
+        .iter()
+        .position(|row| row.contains("2 🤖 Assistant - hi there"))
+        .expect("second entry visible");
+    assert!(
+        first < second,
+        "rewind entries must occupy separate ordered rows: {rows:?}"
+    );
     assert!(!last.content.contains("No messages in conversation"));
 }
 
@@ -466,6 +493,9 @@ fn test_remote_done_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                     status: "completed".into(),
                     confidence: Some(planning),
                     completion_confidence: Some(completion),
+                    waiting_reason: None,
+                    requires_user_auth: None,
+                    waiting_on: Vec::new(),
                     confidence_history: history,
                     ..Default::default()
                 }],
@@ -479,20 +509,12 @@ fn test_remote_done_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
                 app.current_message_id = Some(id);
                 app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
                 assert!(!app.todo_confidence_spike_challenged);
-                if id == 42 {
-                    assert_eq!(
-                        app.queued_messages,
-                        vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-                    );
-                    assert!(app.pending_queued_dispatch);
-                } else {
-                    assert!(app.queued_messages.is_empty());
-                    assert!(!app.pending_queued_dispatch);
-                }
+                assert!(app.queued_messages.is_empty());
+                assert!(!app.pending_queued_dispatch);
                 app.queued_messages.clear();
                 app.pending_queued_dispatch = false;
             }
-            assert!(!app.auto_poke_incomplete_todos);
+            assert!(app.auto_poke_incomplete_todos);
             assert!(app.hidden_queued_system_messages.is_empty());
             assert!(
                 !app.display_messages()

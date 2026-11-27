@@ -30,94 +30,6 @@ impl Drop for EnvVarGuard {
     }
 }
 
-#[test]
-fn direct_api_url_supports_standard_and_profile_overrides() {
-    let _lock = jcode_base::storage::lock_test_env();
-    let _standard = EnvVarGuard::set("ANTHROPIC_BASE_URL", "https://proxy.example/v1/");
-    assert_eq!(direct_api_url(), "https://proxy.example/v1/messages");
-
-    let _profile = EnvVarGuard::set(
-        "JCODE_ANTHROPIC_API_BASE",
-        "https://gateway.example/anthropic/v1/messages",
-    );
-    assert_eq!(
-        direct_api_url(),
-        "https://gateway.example/anthropic/v1/messages"
-    );
-}
-
-#[test]
-fn configured_direct_headers_parse_and_reject_invalid_values() {
-    let _lock = jcode_base::storage::lock_test_env();
-    let _headers = EnvVarGuard::set(
-        "JCODE_ANTHROPIC_HEADERS",
-        r#"{"x-tenant":"alpha","x-route":"claude"}"#,
-    );
-    let parsed = configured_direct_headers().expect("valid custom headers");
-    assert_eq!(parsed.get("x-tenant").unwrap(), "alpha");
-    assert_eq!(parsed.get("x-route").unwrap(), "claude");
-
-    let _invalid = EnvVarGuard::set("JCODE_ANTHROPIC_HEADERS", r#"{"bad header":"x"}"#);
-    assert!(configured_direct_headers().is_err());
-}
-
-#[test]
-fn anthropic_auth_token_selects_bearer_without_affecting_explicit_profile_auth() {
-    let _lock = jcode_base::storage::lock_test_env();
-    let _token = EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", "gateway-token");
-    assert_eq!(direct_auth_mode(), "bearer");
-
-    let _explicit = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "header");
-    assert_eq!(direct_auth_mode(), "header");
-}
-
-#[test]
-fn named_profile_runtime_captures_transport_and_credential_immutably() {
-    let _lock = jcode_base::storage::lock_test_env();
-    let _base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://one.example/v1");
-    let _auth = EnvVarGuard::set("JCODE_ANTHROPIC_AUTH", "bearer");
-    let _key_name = EnvVarGuard::set("JCODE_ANTHROPIC_API_KEY_NAME", "PROFILE_ONE_KEY");
-    let _key = EnvVarGuard::set("PROFILE_ONE_KEY", "one-secret");
-    let provider = AnthropicProvider::new();
-
-    let _changed_base = EnvVarGuard::set("JCODE_ANTHROPIC_API_BASE", "https://two.example/v1");
-    let _changed_key = EnvVarGuard::set("PROFILE_ONE_KEY", "two-secret");
-    assert_eq!(
-        provider.direct_transport.api_url,
-        "https://one.example/v1/messages"
-    );
-    assert_eq!(provider.direct_transport.auth_mode, "bearer");
-    assert_eq!(
-        provider.profile_api_key.as_ref().unwrap().as_ref().unwrap(),
-        "one-secret"
-    );
-}
-
-#[test]
-fn named_anthropic_profile_accepts_its_configured_custom_model() {
-    let _lock = jcode_base::storage::lock_test_env();
-    let _home = tempfile::TempDir::new().expect("temp home");
-    let _home_guard = EnvVarGuard::set("JCODE_HOME", _home.path());
-    std::fs::write(
-        _home.path().join("config.toml"),
-        r#"
-        [providers.custom]
-        type = "anthropic-compatible"
-        base_url = "http://localhost:12345/v1"
-        default_model = "claude-private"
-        "#,
-    )
-    .expect("write config");
-    jcode_base::config::Config::invalidate_cache();
-    let _profile = EnvVarGuard::set("JCODE_NAMED_PROVIDER_PROFILE", "custom");
-    let models = active_anthropic_profile_models().expect("active profile models");
-    assert!(models.iter().any(|model| model == "claude-private"));
-    assert!(!models.iter().any(|model| model == "not-configured"));
-    drop(_profile);
-    drop(_home_guard);
-    jcode_base::config::Config::invalidate_cache();
-}
-
 async fn collect_live_smoke_stream(
     mut stream: EventStream,
     timeout: std::time::Duration,
@@ -243,6 +155,45 @@ fn message_start_warns_when_server_substitutes_a_different_model() {
 }
 
 #[test]
+fn resolved_model_uses_upstream_alias_target_and_deduplicates_metadata() {
+    let mut state = SseStreamState {
+        requested_model_base: "claude-alias".into(),
+        ..Default::default()
+    };
+    let event = SseEvent {
+        event_type: "message_start".into(),
+        data: serde_json::json!({"message": {"model": "claude-actual-20260101"}}).to_string(),
+    };
+    let events = process_sse_event(&event, &mut state, false);
+    assert!(events.iter().any(|event| matches!(event,
+        StreamEvent::ResolvedModel { model } if model == "claude-actual-20260101")));
+    assert!(
+        !process_sse_event(&event, &mut state, false)
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+    );
+}
+
+#[test]
+fn resolved_model_does_not_infer_missing_or_empty_metadata() {
+    for message in [serde_json::json!({}), serde_json::json!({"model": " "})] {
+        let mut state = SseStreamState {
+            requested_model_base: "claude-alias".into(),
+            ..Default::default()
+        };
+        let event = SseEvent {
+            event_type: "message_start".into(),
+            data: serde_json::json!({"message": message}).to_string(),
+        };
+        assert!(
+            !process_sse_event(&event, &mut state, false)
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ResolvedModel { .. }))
+        );
+    }
+}
+
+#[test]
 fn test_anthropic_thinking_sse_events() {
     let mut state = SseStreamState::default();
     let start = SseEvent {
@@ -361,7 +312,8 @@ async fn live_anthropic_reasoning_smoke() -> Result<()> {
         content: vec![ContentBlock::Text {
             text: prompt,
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -397,7 +349,8 @@ async fn test_dangling_tool_use_repair() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -420,7 +373,8 @@ async fn test_dangling_tool_use_repair() {
                     input: serde_json::json!({"file_path": "/tmp/test"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -469,9 +423,9 @@ async fn test_orphaned_tool_result_is_rewritten_as_text() {
     // repair answered it, then a late result for a tool_use that is not in the
     // transcript was persisted right after. Anthropic 400s on that orphan.
     let provider = AnthropicProvider::new();
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -565,9 +519,9 @@ async fn test_displaced_tool_result_still_answers_tool_use_in_place() {
     // rewrite turns the late result into text, so tool_x would otherwise be
     // left without a tool_result right after it (HTTP 400).
     let provider = AnthropicProvider::new();
-    let msg = |role, content| Message {
+    let msg = |role, content: Vec<ContentBlock>| Message {
         role,
-        content,
+        content: content.into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -634,7 +588,8 @@ async fn test_no_repair_when_tool_results_present() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -645,7 +600,8 @@ async fn test_no_repair_when_tool_results_present() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -655,7 +611,8 @@ async fn test_no_repair_when_tool_results_present() {
                 tool_use_id: "tool_123".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: Some(false),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -707,7 +664,8 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                 ),
                 cache_control: None,
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     };
@@ -734,7 +692,8 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
                     input: serde_json::json!({"file_path": "c.png"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -962,22 +921,29 @@ fn test_system_param_split_oauth() {
     let result = build_system_param_split(static_content, dynamic_content, true);
 
     if let Some(ApiSystem::Blocks(blocks)) = result {
-        // Should have 4 blocks: identity, notice, static (cached), dynamic (not cached)
-        assert_eq!(blocks.len(), 4);
+        // 3 blocks: billing attribution, static (cached), dynamic (not cached).
+        // No identity sentence: it made the model claim Jcode is built on the
+        // Claude Agent SDK, and the billing block alone is enough for OAuth.
+        assert_eq!(blocks.len(), 3);
 
-        // Block 0: identity (no cache)
+        // Block 0: billing attribution (no cache)
         assert!(blocks[0].cache_control.is_none());
+        assert!(blocks[0].text.starts_with("x-anthropic-billing-header: "));
 
-        // Block 1: notice (no cache)
-        assert!(blocks[1].cache_control.is_none());
+        // Block 1: static (cached)
+        assert!(blocks[1].cache_control.is_some());
+        assert!(blocks[1].text.contains("static"));
 
-        // Block 2: static (cached)
-        assert!(blocks[2].cache_control.is_some());
-        assert!(blocks[2].text.contains("static"));
+        // Block 2: dynamic (not cached)
+        assert!(blocks[2].cache_control.is_none());
+        assert!(blocks[2].text.contains("dynamic"));
 
-        // Block 3: dynamic (not cached)
-        assert!(blocks[3].cache_control.is_none());
-        assert!(blocks[3].text.contains("dynamic"));
+        assert!(
+            !blocks.iter().any(|b| b.text.contains("Agent SDK")
+                || b.text.contains("You are a Claude agent")
+                || b.text.contains("You are Claude Code")),
+            "OAuth system blocks must not inject a Claude identity sentence"
+        );
     } else {
         panic!("Expected Blocks variant");
     }
@@ -1257,7 +1223,8 @@ async fn test_sanitize_tool_ids_with_dots() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1268,7 +1235,8 @@ async fn test_sanitize_tool_ids_with_dots() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1278,7 +1246,8 @@ async fn test_sanitize_tool_ids_with_dots() {
                 tool_use_id: "chatcmpl-BF2xX.tool_call.0".to_string(),
                 content: "file1.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1312,7 +1281,8 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
             content: vec![ContentBlock::Text {
                 text: "Hello".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1323,7 +1293,8 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "crash"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1450,6 +1421,42 @@ async fn explicit_oauth_mode_does_not_silently_fall_back_to_api_key() {
 
     let error = provider.get_access_token().await.unwrap_err().to_string();
     assert!(error.contains("expired"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn rejected_refresh_preserves_access_until_real_expiry() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    let refresh = "test-permanently-rejected-refresh";
+    jcode_base::auth::refresh_state::record_permanent_rejection("claude", refresh, "invalid_grant")
+        .unwrap();
+    for expired in [false, true] {
+        jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
+            label: "claude-otter".into(),
+            access: "test-live-access".into(),
+            refresh: refresh.into(),
+            expires: chrono::Utc::now().timestamp_millis()
+                + if expired { -60_000 } else { 120_000 },
+            email: None,
+            subscription_type: Some("max".into()),
+            scopes: vec!["user:inference".into()],
+        })
+        .unwrap();
+        let provider = AnthropicProvider::new();
+        let result = provider.get_oauth_access_token().await;
+        if expired {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("previously rejected")
+            );
+        } else {
+            assert_eq!(result.unwrap(), ("test-live-access".into(), true));
+        }
+    }
 }
 
 #[test]
@@ -2027,3 +2034,6 @@ fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
         );
     }
 }
+
+#[path = "anthropic_tests_additional_tests.rs"]
+mod additional_direct_api_url_supports_standard_and_profile_overrides;

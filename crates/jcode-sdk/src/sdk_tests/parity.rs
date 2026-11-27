@@ -66,12 +66,14 @@ const CAPABILITIES: &[Capability] = &[
     cap("todo_state", "todoState"),
     cap("ack_todo_follow_up", "ackTodoFollowUp"),
     cap("set_model", "setModel"),
+    cap("set_context_cap", "setContextCap"),
     cap("configure_tools", "configureTools"),
     cap("list_tools", "listTools"),
     cap("submit_tool_result", "submitToolResult"),
     cap("set_reasoning_effort", "setReasoningEffort"),
     cap("compact", "compact"),
     cap("rename_session", "renameSession"),
+    cap("set_session_env", "setSessionEnv"),
     cap("set_session_saved", "setSessionSaved"),
     cap("applet_action", "appletAction"),
     cap("close_applet", "closeApplet"),
@@ -196,6 +198,9 @@ const RUST_ONLY: &[&str] = &[
     "connect_with",
     // `Drop` closes the connection in Rust, so there is no `close()` to mirror.
     "is_closed",
+    // Rust event channels close without an error payload. TS transports expose
+    // failures via events; this accessor preserves the Rust reader cause.
+    "disconnect_reason",
     // TS reads `client.socketPath` as a field; Rust exposes it as an accessor.
     "socket_path",
 ];

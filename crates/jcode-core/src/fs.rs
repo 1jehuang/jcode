@@ -1,5 +1,9 @@
 use std::path::Path;
 
+#[cfg(all(test, windows))]
+#[path = "fs_windows_tests.rs"]
+mod windows_tests;
+
 /// Set file permissions to owner-only read/write (0o600).
 /// On Windows, replaces the DACL with a protected full-control ACE for the
 /// current process user so inherited or explicit access for other principals
@@ -18,7 +22,9 @@ pub fn set_permissions_owner_only(path: &Path) -> std::io::Result<()> {
 }
 
 /// Set directory permissions to owner-only read/write/execute (0o700).
-/// Windows child objects inherit the same current-user-only access rule.
+/// New Windows child objects inherit the same current-user-only access rule.
+/// Existing descendants are not modified. Secret files must be hardened
+/// individually, including legacy files discovered during read-time repair.
 pub fn set_directory_permissions_owner_only(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -43,12 +49,13 @@ fn set_windows_acl_owner_only(
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_ALL, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
-        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+        EXPLICIT_ACCESS_W, SET_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
-        TOKEN_QUERY, TOKEN_USER, TokenUser,
+        DACL_SECURITY_INFORMATION, GetTokenInformation, InitializeSecurityDescriptor,
+        PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
+        SetFileSecurityW, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -103,29 +110,47 @@ fn set_windows_acl_owner_only(
             return Err(std::io::Error::from_raw_os_error(acl_status as i32));
         }
 
-        let mut wide_path = path
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<_>>();
-        let security_status = unsafe {
-            SetNamedSecurityInfoW(
-                wide_path.as_mut_ptr(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                null_mut(),
-                null_mut(),
-                acl,
-                null(),
-            )
-        };
+        // SetNamedSecurityInfoW propagates inheritable ACEs to existing children,
+        // turning an auth.json write into a permission walk of the entire home.
+        // SetFileSecurityW changes only this object. Keep inheritable access for
+        // future children, and protect the DACL against permissive ancestors.
+        let apply_result = (|| -> std::io::Result<()> {
+            let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+            let descriptor_ptr = (&mut descriptor as *mut SECURITY_DESCRIPTOR).cast::<c_void>();
+            // SECURITY_DESCRIPTOR_REVISION is 1 in the Windows descriptor ABI.
+            if unsafe { InitializeSecurityDescriptor(descriptor_ptr, 1) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe { SetSecurityDescriptorDacl(descriptor_ptr, 1, acl, 0) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if unsafe {
+                SetSecurityDescriptorControl(descriptor_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            let wide_path = path
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>();
+            if unsafe {
+                SetFileSecurityW(
+                    wide_path.as_ptr(),
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    descriptor_ptr,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })();
         unsafe {
             LocalFree(acl.cast::<c_void>());
         }
-        if security_status != 0 {
-            return Err(std::io::Error::from_raw_os_error(security_status as i32));
-        }
-        Ok(())
+        apply_result
     })();
 
     unsafe {

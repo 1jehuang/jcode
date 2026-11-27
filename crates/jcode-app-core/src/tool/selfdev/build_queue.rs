@@ -373,6 +373,7 @@ export -f cargo
         let result = if Self::is_test_session() {
             Self::run_test_build(output_path.clone(), &reason).await?
         } else {
+            let prerelease = build::linux_prerelease_candidate(&repo_dir, &actual_source);
             let result =
                 Self::stream_build_command(repo_dir.clone(), command.clone(), output_path.clone())
                     .await?;
@@ -396,6 +397,13 @@ export -f cargo
                         request.validated = true;
                         request.last_progress = Some("published and smoke-tested".to_string());
                         request.save()?;
+                        if prerelease && result.status == Some(BackgroundTaskStatus::Completed) {
+                            build::dispatch_linux_prerelease(
+                                &repo_dir,
+                                &source_after_build,
+                                request.public_build_notes().as_deref(),
+                            );
+                        }
                         result
                     }
                     Err(err) => {
@@ -450,6 +458,7 @@ export -f cargo
     pub(super) async fn do_build(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         notify: Option<bool>,
         wake: Option<bool>,
@@ -463,6 +472,10 @@ export -f cargo
                     "`selfdev build` requires a non-empty `reason` so other queued agents can see why the build is needed."
                 )
             })?;
+        let release_notes = release_notes
+            .map(|notes| notes.trim().to_owned())
+            .filter(|notes| !notes.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("`selfdev build` and `build-reload` require nonblank `release_notes` suitable for public release."))?;
         let repo_dir =
             SelfDevTool::resolve_repo_dir(ctx.working_dir.as_deref()).ok_or_else(|| {
                 anyhow::anyhow!("Could not find the jcode repository directory for selfdev build")
@@ -491,6 +504,7 @@ export -f cargo
                 repo_dir: repo_dir.display().to_string(),
                 repo_scope: requested_source.repo_scope.clone(),
                 worktree_scope: requested_source.worktree_scope.clone(),
+                release_notes: Some(release_notes),
                 command: command.display.clone(),
                 requested_at: Utc::now().to_rfc3339(),
                 started_at: None,
@@ -543,7 +557,7 @@ export -f cargo
                 "Completion delivery is disabled for this watcher."
             };
             let output = format!(
-                "Matching self-dev build already queued/running, so this request was attached instead of spawning a duplicate build.\n\n- Your request ID: `{}`\n- Watcher task ID: `{}`\n- Existing request: `{}`\n- Requested by: {}\n- Reason: {}\n- Target version: `{}`\n- Source fingerprint: `{}`\n\n{}",
+                "Matching self-dev build already queued/running, so this request was attached instead of spawning a duplicate build.\n\n- Your request ID: `{}`\n- Watcher task ID: `{}`\n- Existing request: `{}`\n- Requested by: {}\n- Reason: {}\n- Target version: `{}`\n- Source fingerprint: `{}`\n\n{}\n\n{}",
                 request_id,
                 info.task_id,
                 existing.request_id,
@@ -551,7 +565,8 @@ export -f cargo
                 existing.reason,
                 requested_source.version_label,
                 requested_source.fingerprint,
-                delivery
+                delivery,
+                crate::tool::BACKGROUND_WAIT_GUIDANCE
             );
 
             return Ok(ToolOutput::new(output).with_metadata(json!({
@@ -587,6 +602,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: Some(release_notes),
             command: command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -658,6 +674,8 @@ export -f cargo
             info.status_file.display(),
             delivery
         );
+        output.push_str("\n\n");
+        output.push_str(crate::tool::BACKGROUND_WAIT_GUIDANCE);
 
         if let Some(ref blocker) = blocker {
             output.push_str(&format!(
@@ -667,11 +685,7 @@ export -f cargo
             ));
         }
 
-        output.push_str(&format!(
-            "\n\nUse `bg action=\"wait\" task_id=\"{}\"` to wait for completion/checkpoints, `bg action=\"status\" task_id=\"{}\"` to check progress immediately, or `selfdev status` to inspect the build queue.\nAfter it finishes, use `selfdev reload` when you want to restart onto the new binary.",
-            info.task_id,
-            info.task_id
-        ));
+        output.push_str("\n\nAfter it finishes, use `selfdev reload` when you want to restart onto the new binary.");
 
         Ok(ToolOutput::new(output).with_metadata(json!({
             "background": true,
@@ -703,6 +717,7 @@ export -f cargo
     pub(super) async fn do_build_reload(
         &self,
         reason: Option<String>,
+        release_notes: Option<String>,
         target: Option<String>,
         context: Option<String>,
         ctx: &ToolContext,
@@ -711,7 +726,7 @@ export -f cargo
         // waits inline for completion, so a separate completion notification
         // would be redundant noise.
         let build_output = self
-            .do_build(reason, target, Some(false), Some(false), ctx)
+            .do_build(reason, release_notes, target, Some(false), Some(false), ctx)
             .await?;
 
         let metadata = build_output.metadata.clone().unwrap_or_else(|| json!({}));
@@ -748,10 +763,9 @@ export -f cargo
 
         if !finished {
             return Ok(ToolOutput::new(format!(
-                "{}\n\nThe build is still running after waiting {}s, so the automatic reload was not started yet. Use `bg action=\"wait\" task_id=\"{}\"` to keep waiting, then `selfdev reload` once it finishes.",
+                "{}\n\nThe build is still running after waiting {}s, so the automatic reload was not started yet. After it finishes, use `selfdev reload`.",
                 build_output.output,
-                wait.as_secs(),
-                task_id
+                wait.as_secs()
             ))
             .with_metadata(json!({
                 "phase": "build",
@@ -900,6 +914,7 @@ export -f cargo
             repo_dir: repo_dir.display().to_string(),
             repo_scope: requested_source.repo_scope.clone(),
             worktree_scope: requested_source.worktree_scope.clone(),
+            release_notes: None,
             command: shell_command.display.clone(),
             requested_at: Utc::now().to_rfc3339(),
             started_at: None,
@@ -975,10 +990,8 @@ export -f cargo
                 blocker.reason
             ));
         }
-        output.push_str(&format!(
-            "\n\nUse `bg action=\"wait\" task_id=\"{}\"` to wait for completion/checkpoints, or `selfdev status` to inspect the queue.",
-            info.task_id
-        ));
+        output.push_str("\n\n");
+        output.push_str(crate::tool::BACKGROUND_WAIT_GUIDANCE);
 
         Ok(ToolOutput::new(output).with_metadata(json!({
             "background": true,

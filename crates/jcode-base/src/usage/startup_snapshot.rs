@@ -93,6 +93,33 @@ fn socket_identity(_socket: &Path) -> Option<SocketIdentity> {
     None
 }
 
+/// Count the complete compact JSON representation without retaining its bytes.
+/// Keep serialization fallible, including non-UTF-8 socket path errors.
+fn serialized_byte_len(value: &impl Serialize) -> serde_json::Result<u64> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.write_all(bytes)?;
+            Ok(bytes.len())
+        }
+
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| std::io::Error::other("serialized snapshot length overflow"))?;
+            Ok(())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
+}
+
 impl AccountUsageStartupPublisher {
     pub fn new(socket: &Path, instance_id: &str) -> Option<Self> {
         let socket = normalized_socket(socket)?;
@@ -137,7 +164,7 @@ impl AccountUsageStartupPublisher {
             anthropic: strip_email(anthropic),
             openai: strip_email(openai),
         };
-        if serde_json::to_vec(&snapshot)?.len() as u64 > MAX_BYTES {
+        if serialized_byte_len(&snapshot)? > MAX_BYTES {
             return Ok(());
         }
         // Private directory and private atomic replacement. Quotas and labels
@@ -202,18 +229,25 @@ fn snapshot_age(
 /// stays unknown. Callers must skip this entirely for SSH-forwarded sockets.
 /// Returns true only when an actual (possibly empty) snapshot was imported.
 pub fn hydrate_remote_account_usage(socket: &Path) -> bool {
+    let generation = super::remote_accounts::remote_account_usage_generation();
+    hydrate_remote_account_usage_for_generation(socket, generation)
+}
+
+/// Read a startup hint off the async connection path. A live daemon reply or
+/// another connection reset invalidates the generation while disk I/O runs.
+pub fn hydrate_remote_account_usage_for_generation(socket: &Path, generation: u64) -> bool {
     let Some(socket) = normalized_socket(socket) else {
         return false;
     };
     let Some((snapshot, age)) = read_snapshot(&socket, &cache_path(&socket)) else {
         return false;
     };
-    super::remote_accounts::set_remote_account_usage_with_age(
+    super::remote_accounts::import_remote_account_usage(
+        generation,
         snapshot.anthropic,
         snapshot.openai,
         age,
-    );
-    true
+    )
 }
 
 fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
@@ -232,6 +266,21 @@ fn read_snapshot(socket: &Path, path: &Path) -> Option<(Snapshot, Duration)> {
 
 fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
     for account in accounts {
+        account.additional_windows.retain(|window| {
+            !window
+                .resets_at
+                .as_deref()
+                .and_then(|reset| match chrono::DateTime::parse_from_rfc3339(reset) {
+                    Ok(reset) => Some(reset),
+                    Err(error) => {
+                        crate::logging::debug(&format!(
+                            "Keeping usage window with invalid reset timestamp: {error}"
+                        ));
+                        None
+                    }
+                })
+                .is_some_and(|reset| i128::from(reset.timestamp_millis()) <= i128::from(now_ms))
+        });
         let expired = account
             .resets_at
             .as_deref()
@@ -247,6 +296,10 @@ fn discard_expired_windows(accounts: &mut [AccountUsageSnapshot], now_ms: u64) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "startup_snapshot_sizing_tests.rs"]
+mod sizing_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -309,6 +362,7 @@ mod tests {
         // Keep test artifacts inside the temporary directory, not global cache.
         publisher.path = dir.path().join("usage.json");
         let account = AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: Some("private@example.test".into()),
             exhausted: false,
@@ -318,6 +372,9 @@ mod tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         };
         publisher.publish(&[], &[account]).unwrap();
         let bytes = read_private(&publisher.path).unwrap();
@@ -327,9 +384,11 @@ mod tests {
         let second = dir.path().join("other.sock");
         let _other = UnixListener::bind(&second).unwrap();
         assert!(read_snapshot(&second, &publisher.path).is_none());
-        drop(listener);
         std::fs::remove_file(&socket).unwrap();
+        // Keep the old socket alive until replacement so its inode cannot be
+        // recycled within the filesystem's timestamp resolution.
         let _replacement = UnixListener::bind(&socket).unwrap();
+        drop(listener);
         publisher.publish(&[], &[]).unwrap();
         assert_eq!(read_private(&publisher.path).unwrap(), bytes);
         assert!(read_snapshot(&publisher.socket, &publisher.path).is_none());
@@ -342,10 +401,22 @@ mod tests {
         let _listener = UnixListener::bind(&socket).unwrap();
         let mut before_chmod = AccountUsageStartupPublisher::new(&socket, "before-chmod").unwrap();
         before_chmod.path = dir.path().join("old-usage.json");
-        // Ensure the metadata change is visible even on coarse test clocks.
-        std::thread::sleep(Duration::from_millis(2));
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let current = socket_identity(&socket).unwrap();
+        // Observe the chmod transition rather than assuming a fixed sleep
+        // exceeds the filesystem's ctime resolution. The deadline diagnoses
+        // a missing transition without allowing a hung test.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let current = loop {
+            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let current = socket_identity(&socket).unwrap();
+            if current != before_chmod.identity {
+                break current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "chmod did not change the socket generation within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
         assert_eq!(before_chmod.identity.inode, current.inode);
         assert_ne!(before_chmod.identity, current);
         before_chmod.publish(&[], &[]).unwrap();
@@ -359,6 +430,28 @@ mod tests {
     #[test]
     fn reset_boundary_discards_exhaustion_but_preserves_error() {
         let mut accounts = vec![AccountUsageSnapshot {
+            additional_windows: vec![
+                jcode_protocol::AccountUsageWindow {
+                    label: "Fable".into(),
+                    usage_ratio: 0.9,
+                    resets_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Future".into(),
+                    usage_ratio: 0.3,
+                    resets_at: Some("2099-01-01T00:00:00Z".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Invalid reset".into(),
+                    usage_ratio: 0.7,
+                    resets_at: Some("not-a-timestamp".into()),
+                },
+                jcode_protocol::AccountUsageWindow {
+                    label: "Unknown reset".into(),
+                    usage_ratio: 0.8,
+                    resets_at: None,
+                },
+            ],
             label: "test".into(),
             email: None,
             exhausted: true,
@@ -368,13 +461,21 @@ mod tests {
             seven_day_ratio: Some(0.5),
             resets_at: Some("2026-01-01T00:00:00Z".into()),
             error: Some("Usage unavailable".into()),
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         }];
         let reset = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
             .unwrap()
             .timestamp_millis() as u64;
         discard_expired_windows(&mut accounts, reset - 1);
+        assert_eq!(accounts[0].additional_windows.len(), 4);
         assert!(accounts[0].exhausted);
         discard_expired_windows(&mut accounts, reset);
+        assert_eq!(accounts[0].additional_windows.len(), 3);
+        assert_eq!(accounts[0].additional_windows[1].label, "Invalid reset");
+        assert_eq!(accounts[0].additional_windows[2].label, "Unknown reset");
+        assert_eq!(accounts[0].additional_windows[0].label, "Future");
         assert!(!accounts[0].exhausted);
         assert!(accounts[0].five_hour_ratio.is_none());
         assert!(accounts[0].seven_day_ratio.is_none());

@@ -21,9 +21,10 @@
 //!
 //! The remote half is the hidden `jcode cloud receive|activate|export`
 //! commands, invoked over `ssh <host>` (or `--transport` for tests).
-//! The selected Jcode-owned OpenAI/Claude OAuth account travels separately over
-//! SSH, never in the repository/session tarball. Moving is consent to copy that
-//! account to the chosen host. Other accounts and external logins stay local.
+//! Jcode-owned OpenAI/Claude OAuth accounts travel separately over
+//! SSH, never in the repository/session tarball. Moving is consent to copy those
+//! accounts to the chosen host. External logins and API keys stay local unless
+//! explicitly requested through the restricted cloud environment transfer.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -32,18 +33,51 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::auth::router_transfer;
 use crate::auth::transfer::{self, CloudCredentialTransfer, TransferProvider};
 use crate::{session, storage};
+
+mod transport;
+pub(crate) use transport::Target;
+use transport::retry_ssh;
+
+#[path = "cloud_group.rs"]
+mod group;
+pub(crate) use group::run_migrate;
 
 #[cfg(test)]
 #[path = "cloud_move_repo_tests.rs"]
 mod repo_tests;
+
+#[path = "cloud_replace.rs"]
+mod replace;
+
+#[path = "cloud_session_ops.rs"]
+mod ops;
+
+#[path = "cloud_diagnostics.rs"]
+mod diagnostics;
+
+#[path = "cloud_env.rs"]
+pub(super) mod environment;
 
 #[cfg(all(test, unix))]
 #[path = "cloud_move_latency_tests.rs"]
 mod latency_tests;
 
 const FORMAT_VERSION: u32 = 1;
+
+/// Hidden remote subcommands a cloud host must support before anything is
+/// uploaded. Probing all of them up front means an older host fails clearly at
+/// preflight instead of after a partial credential transfer.
+const REQUIRED_REMOTE_COMMANDS: [&str; 6] = [
+    "receive",
+    "credentials",
+    "router-credentials",
+    "cancel-return",
+    "replace-receive",
+    "group-protocol",
+];
 const SNAPSHOT_REF_PREFIX: &str = "refs/jcode-cloud";
 /// Environment variables worth carrying. Everything else (DISPLAY, WAYLAND_*,
 /// SSH_AUTH_SOCK, DBUS_*, XDG_RUNTIME_DIR, secrets) is machine-local.
@@ -86,6 +120,9 @@ pub(crate) struct MoveManifest {
     /// Account identity only. Tokens never enter this manifest or its tarball.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_account: Option<CloudAccount>,
+    /// All transferred identities, without credential values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_accounts: Vec<CloudAccount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,8 +160,17 @@ fn baseline_path(session_id: &str) -> Result<PathBuf> {
 fn import_return_credentials(session_id: &str, account: &CloudAccount, bytes: &[u8]) -> Result<()> {
     let home = storage::jcode_dir()?;
     let path = baseline_path(session_id)?;
-    if path.exists() {
-        let baseline: CloudAuthBaseline = read_json(&path)?;
+    let baselines = if path.exists() {
+        let value: serde_json::Value = read_json(&path)?;
+        if value.is_array() {
+            serde_json::from_value::<Vec<CloudAuthBaseline>>(value)?
+        } else {
+            vec![serde_json::from_value::<CloudAuthBaseline>(value)?]
+        }
+    } else {
+        Vec::new()
+    };
+    for baseline in baselines {
         if baseline.account == *account {
             let local =
                 transfer::export_cloud_account_at(&home, account.provider, Some(&account.label))?;
@@ -147,6 +193,9 @@ fn import_return_credentials(session_id: &str, account: &CloudAccount, bytes: &[
             )
             .map_err(Into::into);
         }
+    }
+    if path.exists() {
+        bail!("the OAuth account was not part of this session's credential transfer");
     }
     transfer::import_cloud_at(&home, account.provider, &account.label, bytes).map_err(Into::into)
 }
@@ -193,6 +242,78 @@ fn session_credentials(sess: &session::Session) -> Result<Option<CloudCredential
     )?))
 }
 
+/// Router credential sources (API-key env files, non-pool OAuth stores and the
+/// auto-switch order) that exist locally. See `auth::router_transfer`.
+fn export_router_credentials() -> Result<router_transfer::RouterBundle> {
+    let config = crate::config::Config::load();
+    let named: Vec<String> = config
+        .providers
+        .values()
+        .filter_map(|profile| profile.env_file.clone())
+        .collect();
+    let names = router_transfer::env_file_names(named.iter().map(String::as_str));
+    router_transfer::export_at(&storage::jcode_dir()?, &storage::app_config_dir()?, &names)
+        .map_err(Into::into)
+}
+
+fn run_router_credentials() -> Result<()> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take((router_transfer::MAX_BUNDLE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    router_transfer::import_at(&storage::jcode_dir()?, &storage::app_config_dir()?, &bytes)?;
+    notify_daemon_auth_changed();
+    Ok(())
+}
+
+/// Best effort: make an already-running daemon re-read every provider's
+/// credentials. OpenAI/Claude OAuth stores are re-read per request, but API
+/// keys and other providers are initialized when auth changes. No daemon means
+/// the next start reads the new files anyway.
+fn notify_daemon_auth_changed() {
+    if std::thread::spawn(|| {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        runtime.block_on(async {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                let mut client = crate::server::Client::connect().await?;
+                client.notify_auth_changed().await?;
+                anyhow::Ok(())
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    crate::logging::debug(&format!("Daemon auth notification failed: {error:#}"))
+                }
+                Err(error) => {
+                    crate::logging::debug(&format!("Daemon auth notification timed out: {error}"))
+                }
+            }
+        });
+    })
+    .join()
+    .is_err()
+    {
+        crate::logging::warn("Daemon auth notification thread panicked");
+    }
+}
+
+fn cloud_accounts() -> Result<Vec<CloudAccount>> {
+    Ok(transfer::cloud_accounts_at(&storage::jcode_dir()?)?
+        .into_iter()
+        .map(|(provider, label)| CloudAccount { provider, label })
+        .collect())
+}
+
+fn transferred_accounts_path(session_id: &str) -> Result<PathBuf> {
+    Ok(baseline_path(session_id)?.with_extension("accounts.json"))
+}
+
 fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
     let provider = provider.parse::<TransferProvider>()?;
     let home = storage::jcode_dir()?;
@@ -205,7 +326,7 @@ fn run_credentials(provider: &str, account: &str, export: bool) -> Result<()> {
         std::io::stdin()
             .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
-        transfer::import_cloud_at(&home, provider, account, &bytes)?;
+        transfer::import_cloud_handoff_at(&home, provider, account, &bytes)?;
     }
     Ok(())
 }
@@ -232,262 +353,14 @@ pub(crate) struct RepoManifest {
 // Entry points
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Target {
-    pub host: Option<String>,
-    pub remote_binary: Option<String>,
-    pub transport: Option<String>,
-}
-
-impl Target {
-    fn resolve_host(&self) -> Result<String> {
-        if let Some(host) = self.host.clone().filter(|h| !h.trim().is_empty()) {
-            return Ok(host);
-        }
-        if let Ok(host) = std::env::var("JCODE_CLOUD_HOST")
-            && !host.trim().is_empty()
-        {
-            return Ok(host);
-        }
-        if super::cloud_managed::account_available() {
-            return Ok(super::cloud_managed::HOST.to_string());
-        }
-        bail!(
-            "no cloud machine: sign in with `jcode login` to use the Jcode Cloud machine included with your subscription, or pass --host <ssh-alias> / set JCODE_CLOUD_HOST"
-        )
-    }
-
-    fn remote_binary(&self) -> String {
-        self.remote_binary
-            .clone()
-            .or_else(|| std::env::var("JCODE_CLOUD_REMOTE_BINARY").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "jcode".to_string())
-    }
-
-    /// Fail fast, with an actionable message, when the cloud host's jcode is
-    /// too old to speak the move protocol.
-    fn preflight(&self, host: &str) -> Result<()> {
-        timed_move_stage("host preflight", || {
-            if super::cloud_managed::is_managed(host) && self.transport.is_none() {
-                step("prepare", "waking your Jcode Cloud machine");
-                super::cloud_managed::connect(&mut |m| step("prepare", m))?;
-                let home = dirs::home_dir()
-                    .map(|h| h.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.run_shell(host, &super::cloud_managed::prepare_script(&home)?)
-                    .context("prepare the Jcode Cloud machine")?;
-            }
-            // Preserve custom transports that only support one remote invocation.
-            if self.transport.is_none() {
-                let binary = shell_quote(&self.remote_binary());
-                let mut script =
-                    String::from("PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH\n");
-                for command in ["receive", "credentials", "cancel-return"] {
-                    script.push_str(&format!(
-                    "{binary} --no-update --no-selfdev cloud {command} --help || {{ printf '%s\\n' 'cloud protocol probe failed: {command}' >&2; exit 1; }}\n"
-                ));
-                }
-                let probe = (|| -> Result<()> {
-                    let output = Self::ssh_command(host)?
-                        .arg(&script)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::piped())
-                        .output()
-                        .with_context(|| format!("failed to reach cloud host `{host}`"))?;
-                    if !output.status.success() {
-                        bail!(
-                            "remote cloud protocol probes failed ({}): {}",
-                            output.status,
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        );
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = probe {
-                    if format!("{error:#}").contains("unrecognized") {
-                        bail!(
-                            "jcode on `{host}` does not support the complete cloud handoff protocol. Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build): {error:#}"
-                        );
-                    }
-                    return Err(error.context(format!("could not run jcode on `{host}`")));
-                }
-                return Ok(());
-            }
-            for command in ["receive", "credentials", "cancel-return"] {
-                if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
-                    let text = format!("{error:#}");
-                    if text.contains("unrecognized") {
-                        bail!(
-                            "jcode on `{host}` does not support the complete cloud handoff protocol (`{command}`). Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
-                        );
-                    }
-                    return Err(error.context(format!("could not run jcode on `{host}`")));
-                }
-            }
-            Ok(())
-        })
-    }
-
-    /// `ssh` with the options every cloud call uses, including the private
-    /// config for the managed machine.
-    fn ssh_command(host: &str) -> Result<Command> {
-        let mut command = Command::new("ssh");
-        if super::cloud_managed::is_managed(host) {
-            command.args(super::cloud_managed::ssh_args()?);
-        }
-        command.args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", "--"]);
-        command.arg(host);
-        Ok(command)
-    }
-
-    /// Run a raw shell script on the target (managed-machine preparation).
-    fn run_shell(&self, host: &str, script: &str) -> Result<()> {
-        let mut command = Self::ssh_command(host)?;
-        command.arg("bash -s");
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
-        child
-            .stdin
-            .take()
-            .context("ssh stdin")?
-            .write_all(script.as_bytes())?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-        }
-        Ok(())
-    }
-
-    fn remote_command(&self, host: &str, args: &[&str]) -> Result<Command> {
-        let binary = shell_quote(&self.remote_binary());
-        let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
-        let remote_cmd = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {binary} --no-update --no-selfdev {}",
-            quoted.join(" ")
-        );
-        let command = match self.transport.as_deref() {
-            Some(transport) => {
-                let mut parts = transport.split_whitespace();
-                let program = parts
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("empty --transport"))?;
-                let mut command = Command::new(program);
-                command.args(parts).arg(&remote_cmd);
-                command
-            }
-            None => {
-                let mut command = Self::ssh_command(host)?;
-                command.arg(&remote_cmd);
-                command
-            }
-        };
-        Ok(command)
-    }
-
-    /// Run `jcode <args>` on the target, feeding `stdin` and returning stdout.
-    fn run_remote(&self, host: &str, args: &[&str], stdin: Option<&Path>) -> Result<Vec<u8>> {
-        let mut command = self.remote_command(host, args)?;
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        command.stdin(match stdin {
-            Some(path) => Stdio::from(
-                std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?,
-            ),
-            None => Stdio::null(),
-        });
-        let output = command
-            .output()
-            .with_context(|| format!("failed to reach cloud host `{host}`"))?;
-        if !output.status.success() {
-            bail!(
-                "remote `jcode {}` on `{host}` failed ({}):\n{}",
-                args.first().copied().unwrap_or_default(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(output.stdout)
-    }
-
-    /// Secrets travel only in an SSH pipe, never argv, a temporary file, or the
-    /// session archive. Discard remote stderr: even a broken transport must not
-    /// reflect a credential into the local transcript or logs.
-    fn exchange_credentials(
-        &self,
-        host: &str,
-        account: &CloudAccount,
-        payload: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
-        let mut args = vec![
-            "cloud",
-            "credentials",
-            "--provider",
-            account.provider.as_str(),
-            "--account",
-            account.label.as_str(),
-        ];
-        if payload.is_none() {
-            args.push("--export");
-        }
-        let mut command = self.remote_command(host, &args)?;
-        command.stdin(if payload.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-        command.stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut child = command
-            .spawn()
-            .context("start private cloud credential transfer")?;
-        let result = std::thread::scope(|scope| -> Result<Vec<u8>> {
-            let writer = payload.map(|bytes| {
-                let mut stdin = child.stdin.take().expect("piped credential stdin");
-                scope.spawn(move || stdin.write_all(bytes))
-            });
-            let mut bytes = Vec::new();
-            child
-                .stdout
-                .take()
-                .context("cloud credential stdout")?
-                .take((transfer::MAX_TRANSFER_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-                .map_err(|_| anyhow::anyhow!("could not read cloud credential response"))?;
-            if bytes.len() > transfer::MAX_TRANSFER_BYTES {
-                let _ = child.kill();
-                bail!("cloud credential response exceeds the size limit");
-            }
-            if let Some(writer) = writer {
-                writer
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("cloud credential writer failed"))?
-                    .map_err(|_| anyhow::anyhow!("could not send cloud credentials"))?;
-            }
-            let status = child.wait().context("wait for cloud credential transfer")?;
-            if !status.success() {
-                bail!(
-                    "cloud credential transfer failed ({status}); destination credentials were not accepted"
-                );
-            }
-            if payload.is_some() && !bytes.is_empty() {
-                bail!("unexpected cloud credential import response");
-            }
-            Ok(bytes)
-        });
-        if result.is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        result
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub(crate) struct MoveReport {
     pub session_id: String,
+    /// Empty for legacy single-session transfers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_session_ids: Vec<String>,
     pub host: String,
     pub epoch: u64,
     pub repo_root: Option<String>,
@@ -497,20 +370,74 @@ pub(crate) struct MoveReport {
     pub return_command: String,
 }
 
-fn timed_move_stage<T>(stage: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let started = std::time::Instant::now();
-    let result = operation();
-    crate::logging::info(&format!(
-        "cloud move: {stage} {} in {:.3}s",
-        if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
-        },
-        started.elapsed().as_secs_f64()
-    ));
-    result
+/// `/cloud` prepares the host, then runs the move in a second process moments
+/// later. Re-checking the same host and binary doubled the wait for no benefit.
+const PREFLIGHT_FRESH_SECS: u64 = 120;
+
+fn preflight_marker() -> Option<PathBuf> {
+    storage::jcode_dir()
+        .ok()
+        .map(|dir| dir.join("cloud-preflight-ok"))
 }
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn preflight_is_fresh(key: &str) -> bool {
+    let Some(text) = preflight_marker().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return false;
+    };
+    let Some((stamp, stored)) = text.split_once('\n') else {
+        return false;
+    };
+    stored == key
+        && stamp
+            .parse::<u64>()
+            .is_ok_and(|t| now_secs().saturating_sub(t) <= PREFLIGHT_FRESH_SECS)
+}
+
+fn record_preflight(key: &str) {
+    if let Some(path) = preflight_marker() {
+        let _ = std::fs::write(path, format!("{}\n{key}", now_secs()));
+    }
+}
+
+fn memory_marker(host: &str, memory: &Path) -> Option<PathBuf> {
+    let name = hex::encode(Sha256::digest(
+        format!("{host}\n{}", memory.display()).as_bytes(),
+    ));
+    Some(
+        storage::jcode_dir()
+            .ok()?
+            .join("cloud-memory-sent")
+            .join(name),
+    )
+}
+
+/// The receiver installs project memory only when the host has none, so a
+/// copy it already accepted never needs to be sent again.
+fn memory_already_sent(host: &str, memory: &Path, bytes: &[u8]) -> bool {
+    let digest = hex::encode(Sha256::digest(bytes));
+    memory_marker(host, memory)
+        .and_then(|marker| std::fs::read_to_string(marker).ok())
+        .is_some_and(|sent| sent == digest)
+}
+
+fn mark_memory_sent(host: &str, memory: &Path, bytes: &[u8]) {
+    if let Some(marker) = memory_marker(host, memory) {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(marker, hex::encode(Sha256::digest(bytes)));
+    }
+}
+
+mod timing;
+use timing::timed_move_stage;
 
 pub(crate) fn run_move(
     session_ref: Option<&str>,
@@ -520,6 +447,8 @@ pub(crate) fn run_move(
 ) -> Result<MoveReport> {
     let host = target.resolve_host()?;
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     if let Some(lease) = storage::read_session_lease(&session_id)
         && let Some(away) = lease.away_host
     {
@@ -533,7 +462,7 @@ pub(crate) fn run_move(
 
     // ---- prepare -------------------------------------------------------
     step("prepare", "checking the cloud host");
-    let (staging, sess, auth_account, epoch, repo) = std::thread::scope(|scope| {
+    let (staging, sess, auth_accounts, epoch, repo, base) = std::thread::scope(|scope| {
         let preflight = scope.spawn(|| target.preflight(&host));
         let prepared = timed_move_stage("local snapshot preparation", || -> Result<_> {
             step("prepare", "snapshotting session, repo and environment");
@@ -547,6 +476,7 @@ pub(crate) fn run_move(
                 // Pin an implicit OAuth route to the exact account being transferred.
                 sess.route_api_method = Some(account.route());
             }
+            let auth_accounts = cloud_accounts()?;
             let epoch = storage::read_session_lease(&session_id)
                 .map(|lease| lease.epoch)
                 .unwrap_or(0)
@@ -581,6 +511,7 @@ pub(crate) fn run_move(
                 not_transferred,
                 mcp_servers: configured_mcp_servers(),
                 auth_account: auth_account.clone(),
+                auth_accounts: auth_accounts.clone(),
             };
 
             // The shipped transcript: current conversation plus a hidden notice that
@@ -595,13 +526,36 @@ pub(crate) fn run_move(
                 serde_json::to_vec_pretty(&manifest)?,
             )?;
             copy_if_exists(&todo_file(&session_id)?, &stage.join("todos.json"))?;
+            // Last known account limits, so the cloud UI shows them instantly
+            // instead of waiting on fresh usage probes.
+            std::fs::write(
+                stage.join("limits.json"),
+                crate::usage::export_limits_snapshot(),
+            )?;
             if let Some(repo) = &repo {
-                copy_if_exists(
-                    &crate::memory::project_memory_file(Path::new(&repo.working_dir))?,
-                    &stage.join("project_memory.json"),
-                )?;
+                // Project memory can be megabytes and rarely changes between
+                // moves. The receiver never overwrites existing memory, so
+                // ship it only when it changed since the last move to here.
+                let memory = crate::memory::project_memory_file(Path::new(&repo.working_dir))?;
+                if let Ok(bytes) = std::fs::read(&memory)
+                    && !memory_already_sent(&host, &memory, &bytes)
+                {
+                    std::fs::write(stage.join("project_memory.json"), &bytes)?;
+                }
             }
-            Ok((staging, sess, auth_account, epoch, repo))
+            Ok((staging, sess, auth_accounts, epoch, repo))
+        });
+        // Probe remote history while the host check is still running. It only
+        // reads `git rev-list` on the host, so it need not wait for preflight.
+        let history = prepared.as_ref().ok().and_then(|(_, _, _, _, repo)| {
+            repo.clone().map(|repo| {
+                let host = &host;
+                scope.spawn(move || {
+                    timed_move_stage("common repository history", || {
+                        Ok(common_remote_commit(target, host, &repo))
+                    })
+                })
+            })
         });
         // Always join, including when local preparation failed. Nothing may
         // continue preparing the host after this move returns.
@@ -609,20 +563,21 @@ pub(crate) fn run_move(
             .join()
             .map_err(|_| anyhow::anyhow!("cloud host preflight thread panicked"))
             .and_then(|result| result);
+        let base = history
+            .and_then(|handle| handle.join().ok())
+            .and_then(|result| result.ok())
+            .flatten();
         match (prepared, checked) {
-            (Ok(prepared), Ok(())) => Ok(prepared),
+            (Ok((staging, sess, accounts, epoch, repo)), Ok(())) => {
+                Ok((staging, sess, accounts, epoch, repo, base))
+            }
             (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
             (Err(error), Err(preflight_error)) => Err(error.context(format!(
                 "cloud host preflight also failed: {preflight_error:#}"
             ))),
         }
     })?;
-    // Negotiate only after preflight is joined. Snapshotting can overlap host
-    // startup, while packing waits so known remote history need not be shipped.
     if let Some(repo) = &repo {
-        let base = timed_move_stage("common repository history", || {
-            Ok(common_remote_commit(target, &host, repo))
-        })?;
         timed_move_stage("repository bundle", || {
             create_repo_bundle(repo, &session_id, staging.path(), base.as_deref())
         })?;
@@ -637,6 +592,7 @@ pub(crate) fn run_move(
                 "session.json",
                 "todos.json",
                 "project_memory.json",
+                "limits.json",
                 "repo.bundle",
                 "ignored.tar",
             ],
@@ -646,9 +602,82 @@ pub(crate) fn run_move(
     let _staging = staging;
 
     // ---- transfer + verify ---------------------------------------------
+    // Upload and credential transfers are independent SSH round trips, so run
+    // them all at once. Credentials go to the host's account store, not the
+    // session, and are harmless if the move is later abandoned.
     step("transfer", &format!("uploading to `{host}`"));
-    let out = timed_move_stage("upload and receive", || {
-        target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
+    let router = if dry_run {
+        None
+    } else {
+        Some(export_router_credentials()?).filter(|router| !router.is_empty())
+    };
+    let accounts: &[CloudAccount] = if dry_run { &[] } else { &auth_accounts };
+    if !accounts.is_empty() || router.is_some() {
+        step(
+            "credentials",
+            "securely transferring accounts, keys and routing",
+        );
+    }
+    let (out, baselines) = std::thread::scope(|scope| -> Result<_> {
+        let router_handle = router.as_ref().map(|router| {
+            let host = &host;
+            scope.spawn(move || {
+                timed_move_stage("router credential transfer", || {
+                    retry_ssh(host, "provider key transfer", || {
+                        target.send_router_credentials(host, router.as_bytes())
+                    })
+                })
+            })
+        });
+        let handles: Vec<_> = accounts
+            .iter()
+            .map(|account| {
+                let host = &host;
+                scope.spawn(move || -> Result<CloudAuthBaseline> {
+                    // Export at send time so a token refreshed by another
+                    // local session during snapshotting is not shipped stale.
+                    let credentials = transfer::export_cloud_account_at(
+                        &storage::jcode_dir()?,
+                        account.provider,
+                        Some(&account.label),
+                    )?;
+                    timed_move_stage("credential transfer", || {
+                        retry_ssh(host, "credential transfer", || {
+                            target.exchange_credentials(host, account, Some(credentials.as_bytes()))
+                        })
+                    })?;
+                    Ok(CloudAuthBaseline {
+                        account: account.clone(),
+                        fingerprint: credential_fingerprint(&credentials),
+                    })
+                })
+            })
+            .collect();
+        let out = timed_move_stage("upload and receive", || {
+            retry_ssh(&host, "upload", || {
+                target.run_remote(&host, &["cloud", "receive", "--json"], Some(&tarball))
+            })
+        });
+        let baselines = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("credential transfer thread panicked"))?
+            })
+            .collect::<Result<Vec<_>>>();
+        let router_result = router_handle.map(|handle| {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("router transfer thread panicked"))
+                .and_then(|result| result)
+        });
+        let out = out?;
+        let baselines = baselines?;
+        if let Some(result) = router_result {
+            result?;
+        }
+        Ok((out, baselines))
     })?;
     let verify: ReceiveReport = serde_json::from_slice(&out).with_context(|| {
         format!(
@@ -679,6 +708,8 @@ pub(crate) fn run_move(
 
     let report = MoveReport {
         session_id: session_id.clone(),
+        members: Vec::new(),
+        excluded_session_ids: Vec::new(),
         host: host.clone(),
         epoch,
         repo_root: repo.as_ref().map(|r| r.root.clone()),
@@ -695,29 +726,9 @@ pub(crate) fn run_move(
         return Ok(report);
     }
 
-    if let Some(account) = &auth_account {
-        step(
-            "credentials",
-            "securely transferring the session's OAuth account",
-        );
-        // Snapshotting a large repository may take long enough for another
-        // local session to refresh the account. Do not ship the earlier token.
-        let credentials = transfer::export_cloud_account_at(
-            &storage::jcode_dir()?,
-            account.provider,
-            Some(&account.label),
-        )?;
-        timed_move_stage("credential transfer", || {
-            target.exchange_credentials(&host, account, Some(credentials.as_bytes()))
-        })?;
-        storage::write_json_secret(
-            &baseline_path(&session_id)?,
-            &CloudAuthBaseline {
-                account: account.clone(),
-                fingerprint: credential_fingerprint(&credentials),
-            },
-        )?;
-    }
+    // API keys, other providers' token stores and the auto-switch order are
+    // one-way: the cloud copy is never imported back.
+    storage::write_json_secret(&baseline_path(&session_id)?, &baselines)?;
 
     // ---- commit ----------------------------------------------------------
     // Local lease first: from here on local turns stop. If activation fails
@@ -735,18 +746,20 @@ pub(crate) fn run_move(
     })?;
     let epoch_arg = epoch.to_string();
     if let Err(error) = timed_move_stage("activation", || {
-        target.run_remote(
-            &host,
-            &[
-                "cloud",
-                "activate",
-                "--session",
-                &session_id,
-                "--epoch",
-                &epoch_arg,
-            ],
-            None,
-        )
+        retry_ssh(&host, "activation", || {
+            target.run_remote(
+                &host,
+                &[
+                    "cloud",
+                    "activate",
+                    "--session",
+                    &session_id,
+                    "--epoch",
+                    &epoch_arg,
+                ],
+                None,
+            )
+        })
     }) {
         match previous {
             Some(lease) => storage::write_session_lease(&lease)?,
@@ -764,11 +777,27 @@ pub(crate) fn run_move(
             ],
         );
     }
+    if let Some(repo) = &repo
+        && let Ok(memory) = crate::memory::project_memory_file(Path::new(&repo.working_dir))
+        && let Ok(bytes) = std::fs::read(_staging.path().join("project_memory.json"))
+    {
+        mark_memory_sent(&host, &memory, &bytes);
+    }
+    if let Some(repo) = &repo {
+        // Ownership has moved. Environment hydration must not turn a successful
+        // migration into an apparent failure that invites a second migration.
+        if environment::sync_saved(Path::new(&repo.root), target).is_err() {
+            step(
+                "environment",
+                "saved environment requirements need attention on the cloud host; the agent can retry through cloud_environment",
+            );
+        }
+    }
     step("done", &format!("session now lives on `{host}`"));
     Ok(report)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ReturnReport {
     pub session_id: String,
     pub host: String,
@@ -777,7 +806,7 @@ pub(crate) struct ReturnReport {
     pub merge: MergeOutcome,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum MergeOutcome {
     NoRepo,
@@ -800,10 +829,19 @@ pub(crate) fn run_return(
     session_ref: Option<&str>,
     target: &Target,
     refs_only: bool,
+    keep_local_auth: bool,
 ) -> Result<ReturnReport> {
     let session_id = resolve_session_id(session_ref)?;
+    group::reject_member_return(&session_id)?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&session_id))?;
     let lease = storage::read_session_lease(&session_id)
         .with_context(|| format!("session {session_id} was never moved"))?;
+    let receipt_path = return_state_path(&session_id, lease.epoch, "receipt.json")?;
+    if lease.is_here() && receipt_path.exists() {
+        let report: ReturnReport = read_json(&receipt_path)?;
+        complete_remote_return(target, &report)?;
+        return Ok(report);
+    }
     let host = match (&lease.away_host, &target.host) {
         (Some(away), _) => away.clone(),
         (None, _) => bail!("session {session_id} already lives here"),
@@ -813,18 +851,23 @@ pub(crate) fn run_return(
     // ---- export (cloud stops owning at `epoch`) --------------------------
     step("export", &format!("collecting the session from `{host}`"));
     let epoch_arg = epoch.to_string();
-    let bytes = target.run_remote(
-        &host,
-        &[
+    let completion_supported = target
+        .run_remote(&host, &["cloud", "complete-return", "--help"], None)
+        .is_ok();
+    let bytes = retry_ssh(&host, "export", || {
+        let mut args = vec![
             "cloud",
             "export",
             "--session",
             &session_id,
             "--epoch",
             &epoch_arg,
-        ],
-        None,
-    )?;
+        ];
+        if completion_supported {
+            args.push("--require-completion");
+        }
+        target.run_remote(&host, &args, None)
+    })?;
     let staging = tempfile::Builder::new()
         .prefix("jcode-cloud-return-")
         .tempdir()?;
@@ -836,20 +879,50 @@ pub(crate) fn run_return(
     if manifest.session_id != session_id || manifest.epoch != epoch {
         bail!("cloud returned the wrong session/epoch");
     }
+    // Older hosts do not implement completion and use the historical returned
+    // lease. Only opt in when the archive explicitly advertises this protocol.
+    let requires_completion = stage.join("return-completion-v1").is_file();
 
     // The cloud has stopped running turns, so export its final refreshed tokens.
     // On conflict, restore cloud ownership rather than strand the conversation.
-    if let Some(account) = &manifest.auth_account {
+    // The local departure record is authoritative, including when returning
+    // from an older host that does not retain the multi-account manifest field.
+    // Never import unrelated accounts selected or injected on the remote host.
+    let departure_path = baseline_path(&session_id)?;
+    let return_accounts = if departure_path.exists() {
+        let value: serde_json::Value = read_json(&departure_path)?;
+        let baselines = if value.is_array() {
+            serde_json::from_value::<Vec<CloudAuthBaseline>>(value)?
+        } else {
+            vec![serde_json::from_value::<CloudAuthBaseline>(value)?]
+        };
+        baselines
+            .into_iter()
+            .map(|baseline| baseline.account)
+            .collect::<Vec<_>>()
+    } else if manifest.auth_accounts.is_empty() {
+        manifest.auth_account.iter().cloned().collect::<Vec<_>>()
+    } else {
+        manifest.auth_accounts.clone()
+    };
+    if keep_local_auth {
+        step(
+            "credentials",
+            "keeping local OAuth credentials; cloud credentials will not be imported",
+        );
+    }
+    for account in return_accounts.iter().filter(|_| !keep_local_auth) {
         step(
             "credentials",
             "bringing refreshed OAuth credentials back securely",
         );
-        let imported = target
-            .exchange_credentials(&host, account, None)
-            .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
+        let imported = retry_ssh(&host, "credential return", || {
+            target.exchange_credentials(&host, account, None)
+        })
+        .and_then(|bytes| import_return_credentials(&session_id, account, &bytes));
         if let Err(error) = imported {
-            target
-                .run_remote(
+            retry_ssh(&host, "cancel return", || {
+                target.run_remote(
                     &host,
                     &[
                         "cloud",
@@ -861,13 +934,14 @@ pub(crate) fn run_return(
                     ],
                     None,
                 )
-                .context("credential return failed and cloud ownership could not be restored")?;
+            })
+            .context("credential return failed and cloud ownership could not be restored")?;
             storage::write_session_lease(&storage::SessionLease {
                 epoch,
                 ..lease.clone()
             })?;
             return Err(
-                error.context("credential return refused; the session remains on the cloud host")
+                error.context("credential return refused; the session remains on the cloud host. To recover without replacing local OAuth credentials, retry with --keep-local-auth")
             );
         }
     }
@@ -914,6 +988,21 @@ pub(crate) fn run_return(
         ),
     );
     install_session(&sess, stage)?;
+    let report = ReturnReport {
+        session_id: session_id.clone(),
+        host,
+        epoch,
+        messages: sess.messages.len(),
+        merge,
+    };
+    // Persist the completion receipt before switching the local lease. A retry
+    // can acknowledge the remote fence even after a lost SSH response/crash.
+    if requires_completion {
+        write_return_state(
+            &return_state_path(&session_id, epoch, "receipt.json")?,
+            &serde_json::to_vec(&report)?,
+        )?;
+    }
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.clone(),
         epoch,
@@ -923,14 +1012,77 @@ pub(crate) fn run_return(
         last_sync_head: manifest.repo.as_ref().map(|r| r.head.clone()),
         updated_at: chrono::Utc::now().to_rfc3339(),
     })?;
-    let _ = std::fs::remove_file(baseline_path(&session_id)?);
+    if let Err(error) = std::fs::remove_file(baseline_path(&session_id)?)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logging::warn(&format!("Failed to remove cloud baseline: {error}"));
+    }
+    if requires_completion {
+        complete_remote_return(target, &report)?;
+    }
     step("done", "session is local again");
-    Ok(ReturnReport {
-        session_id,
-        host,
-        epoch,
-        messages: sess.messages.len(),
-        merge,
+    Ok(report)
+}
+
+fn return_state_path(session_id: &str, epoch: u64, name: &str) -> Result<PathBuf> {
+    if session_id.is_empty()
+        || !session_id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        bail!("invalid cloud return session id");
+    }
+    Ok(storage::jcode_dir()?
+        .join("cloud-returns")
+        .join(session_id)
+        .join(epoch.to_string())
+        .join(name))
+}
+
+fn write_return_state(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context("return state has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn complete_remote_return(target: &Target, report: &ReturnReport) -> Result<()> {
+    retry_ssh(&report.host, "complete return", || {
+        target.run_remote(&report.host, &[
+            "cloud", "complete-return", "--session", &report.session_id,
+            "--epoch", &report.epoch.to_string(),
+        ], None)
+    }).with_context(|| format!(
+        "session is safely local, but the cloud checkout remains protected; upgrade the cloud jcode if needed, then retry `jcode cloud return --session {} --refs-only` to finish recovery",
+        report.session_id
+    ))?;
+    Ok(())
+}
+
+fn complete_return(session_id: &str, epoch: u64) -> Result<()> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    let lease = storage::read_session_lease(session_id).context("missing cloud session lease")?;
+    if lease.epoch != epoch
+        || !matches!(
+            lease.away_host.as_deref(),
+            Some("return-pending" | "returned-complete")
+        )
+    {
+        bail!("cloud return completion has a stale epoch or owner");
+    }
+    storage::write_session_lease(&storage::SessionLease {
+        away_host: Some("returned-complete".to_string()),
+        ..lease
     })
 }
 
@@ -960,7 +1112,12 @@ pub(crate) fn run_receive() -> Result<()> {
     std::io::stdin().read_to_end(&mut data)?;
     std::fs::write(&tarball, &data)?;
     untar(&tarball, stage)?;
+    if stage.join("group.json").exists() {
+        return group::receive(staging);
+    }
     let manifest: MoveManifest = read_json(&stage.join("manifest.json"))?;
+    let _migration_lock = group::lock_sessions(std::slice::from_ref(&manifest.session_id))?;
+    group::reject_member_return(&manifest.session_id)?;
     if manifest.format_version != FORMAT_VERSION {
         bail!(
             "move format {} not supported by this jcode (expects {FORMAT_VERSION}); update jcode on the cloud host",
@@ -1008,7 +1165,25 @@ pub(crate) fn run_receive() -> Result<()> {
 /// Take ownership of a staged move: install transcript, todos and memory.
 pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
     let dir = inbox_dir()?.join(format!("{session_id}.{epoch}"));
+    if dir.join("group.json").exists() || group::is_group_root(session_id, epoch)? {
+        return group::activate(session_id, epoch);
+    }
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
+    group::reject_member_return(session_id)?;
+    if storage::read_session_lease(session_id)
+        .is_some_and(|lease| lease.epoch > epoch || (lease.epoch == epoch && !lease.is_here()))
+    {
+        bail!("stale activation for {session_id} at epoch {epoch}; session ownership has advanced");
+    }
     if !dir.is_dir() {
+        // A retried activation whose first attempt succeeded but lost its
+        // SSH connection finds the move already installed. Report success.
+        if storage::read_session_lease(session_id)
+            .is_some_and(|lease| lease.epoch == epoch && lease.is_here())
+        {
+            eprintln!("{session_id} already active at epoch {epoch}");
+            return Ok(());
+        }
         bail!("no staged move for {session_id} at epoch {epoch}");
     }
     let manifest: MoveManifest = read_json(&dir.join("manifest.json"))?;
@@ -1023,6 +1198,10 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
             bail!("staged OAuth account does not match the session route");
         }
     }
+    storage::write_json_secret(
+        &transferred_accounts_path(session_id)?,
+        &manifest.auth_accounts,
+    )?;
     install_session(&sess, &dir)?;
     storage::write_session_lease(&storage::SessionLease {
         session_id: session_id.to_string(),
@@ -1039,14 +1218,44 @@ pub(crate) fn run_activate(session_id: &str, epoch: u64) -> Result<()> {
 }
 
 /// Hand the session back: stop owning it here, snapshot repo, stream tarball.
-pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
+pub(crate) fn run_export(session_id: &str, epoch: u64, require_completion: bool) -> Result<()> {
+    let bytes = export_return_archive(session_id, epoch, require_completion)?;
+    std::io::stdout().write_all(&bytes)?;
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+fn export_return_archive(
+    session_id: &str,
+    epoch: u64,
+    require_completion: bool,
+) -> Result<Vec<u8>> {
+    group::reject_member_return(session_id)?;
+    let _migration_lock = group::lock_sessions(&[session_id.to_owned()])?;
     let lease = storage::read_session_lease(session_id)
         .with_context(|| format!("session {session_id} is not a migrated session on this host"))?;
-    if !lease.is_here() {
+    // A retried export after a dropped connection finds this host already
+    // released at the same epoch. Replay the durable original archive, never
+    // snapshot a checkout which may have been replaced since the first export.
+    let re_export = lease.epoch == epoch
+        && matches!(
+            lease.away_host.as_deref(),
+            Some("returned" | "return-pending" | "returned-complete")
+        );
+    if !re_export && !lease.is_here() {
         bail!("session {session_id} does not live on this host");
     }
-    if epoch <= lease.epoch {
+    if !re_export && epoch <= lease.epoch {
         bail!("stale export epoch {epoch} (host is at {})", lease.epoch);
+    }
+    let archive_path = return_state_path(session_id, epoch, "export.tar")?;
+    if re_export && archive_path.exists() {
+        return Ok(std::fs::read(&archive_path)?);
+    }
+    if lease.away_host.as_deref() == Some("returned-complete") {
+        bail!(
+            "completed cloud return archive is missing; refusing to snapshot a possibly replaced checkout"
+        );
     }
     if storage::streaming_session_ids().contains(&session_id.to_string()) {
         bail!(
@@ -1055,13 +1264,20 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
     }
     // Stop owning first so nothing new lands after the snapshot.
     storage::write_session_lease(&storage::SessionLease {
-        away_host: Some("returned".to_string()),
+        away_host: Some(
+            if require_completion {
+                "return-pending"
+            } else {
+                "returned"
+            }
+            .to_string(),
+        ),
         epoch,
         updated_at: chrono::Utc::now().to_rfc3339(),
         ..lease.clone()
     })?;
     let result = (|| -> Result<Vec<u8>> {
-        let sess = session::Session::load(session_id)?;
+        let sess = session::Session::load(session_id).context("load cloud return session")?;
         let staging = tempfile::Builder::new()
             .prefix("jcode-cloud-export-")
             .tempdir()?;
@@ -1072,7 +1288,30 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             .map(PathBuf::from)
             .or_else(|| lease.repo_root.clone().map(PathBuf::from));
         let repo = match working_dir {
-            Some(dir) => snapshot_repo(&dir, session_id, stage)?,
+            Some(dir) => {
+                let repo = prepare_repo_snapshot(&dir, session_id, stage)
+                    .context("snapshot cloud return repository")?;
+                if let Some(repo) = &repo {
+                    // The laptop sent `last_sync_head` and the snapshot on top
+                    // of it, so it already has that history. Shipping the full
+                    // repository back made `/local` take over a minute. With
+                    // no new commits the base equals HEAD, which the bundle
+                    // must still advertise, so exclude its parent instead.
+                    let base = lease.last_sync_head.as_deref().and_then(|base| {
+                        if base == repo.head {
+                            git(
+                                Path::new(&repo.root),
+                                &["rev-parse", "--verify", "-q", &format!("{base}^")],
+                            )
+                            .ok()
+                        } else {
+                            Some(base.to_string())
+                        }
+                    });
+                    create_repo_bundle(repo, session_id, stage, base.as_deref())?;
+                }
+                repo
+            }
             None => None,
         };
         let manifest = MoveManifest {
@@ -1093,6 +1332,10 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
                     provider: credentials.provider(),
                     label: credentials.label().to_string(),
                 }),
+            auth_accounts: match transferred_accounts_path(session_id)? {
+                path if path.exists() => read_json(&path)?,
+                _ => Vec::new(),
+            },
         };
         std::fs::write(stage.join("session.json"), serde_json::to_vec(&sess)?)?;
         std::fs::write(
@@ -1100,20 +1343,27 @@ pub(crate) fn run_export(session_id: &str, epoch: u64) -> Result<()> {
             serde_json::to_vec_pretty(&manifest)?,
         )?;
         copy_if_exists(&todo_file(session_id)?, &stage.join("todos.json"))?;
+        if require_completion {
+            std::fs::write(stage.join("return-completion-v1"), b"1")?;
+        }
         let tarball = stage.join("return.tar");
         tar_dir(
             stage,
             &tarball,
-            &["manifest.json", "session.json", "todos.json", "repo.bundle"],
+            &[
+                "manifest.json",
+                "session.json",
+                "todos.json",
+                "repo.bundle",
+                "return-completion-v1",
+            ],
         )?;
-        Ok(std::fs::read(&tarball)?)
+        let bytes = std::fs::read(&tarball)?;
+        write_return_state(&archive_path, &bytes)?;
+        Ok(bytes)
     })();
     match result {
-        Ok(bytes) => {
-            std::io::stdout().write_all(&bytes)?;
-            std::io::stdout().flush()?;
-            Ok(())
-        }
+        Ok(bytes) => Ok(bytes),
         Err(error) => {
             // Could not export: keep owning the session here.
             storage::write_session_lease(&lease)?;
@@ -1182,7 +1432,12 @@ pub(crate) fn away_host(session_ref: Option<&str>) -> Result<(String, String)> {
     let lease = storage::read_session_lease(&id).context("session was never moved")?;
     let host = lease
         .away_host
-        .filter(|h| h != "returned")
+        .filter(|h| {
+            !matches!(
+                h.as_str(),
+                "returned" | "return-pending" | "returned-complete"
+            )
+        })
         .context("session lives on this machine")?;
     Ok((id, host))
 }
@@ -1212,10 +1467,8 @@ fn git_env(dir: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Resul
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Build a commit capturing the full working tree state (tracked changes plus
-/// untracked non-ignored files) on top of HEAD without touching the index or
-/// working tree, bundle it with the branch history, and copy allowlisted
-/// ignored files.
+/// Full snapshot plus self-contained bundle (tests and fallbacks).
+#[cfg(test)]
 fn snapshot_repo(
     working_dir: &Path,
     session_id: &str,
@@ -1369,7 +1622,11 @@ fn prepare_repo_snapshot(
     // Temporary index so the user's real index is untouched.
     let index = stage.join("snapshot.index");
     let git_dir = PathBuf::from(git(&root_path, &["rev-parse", "--absolute-git-dir"])?);
-    std::fs::copy(git_dir.join("index"), &index).ok();
+    if let Err(error) = std::fs::copy(git_dir.join("index"), &index)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to copy Git index for working-tree snapshot");
+    }
     let env = [("GIT_INDEX_FILE", index.as_os_str())];
     git_env(&root_path, &["add", "-A", "--", "."], &env)?;
     let tree = git_env(&root_path, &["write-tree"], &env)?;
@@ -1465,7 +1722,7 @@ fn restore_repo(
         // placed or exported here. Anything else is work that never came back.
         let scratch = tempfile::tempdir()?;
         let current = snapshot_worktree_tree(&root, scratch.path())?;
-        let known: Vec<String> = ["base", "outgoing"]
+        let mut known: Vec<String> = ["base", "outgoing"]
             .iter()
             .filter_map(|name| {
                 git(
@@ -1478,8 +1735,82 @@ fn restore_repo(
                 .ok()
             })
             .collect();
+        // A different session that already returned exported this exact state
+        // back, so nothing here is unreturned work. Sessions still living on
+        // this host are excluded: their working files are live.
+        let exported = git(
+            &root,
+            &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
+        )
+        .unwrap_or_default();
+        for refname in exported.lines() {
+            let Some(other) = refname
+                .strip_prefix("refs/jcode-cloud/")
+                .and_then(|rest| rest.strip_suffix("/outgoing"))
+            else {
+                continue;
+            };
+            if other == session_id
+                || storage::read_session_lease(other).is_some_and(|lease| lease.is_here())
+            {
+                continue;
+            }
+            if let Ok(tree) = git(&root, &["rev-parse", &format!("{refname}^{{tree}}")]) {
+                known.push(tree);
+            }
+        }
         let head_tree = git(&root, &["rev-parse", "HEAD^{tree}"]).ok();
-        if !known.contains(&current) && head_tree.as_deref() != Some(current.as_str()) {
+        // An empty checkout holds nothing that could be lost.
+        let empty_tree = git(&root, &["hash-object", "-t", "tree", "/dev/null"]).ok();
+        if !known.contains(&current)
+            && head_tree.as_deref() != Some(current.as_str())
+            && empty_tree.as_deref() != Some(current.as_str())
+        {
+            // Preserve the unreturned state as a durable commit instead of
+            // refusing. Orphaned work from older sessions otherwise blocks
+            // every later move into this checkout. The rescue ref keeps the
+            // full tree (tracked and untracked) recoverable on this host.
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or_default();
+            let rescue_ref = format!("{SNAPSHOT_REF_PREFIX}/rescued/{stamp}-{session_id}");
+            let message = format!("jcode cloud: unreturned work rescued before {session_id}");
+            let mut args = vec!["commit-tree", current.as_str(), "-m", message.as_str()];
+            let parent = git(&root, &["rev-parse", "--verify", "HEAD^{commit}"]).ok();
+            if let Some(parent) = &parent {
+                args.extend(["-p", parent.as_str()]);
+            }
+            let rescued = git_env(&root, &args, &identity_env(&root)).and_then(|commit| {
+                git(&root, &["update-ref", &rescue_ref, &commit])?;
+                Ok(commit)
+            });
+            match rescued {
+                Ok(commit) => eprintln!(
+                    "[cloud receive] preserved unreturned work in {} as {rescue_ref} ({commit})",
+                    repo.root
+                ),
+                Err(error) => {
+                    eprintln!("[cloud receive] could not preserve unreturned work: {error:#}");
+                    refuse_unreturned(&root, repo)?;
+                }
+            }
+        }
+    } else {
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("create {} on the cloud host", repo.root))?;
+        git(&root, &["init", "--quiet"])?;
+        if let Some(url) = &repo.origin_url {
+            let _ = git(&root, &["remote", "add", "origin", url]);
+        }
+    }
+    restore_repo_contents(repo, &root, &bundle_str, &snap_ref, ignored_tar, session_id)
+}
+
+fn refuse_unreturned(root: &Path, repo: &RepoManifest) -> Result<()> {
+    {
+        {
+            let root = root.to_path_buf();
             let owners = git(
                 &root,
                 &["for-each-ref", "--format=%(refname)", SNAPSHOT_REF_PREFIX],
@@ -1505,14 +1836,20 @@ fn restore_repo(
                 repo.root,
             );
         }
-    } else {
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("create {} on the cloud host", repo.root))?;
-        git(&root, &["init", "--quiet"])?;
-        if let Some(url) = &repo.origin_url {
-            let _ = git(&root, &["remote", "add", "origin", url]);
-        }
     }
+}
+
+fn restore_repo_contents(
+    repo: &RepoManifest,
+    root: &Path,
+    bundle_str: &str,
+    snap_ref: &str,
+    ignored_tar: &Path,
+    session_id: &str,
+) -> Result<String> {
+    let root = root.to_path_buf();
+    let bundle_str = bundle_str.to_owned();
+    let snap_ref = snap_ref.to_owned();
     // An incremental bundle may omit the branch advertisement when that
     // branch's tip is already a prerequisite on this host. The snapshot has
     // the complete parent chain we need, so fetch it rather than requiring an
@@ -1740,7 +2077,11 @@ fn merge_back(
 fn snapshot_worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
     let index = scratch.join("ours.index");
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?);
-    std::fs::copy(git_dir.join("index"), &index).ok();
+    if let Err(error) = std::fs::copy(git_dir.join("index"), &index)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("failed to copy Git index for working-tree snapshot");
+    }
     let env = [("GIT_INDEX_FILE", index.as_os_str())];
     git_env(root, &["add", "-A", "--", "."], &env)?;
     git_env(root, &["write-tree"], &env)
@@ -1749,6 +2090,23 @@ fn snapshot_worktree_tree(root: &Path, scratch: &Path) -> Result<String> {
 // ---------------------------------------------------------------------------
 // CLI glue
 // ---------------------------------------------------------------------------
+
+/// Prepare only the destination. In particular, do not read the transcript,
+/// snapshot the repository, copy credentials, or change session ownership.
+/// This may safely run while the source agent is still working.
+fn prepare_host(target: &Target) -> Result<String> {
+    let host = target.resolve_host()?;
+    step(
+        "prepare",
+        "preparing destination while the current turn continues",
+    );
+    target.preflight(&host)?;
+    step(
+        "ready",
+        "destination ready; waiting for a safe turn boundary",
+    );
+    Ok(host)
+}
 
 pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
     use super::args::CloudCommand as C;
@@ -1761,9 +2119,80 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             .filter(|s| !s.trim().is_empty()),
     };
     match command {
+        C::Fork {
+            session,
+            prompt,
+            target,
+            json,
+        } => ops::fork(
+            session.as_deref(),
+            prompt.as_deref(),
+            &target_of(target),
+            json,
+        ),
+        C::Send {
+            session,
+            message,
+            json,
+        } => ops::send(&session, &message, json),
+        C::Status {
+            session,
+            messages,
+            json,
+        } => ops::status(&session, messages, json),
+        C::Wait {
+            session,
+            timeout,
+            messages,
+            json,
+        } => {
+            let result = ops::wait(&session, timeout, messages, json);
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.downcast_ref::<ops::WaitTimeout>().is_some())
+            {
+                std::process::exit(2);
+            }
+            result
+        }
+        C::Logs { session, lines } => ops::logs(&session, lines),
+        C::Problems { limit, json } => diagnostics::problems(limit, json),
+        C::Doctor { target, json } => diagnostics::doctor(&target_of(target), json),
+        C::Inspect {
+            session,
+            messages,
+            log_lines,
+        } => ops::inspect(&session, messages, log_lines),
+        C::RunDetached { session, message } => ops::run_detached(&session, &message),
+        C::GroupProtocol => {
+            println!("{}", serde_json::json!({ "version": 1 }));
+            Ok(())
+        }
+        C::Replace {
+            target,
+            yes,
+            dry_run,
+            json,
+        } => replace::run(&target_of(target), yes, dry_run, json),
+        C::ReplaceReceive { dry_run } => replace::receive(dry_run),
+        C::Env { action } => environment::run_cli(action),
+        C::Ephemeral { action } => super::cloud_ephemeral::run_cli(action),
+        C::Runtime { action } => super::cloud_runtime::run_cli(action),
         C::Sessions { .. } => unreachable!("handled by the cloud sessions dispatcher"),
+        C::Prepare { target, json } => {
+            let host = prepare_host(&target_of(target))?;
+            if json {
+                println!("{}", serde_json::json!({ "host": host }));
+            } else {
+                println!("Cloud host `{host}` is ready. No session was moved.");
+            }
+            Ok(())
+        }
         C::Move {
             session,
+            include_sessions,
+            session_only,
             target,
             allow_active,
             dry_run,
@@ -1771,7 +2200,17 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             json,
         } => {
             let target = target_of(target);
-            let report = run_move(session.as_deref(), &target, allow_active, dry_run)?;
+            let report = if session_only {
+                run_move(session.as_deref(), &target, allow_active, dry_run)?
+            } else {
+                run_migrate(
+                    session.as_deref(),
+                    &target,
+                    allow_active,
+                    dry_run,
+                    &include_sessions,
+                )?
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else if report.dry_run {
@@ -1799,10 +2238,16 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             session,
             target,
             refs_only,
+            keep_local_auth,
             attach,
             json,
         } => {
-            let report = run_return(session.as_deref(), &target_of(target), refs_only)?;
+            let report = run_return(
+                session.as_deref(),
+                &target_of(target),
+                refs_only,
+                keep_local_auth,
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -1873,6 +2318,7 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
         C::Machine { action } => {
             use super::args::CloudMachineAction as A;
             let reply = match action {
+                A::PrepareSsh => return super::cloud_managed::prepare_ssh(),
                 A::Status => super::cloud_managed::status()?,
                 A::Wake => super::cloud_managed::connect(&mut |m| eprintln!("{m}"))?,
                 A::Stop => super::cloud_managed::stop()?,
@@ -1886,19 +2332,33 @@ pub(crate) fn run_cli(command: super::args::CloudCommand) -> Result<()> {
             account,
             export,
         } => run_credentials(&provider, &account, export),
+        C::RouterCredentials => run_router_credentials(),
         C::Receive { .. } => run_receive(),
         C::Activate { session, epoch } => run_activate(&session, epoch),
-        C::Export { session, epoch } => run_export(&session, epoch),
+        C::Export {
+            session,
+            epoch,
+            require_completion,
+        } => run_export(&session, epoch, require_completion),
+        C::CompleteReturn { session, epoch } => complete_return(&session, epoch),
         C::CancelReturn { session, epoch } => {
+            group::reject_member_return(&session)?;
+            let _migration_lock = group::lock_sessions(std::slice::from_ref(&session))?;
             let lease =
                 storage::read_session_lease(&session).context("missing cloud session lease")?;
-            if lease.epoch != epoch || lease.away_host.as_deref() != Some("returned") {
+            if lease.epoch != epoch || lease.away_host.as_deref() != Some("return-pending") {
                 bail!("cloud return can no longer be cancelled");
             }
             let mut sess = session::Session::load(&session)?;
             sess.migration_epoch = epoch;
             let empty = tempfile::tempdir()?;
             install_session(&sess, empty.path())?;
+            // Cancellation is serialized with export. Discard the old snapshot
+            // before restoring ownership so a later return includes new work.
+            let archive = return_state_path(&session, epoch, "export.tar")?;
+            if archive.exists() {
+                std::fs::remove_file(archive)?;
+            }
             storage::write_session_lease(&storage::SessionLease {
                 away_host: None,
                 ..lease
@@ -1917,14 +2377,15 @@ fn exec_attach(
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
     command.arg("--ssh").arg(host);
-    if let Some(binary) = &target.remote_binary {
-        command.arg("--ssh-binary").arg(binary);
-    }
+    command.arg("--ssh-binary").arg(target.remote_binary());
     if let Some(root) = repo_root {
         command.arg("--remote-working-dir").arg(root);
         command.env("JCODE_SSH_LOCAL_WORKING_DIR", root);
     }
     command.arg("--resume").arg(session_id);
+    // The bridge still validates the original local lease and expiry. Attaching
+    // does not create a new grant or extend the time granted by the migration.
+    command.env("JCODE_CLOUD_ENV_SESSION", session_id);
     let error = crate::platform::replace_process(&mut command);
     bail!("failed to attach to `{host}`: {error}")
 }
@@ -1968,6 +2429,9 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
         }
         std::fs::copy(&todos, dest)?;
     }
+    if let Ok(limits) = std::fs::read(stage.join("limits.json")) {
+        crate::usage::import_limits_snapshot(&limits);
+    }
     let memory = stage.join("project_memory.json");
     if memory.is_file()
         && let Some(dir) = sess.working_dir.as_deref()
@@ -1983,141 +2447,9 @@ fn install_session(sess: &session::Session, stage: &Path) -> Result<()> {
     Ok(())
 }
 
-fn append_system_notice(sess: &mut session::Session, text: &str) {
-    append_arrival(sess, &[], "", text);
-}
-
-/// Tool calls in the final assistant message that have no result yet. When
-/// the agent itself runs `/cloud` mid-turn, its own bash call is one of these.
-fn dangling_tool_use_ids(sess: &session::Session) -> Vec<String> {
-    use crate::message::{ContentBlock, Role};
-    let Some(last_assistant) = sess
-        .messages
-        .iter()
-        .rposition(|m| m.role == Role::Assistant)
-    else {
-        return Vec::new();
-    };
-    let answered: std::collections::HashSet<&str> = sess.messages[last_assistant + 1..]
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
-            _ => None,
-        })
-        .collect();
-    sess.messages[last_assistant]
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, .. } if !answered.contains(id.as_str()) => Some(id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn append_arrival(sess: &mut session::Session, dangling: &[String], host: &str, text: &str) {
-    let mut blocks: Vec<crate::message::ContentBlock> = dangling
-        .iter()
-        .map(|id| crate::message::ContentBlock::ToolResult {
-            tool_use_id: id.clone(),
-            content: format!(
-                "jcode cloud move completed. This session now runs on cloud host `{host}`. This tool call was interrupted by the move; rerun it here if its result still matters."
-            ),
-            is_error: None,
-        })
-        .collect();
-    blocks.push(crate::message::ContentBlock::Text {
-        text: format!("<system-reminder>\n{text}\n</system-reminder>"),
-        cache_control: None,
-    });
-    // Tool results must stay provider-visible and paired with their calls.
-    let role = dangling
-        .is_empty()
-        .then_some(session::StoredDisplayRole::System);
-    sess.add_message_with_display_role(crate::message::Role::User, blocks, role);
-}
-
-fn arrival_notice(manifest: &MoveManifest) -> String {
-    let mut lines = vec![format!(
-        "This session was moved from `{}` to cloud host `{}` at {} (migration epoch {}). You are now running on the cloud host. The conversation, todos and project memory came along.",
-        manifest.source_host, manifest.target_host, manifest.created_at, manifest.epoch
-    )];
-    if let Some(repo) = &manifest.repo {
-        lines.push(format!(
-            "The repository is restored at the same path `{}` on branch `{}` at {}{}. Paths in earlier messages are still valid.",
-            repo.root,
-            repo.branch.as_deref().unwrap_or("(detached)"),
-            &repo.head[..repo.head.len().min(12)],
-            if repo.dirty {
-                ", with the same uncommitted and untracked changes"
-            } else {
-                ""
-            }
-        ));
-        if !repo.ignored_files.is_empty() {
-            lines.push(format!(
-                "Ignored files copied: {}.",
-                repo.ignored_files.join(", ")
-            ));
-        }
-        lines.push("Build caches (target/, node_modules/, etc.) did not come along. The first build here will be cold. Install dependencies if a command fails for that reason.".to_string());
-    }
-    if !manifest.toolchain_hints.is_empty() {
-        lines.push(format!(
-            "Toolchain hints from the repo: {}. Check these tools exist on this host before relying on them.",
-            manifest.toolchain_hints.join(", ")
-        ));
-    }
-    if !manifest.not_transferred.is_empty() {
-        lines.push(format!(
-            "These were running locally and did NOT move: {}. Restart them here if you still need them.",
-            manifest.not_transferred.join("; ")
-        ));
-    }
-    if !manifest.mcp_servers.is_empty() {
-        lines.push(format!(
-            "Local MCP servers ({}) are not connected here unless this host configures them too.",
-            manifest.mcp_servers.join(", ")
-        ));
-    }
-    lines.push("There is no local display, desktop, browser or ssh-agent on this host. Keep working on the task exactly where you left off. The user can bring the session back with /local (`jcode cloud return`). Git will merge your work with any local edits.".to_string());
-    lines.join("\n")
-}
-
-fn describe_local_only_state(session_id: &str) -> Vec<String> {
-    let mut items = Vec::new();
-    let dir = std::env::temp_dir().join("jcode-bg-tasks");
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(raw) = std::fs::read(&path) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-                continue;
-            };
-            if value.get("session_id").and_then(|v| v.as_str()) != Some(session_id) {
-                continue;
-            }
-            if value.get("status").and_then(|v| v.as_str()) != Some("running") {
-                continue;
-            }
-            let name = value
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .or_else(|| value.get("tool_name").and_then(|v| v.as_str()))
-                .unwrap_or("task");
-            let id = value.get("task_id").and_then(|v| v.as_str()).unwrap_or("?");
-            items.push(format!("background task {id} ({name})"));
-        }
-    }
-    items
-}
-
+#[path = "cloud_move_arrival.rs"]
+mod arrival;
+use arrival::*;
 fn toolchain_hints(root: Option<&Path>) -> Vec<String> {
     let Some(root) = root else { return Vec::new() };
     [
@@ -2201,8 +2533,10 @@ fn tar_dir(dir: &Path, out: &Path, names: &[&str]) -> Result<()> {
         .filter(|n| dir.join(n).exists())
         .collect();
     let mut command = Command::new("tar");
+    // Gzip: transcripts and memory JSON shrink ~50x, and upload bandwidth, not
+    // latency, dominated the move. GNU tar on the receiver auto-detects it.
     command
-        .arg("-cf")
+        .arg("-czf")
         .arg(out)
         .arg("-C")
         .arg(dir)
@@ -2266,6 +2600,12 @@ pub(crate) fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
 
 /// Replace this client with one attached where the session now lives.
 pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
+    let mut command = handoff_command(handoff)?;
+    let error = crate::platform::replace_process(&mut command);
+    bail!("failed to reattach after cloud move: {error}")
+}
+
+fn handoff_command(handoff: crate::tui::CloudHandoff) -> Result<Command> {
     let exe = std::env::current_exe()?;
     let mut command = Command::new(&exe);
     // Never inherit the previous SSH attach identity.
@@ -2279,11 +2619,20 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
         "JCODE_SSH_LAST_TRANSFER_AT",
         "JCODE_SSH_CONFIG",
         "JCODE_SOCKET",
+        "JCODE_CLOUD_HANDOFF_PREVIEW_SESSION",
+        "JCODE_CLOUD_ENV_SESSION",
+        "JCODE_CLOUD_CONTINUE_MESSAGE",
     ] {
         command.env_remove(var);
     }
+    let just_migrated = matches!(&handoff, crate::tui::CloudHandoff::Remote { .. });
     match handoff {
         crate::tui::CloudHandoff::Remote {
+            session_id,
+            host,
+            working_dir,
+        }
+        | crate::tui::CloudHandoff::RemoteResume {
             session_id,
             host,
             working_dir,
@@ -2297,10 +2646,15 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
                 command.env("JCODE_SSH_LOCAL_WORKING_DIR", &dir);
             }
             command.arg("--resume").arg(&session_id);
-            command.env(
-                "JCODE_CLOUD_CONTINUE_MESSAGE",
-                "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
-            );
+            // Only an explicit handoff may preview the matching local transcript.
+            command.env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", &session_id);
+            if just_migrated {
+                command.env("JCODE_CLOUD_ENV_SESSION", &session_id);
+                command.env(
+                    "JCODE_CLOUD_CONTINUE_MESSAGE",
+                    "[jcode cloud] This session just moved to the cloud host. Read the migration notice above, verify the environment you need is here, then continue the task exactly where you left off.",
+                );
+            }
         }
         crate::tui::CloudHandoff::Local { session_id } => {
             if let Some(root) = storage::read_session_lease(&session_id).and_then(|l| l.repo_root) {
@@ -2309,6 +2663,55 @@ pub(crate) fn exec_handoff(handoff: crate::tui::CloudHandoff) -> Result<()> {
             command.arg("--resume").arg(&session_id);
         }
     }
-    let error = crate::platform::replace_process(&mut command);
-    bail!("failed to reattach after cloud move: {error}")
+    Ok(command)
+}
+
+#[cfg(test)]
+mod resume_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn cloud_resume_handoff_does_not_continue_or_grant_local_resources() {
+        let command = handoff_command(crate::tui::CloudHandoff::RemoteResume {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: Some("/workspace/project".into()),
+        })
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--ssh", "dev-cloud"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "session_cloud_123"])
+        );
+        for name in [
+            "JCODE_CLOUD_CONTINUE_MESSAGE",
+            "JCODE_CLOUD_ENV_SESSION",
+            "JCODE_SOCKET",
+        ] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_migration_handoff_still_continues_the_moved_task() {
+        let command = handoff_command(crate::tui::CloudHandoff::Remote {
+            session_id: "session_cloud_123".into(),
+            host: "dev-cloud".into(),
+            working_dir: None,
+        })
+        .unwrap();
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "JCODE_CLOUD_CONTINUE_MESSAGE" && value.is_some())
+        );
+    }
 }

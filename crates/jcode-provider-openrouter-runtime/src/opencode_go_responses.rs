@@ -182,8 +182,11 @@ struct ToolState {
 
 pub(crate) struct ResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+    // Retain raw bytes until a complete SSE frame arrives: transport chunks
+    // can split a UTF-8 character at any byte.
+    buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
+    resolved_model: Option<String>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
     ended: bool,
@@ -195,8 +198,9 @@ impl ResponsesStream {
     ) -> Self {
         Self {
             inner: Box::pin(stream),
-            buffer: String::new(),
+            buffer: Vec::new(),
             pending: Vec::new(),
+            resolved_model: None,
             tools: HashMap::new(),
             thinking: false,
             ended: false,
@@ -207,6 +211,18 @@ impl ResponsesStream {
         let Ok(value) = serde_json::from_str::<Value>(data) else {
             return;
         };
+        if let Some(model) = value
+            .get("response")
+            .and_then(|response| response.get("model"))
+            .and_then(Value::as_str)
+            .filter(|model| !model.trim().is_empty())
+            && self.resolved_model.as_deref() != Some(model)
+        {
+            self.resolved_model = Some(model.to_owned());
+            self.pending.push(StreamEvent::ResolvedModel {
+                model: model.to_owned(),
+            });
+        }
         let kind = value
             .get("type")
             .and_then(Value::as_str)
@@ -377,20 +393,25 @@ impl ResponsesStream {
     }
 
     fn next_event(&mut self) -> Option<StreamEvent> {
-        if let Some(event) = self.pending.first().cloned() {
-            self.pending.remove(0);
-            return Some(event);
+        if !self.pending.is_empty() {
+            return Some(self.pending.remove(0));
         }
         while let Some((pos, separator_len)) = [
-            self.buffer.find("\n\n").map(|pos| (pos, 2)),
-            self.buffer.find("\r\n\r\n").map(|pos| (pos, 4)),
+            self.buffer
+                .windows(2)
+                .position(|bytes| bytes == b"\n\n")
+                .map(|pos| (pos, 2)),
+            self.buffer
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .map(|pos| (pos, 4)),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|(pos, _)| *pos)
         {
-            let raw = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + separator_len..].to_string();
+            let raw = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
+            self.buffer.drain(..pos + separator_len);
             let data = raw
                 .lines()
                 .filter_map(|line| line.strip_prefix("data:"))
@@ -401,9 +422,8 @@ impl ResponsesStream {
                 continue;
             }
             self.parse_event(&data);
-            if let Some(event) = self.pending.first().cloned() {
-                self.pending.remove(0);
-                return Some(event);
+            if !self.pending.is_empty() {
+                return Some(self.pending.remove(0));
             }
         }
         None
@@ -463,27 +483,25 @@ impl Stream for ResponsesStream {
             }
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(error))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {error}"))));
                 }
                 Poll::Ready(None) => {
-                    if !self.buffer.trim().is_empty() {
+                    if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
-                        self.parse_event(tail.trim());
-                        if let Some(event) = self.pending.first().cloned() {
-                            self.pending.remove(0);
-                            return Poll::Ready(Some(Ok(event)));
+                        self.parse_event(String::from_utf8_lossy(&tail).trim());
+                        if !self.pending.is_empty() {
+                            return Poll::Ready(Some(Ok(self.pending.remove(0))));
                         }
                     }
                     if !self.ended {
                         if self.thinking {
                             self.pending.push(StreamEvent::ThinkingEnd);
                             self.thinking = false;
-                            if let Some(event) = self.pending.first().cloned() {
-                                self.pending.remove(0);
-                                return Poll::Ready(Some(Ok(event)));
+                            if !self.pending.is_empty() {
+                                return Poll::Ready(Some(Ok(self.pending.remove(0))));
                             }
                         }
                         self.ended = true;
@@ -501,8 +519,53 @@ impl Stream for ResponsesStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_model_metadata_dedupes_and_resets_per_attempt() {
+        for _attempt in 0..2 {
+            let mut stream = super::ResponsesStream::new(futures::stream::empty());
+            for data in [
+                r#"{"type":"response.created","model":"requested-alias","response":{}}"#,
+                r#"{"type":"response.created","response":{"model":" "}}"#,
+                r#"{"type":"response.created","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"actual-snapshot"}}"#,
+                r#"{"type":"response.in_progress","response":{"model":"other-snapshot"}}"#,
+            ] {
+                stream.parse_event(data);
+            }
+            let models = stream
+                .pending
+                .iter()
+                .filter_map(|event| match event {
+                    super::StreamEvent::ResolvedModel { model } => Some(model.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(models, ["actual-snapshot", "other-snapshot"]);
+        }
+    }
+
     use super::*;
     use futures::StreamExt;
+
+    #[test]
+    fn queued_payload_is_moved_without_reallocating_and_preserves_order() {
+        let mut stream = ResponsesStream::new(futures::stream::empty());
+        let text = "large queued tool input".repeat(65536);
+        let pointer = text.as_ptr();
+        let capacity = text.capacity();
+        stream.pending.push(StreamEvent::ToolInputDelta(text));
+        stream.pending.push(StreamEvent::ToolUseEnd);
+        match stream.next_event().expect("queued payload") {
+            StreamEvent::ToolInputDelta(text) => {
+                assert_eq!(text.as_ptr(), pointer);
+                assert_eq!(text.capacity(), capacity);
+                assert_eq!(text, "large queued tool input".repeat(65536));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert!(matches!(stream.next_event(), Some(StreamEvent::ToolUseEnd)));
+        assert!(stream.next_event().is_none());
+    }
 
     #[test]
     fn only_open_code_go_responses_models_use_responses() {
@@ -636,6 +699,68 @@ mod tests {
             "Use only Jcode-approved tools in /work/project"
         );
         assert_eq!(request["model"], "muse-wonder-1.0");
+    }
+
+    #[test]
+    fn responses_stream_preserves_unicode_at_every_byte_split() {
+        let text = "café 中文 🦀 e\u{301}";
+        let arguments = serde_json::json!({"query": text}).to_string();
+        let events = [
+            serde_json::json!({"type": "response.output_text.delta", "delta": text}),
+            serde_json::json!({"type": "response.output_item.added", "item": {
+                "type": "function_call", "id": "item_1", "call_id": "call_1", "name": "search"
+            }}),
+            serde_json::json!({"type": "response.function_call_arguments.delta", "item_id": "item_1", "delta": arguments}),
+            serde_json::json!({"type": "response.function_call_arguments.done", "item_id": "item_1"}),
+            serde_json::json!({"type": "response.completed", "response": {}}),
+        ];
+        for newline in ["\n", "\r\n"] {
+            let payload = events
+                .iter()
+                .map(|event| format!("data: {event}{newline}{newline}"))
+                .collect::<String>()
+                .into_bytes();
+            // Include empty chunks at either end, every two-chunk split, and
+            // one-byte chunks that split all multibyte characters repeatedly.
+            let chunkings = (0..=payload.len())
+                .map(|split| {
+                    vec![
+                        Bytes::copy_from_slice(&payload[..split]),
+                        Bytes::copy_from_slice(&payload[split..]),
+                    ]
+                })
+                .chain(std::iter::once(
+                    payload
+                        .iter()
+                        .map(|byte| Bytes::copy_from_slice(&[*byte]))
+                        .collect(),
+                ));
+            for (split, chunks) in chunkings.enumerate() {
+                let actual = futures::executor::block_on(
+                    ResponsesStream::new(futures::stream::iter(chunks.into_iter().map(Ok)))
+                        .collect::<Vec<_>>(),
+                )
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()
+                .expect("response events");
+                assert_eq!(actual.len(), 5, "newline {newline:?}, split {split}");
+                assert!(
+                    matches!(&actual[0], StreamEvent::TextDelta(value) if value == text),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[0]
+                );
+                assert!(
+                    matches!(&actual[1], StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "search")
+                );
+                assert!(
+                    matches!(&actual[2], StreamEvent::ToolInputDelta(value) if value == &arguments),
+                    "newline {newline:?}, split {split}: {:?}",
+                    actual[2]
+                );
+                assert!(matches!(actual[3], StreamEvent::ToolUseEnd));
+                assert!(matches!(actual[4], StreamEvent::MessageEnd { .. }));
+            }
+        }
     }
 
     #[test]

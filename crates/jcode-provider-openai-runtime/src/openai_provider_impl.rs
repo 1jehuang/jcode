@@ -1,8 +1,35 @@
 use super::openai_stream_cancellation::while_consumer_open;
 use super::openai_stream_runtime::{
-    stream_response, stream_response_websocket_persistent, try_persistent_ws_continuation,
+    recover_opaque_ws_rejection, stream_response, stream_response_websocket_persistent,
+    try_persistent_ws_continuation,
 };
 use super::*;
+
+#[path = "openai_catalog_prefetch.rs"]
+mod catalog_prefetch;
+
+/// Historical canonical selection, sorted exactly like serde_json's object map.
+fn canonical_request_fields(request: &Value) -> [(&'static str, &Value); 12] {
+    [
+        "context_management",
+        "include",
+        "input",
+        "instructions",
+        "model",
+        "parallel_tool_calls",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "service_tier",
+        "tool_choice",
+        "tools",
+    ]
+    .map(|key| (key, request.get(key).unwrap_or(&Value::Null)))
+}
+
+#[cfg(test)]
+#[path = "openai_canonical_logging_tests.rs"]
+mod canonical_logging_tests;
 
 /// Whether a model catalog fetch error is an auth rejection (401/403) that a
 /// token force-refresh may fix, as opposed to a network/server failure.
@@ -122,63 +149,7 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prewarm(&self, tools: &[ToolDefinition], system: &str) {
-        if self.oauth_account_label().is_some_and(|label| {
-            jcode_base::auth::codex::load_credentials_for_account(&label).is_err()
-        }) {
-            return;
-        }
-        if self.is_browser_only()
-            || is_chatgpt_web_model(&self.model())
-            || std::env::var("JCODE_OPENAI_PREWARM").is_ok_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off"
-                )
-            })
-        {
-            return;
-        }
-        let mode = self
-            .transport_mode
-            .try_read()
-            .map(|mode| *mode)
-            .unwrap_or(OpenAITransportMode::HTTPS);
-        if matches!(mode, OpenAITransportMode::HTTPS) {
-            return;
-        }
-        // An existing response chain is more useful than a speculative prefix.
-        // Never contend with active generation or keepalive for its socket.
-        match self.persistent_ws.try_lock() {
-            Ok(guard) if guard.is_none() => {}
-            _ => return,
-        }
-        // Unlike foreground completion, preparation must not wait for model
-        // discovery or OAuth refresh. A changed/fallback model simply makes
-        // this speculative request incompatible at adoption time.
-        let model = self.model();
-        let model = model.strip_suffix("[1m]").unwrap_or(&model);
-        let Ok(credentials) = self.credentials.try_read() else {
-            return;
-        };
-        let request = self.response_request_for_model(
-            model,
-            &[],
-            tools,
-            system,
-            Self::is_chatgpt_mode(&credentials),
-        );
-        drop(credentials);
-        if matches!(mode, OpenAITransportMode::Auto)
-            && websocket_cooldown_remaining(
-                &self.websocket_cooldowns,
-                &openai_request_model(&request),
-            )
-            .await
-            .is_some()
-        {
-            return;
-        }
-        self.prewarm.start(Arc::clone(&self.credentials), &request);
+        self.prewarm_request(tools, system).await;
     }
 
     async fn complete(
@@ -212,7 +183,10 @@ impl Provider for OpenAIProvider {
             }
         }
         let input_item_count = input.len();
-        let request = self.response_request(&input, tools, system).await;
+        let request = self.response_request(input, tools, system).await;
+        let input = request["input"]
+            .as_array()
+            .context("OpenAI request input is not an array")?;
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
@@ -250,40 +224,25 @@ impl Provider for OpenAIProvider {
         } else {
             self.prewarm.clear();
         }
-        let request_tools = request
-            .get("tools")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([]));
-        let request_instructions = request.get("instructions").cloned();
+        let empty_tools = serde_json::json!([]);
+        let request_tools = request.get("tools").unwrap_or(&empty_tools);
+        let request_instructions = request.get("instructions");
         let request_tool_count = request_tools
             .as_array()
             .map(|tools| tools.len())
             .unwrap_or(tools.len());
-        let canonical_payload = serde_json::json!({
-            "model": request.get("model"),
-            "instructions": request.get("instructions"),
-            "input": &input,
-            "tools": request.get("tools"),
-            "tool_choice": request.get("tool_choice"),
-            "parallel_tool_calls": request.get("parallel_tool_calls"),
-            "reasoning": request.get("reasoning"),
-            "context_management": request.get("context_management"),
-            "include": request.get("include"),
-            "service_tier": request.get("service_tier"),
-            "prompt_cache_key": request.get("prompt_cache_key"),
-            "prompt_cache_retention": request.get("prompt_cache_retention"),
-        });
+        let canonical_fields = canonical_request_fields(&request);
         let prompt_cache_key_hash = request
             .get("prompt_cache_key")
             .map(jcode_provider_core::fingerprint::stable_hash_json);
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
+        jcode_provider_core::fingerprint::log_provider_canonical_input_fields(
             "openai",
             &model_id,
             "openai_responses_full",
-            &canonical_payload,
-            &input,
-            request_instructions.as_ref(),
-            Some(&request_tools),
+            &canonical_fields,
+            input,
+            request_instructions,
+            Some(request_tools),
             Some(request_tool_count),
             &[
                 (
@@ -383,6 +342,20 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
+                let Some(input) = request["input"].as_array() else {
+                    if tx
+                        .send(Err(anyhow::anyhow!("OpenAI request input is not an array")))
+                        .await
+                        .is_err()
+                    {
+                        jcode_base::logging::debug(
+                            "OpenAI stream consumer closed before request validation error could be delivered",
+                        );
+                    }
+                    return;
+                };
+                let mut retry_diagnostics =
+                    super::openai_retry_diagnostics::OpenAIRetryDiagnostics::default();
                 // Attempt persistent WebSocket continuation first
                 if use_websocket_transport {
                     // Track output: a continuation that streams partial output
@@ -396,7 +369,7 @@ impl Provider for OpenAIProvider {
                             &persistent_ws,
                             &credentials,
                             &request,
-                            &input,
+                            input,
                             input_item_count,
                             &attempt_tx,
                         ),
@@ -409,6 +382,16 @@ impl Provider for OpenAIProvider {
                     let saw_output = attempt_guard.finish().await;
 
                     match continuation_result {
+                        PersistentWsResult::OpaqueWsRejection => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                &request,
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         PersistentWsResult::TerminalError => return,
                         PersistentWsResult::Success => {
                             log_openai_stream_lifecycle(
@@ -465,6 +448,9 @@ impl Provider for OpenAIProvider {
                                         max: MAX_RETRIES,
                                     }))
                                     .await;
+                            }
+                            if let Some(notice) = retry_diagnostics.record(&err) {
+                                emit_status_detail(&tx, notice).await;
                             }
                         }
                     }
@@ -580,7 +566,7 @@ impl Provider for OpenAIProvider {
                         stream_response_websocket_persistent(
                             Arc::clone(&credentials),
                             account_label.clone(),
-                            request.clone(),
+                            &request,
                             attempt_tx,
                             Arc::clone(&persistent_ws),
                             input_item_count,
@@ -604,7 +590,7 @@ impl Provider for OpenAIProvider {
                             attempt_client,
                             Arc::clone(&credentials),
                             account_label.clone(),
-                            request.clone(),
+                            &request,
                             if force_https_for_request {
                                 let reason = last_error
                                     .as_ref()
@@ -633,6 +619,16 @@ impl Provider for OpenAIProvider {
                     }
 
                     match result {
+                        Err(OpenAIStreamFailure::OpaqueWsRejection) => {
+                            recover_opaque_ws_rejection(
+                                Arc::clone(&credentials),
+                                account_label.clone(),
+                                &request,
+                                &tx,
+                            )
+                            .await;
+                            return;
+                        }
                         Ok(()) => {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Info,
@@ -692,6 +688,9 @@ impl Provider for OpenAIProvider {
                                     .await;
                             }
                             force_https_for_request = true;
+                            if let Some(notice) = retry_diagnostics.record(&format!("{error:#}")) {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             skip_backoff_once = true;
                             if matches!(transport_mode, OpenAITransportMode::Auto) {
                                 let (streak, cooldown) = record_websocket_fallback(
@@ -717,6 +716,7 @@ impl Provider for OpenAIProvider {
                             continue;
                         }
                         Err(OpenAIStreamFailure::Other(error)) => {
+                            let overload_notice = retry_diagnostics.record(&format!("{error:#}"));
                             let elapsed_ms = attempt_started.elapsed().as_millis();
                             // Full anyhow chain ({:#}) so a send-level transport
                             // cause wrapped behind `.context("Failed to send
@@ -748,6 +748,11 @@ impl Provider for OpenAIProvider {
                                         ("elapsed_ms", elapsed_ms.to_string()),
                                     ],
                                 );
+                                // A durable UI notice is a transcript fence. It
+                                // must follow rollback of this failed attempt.
+                                if let Some(notice) = overload_notice {
+                                    emit_status_detail(&tx, notice).await;
+                                }
                                 jcode_base::logging::info(&format!(
                                     "Transient error after {}ms, will retry: {}",
                                     elapsed_ms, error
@@ -771,6 +776,9 @@ impl Provider for OpenAIProvider {
                                     ("elapsed_ms", elapsed_ms.to_string()),
                                 ],
                             );
+                            if let Some(notice) = overload_notice {
+                                emit_status_detail(&tx, notice).await;
+                            }
                             // A tool schema OpenAI rejects fails every turn, not
                             // just this one, and one bad construct invalidates
                             // the whole catalog (#446, #543, #687, #711, #713).
@@ -792,7 +800,7 @@ impl Provider for OpenAIProvider {
                                 }
                                 None => error,
                             };
-                            let _ = tx.send(Err(error)).await;
+                            let _ = tx.send(Err(retry_diagnostics.annotate(error))).await;
                             return;
                         }
                     }
@@ -810,11 +818,11 @@ impl Provider for OpenAIProvider {
                         ],
                     );
                     let _ = tx
-                        .send(Err(anyhow::anyhow!(
+                        .send(Err(retry_diagnostics.annotate(anyhow::anyhow!(
                             "Failed after {} retries: {}",
                             MAX_RETRIES,
                             e
-                        )))
+                        ))))
                         .await;
                 }
             };
@@ -932,97 +940,7 @@ impl Provider for OpenAIProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.is_browser_only() {
-            return Ok(());
-        }
-        // The loaded credential's *shape* is authoritative for which catalog
-        // endpoint to hit, not the requested credential mode. In Auto mode a
-        // user with only an OPENAI_API_KEY loads an API-key-shaped credential
-        // while the mode stays Auto; routing by mode would send that platform
-        // key to the ChatGPT/Codex endpoint and get a 401.
-        let account_label = self.refresh_account_label();
-        let (access_token, is_chatgpt_mode, credential_identity, scope) = {
-            let creds = self.credentials.read().await;
-            (
-                creds.access_token.clone(),
-                Self::is_chatgpt_mode(&creds),
-                Self::catalog_credential_identity(&creds),
-                self.selected_catalog_scope_for(&creds),
-            )
-        };
-        let catalog = if is_chatgpt_mode {
-            let access_token =
-                openai_access_token(self.refresh_account_label(), &self.credentials).await?;
-            match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
-                Ok(catalog) => catalog,
-                // The server can reject a token that still looks fresh by its
-                // local expiry (revoked/rotated). The chat path recovers by
-                // force-refreshing; without the same recovery here the model
-                // catalog silently stays stale and newly released models never
-                // show up until the user happens to re-login (observed as
-                // days of bootstrap 401s in the logs).
-                Err(err) if catalog_error_is_auth_rejection(&err) => {
-                    let refresh_token = {
-                        let creds = self.credentials.read().await;
-                        creds.refresh_token.clone()
-                    };
-                    if refresh_token.is_empty() {
-                        return Err(err);
-                    }
-                    jcode_base::logging::info(
-                        "OpenAI model catalog fetch rejected the access token; force-refreshing and retrying",
-                    );
-                    let refreshed = super::openai_stream_runtime::force_refresh_openai_token(
-                        &self.credentials,
-                        &refresh_token,
-                        account_label.clone(),
-                    )
-                    .await
-                    .map_err(|refresh_err| {
-                        err.context(format!(
-                            "token force-refresh after catalog 401/403 also failed: {refresh_err:#}"
-                        ))
-                    })?;
-                    jcode_base::provider::fetch_openai_model_catalog(&refreshed).await?
-                }
-                Err(err) => return Err(err),
-            }
-        } else {
-            jcode_base::provider::fetch_openai_api_key_model_catalog(&access_token).await?
-        };
-        let current_credential_identity = {
-            let credentials = self.credentials.read().await;
-            Self::catalog_credential_identity(&credentials)
-        };
-        if current_credential_identity != credential_identity
-            || self.refresh_account_label() != account_label
-        {
-            jcode_base::logging::info(
-                "Discarding OpenAI model catalog fetched for credentials that are no longer active",
-            );
-            return Ok(());
-        }
-        match self.model_reasoning_efforts.write() {
-            Ok(mut efforts) => *efforts = catalog.reasoning_efforts.clone(),
-            Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
-        }
-        *self
-            .model_service_tiers
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = catalog.service_tiers.clone();
-        self.warn_unsupported_service_tier();
-        self.revalidate_reasoning_effort();
-        jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
-        }
-        if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_account_models_for_scope(
-                &scope,
-                catalog.available_models,
-            );
-        }
-        Ok(())
+        self.prefetch_model_catalog().await
     }
 
     fn reasoning_effort(&self) -> Option<String> {

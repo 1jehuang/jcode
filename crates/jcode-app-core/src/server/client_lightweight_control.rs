@@ -272,7 +272,9 @@ pub(super) async fn handle_lightweight_control_request(
     if let Request::UpgradeRuntime { id, ref candidate } = request {
         return super::runtime_upgrade::handle(id, candidate, &writer, sessions).await;
     }
-    let _request_activity = crate::runtime_activity::global().try_enter()?;
+    // Ping only snapshots connection presence. Reserving mutation admission here
+    // races the next group-transfer RPC even after the caller receives Pong.
+    // It must also remain available while a transfer owns exclusive admission.
     if let Request::Ping { id } = request {
         let event = super::session_connections::connection_presence_pong(
             id,
@@ -284,6 +286,14 @@ pub(super) async fn handle_lightweight_control_request(
         return Ok(());
     }
 
+    // Comm requests name their owning session. Scope admission to it so a
+    // long-lived request (await_members can hold for an hour) only blocks
+    // transfers of that session, not every /cloud move on the runtime.
+    let gate = crate::runtime_activity::global();
+    let _request_activity = match comm_request_session_id(&request) {
+        Some(session) if !session.trim().is_empty() => gate.try_enter_session(session)?,
+        _ => gate.try_enter()?,
+    };
     write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
@@ -330,6 +340,19 @@ pub(super) async fn handle_lightweight_control_request(
             super::provider_control::handle_invalidate_anthropic_usage(
                 id,
                 account_label,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::NotifyAuthChanged {
+            id, provider, auth, ..
+        } => {
+            super::provider_control::handle_unbound_notify_auth_changed(
+                id,
+                provider,
+                auth,
+                provider_template,
+                sessions,
                 &client_event_tx,
             )
             .await;
@@ -619,6 +642,7 @@ pub(super) async fn handle_lightweight_control_request(
         Request::CommSpawn {
             id,
             session_id: req_session_id,
+            lane_id,
             working_dir,
             initial_message,
             request_nonce,
@@ -634,6 +658,7 @@ pub(super) async fn handle_lightweight_control_request(
             handle_comm_spawn(
                 id,
                 req_session_id,
+                lane_id,
                 working_dir,
                 initial_message,
                 request_nonce,
@@ -1064,7 +1089,7 @@ mod lightweight_swarm_member_tests {
 
     fn empty_state() -> (SessionAgents, Members, Swarms) {
         (
-            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(crate::server::session_manager::SessionManager::new()),
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )

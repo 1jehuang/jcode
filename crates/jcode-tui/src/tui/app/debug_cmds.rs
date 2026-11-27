@@ -1,95 +1,10 @@
+#[path = "debug_dm_fixture.rs"]
+mod dm_fixture;
+#[path = "debug_picker_state.rs"]
+mod picker_state;
 use super::*;
 
 impl App {
-    pub(in crate::tui::app) fn debug_picker_state_json(
-        &self,
-        visible_limit: Option<usize>,
-    ) -> String {
-        let Some(picker) = self.inline_interactive_state.as_ref() else {
-            return serde_json::json!({
-                "open": false,
-                "input": self.input,
-                "cursor_pos": self.cursor_pos,
-            })
-            .to_string();
-        };
-
-        let filtered_count = picker.filtered.len();
-        let total_count = picker.entries.len();
-        let list_height = visible_limit.unwrap_or_else(|| filtered_count.min(40));
-        let selected = picker.selected.min(filtered_count.saturating_sub(1));
-        let start = if filtered_count == 0 || list_height == 0 {
-            0
-        } else {
-            let half = list_height / 2;
-            if selected <= half {
-                0
-            } else if selected + list_height - half > filtered_count {
-                filtered_count.saturating_sub(list_height)
-            } else {
-                selected - half
-            }
-        };
-        let end = if list_height == 0 {
-            start
-        } else {
-            (start + list_height).min(filtered_count)
-        };
-
-        let rows: Vec<serde_json::Value> = picker
-            .filtered
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .filter_map(|(visible_index, entry_index)| {
-                let entry = picker.entries.get(*entry_index)?;
-                let route = entry.active_option();
-                let filter_text = picker.filter_text(entry);
-                Some(serde_json::json!({
-                    "visible_index": visible_index,
-                    "entry_index": entry_index,
-                    "selected": visible_index == selected,
-                    "name": entry.name,
-                    "provider": route.map(|r| r.provider.as_str()).unwrap_or(""),
-                    "api_method": route.map(|r| r.api_method.as_str()).unwrap_or(""),
-                    "available": route.map(|r| r.available).unwrap_or(false),
-                    "detail": route.map(|r| r.detail.as_str()).unwrap_or(""),
-                    "filter_text": filter_text,
-                    "fuzzy_score": if picker.filter.is_empty() {
-                        None
-                    } else {
-                        Self::picker_fuzzy_score(&picker.filter, &filter_text)
-                    },
-                    "recommended": entry.recommended,
-                    "current": entry.is_current,
-                    "default": entry.is_default,
-                    "old": entry.old,
-                    "created_date": entry.created_date,
-                }))
-            })
-            .collect();
-
-        serde_json::to_string_pretty(&serde_json::json!({
-            "open": true,
-            "kind": format!("{:?}", picker.kind),
-            "preview": picker.preview,
-            "input": self.input,
-            "cursor_pos": self.cursor_pos,
-            "filter": picker.filter,
-            "selected": picker.selected,
-            "column": picker.column,
-            "total_count": total_count,
-            "filtered_count": filtered_count,
-            "visible_start": start,
-            "visible_end": end,
-            "visible_count": rows.len(),
-            "visible_limit": visible_limit,
-            "rows": rows,
-        }))
-        .unwrap_or_else(|_| "{}".to_string())
-    }
-
     pub(in crate::tui::app) fn handle_debug_command(&mut self, cmd: &str) -> String {
         let cmd = cmd.trim();
         if cmd == "hibernate" {
@@ -201,6 +116,12 @@ impl App {
             // Return current state as JSON for easier parsing
             serde_json::json!({
                 "processing": self.is_processing,
+                "processing_status": format!("{:?}", self.status),
+                "current_message_id": self.current_message_id,
+                "pending_soft_interrupts": self.pending_soft_interrupts.len(),
+                "pending_soft_interrupt_requests": self.pending_soft_interrupt_requests.len(),
+                "pending_queued_dispatch": self.pending_queued_dispatch,
+                "remote_session_id": self.remote_session_id,
                 "terminal_title": self.terminal_title.borrow().last_sent,
                 "session_edit_lines": self.display_edit_line_counts,
                 "messages": self.messages.len(),
@@ -296,7 +217,7 @@ impl App {
             let image_id = crate::tui::ui::inline_image_expand_target_from_screen(col, row);
             let body_id =
                 crate::tui::ui::inline_image_body_target_from_screen(col, row, self.centered);
-            let link = crate::tui::ui::link_target_from_screen(col, row);
+            let link = crate::tui::ui::link_target_from_screen_with_state(col, row, self);
             serde_json::json!({
                 "col": col,
                 "row": row,
@@ -322,6 +243,7 @@ impl App {
                 label: "fixture".to_string(),
                 expected_state: "fixture".to_string(),
                 redirect_uri: "http://localhost:1455/auth/callback".to_string(),
+                device_fallback_cancelled: None,
             });
             self.follow_chat_bottom();
             serde_json::json!({"ok": true, "fixture": "login-progress"}).to_string()
@@ -339,6 +261,8 @@ impl App {
                 provider: "openai".to_string(),
             });
             serde_json::json!({"ok": true, "fixture": "login-progress-exchange"}).to_string()
+        } else if cmd == "dm-fixture" {
+            self.show_debug_dm_fixture()
         } else if cmd == "expand-badge-fixture" {
             let old_string = (0..24)
                 .map(|idx| format!("old fixture line {idx}\n"))
@@ -447,6 +371,17 @@ impl App {
                 self.debug_force_inline_gallery = false;
                 self.remote_swarm_members.clear();
                 "OK: inline swarm gallery cleared".to_string()
+            } else if raw.starts_with('[') {
+                match serde_json::from_str::<Vec<crate::protocol::SwarmMemberStatus>>(raw) {
+                    Ok(members) => {
+                        let n = members.len();
+                        self.remote_swarm_members = members;
+                        self.debug_force_inline_gallery = true;
+                        self.refresh_pinned_todos_now();
+                        format!("OK: injected {n} explicit swarm members; gallery forced active")
+                    }
+                    Err(error) => format!("Invalid swarm member fixture: {error}"),
+                }
             } else {
                 let n: usize = raw.parse().unwrap_or(3);
                 let statuses = ["running", "thinking", "ready", "completed", "blocked"];
@@ -533,6 +468,7 @@ impl App {
                             effort: Some("high".into()),
                             elapsed_secs: Some(18),
                             activity_age_secs: None,
+                            ..Default::default()
                         },
                     })
                     .collect();
@@ -614,6 +550,186 @@ impl App {
                 })
                 .collect();
             serde_json::to_string_pretty(&msgs).unwrap_or_else(|_| "[]".to_string())
+        } else if cmd == "cells" || cmd.starts_with("cells:") {
+            let (default_w, default_h) = crate::tui::visual_debug::latest_frame()
+                .map(|f| f.terminal_size)
+                .unwrap_or((100, 36));
+            let spec = cmd.strip_prefix("cells:").unwrap_or("").trim();
+            let (synthetic, size_spec) = if let Some(rest) = spec.strip_prefix("synthetic:") {
+                (true, rest.trim())
+            } else if spec == "synthetic" {
+                (true, "")
+            } else {
+                (false, spec)
+            };
+            let (w, h) = size_spec
+                .split_once('x')
+                .and_then(|(ws, hs)| {
+                    let w = ws.parse::<u16>().ok()?.clamp(20, 300);
+                    let h = hs.parse::<u16>().ok()?.clamp(8, 120);
+                    Some((w, h))
+                })
+                .unwrap_or((default_w.clamp(20, 300), default_h.clamp(8, 120)));
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = match ratatui::Terminal::new(backend) {
+                Ok(t) => t,
+                Err(e) => return format!("cells error: {}", e),
+            };
+            let draw_result = if synthetic {
+                let saved_messages = std::mem::replace(
+                    &mut self.display_messages,
+                    vec![
+                        DisplayMessage::user(
+                            "Review the workspace setup and check the active configuration.",
+                        ),
+                        DisplayMessage::assistant("All checks passed. Ready for the next command."),
+                    ],
+                );
+                let saved_user_count = std::mem::replace(&mut self.display_user_message_count, 1);
+                let saved_scroll = std::mem::replace(&mut self.scroll_offset, 0);
+                let saved_auto_scroll = std::mem::replace(&mut self.auto_scroll_paused, false);
+                let saved_processing = std::mem::replace(&mut self.is_processing, false);
+                let saved_streaming = std::mem::take(&mut self.streaming.streaming_text);
+                let saved_queued = std::mem::take(&mut self.queued_messages);
+                let saved_interleave = self.interleave_message.take();
+                let saved_soft = std::mem::take(&mut self.pending_soft_interrupts);
+                let saved_input = std::mem::take(&mut self.input);
+                let saved_cursor = std::mem::replace(&mut self.cursor_pos, 0);
+                let saved_status = std::mem::replace(&mut self.status, ProcessingStatus::Idle);
+                let saved_notice = self.status_notice.take();
+                self.bump_display_messages_version_no_stats();
+
+                let res = terminal.draw(|frame| crate::tui::ui::draw(frame, self));
+
+                self.display_messages = saved_messages;
+                self.display_user_message_count = saved_user_count;
+                self.scroll_offset = saved_scroll;
+                self.auto_scroll_paused = saved_auto_scroll;
+                self.is_processing = saved_processing;
+                self.streaming.streaming_text = saved_streaming;
+                self.queued_messages = saved_queued;
+                self.interleave_message = saved_interleave;
+                self.pending_soft_interrupts = saved_soft;
+                self.input = saved_input;
+                self.cursor_pos = saved_cursor;
+                self.status = saved_status;
+                self.status_notice = saved_notice;
+                self.bump_display_messages_version_no_stats();
+                res
+            } else {
+                terminal.draw(|frame| crate::tui::ui::draw(frame, self))
+            };
+            if let Err(e) = draw_result {
+                return format!("cells error: {}", e);
+            }
+            let buf = terminal.backend().buffer();
+            let color_to_rgb = |c: ratatui::style::Color| -> Option<[u8; 3]> {
+                use ratatui::style::Color;
+                match c {
+                    Color::Reset => None,
+                    Color::Rgb(r, g, b) => Some([r, g, b]),
+                    Color::Black => Some([16, 18, 24]),
+                    Color::Red => Some([235, 111, 146]),
+                    Color::Green => Some([120, 232, 168]),
+                    Color::Yellow => Some([246, 193, 119]),
+                    Color::Blue => Some([138, 180, 248]),
+                    Color::Magenta => Some([196, 167, 231]),
+                    Color::Cyan => Some([120, 210, 230]),
+                    Color::Gray => Some([180, 188, 200]),
+                    Color::DarkGray => Some([108, 118, 134]),
+                    Color::LightRed => Some([255, 138, 128]),
+                    Color::LightGreen => Some([158, 245, 192]),
+                    Color::LightYellow => Some([255, 224, 150]),
+                    Color::LightBlue => Some([168, 204, 255]),
+                    Color::LightMagenta => Some([216, 190, 250]),
+                    Color::LightCyan => Some([156, 230, 245]),
+                    Color::White => Some([235, 240, 248]),
+                    Color::Indexed(idx) => {
+                        if idx < 16 {
+                            let base: [[u8; 3]; 16] = [
+                                [16, 18, 24],
+                                [235, 111, 146],
+                                [120, 232, 168],
+                                [246, 193, 119],
+                                [138, 180, 248],
+                                [196, 167, 231],
+                                [120, 210, 230],
+                                [180, 188, 200],
+                                [108, 118, 134],
+                                [255, 138, 128],
+                                [158, 245, 192],
+                                [255, 224, 150],
+                                [168, 204, 255],
+                                [216, 190, 250],
+                                [156, 230, 245],
+                                [235, 240, 248],
+                            ];
+                            Some(base[idx as usize])
+                        } else if idx < 232 {
+                            let n = idx - 16;
+                            let r = (n / 36) % 6;
+                            let g = (n / 6) % 6;
+                            let b = n % 6;
+                            let to_c = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                            Some([to_c(r), to_c(g), to_c(b)])
+                        } else {
+                            let v = 8 + (idx - 232) * 10;
+                            Some([v, v, v])
+                        }
+                    }
+                }
+            };
+            let mut rows = Vec::with_capacity(h as usize);
+            for y in 0..h {
+                let mut runs: Vec<serde_json::Value> = Vec::new();
+                let mut cur_text = String::new();
+                type CellStyleKey = (Option<[u8; 3]>, Option<[u8; 3]>, u8);
+                let mut cur_style: Option<CellStyleKey> = None;
+                for x in 0..w {
+                    let cell = &buf[(x, y)];
+                    let fg = color_to_rgb(cell.fg);
+                    let bg = color_to_rgb(cell.bg);
+                    let mut flags: u8 = 0;
+                    if cell.modifier.contains(ratatui::style::Modifier::BOLD) {
+                        flags |= 1;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::ITALIC) {
+                        flags |= 2;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::DIM) {
+                        flags |= 4;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::UNDERLINED) {
+                        flags |= 8;
+                    }
+                    if cell.modifier.contains(ratatui::style::Modifier::REVERSED) {
+                        flags |= 16;
+                    }
+                    let style = (fg, bg, flags);
+                    let sym = cell.symbol();
+                    let ch = if sym.is_empty() { " " } else { sym };
+                    if cur_style == Some(style) {
+                        cur_text.push_str(ch);
+                    } else {
+                        if let Some((pfg, pbg, pflags)) = cur_style.take() {
+                            runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                            cur_text.clear();
+                        }
+                        cur_text.push_str(ch);
+                        cur_style = Some(style);
+                    }
+                }
+                if let Some((pfg, pbg, pflags)) = cur_style {
+                    runs.push(serde_json::json!([cur_text, pfg, pbg, pflags]));
+                }
+                rows.push(serde_json::Value::Array(runs));
+            }
+            serde_json::to_string(&serde_json::json!({
+                "width": w,
+                "height": h,
+                "rows": rows,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "screen" {
             // Capture current visual state
             use crate::tui::visual_debug;
@@ -727,6 +843,17 @@ impl App {
         } else if cmd == "mermaid:memory" {
             let profile = crate::tui::mermaid::debug_memory_profile();
             serde_json::to_string_pretty(&profile).unwrap_or_else(|_| "{}".to_string())
+        } else if cmd == "resume-latency" {
+            self.session_picker_overlay
+                .as_ref()
+                .map(|picker| picker.borrow().debug_resume_latency())
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "open": false,
+                        "note": "Open /resume to collect live picker latency"
+                    })
+                })
+                .to_string()
         } else if cmd == "memory" {
             serde_json::to_string_pretty(&self.debug_memory_profile())
                 .unwrap_or_else(|_| "{}".to_string())
@@ -847,7 +974,7 @@ impl App {
             let (role, content) = if let Some((r, c)) = raw.split_once(':') {
                 let role = match r {
                     "user" | "assistant" | "system" | "background_task" | "tool" | "error"
-                    | "meta" => r,
+                    | "todos" | "meta" => r,
                     _ => "assistant",
                 };
                 if role == "assistant" && r != "assistant" {
@@ -859,14 +986,19 @@ impl App {
                 ("assistant", raw)
             };
 
-            self.push_display_message(DisplayMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            let message = if role == "todos" {
+                DisplayMessage::todos(content)
+            } else {
+                DisplayMessage {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                }
+            };
+            self.push_display_message(message);
             format!("OK: injected {} message ({} chars)", role, content.len())
         } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {
             let raw = cmd.strip_prefix("scroll-test:");
@@ -1058,6 +1190,7 @@ impl App {
                  - mermaid:evict - clear mermaid cache\n\
                  - markdown:stats - dump markdown debug stats\n\
                  - markdown:memory - dump markdown cache memory estimate\n\
+                 - resume-latency - bounded live resume handler-to-ratatui readiness, not terminal paint\n\
                  - memory - dump aggregate client memory profile\n\
                  - memory-history - dump recent process memory samples\n\
                  - slow-frames [n] - dump recent slow-frame records\n\
@@ -1198,6 +1331,8 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
         "redraw_schedule".to_string(),
         serde_json::json!({
             "interval_ms": crate::tui::redraw_interval(app).as_millis() as u64,
+            "tail_catchup_active": crate::tui::ui::tail_catchup_active(),
+            "stream_reveal_pending": crate::tui::TuiState::stream_reveal_pending(app),
             "animation_fps": policy.animation_fps,
             "redraw_fps": policy.redraw_fps,
             "tier": format!("{:?}", policy.tier),
@@ -1206,6 +1341,8 @@ fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
             "idle_animation_area": crate::tui::ui::last_idle_animation_area()
                 .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
             "client_focused": crate::tui::TuiState::client_focused(app),
+            "window_visibility": crate::tui::window_visibility::current().label(),
+            "wake_sources": super::wake_stats::snapshot(),
             "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
             // Unlike `idle_animation.last_full_frame_reason`, which is sticky,
             // this is evaluated against current state, so an expired notice

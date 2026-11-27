@@ -785,3 +785,53 @@ async fn muse_device_login_slow_down_accumulates_delay_challenge_loop() {
 
     set_or_clear_env(auth::muse::EXPERIMENTAL_ENV_VAR, prev_opt_in);
 }
+
+#[test]
+fn obtain_api_key_prefers_flag_then_env_var() {
+    let options = LoginOptions {
+        openai_compatible_api_key: Some("  sk-flag  ".into()),
+        openai_compatible_api_key_env: Some("JCODE_TEST_UNUSED_KEY".into()),
+        ..Default::default()
+    };
+    assert_eq!(obtain_api_key(&options, "Test").unwrap(), "sk-flag");
+
+    let var = "JCODE_TEST_LOGIN_KEY_FROM_ENV";
+    // SAFETY: unique variable name only read by this test.
+    unsafe { std::env::set_var(var, " sk-env ") };
+    let options = LoginOptions {
+        openai_compatible_api_key_env: Some(var.into()),
+        ..Default::default()
+    };
+    assert_eq!(obtain_api_key(&options, "Test").unwrap(), "sk-env");
+    unsafe { std::env::remove_var(var) };
+    assert!(obtain_api_key(&options, "Test").is_err());
+
+    let options = LoginOptions {
+        openai_compatible_api_key_env: Some("BAD NAME".into()),
+        ..Default::default()
+    };
+    assert!(obtain_api_key(&options, "Test").is_err());
+}
+
+#[test]
+fn every_api_key_provider_accepts_api_key_flag_and_oauth_ones_do_not() {
+    for id in [
+        "anthropic-api",
+        "openai-api",
+        "openrouter",
+        "bedrock",
+        "azure",
+        "cursor",
+        "gemini",
+        "openai-compatible",
+    ] {
+        let provider = crate::provider_catalog::resolve_login_provider(id)
+            .unwrap_or_else(|| panic!("resolve {id}"));
+        assert!(target_accepts_api_key(provider.target), "{id}");
+    }
+    for id in ["claude", "openai", "copilot", "antigravity"] {
+        let provider = crate::provider_catalog::resolve_login_provider(id)
+            .unwrap_or_else(|| panic!("resolve {id}"));
+        assert!(!target_accepts_api_key(provider.target), "{id}");
+    }
+}

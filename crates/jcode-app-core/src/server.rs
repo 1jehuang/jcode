@@ -2,6 +2,8 @@ mod account_usage;
 mod available_models_cache;
 mod available_models_dedup;
 mod await_members_state;
+pub use await_members_state::set_dependency_delivery as set_await_dependency_delivery;
+pub(crate) use await_members_state::subscribe_dependency as subscribe_await_dependency;
 mod background_tasks;
 mod client_actions;
 mod client_api;
@@ -16,6 +18,7 @@ mod client_lifecycle_logging;
 mod client_lightweight_control;
 mod client_session;
 mod client_state;
+mod model_refresh;
 mod session_connections;
 pub(crate) use client_state::provider_oauth_email;
 mod client_writer;
@@ -38,11 +41,17 @@ mod debug_swarm_read;
 mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
+mod group_transfer;
 mod headless;
+pub use group_transfer::{GroupTransferBundle, GroupTransferSelection, GroupTransferSession};
+pub use swarm_persistence::{PersistedSwarmMember, PersistedSwarmState, PersistedVersionedPlan};
 mod idle_hibernation;
 mod jade_relay;
+mod lane_dispatch;
 mod lifecycle;
+mod live_status;
 mod live_turn;
+mod mobile_local;
 mod provider_control;
 mod reload;
 mod reload_recovery;
@@ -51,6 +60,10 @@ mod reload_trace;
 mod runtime;
 mod runtime_commands;
 mod runtime_special_commands;
+mod runtime_ssh_accounts;
+mod runtime_ssh_host;
+mod runtime_ssh_loops;
+mod runtime_ssh_sessions;
 mod runtime_upgrade;
 mod socket;
 mod swarm;
@@ -81,7 +94,7 @@ use self::swarm::{
     broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
     record_swarm_event, record_swarm_event_for_session, refresh_swarm_task_staleness,
     remove_plan_participant, remove_session_from_swarm, rename_plan_participant, run_swarm_message,
-    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor,
+    send_swarm_plan_to_session, set_member_task_label, swarm_is_self_or_ancestor, truncate_detail,
     update_member_status, update_member_status_with_report, update_member_status_with_report_tldr,
 };
 use self::swarm_channels::{
@@ -111,17 +124,16 @@ use crate::tool::selfdev::ReloadContext;
 use crate::transport::Listener;
 use anyhow::Result;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
-use jcode_swarm_core::{
-    append_swarm_completion_report_instructions, format_structured_completion_report,
-    summarize_plan_items, truncate_detail,
-};
+use jcode_swarm_core::{format_structured_completion_report, summarize_plan_items};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, OnceCell, RwLock, broadcast, mpsc};
 
-pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+mod session_manager;
+pub(super) use session_manager::SessionManager;
+pub(super) type SessionAgents = Arc<SessionManager>;
 pub(super) type ChannelSubscriptions =
     Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
@@ -174,15 +186,30 @@ async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmS
 /// lifecycle operation. Server-owned sessions all share the long-running
 /// server PID, so leaving the marker behind makes presence UIs count the
 /// removed session forever.
-pub(super) async fn remove_session_entry<T>(
-    sessions: &Arc<RwLock<HashMap<String, T>>>,
+pub(super) async fn remove_session_entry(
+    sessions: &SessionAgents,
     session_id: &str,
-) -> Option<T> {
-    let removed = sessions.write().await.remove(session_id);
+) -> Option<Arc<Mutex<Agent>>> {
+    let removed = sessions.remove(session_id).await;
     if removed.is_some() {
         crate::storage::unregister_active_pid(session_id);
+        crate::session_env::remove_session_env(session_id);
     }
     removed
+}
+
+/// Keep session presence locked until the synchronous registry update finishes.
+/// Otherwise a stale attached client could recreate credentials after teardown.
+pub(super) async fn set_live_session_env(
+    sessions: &SessionAgents,
+    session_id: &str,
+    env: HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let sessions = sessions.read().await;
+    if !sessions.contains_key(session_id) {
+        anyhow::bail!("Session is no longer active");
+    }
+    crate::session_env::set_session_env(session_id, env)
 }
 
 const SERVER_NAME_ENV: &str = "JCODE_SERVER_NAME";
@@ -422,181 +449,11 @@ struct HeadlessRecoveryStats {
     failed_to_load: usize,
 }
 
-async fn capture_runtime_memory_common_sample(
-    identity: &ServerIdentity,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    kind: &str,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    let now = chrono::Utc::now();
-    let process =
-        crate::process_memory::snapshot_with_source(format!("server:runtime-log:{source}"));
-    let connected_count = *client_count.read().await;
-    let background_task_count = crate::background::global().list().await.len();
-    let embedder_stats = crate::embedding::stats();
-    let embedding_model_available = crate::embedding::is_model_available();
-
-    ServerRuntimeMemorySample {
-        schema_version: 2,
-        kind: kind.to_string(),
-        timestamp: now.to_rfc3339(),
-        timestamp_ms: now.timestamp_millis(),
-        source: source.to_string(),
-        trigger,
-        sampling,
-        server: ServerRuntimeMemoryServer {
-            id: identity.id.clone(),
-            name: identity.name.clone(),
-            icon: identity.icon.clone(),
-            version: identity.version.clone(),
-            git_hash: identity.git_hash.clone(),
-            uptime_secs: server_start_time.elapsed().as_secs(),
-        },
-        process_diagnostics: crate::runtime_memory_log::build_process_diagnostics(&process),
-        process,
-        clients: ServerRuntimeMemoryClients { connected_count },
-        sessions: None,
-        background: ServerRuntimeMemoryBackground {
-            task_count: background_task_count,
-        },
-        embeddings: ServerRuntimeMemoryEmbeddings {
-            model_available: embedding_model_available,
-            stats: embedder_stats,
-        },
-    }
-}
-
-async fn capture_runtime_memory_process_sample(
-    identity: &ServerIdentity,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    capture_runtime_memory_common_sample(
-        identity,
-        client_count,
-        server_start_time,
-        "process",
-        source,
-        trigger,
-        sampling,
-    )
-    .await
-}
-
-async fn capture_runtime_memory_attribution_sample(
-    identity: &ServerIdentity,
-    sessions: &SessionAgents,
-    client_count: &Arc<RwLock<usize>>,
-    server_start_time: Instant,
-    source: &str,
-    trigger: RuntimeMemoryLogTrigger,
-    sampling: RuntimeMemoryLogSampling,
-) -> ServerRuntimeMemorySample {
-    let mut sample = capture_runtime_memory_common_sample(
-        identity,
-        client_count,
-        server_start_time,
-        "attribution",
-        source,
-        trigger,
-        sampling,
-    )
-    .await;
-
-    let sessions_guard = sessions.read().await;
-    let live_count = sessions_guard.len();
-    let mut sampled_count = 0usize;
-    let mut contended_count = 0usize;
-    let mut memory_enabled_session_count = 0usize;
-    let mut total_message_count = 0u64;
-    let mut total_provider_cache_message_count = 0u64;
-    let mut total_json_bytes = 0u64;
-    let mut total_payload_text_bytes = 0u64;
-    let mut total_provider_cache_json_bytes = 0u64;
-    let mut total_tool_result_bytes = 0u64;
-    let mut total_provider_cache_tool_result_bytes = 0u64;
-    let mut total_large_blob_bytes = 0u64;
-    let mut total_provider_cache_large_blob_bytes = 0u64;
-    let mut top_sessions: Vec<ServerRuntimeMemoryTopSession> = Vec::new();
-
-    for (session_id, agent_arc) in sessions_guard.iter() {
-        let Ok(mut agent) = agent_arc.try_lock() else {
-            contended_count += 1;
-            continue;
-        };
-
-        sampled_count += 1;
-        let profile = agent.session_memory_profile_snapshot();
-        let memory_enabled = agent.memory_enabled();
-        if memory_enabled {
-            memory_enabled_session_count += 1;
-        }
-
-        let message_count = profile.message_count as u64;
-        let provider_cache_message_count = profile.provider_cache_message_count as u64;
-        let json_bytes = profile.total_json_bytes as u64;
-        let payload_text_bytes = profile.payload_text_bytes as u64;
-        let provider_cache_json_bytes = profile.provider_cache_json_bytes as u64;
-        let tool_result_bytes = profile.canonical_tool_result_bytes as u64;
-        let provider_cache_tool_result_bytes = profile.provider_cache_tool_result_bytes as u64;
-        let large_blob_bytes = profile.canonical_large_blob_bytes as u64;
-        let provider_cache_large_blob_bytes = profile.provider_cache_large_blob_bytes as u64;
-
-        total_message_count += message_count;
-        total_provider_cache_message_count += provider_cache_message_count;
-        total_json_bytes += json_bytes;
-        total_payload_text_bytes += payload_text_bytes;
-        total_provider_cache_json_bytes += provider_cache_json_bytes;
-        total_tool_result_bytes += tool_result_bytes;
-        total_provider_cache_tool_result_bytes += provider_cache_tool_result_bytes;
-        total_large_blob_bytes += large_blob_bytes;
-        total_provider_cache_large_blob_bytes += provider_cache_large_blob_bytes;
-
-        top_sessions.push(ServerRuntimeMemoryTopSession {
-            session_id: session_id.clone(),
-            provider: agent.provider_name(),
-            model: agent.provider_model(),
-            memory_enabled,
-            message_count,
-            provider_cache_message_count,
-            json_bytes,
-            payload_text_bytes,
-            provider_cache_json_bytes,
-            tool_result_bytes,
-            provider_cache_tool_result_bytes,
-            large_blob_bytes,
-            provider_cache_large_blob_bytes,
-        });
-    }
-    drop(sessions_guard);
-
-    top_sessions.sort_by(|left, right| right.json_bytes.cmp(&left.json_bytes));
-    top_sessions.truncate(5);
-
-    sample.sessions = Some(ServerRuntimeMemorySessions {
-        live_count,
-        sampled_count,
-        contended_count,
-        memory_enabled_session_count,
-        total_message_count,
-        total_provider_cache_message_count,
-        total_json_bytes,
-        total_payload_text_bytes,
-        total_provider_cache_json_bytes,
-        total_tool_result_bytes,
-        total_provider_cache_tool_result_bytes,
-        total_large_blob_bytes,
-        total_provider_cache_large_blob_bytes,
-        top_by_json_bytes: top_sessions,
-    });
-    sample
-}
+#[path = "server/runtime_memory_sampling.rs"]
+mod runtime_memory_sampling;
+use runtime_memory_sampling::{
+    capture_runtime_memory_attribution_sample, capture_runtime_memory_process_sample,
+};
 
 mod state;
 mod subscribe_working_dir;
@@ -611,7 +468,7 @@ use self::state::{
     queue_soft_interrupt_for_session, register_background_tool_signal,
     register_session_event_sender, register_session_interrupt_queue, remove_background_tool_signal,
     remove_session_interrupt_queue, rename_background_tool_signal, rename_session_interrupt_queue,
-    session_event_fanout_sender, unregister_session_event_sender,
+    unregister_session_event_sender,
 };
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
@@ -643,15 +500,19 @@ pub use self::socket::{
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
-pub use self::util::ServerIdentity;
 pub(crate) use self::util::server_has_newer_binary;
+pub use self::util::{MANAGED_CLOUD_LIVE_RELOAD_MARKER, ServerIdentity};
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
     startup_headless_recovery_test_delay, swarm_id_for_dir, swarm_id_for_session,
 };
 
 mod file_activity;
-use self::file_activity::file_activity_scope_label;
+use self::file_activity::{
+    FileActivityEntry, PendingFileActivityNotice, deliver_file_activity_notice,
+    file_activity_display_path, file_activity_scope_label, format_file_activity_notice,
+    parse_file_activity_line_range,
+};
 
 mod file_touch_service;
 pub(crate) use self::file_touch_service::FileTouchService;
@@ -677,62 +538,12 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
-mod reload_marker_scope_tests {
-    use super::reload_marker_policy;
-    use super::reload_state::ForeignMarkerPolicy;
-
-    /// Only the shared socket's server may clear a reload marker owned by
-    /// another process; a custom-socket server preserves it, because clearing
-    /// would erase the shared daemon's in-flight `Starting` state (review of
-    /// #1768). Both the bind-time clear and the socket-ready publish consult
-    /// this. The publish path was missed on the first attempt and reopened
-    /// the hole. The policy says nothing about a server's *own* marker, which
-    /// it must always be free to advance.
-    #[test]
-    fn only_shared_socket_server_may_clear_a_foreign_reload_marker() {
-        let _guard = crate::storage::lock_test_env();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-        let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
-        crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
-
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("jcode.sock")),
-            ForeignMarkerPolicy::MayClear
-        );
-        assert_eq!(
-            reload_marker_policy(&runtime_dir.join("run-isolated.sock")),
-            ForeignMarkerPolicy::Preserve
-        );
-
-        if let Some(prev_runtime) = prev_runtime {
-            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
-        } else {
-            crate::env::remove_var("JCODE_RUNTIME_DIR");
-        }
-    }
-}
+#[path = "server/reload_marker_scope_tests.rs"]
+mod reload_marker_scope_tests;
 
 #[cfg(test)]
-mod idle_monitor_tests {
-    use super::idle_monitor_should_start;
-
-    #[test]
-    fn shared_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn temporary_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn idle_monitor_starts_only_without_clients_or_headless_workers() {
-        assert!(idle_monitor_should_start(0, false));
-        assert!(!idle_monitor_should_start(1, false));
-    }
-}
+#[path = "server/idle_monitor_tests.rs"]
+mod idle_monitor_tests;
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;
@@ -751,7 +562,7 @@ pub struct Server {
     /// Broadcast channel for streaming events to all subscribers
     event_tx: broadcast::Sender<ServerEvent>,
     /// Active sessions (session_id -> Agent)
-    sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+    sessions: SessionAgents,
     /// Current processing state
     is_processing: Arc<RwLock<bool>>,
     /// Session ID for the default session
@@ -797,6 +608,9 @@ pub struct Server {
     /// Persisted dedupe registry for mutating swarm coordinator operations.
     swarm_mutation_runtime: SwarmMutationRuntime,
 }
+
+#[path = "server_headless_recovery.rs"]
+mod server_headless_recovery;
 
 impl Server {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
@@ -855,7 +669,7 @@ impl Server {
             gateway_config_override: None,
             identity,
             event_tx,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(SessionManager::new()),
             is_processing: Arc::new(RwLock::new(false)),
             session_id: Arc::new(RwLock::new(String::new())),
             client_count: Arc::new(RwLock::new(0)),
@@ -938,341 +752,6 @@ impl Server {
         });
     }
 
-    async fn recover_headless_sessions_on_startup(&self) {
-        let sessions_to_restore = {
-            let members = self.swarm_state.members.read().await;
-            members
-                .values()
-                .filter(|member| headless_member_should_restore(&member.status, member.is_headless))
-                .map(|member| member.session_id.clone())
-                .collect::<Vec<_>>()
-        };
-
-        if sessions_to_restore.is_empty() {
-            return;
-        }
-
-        crate::logging::info(&format!(
-            "Recovering {} headless session(s) after startup: {:?}",
-            sessions_to_restore.len(),
-            sessions_to_restore
-        ));
-
-        if let Some(delay) = startup_headless_recovery_test_delay() {
-            crate::logging::info(&format!(
-                "Applying test-only headless startup recovery delay of {}ms",
-                delay.as_millis()
-            ));
-            tokio::time::sleep(delay).await;
-        }
-
-        let mcp_pool = get_shared_mcp_pool(&self.mcp_pool).await;
-        let recovery_started = Instant::now();
-        let mut stats = HeadlessRecoveryStats::default();
-        let mut swarms_to_persist = HashSet::new();
-
-        for session_id in sessions_to_restore {
-            stats.candidates += 1;
-            let session = match crate::session::Session::load(&session_id) {
-                Ok(session) => session,
-                Err(error) => {
-                    stats.failed_to_load += 1;
-                    crate::logging::warn(&format!(
-                        "Failed to load headless session {} during startup recovery: {}",
-                        session_id, error
-                    ));
-                    update_member_status(
-                        &session_id,
-                        "failed",
-                        Some(truncate_detail(&error.to_string(), 120)),
-                        &self.swarm_state.members,
-                        &self.swarm_state.swarms_by_id,
-                        Some(&self.event_history),
-                        Some(&self.event_counter),
-                        Some(&self.swarm_event_tx),
-                    )
-                    .await;
-                    if let Some(swarm_id) = {
-                        let members = self.swarm_state.members.read().await;
-                        members
-                            .get(&session_id)
-                            .and_then(|member| member.swarm_id.clone())
-                    } {
-                        persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-                    }
-                    continue;
-                }
-            };
-
-            let previous_status = session.status.clone();
-            let provider = self.provider.fork();
-            let registry = crate::tool::Registry::new(provider.clone()).await;
-            if session.is_canary {
-                registry.register_selfdev_tools().await;
-            }
-            registry
-                .register_mcp_tools_for_dir(
-                    None,
-                    Some(Arc::clone(&mcp_pool)),
-                    Some("headless".to_string()),
-                    session.working_dir.as_ref().map(std::path::PathBuf::from),
-                )
-                .await;
-
-            let agent = Arc::new(Mutex::new(Agent::new_with_session(
-                provider, registry, session, None,
-            )));
-
-            {
-                let mut sessions = self.sessions.write().await;
-                if sessions.contains_key(&session_id) {
-                    continue;
-                }
-                sessions.insert(session_id.clone(), Arc::clone(&agent));
-            }
-
-            {
-                let agent_guard = agent.lock().await;
-                register_session_interrupt_queue(
-                    &self.soft_interrupt_queues,
-                    &session_id,
-                    agent_guard.soft_interrupt_queue(),
-                )
-                .await;
-                let mut shutdown_signals = self.shutdown_signals.write().await;
-                shutdown_signals.insert(session_id.clone(), agent_guard.graceful_shutdown_signal());
-                register_background_tool_signal(&session_id, agent_guard.background_tool_signal());
-            }
-
-            let stored_recovery_record = reload_recovery::peek_for_session(&session_id)
-                .ok()
-                .flatten();
-            let has_stored_recovery_intent = stored_recovery_record
-                .as_ref()
-                .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
-                .unwrap_or(false);
-            let should_resume = has_stored_recovery_intent || {
-                let agent_guard = agent.lock().await;
-                self::client_session::restored_session_was_interrupted(
-                    &session_id,
-                    &previous_status,
-                    &agent_guard,
-                )
-            };
-            if let Some(record) = stored_recovery_record.as_ref() {
-                reload_trace::record_value(
-                    &record.reload_id,
-                    "startup_recovery_decision",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "has_stored_recovery_intent": has_stored_recovery_intent,
-                        "should_resume": should_resume,
-                        "previous_status": previous_status,
-                        "is_headless": true,
-                    }),
-                );
-            }
-
-            if !should_resume {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
-                    &session_id,
-                    "skipped",
-                    "restored session was not interrupted by reload",
-                );
-                stats.skipped += 1;
-                update_member_status(
-                    &session_id,
-                    "ready",
-                    None,
-                    &self.swarm_state.members,
-                    &self.swarm_state.swarms_by_id,
-                    Some(&self.event_history),
-                    Some(&self.event_counter),
-                    Some(&self.swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = self.swarm_state.members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    swarms_to_persist.insert(swarm_id);
-                }
-                continue;
-            }
-
-            let stored_directive = reload_recovery::pending_directive_for_session(&session_id)
-                .ok()
-                .flatten();
-            let reload_ctx = if stored_directive.is_none() {
-                ReloadContext::load_for_session(&session_id).ok().flatten()
-            } else {
-                None
-            };
-            let reminder = stored_directive
-                .map(|directive| directive.continuation_message)
-                .or_else(|| headless_reload_continuation_message(reload_ctx));
-            let Some(reminder) = reminder else {
-                ReloadContext::log_recovery_outcome(
-                    "server_startup_headless",
-                    &session_id,
-                    "failed",
-                    "recovery directive missing for interrupted headless session",
-                );
-                continue;
-            };
-            stats.resumed += 1;
-            ReloadContext::log_recovery_outcome(
-                "server_startup_headless",
-                &session_id,
-                "resuming",
-                "restored interrupted headless session after reload",
-            );
-            let recover_swarm_members = Arc::clone(&self.swarm_state.members);
-            let recover_swarms_by_id = Arc::clone(&self.swarm_state.swarms_by_id);
-            let recover_event_history = Arc::clone(&self.event_history);
-            let recover_event_counter = Arc::clone(&self.event_counter);
-            let recover_swarm_event_tx = self.swarm_event_tx.clone();
-            let recover_swarm_state = self.swarm_state.clone();
-            let recovery_reload_id = stored_recovery_record.map(|record| record.reload_id);
-
-            tokio::spawn(async move {
-                if let Some(reload_id) = recovery_reload_id.as_deref() {
-                    reload_trace::record_value(
-                        reload_id,
-                        "continuation_started",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "source": "server_startup_headless",
-                        }),
-                    );
-                }
-                update_member_status(
-                    &session_id,
-                    "running",
-                    Some("resuming after reload".to_string()),
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-                }
-
-                match reload_recovery::mark_delivered_if_matching_continuation(
-                    &session_id,
-                    &reminder,
-                    "server_startup_headless",
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {}
-                    Err(error) => crate::logging::warn(&format!(
-                        "Failed to mark headless reload recovery intent delivered for {}: {}",
-                        session_id, error
-                    )),
-                }
-
-                let event_tx = self::state::session_event_fanout_sender(
-                    session_id.clone(),
-                    Arc::clone(&recover_swarm_members),
-                );
-                let result = self::turn_failover::process_server_initiated_message(
-                    Arc::clone(&agent),
-                    "",
-                    vec![],
-                    Some(reminder),
-                    event_tx,
-                )
-                .await;
-
-                let (status, detail) = match result {
-                    Ok(()) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_finished",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "status": "ready",
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "resumed",
-                            "continuation dispatched successfully",
-                        );
-                        ("ready", None)
-                    }
-                    Err(error) => {
-                        if let Some(reload_id) = recovery_reload_id.as_deref() {
-                            reload_trace::record_value(
-                                reload_id,
-                                "continuation_failed",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "source": "server_startup_headless",
-                                    "error": error.to_string(),
-                                }),
-                            );
-                        }
-                        ReloadContext::log_recovery_outcome(
-                            "server_startup_headless",
-                            &session_id,
-                            "failed",
-                            &error.to_string(),
-                        );
-                        ("failed", Some(truncate_detail(&error.to_string(), 120)))
-                    }
-                };
-                update_member_status(
-                    &session_id,
-                    status,
-                    detail,
-                    &recover_swarm_members,
-                    &recover_swarms_by_id,
-                    Some(&recover_event_history),
-                    Some(&recover_event_counter),
-                    Some(&recover_swarm_event_tx),
-                )
-                .await;
-                if let Some(swarm_id) = {
-                    let members = recover_swarm_members.read().await;
-                    members
-                        .get(&session_id)
-                        .and_then(|member| member.swarm_id.clone())
-                } {
-                    persist_swarm_state_for(&swarm_id, &recover_swarm_state).await;
-                }
-            });
-        }
-
-        for swarm_id in swarms_to_persist {
-            persist_swarm_state_for(&swarm_id, &self.swarm_state).await;
-        }
-
-        crate::logging::info(&format!(
-            "[TIMING] headless reload startup recovery: candidates={}, resumed={}, skipped={}, failed_to_load={}, total={}ms",
-            stats.candidates,
-            stats.resumed,
-            stats.skipped,
-            stats.failed_to_load,
-            recovery_started.elapsed().as_millis()
-        ));
-    }
-
     async fn finish_startup_after_bind(
         &self,
         main_listener: Listener,
@@ -1291,13 +770,33 @@ impl Server {
             shutdown_signals: Arc::clone(&self.shutdown_signals),
             soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
         });
+        lane_dispatch::register_context(lane_dispatch::LaneDispatchContext {
+            provider: Arc::clone(&self.provider),
+            sessions: Arc::clone(&self.sessions),
+            global_session_id: Arc::clone(&self.session_id),
+            swarm_state: self.swarm_state.clone(),
+            channel_subscriptions: Arc::clone(&self.channel_subscriptions),
+            channel_subscriptions_by_session: Arc::clone(&self.channel_subscriptions_by_session),
+            event_history: Arc::clone(&self.event_history),
+            event_counter: Arc::clone(&self.event_counter),
+            swarm_event_tx: self.swarm_event_tx.clone(),
+            mcp_pool: Arc::clone(&self.mcp_pool),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            swarm_mutation_runtime: self.swarm_mutation_runtime.clone(),
+            client_connections: Arc::clone(&self.client_connections),
+        });
+        lane_dispatch::spawn_startup_scan(Duration::from_secs(5));
+        let temporary_server = lifecycle::temporary_server_enabled();
         // Every resume History asks whether the session has persisted
         // background tasks. The first ask after a reload scans the whole task
         // directory (~250ms) while clients are reconnecting; build the index
         // now, off the async workers, so the storm only sees cache hits.
-        std::thread::spawn(|| {
-            let _ = crate::background::global().persisted_detached_running_tasks_for_session("");
-        });
+        if !temporary_server {
+            std::thread::spawn(|| {
+                let _ =
+                    crate::background::global().persisted_detached_running_tasks_for_session("");
+            });
+        }
         let registry_info = self.build_registry_info();
 
         let runtime = self.runtime();
@@ -1313,6 +812,12 @@ impl Server {
         // only stops it from clearing a marker another process owns.
         publish_reload_socket_ready(reload_marker_policy(&self.socket_path));
         signal_ready_fd();
+
+        // Older snapshots predate the resume index. Backfill off the first-frame
+        // path. Lookups retain an authoritative fallback until it completes.
+        if !temporary_server {
+            crate::recent_session_index::backfill_resume_metadata_in_background();
+        }
 
         // Persist auxiliary discovery metadata after the server is already live.
         self.spawn_registry_metadata_publisher(registry_info);
@@ -1341,7 +846,9 @@ impl Server {
         // Warm the lightweight session-search index after daemon startup. This
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
-        crate::tool::spawn_recent_index_warmup();
+        if temporary_server_policy.is_none() {
+            crate::tool::spawn_recent_index_warmup();
+        }
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die
@@ -1460,6 +967,11 @@ impl Server {
             }
         });
 
+        tokio::spawn(swarm::monitor_wait_status(
+            Arc::clone(&self.swarm_state.members),
+            Arc::clone(&self.swarm_state.swarms_by_id),
+        ));
+
         // Stalled-worker watchdog (#1703): flag running workers that went
         // silent with no tool in flight and notify their owner once.
         if let Some(stall_after) = swarm_watchdog::stall_after() {
@@ -1528,6 +1040,25 @@ impl Server {
             Arc::clone(&self.sessions),
             Arc::clone(&self.swarm_state.members),
         );
+
+        // Upload transcripts for the iOS app when the user enabled mobile sync.
+        crate::mobile_sync::spawn_background_sync();
+        // On Jcode Cloud machines, run sessions the phone starts or continues.
+        crate::mobile_runner::spawn_cloud_runner();
+        // On the user's own computer, take messages the phone sends to
+        // sessions running here (only while mobile sync is enabled).
+        mobile_local::spawn(mobile_local::DaemonSessions {
+            sessions: Arc::clone(&self.sessions),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            swarm: live_turn::LiveTurnSwarmContext::new(
+                &self.swarm_state.members,
+                &self.swarm_state.swarms_by_id,
+                &self.event_history,
+                &self.event_counter,
+                &self.swarm_event_tx,
+            ),
+        });
+        Self::spawn_cloud_activity_keepalive(Arc::clone(&self.swarm_state.members));
 
         // Initialize the memory agent early so it's ready for all sessions
         if crate::config::config().features.memory {
@@ -1951,7 +1482,11 @@ impl Server {
         let registry_identity = self.identity.display_name();
         tokio::spawn(async move {
             let hash_path = format!("{}.hash", registry_info.socket.display());
-            let _ = std::fs::write(&hash_path, jcode_build_meta::git_hash());
+            if let Err(error) = std::fs::write(&hash_path, jcode_build_meta::git_hash()) {
+                crate::logging::warn(&format!(
+                    "Failed to publish server hash at {hash_path}: {error}"
+                ));
+            }
 
             let mut registry = crate::registry::ServerRegistry::load()
                 .await
@@ -2047,6 +1582,25 @@ impl Server {
         });
     }
 
+    /// On Jcode Cloud the host powers off after 30 minutes without an SSH
+    /// client unless the busy marker is fresh. Turns keep running after the
+    /// client disconnects, so mark the host busy while any session runs.
+    fn spawn_cloud_activity_keepalive(swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>) {
+        if !crate::mobile_runner::is_cloud_machine() {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if Self::any_session_streaming(&swarm_members).await {
+                    crate::mobile_runner::touch_cloud_activity_marker();
+                }
+            }
+        });
+    }
+
     /// Whether at least one session is currently in the "running" state, i.e.
     /// actively streaming/processing a turn. This is the same signal that drives
     /// the Waybar "N streaming" indicator.
@@ -2070,13 +1624,16 @@ impl Server {
         swarm_plans: Arc<RwLock<HashMap<String, VersionedPlan>>>,
         swarm_coordinators: Arc<RwLock<HashMap<String, String>>>,
         _shared_context: Arc<RwLock<HashMap<String, HashMap<String, SharedContext>>>>,
-        sessions: Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>,
+        sessions: SessionAgents,
         soft_interrupt_queues: SessionInterruptQueues,
         event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
         event_counter: Arc<std::sync::atomic::AtomicU64>,
         swarm_event_tx: broadcast::Sender<SwarmEvent>,
     ) {
         let mut last_cleanup = Instant::now();
+        // Per-recipient notice still waiting for injection, so bursts of peer
+        // edits fold into one model-facing message.
+        let mut pending_file_notices: HashMap<String, PendingFileActivityNotice> = HashMap::new();
         const TOUCH_EXPIRY: Duration = Duration::from_secs(30 * 60); // 30 min
         const CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60); // 5 min
 
@@ -2091,7 +1648,13 @@ impl Server {
                 break;
             };
             // Keep the envelope alive through asynchronous queue delivery, not
-            // just receipt. An idle upgrade must include every accepted wake.
+            // just receipt. A queued selected-session callback must exclude
+            // transfer even after its original turn/background task exits.
+            let Some(_activity) =
+                self::background_tasks::admit_runtime_delivery(&delivery.event).await
+            else {
+                continue;
+            };
             match delivery.event.clone() {
                 BusEvent::FileTouch(touch) => {
                     let path = touch.path.clone();
@@ -2109,6 +1672,8 @@ impl Server {
                                 intent: touch.intent.clone(),
                                 summary: touch.summary.clone(),
                                 detail: touch.detail.clone(),
+                                added: touch.added,
+                                removed: touch.removed,
                             },
                         )
                         .await;
@@ -2203,30 +1768,45 @@ impl Server {
                         let members = swarm_members.read().await;
                         let current_member = members.get(&session_id);
                         let current_name = current_member.and_then(|m| m.friendly_name.clone());
+                        // The editor only needs to hear about earlier peer
+                        // changes once, on its first edit of this file. Later
+                        // peer edits already reach it as "just edited" notices.
+                        let first_own_modification =
+                            file_touch.accesses_for_path(&path).await.is_none_or(|all| {
+                                all.iter()
+                                    .filter(|access| {
+                                        access.session_id == session_id
+                                            && access.op.is_modification()
+                                    })
+                                    .count()
+                                    <= 1
+                            });
 
                         // Alert the current agent about previous peer touches (one per agent).
-                        if let Some(member) = current_member {
+                        if let Some(member) = current_member.filter(|_| first_own_modification) {
                             for prev in &previous_touches {
                                 let prev_member = members.get(&prev.session_id);
                                 let prev_name = prev_member.and_then(|m| m.friendly_name.clone());
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = prev
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} previously {} this file{}{}",
-                                    path.display(),
-                                    scope,
-                                    prev_name.as_deref().unwrap_or(&prev.session_id[..8]),
-                                    prev.op.as_str(),
-                                    prev.summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: prev_name.clone().unwrap_or_else(|| {
+                                        prev.session_id[..8.min(prev.session_id.len())].to_string()
+                                    }),
+                                    operation: prev.op.as_str().to_string(),
+                                    previously: true,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        member.working_dir.as_deref(),
+                                    ),
+                                    added: prev.added,
+                                    removed: prev.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(prev.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: prev.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: prev.session_id.clone(),
                                     from_name: prev_name,
@@ -2236,53 +1816,47 @@ impl Server {
                                         intent: prev.intent.clone(),
                                         summary: prev.summary.clone(),
                                         detail: prev.detail.clone(),
+                                        added: Some(prev.added),
+                                        removed: Some(prev.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
 
                         // Alert previous agents about the current modification.
                         for prev in &previous_touches {
                             if let Some(prev_member) = members.get(&prev.session_id) {
-                                let scope = file_activity_scope_label(prev, &touch);
-                                let intent_suffix = touch
-                                    .intent
-                                    .as_ref()
-                                    .map(|intent| format!(" — intent: {}", intent))
-                                    .unwrap_or_default();
-                                let alert_msg = format!(
-                                    "⚠ File activity: {} — {} — {} just {} this file you previously worked with{}{}",
-                                    path.display(),
-                                    scope,
-                                    current_name
-                                        .as_deref()
-                                        .unwrap_or(&session_id[..8.min(session_id.len())]),
-                                    touch.op.as_str(),
-                                    touch
-                                        .summary
-                                        .as_ref()
-                                        .map(|s| format!(": {}", s))
-                                        .unwrap_or_default(),
-                                    intent_suffix
-                                );
+                                let entry = FileActivityEntry {
+                                    agent: current_name.clone().unwrap_or_else(|| {
+                                        session_id[..8.min(session_id.len())].to_string()
+                                    }),
+                                    operation: touch.op.as_str().to_string(),
+                                    previously: false,
+                                    path: file_activity_display_path(
+                                        &path,
+                                        prev_member.working_dir.as_deref(),
+                                    ),
+                                    added: touch.added,
+                                    removed: touch.removed,
+                                    edits: 1,
+                                    lines: parse_file_activity_line_range(touch.summary.as_deref()),
+                                    overlap: file_activity_scope_label(prev, &touch)
+                                        == "overlapping lines",
+                                    intent: touch.intent.clone(),
+                                };
+                                let alert_msg =
+                                    format_file_activity_notice(std::slice::from_ref(&entry));
                                 let notification = ServerEvent::Notification {
                                     from_session: session_id.clone(),
                                     from_name: current_name.clone(),
@@ -2292,26 +1866,21 @@ impl Server {
                                         intent: touch.intent.clone(),
                                         summary: touch.summary.clone(),
                                         detail: touch.detail.clone(),
+                                        added: Some(touch.added),
+                                        removed: Some(touch.removed),
                                     },
                                     message: alert_msg.clone(),
                                 };
                                 let _ = prev_member.event_tx.send(notification);
 
-                                if !queue_soft_interrupt_for_session(
+                                deliver_file_activity_notice(
                                     &prev.session_id,
-                                    alert_msg.clone(),
-                                    false,
-                                    SoftInterruptSource::System,
+                                    entry,
+                                    &mut pending_file_notices,
                                     &soft_interrupt_queues,
                                     &sessions,
                                 )
-                                .await
-                                {
-                                    crate::logging::warn(&format!(
-                                        "Failed to queue file-activity soft interrupt for session {}",
-                                        prev.session_id
-                                    ));
-                                }
+                                .await;
                             }
                         }
                     }
@@ -2381,6 +1950,25 @@ impl Server {
                     )
                     .await;
                 }
+                BusEvent::SwarmWorkerReported(event) => {
+                    background_tasks::dispatch_swarm_worker_report(
+                        &event,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        live_turn::LiveTurnSwarmContext::new(
+                            &swarm_members,
+                            &swarms_by_id,
+                            &event_history,
+                            &event_counter,
+                            &swarm_event_tx,
+                        ),
+                    )
+                    .await;
+                }
+                BusEvent::SessionUpdateStatus(status) => {
+                    let (session_id, event) = runtime_ssh_host::maintenance_event(status);
+                    fanout_session_event(&swarm_members, &session_id, event).await;
+                }
                 BusEvent::UiActivity(activity) => {
                     dispatch_ui_activity(&activity, &swarm_members).await;
                 }
@@ -2397,7 +1985,11 @@ impl Server {
                 // Compact todo names and progress are surfaced on the inline
                 // swarm strip so a coordinator can see each managed agent's work.
                 BusEvent::TodoUpdated(event) => {
+                    crate::agents_status::todos_updated(&event.session_id, &event.todos);
                     dispatch_swarm_todo_progress(&event, &swarm_members, &swarms_by_id).await;
+                    // Worker-owned lanes whose dependencies are met get a
+                    // worker automatically; no launch call is involved.
+                    self::lane_dispatch::on_todos_saved(&event.session_id, &event.todos);
                     // A coordinator's todo list is its lane plan: keep a
                     // running plan mirroring every save, so new or reshaped
                     // lanes are picked up without relaunching.
@@ -2445,6 +2037,10 @@ impl Server {
 
         #[cfg(unix)]
         let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
+
+        // Reap zombies and stop orphaned MCP servers left by a previous image
+        // of this PID (exec reload). Must run before this image spawns children.
+        crate::inherited_children::start();
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(

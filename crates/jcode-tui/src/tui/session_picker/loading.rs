@@ -1,4 +1,8 @@
 use crate::id::{extract_session_name, session_icon};
+#[path = "loading_opencode.rs"]
+mod opencode;
+use opencode::load_opencode_session_info;
+
 use crate::message::Role;
 use crate::registry::{self, ServerInfo};
 use crate::session::{self, CrashedSessionsInfo, Session, SessionStatus, StoredDisplayRole};
@@ -18,10 +22,10 @@ use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_SESSION_SCAN_LIMIT, MAX_SESSION_SCAN_LIMIT, MIN_SESSION_SCAN_LIMIT, PreviewMessage,
-    SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo,
+    ResumeTarget, SEARCH_CONTENT_BUDGET_BYTES, ServerGroup, SessionInfo, SessionSource,
 };
 
-use super::{ResumeTarget, SessionSource};
+mod mobile_inventory;
 
 #[cfg(test)]
 const TRANSCRIPT_SEARCH_CHUNK_BYTES: usize = 64 * 1024;
@@ -63,7 +67,7 @@ fn include_old_saved_sessions_on_initial_load() -> bool {
 }
 
 const SESSION_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-const SESSION_LIST_DISK_CACHE_VERSION: u32 = 2;
+const SESSION_LIST_DISK_CACHE_VERSION: u32 = 5;
 const SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const SAVED_METADATA_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 const INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES: usize = 64 * 1024;
@@ -158,7 +162,7 @@ struct SessionListCacheState {
 }
 
 #[derive(Serialize, Deserialize)]
-struct GroupedSessionListDiskCache {
+struct GroupedSessionListDiskCache<Groups = Vec<ServerGroup>, Orphans = Vec<SessionInfo>> {
     version: u32,
     generated_at: chrono::DateTime<chrono::Utc>,
     sessions_dir: PathBuf,
@@ -169,8 +173,8 @@ struct GroupedSessionListDiskCache {
     /// file stays readable (it was written with externals on).
     #[serde(default = "crate::tui::session_picker::loading::default_true")]
     external_sessions: bool,
-    server_groups: Vec<ServerGroup>,
-    orphan_sessions: Vec<SessionInfo>,
+    server_groups: Groups,
+    orphan_sessions: Orphans,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -235,6 +239,26 @@ fn session_list_disk_cache_is_usable(
             <= SESSION_LIST_DISK_CACHE_MAX_AGE_SECONDS
 }
 
+/// Borrow the inventories while writing. Cloning them here duplicates every
+/// search index and loaded transcript solely for the duration of serialization.
+fn grouped_session_list_disk_cache<'a>(
+    sessions_dir: &Path,
+    scan_limit: usize,
+    server_groups: &'a [ServerGroup],
+    orphan_sessions: &'a [SessionInfo],
+) -> GroupedSessionListDiskCache<&'a [ServerGroup], &'a [SessionInfo]> {
+    GroupedSessionListDiskCache {
+        version: SESSION_LIST_DISK_CACHE_VERSION,
+        generated_at: chrono::Utc::now(),
+        sessions_dir: sessions_dir.to_path_buf(),
+        scan_limit,
+        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
+        external_sessions: include_external_sessions(),
+        server_groups,
+        orphan_sessions,
+    }
+}
+
 fn write_grouped_session_list_disk_cache(
     sessions_dir: &Path,
     scan_limit: usize,
@@ -244,16 +268,8 @@ fn write_grouped_session_list_disk_cache(
     let Ok(path) = session_list_disk_cache_path() else {
         return;
     };
-    let cache = GroupedSessionListDiskCache {
-        version: SESSION_LIST_DISK_CACHE_VERSION,
-        generated_at: chrono::Utc::now(),
-        sessions_dir: sessions_dir.to_path_buf(),
-        scan_limit,
-        include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
-        external_sessions: include_external_sessions(),
-        server_groups: server_groups.to_vec(),
-        orphan_sessions: orphan_sessions.to_vec(),
-    };
+    let cache =
+        grouped_session_list_disk_cache(sessions_dir, scan_limit, server_groups, orphan_sessions);
     if let Err(err) = storage::write_json_fast(&path, &cache) {
         crate::logging::debug(&format!(
             "failed to write session picker disk cache {}: {}",
@@ -279,167 +295,148 @@ pub fn load_cached_sessions_grouped() -> Option<(Vec<ServerGroup>, Vec<SessionIn
     Some((cache.server_groups, cache.orphan_sessions))
 }
 
-fn push_with_byte_budget(dst: &mut String, src: &str, budget: &mut usize) {
-    if *budget == 0 || src.is_empty() {
-        return;
+/// Recover the exact recently closed sessions without enumerating historical
+/// transcripts or waiting for the large search cache to deserialize.
+fn load_recently_closed_sessions() -> Vec<SessionInfo> {
+    let window = Duration::from_secs(crate::config::config().display.resume_recent_close_seconds);
+    let closures = session::recent_window_closures(window);
+    if closures.is_empty() {
+        return Vec::new();
     }
-
-    let mut end = src.len().min(*budget);
-    while end > 0 && !src.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == 0 {
-        return;
-    }
-
-    dst.push_str(&src[..end]);
-    *budget = budget.saturating_sub(end);
-}
-
-fn suffix_at_most(value: &str, max_bytes: usize) -> &str {
-    let mut start = value.len().saturating_sub(max_bytes);
-    while start < value.len() && !value.is_char_boundary(start) {
-        start += 1;
-    }
-    &value[start..]
-}
-
-/// Keep a bounded sample from both ends of a growing transcript. Keeping only
-/// the first 64 KiB made `/resume` search silently blind to every later turn in
-/// a long session. The first half retains titles and early prompts while the
-/// second half continuously follows the newest transcript content.
-fn push_sampled_search_text(dst: &mut String, src: &str, limit: usize) {
-    if src.is_empty() || limit == 0 {
-        return;
-    }
-    if dst.len().saturating_add(1).saturating_add(src.len()) <= limit {
-        dst.push(' ');
-        dst.push_str(src);
-        return;
-    }
-
-    // An oversized first message has no existing session head to preserve. Keep
-    // both ends of that message instead of retaining only its suffix.
-    if dst.is_empty() {
-        let head_budget = limit / 2;
-        let mut head_end = src.len().min(head_budget);
-        while head_end > 0 && !src.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        dst.push_str(&src[..head_end]);
-        dst.push_str(suffix_at_most(src, limit.saturating_sub(head_end)));
-        return;
-    }
-
-    let head_budget = limit / 2;
-    let mut head_end = dst.len().min(head_budget);
-    while head_end > 0 && !dst.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let head = dst[..head_end].to_string();
-
-    let tail_budget = limit.saturating_sub(head.len());
-    let tail = if src.len().saturating_add(1) >= tail_budget {
-        suffix_at_most(src, tail_budget).to_string()
-    } else {
-        let old_budget = tail_budget.saturating_sub(src.len() + 1);
-        let old_tail = suffix_at_most(&dst[head_end..], old_budget);
-        let mut tail = String::with_capacity(old_tail.len() + 1 + src.len());
-        tail.push_str(old_tail);
-        tail.push(' ');
-        tail.push_str(src);
-        tail
+    let Ok(home) = storage::jcode_dir() else {
+        return Vec::new();
     };
-
-    dst.clear();
-    dst.push_str(&head);
-    dst.push_str(&tail);
+    let sessions_dir = home.join("sessions");
+    let catchup = crate::catchup::CatchupSeenSnapshot::load();
+    let mut ids: Vec<_> = closures.into_iter().collect();
+    ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    parallel_map(ids, |(id, _)| {
+        parse_jcode_session_info(&sessions_dir, &id, &catchup)
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
-pub(super) fn build_search_index(
-    id: &str,
-    short_name: &str,
-    title: &str,
-    working_dir: Option<&str>,
-    save_label: Option<&str>,
-    messages_preview: &[PreviewMessage],
-) -> String {
-    let mut combined = String::new();
-    combined.push_str(title);
-    combined.push(' ');
-    combined.push_str(short_name);
-    combined.push(' ');
-    combined.push_str(id);
+/// Shared staged loader for the standalone and in-session pickers. A just-closed
+/// session is actionable before loading either the cache or the historical list.
+pub(crate) fn send_session_list_updates(sender: std::sync::mpsc::Sender<super::SessionListUpdate>) {
+    send_session_list_updates_with_discovery(
+        sender,
+        mobile_inventory::available(),
+        mobile_inventory::refresh,
+    );
+}
 
-    if let Some(dir) = working_dir {
-        combined.push(' ');
-        combined.push_str(dir);
+fn send_session_list_updates_with_discovery(
+    sender: std::sync::mpsc::Sender<super::SessionListUpdate>,
+    discovery_available: bool,
+    refresh: impl FnOnce() -> Result<bool>,
+) {
+    let recent = load_recently_closed_sessions();
+    if !recent.is_empty()
+        && sender
+            .send(super::SessionListUpdate::Cached((
+                Vec::new(),
+                recent.clone(),
+            )))
+            .is_err()
+    {
+        return;
     }
-
-    if let Some(label) = save_label {
-        combined.push(' ');
-        combined.push_str(label);
-    }
-
-    let mut budget = SEARCH_CONTENT_BUDGET_BYTES;
-    for msg in messages_preview {
-        let content = msg.content.trim();
-        if content.is_empty() {
-            continue;
+    if let Some((mut groups, mut orphans)) = load_cached_sessions_grouped() {
+        // Do not let an older cached snapshot remove or roll back the recovered
+        // session while the full refresh is still running.
+        let ids: HashSet<_> = recent.iter().map(|s| s.id.as_str()).collect();
+        for group in &mut groups {
+            group.sessions.retain(|s| !ids.contains(s.id.as_str()));
         }
-        combined.push(' ');
-        push_with_byte_budget(&mut combined, content, &mut budget);
-        if budget == 0 {
-            break;
-        }
-    }
-
-    combined.to_lowercase()
-}
-
-fn raw_value_search_excerpt(raw: &RawValue, budget: usize) -> Option<String> {
-    if budget == 0 {
-        return None;
-    }
-    let raw = raw.get();
-    let budget = budget.min(MESSAGE_SEARCH_EXCERPT_BYTES);
-    let mut excerpt = String::new();
-    push_sampled_search_text(&mut excerpt, raw, budget);
-    (!excerpt.is_empty()).then_some(excerpt)
-}
-
-fn raw_value_display_text(raw: &RawValue) -> Option<String> {
-    fn collect_text(value: &serde_json::Value, out: &mut String) {
-        match value {
-            serde_json::Value::String(text) => {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(text);
-            }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    collect_text(item, out);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
-                    out.push_str(text);
-                }
-            }
-            _ => {}
+        orphans.retain(|s| !ids.contains(s.id.as_str()));
+        orphans.extend(recent.iter().cloned());
+        if sender
+            .send(super::SessionListUpdate::Cached((groups, orphans)))
+            .is_err()
+        {
+            return;
         }
     }
-
-    let value: serde_json::Value = serde_json::from_str(raw.get()).ok()?;
-    let mut text = String::new();
-    collect_text(&value, &mut text);
-    let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    let result = load_sessions_grouped().map(|(groups, mut orphans)| {
+        // A long-idle transcript can fall outside the bounded historical scan.
+        // Keep it recoverable after the full refresh too, without replacing a
+        // newer snapshot when that scan did include it.
+        let loaded: HashSet<_> = orphans
+            .iter()
+            .map(|s| s.id.clone())
+            .chain(
+                groups
+                    .iter()
+                    .flat_map(|g| g.sessions.iter().map(|s| s.id.clone())),
+            )
+            .collect();
+        orphans.extend(recent.iter().filter(|s| !loaded.contains(&s.id)).cloned());
+        (groups, orphans)
+    });
+    if !discovery_available {
+        let _ = sender.send(super::SessionListUpdate::Fresh(result));
+        return;
+    }
+    // Keep local results immediately usable while account/SSH discovery runs.
+    let local = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = sender.send(super::SessionListUpdate::Fresh(Err(error)));
+            return;
+        }
+    };
+    if sender
+        .send(super::SessionListUpdate::Cached(local.clone()))
+        .is_err()
+    {
+        return;
+    }
+    let result = match refresh() {
+        Ok(true) => {
+            invalidate_session_list_cache();
+            load_sessions_grouped().map(|(groups, mut orphans)| {
+                let loaded: HashSet<_> = orphans
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .chain(
+                        groups
+                            .iter()
+                            .flat_map(|g| g.sessions.iter().map(|s| s.id.as_str())),
+                    )
+                    .collect();
+                let recovered: Vec<_> = recent
+                    .into_iter()
+                    .filter(|s| !loaded.contains(s.id.as_str()))
+                    .collect();
+                orphans.extend(recovered);
+                (groups, orphans)
+            })
+        }
+        Ok(false) => Ok(local),
+        Err(error) => {
+            crate::logging::debug(&format!("Mobile resume discovery unavailable: {error:#}"));
+            let _ = sender.send(super::SessionListUpdate::CloudUnavailable(
+                "Cloud sessions could not be refreshed. Reopen /resume to retry.".into(),
+            ));
+            Ok(local)
+        }
+    };
+    let _ = sender.send(super::SessionListUpdate::Fresh(result));
 }
+
+#[path = "loading_search_text.rs"]
+mod search_text;
+pub(super) use super::transcript_search::source::SourceBuckets;
+use super::transcript_search::source::{BucketSink, Source, Walk, message_role_source, push_mark};
+#[cfg(test)]
+use search_text::raw_value_search_excerpt;
+pub(super) use search_text::{
+    build_search_index, classified_search_excerpt, classify_json_into, push_sampled_search_text,
+    raw_value_display_text,
+};
 
 #[cfg(test)]
 pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool {
@@ -467,6 +464,7 @@ pub(super) fn session_matches_query(session: &SessionInfo, query: &str) -> bool 
 /// This intentionally avoids transcript file I/O. Transcript-backed content can
 /// still become searchable after preview load because the picker refreshes the
 /// session's cached `search_index` from the loaded preview.
+#[cfg(test)]
 pub(super) fn session_matches_picker_query(session: &SessionInfo, query: &str) -> bool {
     let tokens = search_query_tokens(query);
     tokens.is_empty()
@@ -580,6 +578,39 @@ fn contains_ascii_case_insensitive_bytes(haystack: &[u8], needle_lower: &[u8]) -
     })
 }
 
+/// An external transcript preview plus search text classified by source.
+pub(super) struct ExternalPreview {
+    pub messages: Vec<PreviewMessage>,
+    pub search: SourceBuckets,
+}
+
+impl ExternalPreview {
+    fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            search: SourceBuckets::default(),
+        }
+    }
+
+    fn non_empty(self) -> Option<Self> {
+        (!self.messages.is_empty()).then_some(self)
+    }
+}
+
+/// Search index whose transcript part comes from classified samples.
+pub(super) fn build_classified_search_index(
+    id: &str,
+    short_name: &str,
+    title: &str,
+    working_dir: Option<&str>,
+    save_label: Option<&str>,
+    search: &SourceBuckets,
+) -> String {
+    let mut text = String::new();
+    search.render(&mut text);
+    build_search_index_from_summary(id, short_name, title, working_dir, save_label, &text)
+}
+
 fn build_search_index_from_summary(
     id: &str,
     short_name: &str,
@@ -588,22 +619,8 @@ fn build_search_index_from_summary(
     save_label: Option<&str>,
     transcript_search_text: &str,
 ) -> String {
-    let mut combined = String::new();
-    combined.push_str(title);
-    combined.push(' ');
-    combined.push_str(short_name);
-    combined.push(' ');
-    combined.push_str(id);
-
-    if let Some(dir) = working_dir {
-        combined.push(' ');
-        combined.push_str(dir);
-    }
-
-    if let Some(label) = save_label {
-        combined.push(' ');
-        combined.push_str(label);
-    }
+    let mut combined =
+        search_text::search_index_header(id, short_name, title, working_dir, save_label);
 
     if !transcript_search_text.is_empty() {
         combined.push(' ');
@@ -825,6 +842,8 @@ fn push_preview_message(preview: &mut Vec<PreviewMessage>, role: &str, content: 
         content: content.to_string(),
         tool_calls: Vec::new(),
         tool_data: None,
+        duration_secs: None,
+        title: None,
         timestamp: None,
     });
     if preview.len() > PREVIEW_MESSAGE_LIMIT {
@@ -868,6 +887,34 @@ fn extract_text_from_value(value: &serde_json::Value) -> String {
     let mut out = Vec::new();
     visit(value, &mut out);
     out.join(" ")
+}
+
+/// Classifies every OpenCode part, including tool and reasoning parts the
+/// preview omits, at the weight of its own block type.
+fn classify_opencode_parts(
+    search: &mut SourceBuckets,
+    parts_base: &Path,
+    message_id: &str,
+    role: Source,
+) {
+    let message_parts = parts_base.join(message_id);
+    if !message_parts.exists() {
+        return;
+    }
+    for part_path in collect_files_recursive(&message_parts, "json") {
+        let Ok(file) = std::fs::File::open(&part_path) else {
+            continue;
+        };
+        let Ok(part) = serde_json::from_reader::<_, serde_json::Value>(file) else {
+            continue;
+        };
+        let source = match part.get("type").and_then(|v| v.as_str()) {
+            Some("text") => role,
+            Some("tool") => Source::ToolInput,
+            _ => Source::Other,
+        };
+        classify_json_into(search, &part, source);
+    }
 }
 
 /// Extract message body text from OpenCode part files for the session-picker
@@ -1290,11 +1337,22 @@ struct SessionMessageSummaryData {
     assistant_message_count: usize,
     estimated_tokens: usize,
     first_user_prompt: Option<String>,
-    search_text: String,
+    /// A fork boundary overrides the opening intent of earlier snapshot/journal data.
+    saw_fork_marker: bool,
+    search_text: SourceBuckets,
+    /// Newest stored message timestamp, of any role (prompts, replies, tools).
+    last_message_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl SessionMessageSummaryData {
     fn add_message(&mut self, message: &SessionMessageSummary) {
+        if let Some(ts) = message.timestamp {
+            self.last_message_at = Some(self.last_message_at.map_or(ts, |cur| cur.max(ts)));
+        }
+        if message.is_fork_marker {
+            self.first_user_prompt = None;
+            self.saw_fork_marker = true;
+        }
         if !summary_message_is_visible_conversation(message) {
             return;
         }
@@ -1314,16 +1372,17 @@ impl SessionMessageSummaryData {
                 .estimated_tokens
                 .saturating_add(usage.total_tokens() as usize);
         }
-        if let Some(raw_content) = message.content_raw.as_deref() {
-            push_sampled_search_text(
-                &mut self.search_text,
-                raw_content,
-                INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
-            );
+        if let Some(content) = &message.content_search {
+            self.search_text
+                .merge(content, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
         }
     }
 
     fn merge(&mut self, other: Self) {
+        self.last_message_at = match (self.last_message_at, other.last_message_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
         self.visible_message_count = self
             .visible_message_count
             .saturating_add(other.visible_message_count);
@@ -1334,14 +1393,12 @@ impl SessionMessageSummaryData {
             .assistant_message_count
             .saturating_add(other.assistant_message_count);
         self.estimated_tokens = self.estimated_tokens.saturating_add(other.estimated_tokens);
-        if self.first_user_prompt.is_none() {
+        if other.saw_fork_marker || self.first_user_prompt.is_none() {
             self.first_user_prompt = other.first_user_prompt;
         }
-        push_sampled_search_text(
-            &mut self.search_text,
-            &other.search_text,
-            INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES,
-        );
+        self.saw_fork_marker |= other.saw_fork_marker;
+        self.search_text
+            .merge(&other.search_text, INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES);
     }
 }
 
@@ -1407,10 +1464,13 @@ struct SessionMessageSummary {
     // allocating or walking it. After display metadata is known, we inspect only
     // the raw prefix for old snapshots that predate `display_role`.
     content_starts_with_system_reminder: bool,
-    content_raw: Option<String>,
+    is_fork_marker: bool,
+    /// Bounded per-source samples of the content, classified by block type.
+    content_search: Option<SourceBuckets>,
     content_text: Option<String>,
     display_role: Option<StoredDisplayRole>,
     token_usage: Option<SessionTokenUsageSummary>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl<'de> Deserialize<'de> for SessionMessageSummary {
@@ -1443,11 +1503,15 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
         let mut content: Option<&'de RawValue> = None;
         let mut display_role: Option<StoredDisplayRole> = None;
         let mut token_usage: Option<SessionTokenUsageSummary> = None;
+        let mut timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
 
         while let Some(key) = map.next_key::<Cow<'de, str>>()? {
             match key.as_ref() {
                 "role" => {
                     role = Some(map.next_value()?);
+                }
+                "timestamp" => {
+                    timestamp = map.next_value()?;
                 }
                 "content" => {
                     content = Some(map.next_value()?);
@@ -1459,44 +1523,60 @@ impl<'de> Visitor<'de> for SessionMessageSummaryVisitor {
                     token_usage = map.next_value()?;
                 }
                 _ => {
-                    let _ = map.next_value::<IgnoredAny>()?;
+                    map.next_value::<IgnoredAny>()?;
                 }
             }
         }
 
         let role = role.ok_or_else(|| serde::de::Error::missing_field("role"))?;
+        // Inspect explicit fork reminders even when display_role hides them.
+        // Decode the text so escaped newlines and block-form content work alike.
+        let is_fork_marker = matches!(role, Role::User)
+            && content.is_some_and(raw_content_starts_with_system_reminder)
+            && content
+                .and_then(raw_value_display_text)
+                .is_some_and(|text| {
+                    text.trim_start()
+                        .strip_prefix("<system-reminder>")
+                        .is_some_and(|body| {
+                            body.trim_start()
+                                .starts_with("This session was forked (split) from session ")
+                        })
+                });
+        let conversational_role =
+            matches!(display_role, None | Some(StoredDisplayRole::JarvisUser));
         let content_starts_with_system_reminder = matches!(role, Role::User)
             && display_role.is_none()
             && content.is_some_and(raw_content_starts_with_system_reminder);
-        let content_raw = if display_role.is_none() && !content_starts_with_system_reminder {
-            content.and_then(|raw| raw_value_search_excerpt(raw, self.content_excerpt_budget))
-        } else {
-            None
-        };
-        let content_text = if display_role.is_none() && !content_starts_with_system_reminder {
-            content.and_then(raw_value_display_text)
-        } else {
-            None
-        };
+        let (content_search, content_text) =
+            if conversational_role && !content_starts_with_system_reminder {
+                (
+                    content.and_then(|raw| {
+                        classified_search_excerpt(raw, &role, self.content_excerpt_budget)
+                    }),
+                    content.and_then(raw_value_display_text),
+                )
+            } else {
+                (None, None)
+            };
         Ok(SessionMessageSummary {
             role,
             content_starts_with_system_reminder,
-            content_raw,
+            is_fork_marker,
+            content_search,
             content_text,
             display_role,
             token_usage,
+            timestamp,
         })
     }
 }
 
 fn summary_message_is_visible_conversation(message: &SessionMessageSummary) -> bool {
-    if message.display_role.is_some() {
-        return false;
-    }
-    if message.content_starts_with_system_reminder {
-        return false;
-    }
-    true
+    matches!(
+        message.display_role,
+        None | Some(StoredDisplayRole::JarvisUser)
+    ) && !message.content_starts_with_system_reminder
 }
 
 fn raw_content_starts_with_system_reminder(raw: &RawValue) -> bool {
@@ -1666,11 +1746,14 @@ pub(super) fn build_messages_preview_with_offset(
     let preview = rendered
         .into_iter()
         .skip(skip)
+        .map(crate::tui::DisplayMessage::from_rendered_message)
         .map(|msg| PreviewMessage {
             role: msg.role,
             content: msg.content,
             tool_calls: msg.tool_calls,
             tool_data: msg.tool_data,
+            duration_secs: msg.duration_secs,
+            title: msg.title,
             timestamp: None,
         })
         .collect();
@@ -1767,21 +1850,32 @@ fn parse_jcode_session_info(
         session.model.as_deref(),
     );
 
+    let todo_summary = crate::todo::load_session_todo_summary(stem);
     let title = session
         .custom_title
         .or_else(|| {
-            crate::todo::load_session_title(stem).map(|title| truncate_title_text(&title, 72))
+            todo_summary
+                .title
+                .map(|title| truncate_title_text(&title, 72))
         })
         .or(session.title)
         .unwrap_or_else(|| short_name.clone());
-    let search_index = build_search_index_from_summary(
+    let mut search_index = build_search_index_from_summary(
         stem,
         &short_name,
         &title,
         session.working_dir.as_deref(),
         session.save_label.as_deref(),
-        &session.messages.search_text,
+        &{
+            let mut text = String::new();
+            session.messages.search_text.render(&mut text);
+            text
+        },
     );
+    if let Some(intention) = todo_summary.user_intention.as_deref() {
+        search_index.push(' ');
+        search_index.push_str(&intention.to_lowercase());
+    }
 
     Some(SessionInfo {
         id: stem.to_string(),
@@ -1793,7 +1887,12 @@ fn parse_jcode_session_info(
         user_message_count,
         assistant_message_count,
         created_at: session.created_at,
-        last_message_time: session.updated_at,
+        // Newest message, falling back to the save time for old snapshots
+        // whose messages predate per-message timestamps (or empty sessions).
+        last_message_time: session
+            .messages
+            .last_message_at
+            .unwrap_or(session.updated_at),
         last_active_at: session.last_active_at,
         working_dir: session.working_dir,
         model: session.model,
@@ -1806,6 +1905,7 @@ fn parse_jcode_session_info(
         needs_catchup,
         estimated_tokens,
         first_user_prompt: session.messages.first_user_prompt,
+        user_intention: todo_summary.user_intention,
         messages_preview: Vec::new(),
         search_index,
         server_name: None,
@@ -1815,6 +1915,7 @@ fn parse_jcode_session_info(
             session_id: stem.to_string(),
         },
         external_path: None,
+        todo_statuses: todo_summary.todo_statuses,
     })
 }
 
@@ -1940,11 +2041,22 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
             sessions.extend(saved_sessions.into_iter().flatten());
         }
 
-        (sessions, external_handle.join().unwrap_or_default())
+        (
+            sessions,
+            external_handle.join().unwrap_or_else(|_| {
+                crate::logging::debug("External session loader thread failed");
+                Vec::new()
+            }),
+        )
     });
     sessions.extend(external_sessions);
 
-    sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
+    // A moved session's local snapshot stops changing. Keep it discoverable
+    // even after it falls outside the recency window, without waking the host
+    // or making an SSH connection just to open the picker.
+    include_cloud_sessions(&sessions_dir, &catchup_seen, &mut sessions);
+
+    limit_sessions_by_recency(&mut sessions, scan_limit);
 
     #[cfg(test)]
     run_before_session_list_cache_publish_hook();
@@ -1964,6 +2076,25 @@ fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// Apply a single visible budget after merging every source. Hidden test sessions
+/// have their own bounded budget so toggling them remains useful without pushing
+/// ordinary conversations out of the most recent results. Saved and cloud
+/// sessions compete by recency too, rather than reserving extra visible slots.
+fn limit_sessions_by_recency(sessions: &mut Vec<SessionInfo>, limit: usize) {
+    sessions.sort_by_cached_key(|s| std::cmp::Reverse(super::session_resume_time(s)));
+    let mut visible = 0;
+    let mut debug = 0;
+    sessions.retain(|session| {
+        let count = if session.is_debug {
+            &mut debug
+        } else {
+            &mut visible
+        };
+        *count += 1;
+        *count <= limit
+    });
+}
+
 /// Scan every supported foreign agent CLI in parallel, or nothing at all when
 /// the user opted out via `display.external_sessions` (issue #674). Returning
 /// early skips the filesystem work entirely rather than filtering afterwards.
@@ -1980,7 +2111,10 @@ fn load_external_sessions(enabled: bool, scan_limit: usize) -> Vec<SessionInfo> 
 
         let mut external = Vec::new();
         for handle in [claude, codex, pi, opencode, cursor] {
-            external.extend(handle.join().unwrap_or_default());
+            match handle.join() {
+                Ok(sessions) => external.extend(sessions),
+                Err(_) => crate::logging::warn("External session loader panicked"),
+            }
         }
         external
     })
@@ -2057,17 +2191,24 @@ fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {
                     session_path: session.full_path.clone(),
                 },
                 external_path: Some(session.full_path),
+                user_intention: None,
+                todo_statuses: Vec::new(),
             }
         })
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+    load_claude_code_external_preview(path).map(|preview| preview.messages)
+}
+
+pub(super) fn load_claude_code_external_preview(path: &Path) -> Option<ExternalPreview> {
     // Only parse the tail of the transcript (see `load_codex_preview_from_path`):
     // the preview shows the last ~20 messages, so reparsing multi-MB transcripts
     // on every selection change made picker navigation lag.
     let (text, truncated) = read_file_tail_text(path, EXTERNAL_PREVIEW_TAIL_BYTES)?;
-    let mut preview = Vec::new();
+    let mut out = ExternalPreview::new();
 
     // If we seeked into the middle of the file, the first line is a partial
     // record; drop it. When we read the whole file the first line is a real
@@ -2099,22 +2240,36 @@ pub(super) fn load_claude_code_preview_from_path(path: &Path) -> Option<Vec<Prev
             .unwrap_or(entry_type);
         let text =
             extract_text_from_value(message.get("content").unwrap_or(&serde_json::Value::Null));
-        push_preview_message(&mut preview, role, text);
+        push_preview_message(&mut out.messages, role, text);
+        classify_json_into(&mut out.search, message, message_role_source(role));
     }
 
-    if preview.is_empty() {
-        None
-    } else {
-        Some(preview)
-    }
+    out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_claude_code_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
+    let sessions = match crate::import::list_claude_code_sessions() {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Could not discover Claude Code preview sessions: {error}"
+            ));
+            return None;
+        }
+    };
+    let session = sessions
+        .into_iter()
+        .find(|session| session.session_id == session_id)?;
+    load_claude_code_preview_from_path(Path::new(&session.full_path))
+}
+
+pub(super) fn load_claude_code_external_preview_by_id(session_id: &str) -> Option<ExternalPreview> {
     let session = crate::import::list_claude_code_sessions()
         .ok()?
         .into_iter()
         .find(|session| session.session_id == session_id)?;
-    load_claude_code_preview_from_path(Path::new(&session.full_path))
+    load_claude_code_external_preview(Path::new(&session.full_path))
 }
 
 fn load_external_codex_sessions(scan_limit: usize) -> Vec<SessionInfo> {
@@ -2211,6 +2366,8 @@ fn load_codex_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2243,12 +2400,17 @@ fn find_codex_session_file(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+    load_codex_external_preview(path).map(|preview| preview.messages)
+}
+
+pub(super) fn load_codex_external_preview(path: &Path) -> Option<ExternalPreview> {
     // Only parse the tail of the transcript: the preview shows the last ~20
     // messages, and these rollout files can be tens of MB, so reading the whole
     // file on every selection change made picker navigation lag.
     let (text, _truncated) = read_file_tail_text(path, EXTERNAL_PREVIEW_TAIL_BYTES)?;
-    let mut preview = Vec::new();
+    let mut out = ExternalPreview::new();
 
     // When we read from the start we skip the first line (the `session_meta`
     // record). When we read a tail slice the first line is almost certainly a
@@ -2276,6 +2438,9 @@ pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMes
         } else if line_type == "response_item" {
             let payload = value.get("payload")?;
             if payload.get("type").and_then(|v| v.as_str()) != Some("message") {
+                // Tool calls, their output, and reasoning are searchable at
+                // their own weight even though the preview hides them.
+                classify_json_into(&mut out.search, payload, Source::Other);
                 continue;
             }
             let role = payload.get("role").and_then(|v| v.as_str())?;
@@ -2290,290 +2455,29 @@ pub(super) fn load_codex_preview_from_path(path: &Path) -> Option<Vec<PreviewMes
             continue;
         }
         let text = extract_block_text_from_value(content_value);
-        push_preview_message(&mut preview, role, text);
+        push_preview_message(&mut out.messages, role, text);
+        classify_json_into(&mut out.search, content_value, message_role_source(role));
     }
 
-    if preview.is_empty() {
-        None
-    } else {
-        Some(preview)
-    }
+    out.non_empty()
 }
 
+#[cfg(test)]
 pub(super) fn load_codex_preview(session_id: &str) -> Option<Vec<PreviewMessage>> {
     let path = find_codex_session_file(session_id)?;
     load_codex_preview_from_path(&path)
 }
 
-pub(super) fn load_pi_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    load_pi_session_info(path)
-        .ok()
-        .flatten()
-        .map(|session| session.messages_preview)
+pub(super) fn load_codex_external_preview_by_id(session_id: &str) -> Option<ExternalPreview> {
+    load_codex_external_preview(&find_codex_session_file(session_id)?)
 }
 
-fn load_external_pi_sessions(scan_limit: usize) -> Vec<SessionInfo> {
-    let Ok(root) = crate::storage::user_home_path(".pi/agent/sessions") else {
-        return Vec::new();
-    };
-    if !root.exists() {
-        return Vec::new();
-    }
-
-    let paths = collect_recent_files_recursive(&root, "jsonl", scan_limit);
-    parallel_map(paths, |path| load_pi_session_stub(&path).ok().flatten())
-        .into_iter()
-        .flatten()
-        .collect()
-}
-
-fn load_pi_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
-    let file = File::open(path)?;
-    let mut lines = BufReader::new(file).lines();
-    let Some(first_line) = lines.next() else {
-        return Ok(None);
-    };
-    let header: serde_json::Value = serde_json::from_str(&first_line?)?;
-    if header.get("type").and_then(|v| v.as_str()) != Some("session") {
-        return Ok(None);
-    }
-
-    let session_id = header
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if session_id.is_empty() {
-        return Ok(None);
-    }
-
-    let created_at = header
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(chrono::Utc::now);
-    let last_message_time = std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .map(chrono::DateTime::<chrono::Utc>::from)
-        .unwrap_or(created_at);
-    let working_dir = header
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let short_name = format!("pi {}", jcode_core::util::truncate_str(&session_id, 8));
-    let title = format!(
-        "Pi session {}",
-        jcode_core::util::truncate_str(&session_id, 8)
-    );
-    let search_index = build_search_index(
-        &format!("pi:{session_id}"),
-        &short_name,
-        &title,
-        working_dir.as_deref(),
-        None,
-        &[],
-    );
-
-    Ok(Some(SessionInfo {
-        id: format!("pi:{session_id}"),
-        parent_id: None,
-        short_name,
-        icon: "π".to_string(),
-        title,
-        message_count: 0,
-        user_message_count: 0,
-        assistant_message_count: 0,
-        created_at,
-        last_message_time,
-        last_active_at: Some(last_message_time),
-        working_dir,
-        model: None,
-        provider_key: Some("pi".to_string()),
-        is_canary: false,
-        is_debug: false,
-        saved: false,
-        save_label: None,
-        status: SessionStatus::Closed,
-        needs_catchup: false,
-        estimated_tokens: 0,
-        first_user_prompt: None,
-        messages_preview: Vec::new(),
-        search_index,
-        server_name: None,
-        server_icon: None,
-        source: SessionSource::Pi,
-        resume_target: ResumeTarget::PiSession {
-            session_path: path.to_string_lossy().to_string(),
-        },
-        external_path: Some(path.to_string_lossy().to_string()),
-    }))
-}
-
-fn load_pi_session_info(path: &Path) -> Result<Option<SessionInfo>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-    let Some(first_line) = lines.next() else {
-        return Ok(None);
-    };
-    let header: serde_json::Value = serde_json::from_str(&first_line?)?;
-    if header.get("type").and_then(|v| v.as_str()) != Some("session") {
-        return Ok(None);
-    }
-
-    let session_id = header
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if session_id.is_empty() {
-        return Ok(None);
-    }
-
-    let created_at = header
-        .get("timestamp")
-        .and_then(|v| v.as_str())
-        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(chrono::Utc::now);
-    let working_dir = header
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let mut title: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut provider_key: Option<String> = Some("pi".to_string());
-    let mut last_message_time = created_at;
-    let mut user_message_count = 0usize;
-    let mut assistant_message_count = 0usize;
-    let mut message_count = 0usize;
-    let mut preview = Vec::new();
-
-    for line in lines {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-
-        if let Some(ts) = value
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-        {
-            last_message_time = ts;
-        }
-
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("model_change") => {
-                provider_key = value
-                    .get("provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or(provider_key);
-                model = value
-                    .get("modelId")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .or(model);
-            }
-            Some("message") => {
-                let Some(message) = value.get("message") else {
-                    continue;
-                };
-                let role = message
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let text = extract_text_from_value(
-                    message.get("content").unwrap_or(&serde_json::Value::Null),
-                );
-                if title.is_none() && role == "user" && !text.trim().is_empty() {
-                    title = Some(truncate_title_text(&text, 72));
-                }
-                if model.is_none() {
-                    model = message
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                }
-                message_count += 1;
-                match role {
-                    "user" => user_message_count += 1,
-                    "assistant" => assistant_message_count += 1,
-                    _ => {}
-                }
-                push_preview_message(&mut preview, role, text);
-            }
-            _ => {}
-        }
-    }
-
-    if message_count == 0 {
-        return Ok(None);
-    }
-
-    let short_name = format!("pi {}", jcode_core::util::truncate_str(&session_id, 8));
-    let title = title.unwrap_or_else(|| {
-        format!(
-            "Pi session {}",
-            jcode_core::util::truncate_str(&session_id, 8)
-        )
-    });
-    let search_index = build_search_index(
-        &format!("pi:{session_id}"),
-        &short_name,
-        &title,
-        working_dir.as_deref(),
-        None,
-        &preview,
-    );
-    let first_user_prompt = preview
-        .iter()
-        .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
-        .map(|msg| msg.content.clone());
-
-    Ok(Some(SessionInfo {
-        id: format!("pi:{session_id}"),
-        parent_id: None,
-        short_name,
-        icon: "π".to_string(),
-        title,
-        message_count,
-        user_message_count,
-        assistant_message_count,
-        created_at,
-        last_message_time,
-        last_active_at: Some(last_message_time),
-        working_dir,
-        model,
-        provider_key,
-        is_canary: false,
-        is_debug: false,
-        saved: false,
-        save_label: None,
-        status: SessionStatus::Closed,
-        needs_catchup: false,
-        estimated_tokens: 0,
-        first_user_prompt,
-        messages_preview: preview,
-        search_index,
-        server_name: None,
-        server_icon: None,
-        source: SessionSource::Pi,
-        resume_target: ResumeTarget::PiSession {
-            session_path: path.to_string_lossy().to_string(),
-        },
-        external_path: Some(path.to_string_lossy().to_string()),
-    }))
-}
-
+#[path = "loading/pi_sessions.rs"]
+mod pi_sessions;
+use pi_sessions::load_external_pi_sessions;
+pub(super) use pi_sessions::load_pi_external_preview;
+#[cfg(test)]
+pub(super) use pi_sessions::load_pi_preview_from_path;
 fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return Vec::new();
@@ -2591,11 +2495,17 @@ fn load_external_opencode_sessions(scan_limit: usize) -> Vec<SessionInfo> {
     .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_opencode_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
-    load_opencode_session_info(path)
-        .ok()
-        .flatten()
-        .map(|session| session.messages_preview)
+    load_opencode_external_preview(path).map(|preview| preview.messages)
+}
+
+pub(super) fn load_opencode_external_preview(path: &Path) -> Option<ExternalPreview> {
+    let (session, search) = load_opencode_session_info(path).ok().flatten()?;
+    Some(ExternalPreview {
+        messages: session.messages_preview,
+        search,
+    })
 }
 
 fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
@@ -2681,156 +2591,8 @@ fn load_opencode_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
-    }))
-}
-
-fn load_opencode_session_info(path: &Path) -> Result<Option<SessionInfo>> {
-    let value: serde_json::Value = serde_json::from_reader(File::open(path)?)?;
-    let session_id = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    if session_id.is_empty() {
-        return Ok(None);
-    }
-
-    let created_at = value
-        .get("time")
-        .and_then(|time| time.get("created"))
-        .and_then(|v| v.as_i64())
-        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-        .unwrap_or_else(chrono::Utc::now);
-    let last_message_time = value
-        .get("time")
-        .and_then(|time| time.get("updated"))
-        .and_then(|v| v.as_i64())
-        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-        .unwrap_or(created_at);
-    let working_dir = value
-        .get("directory")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let title = value
-        .get("title")
-        .and_then(|v| v.as_str())
-        .map(|s| truncate_title_text(s, 72))
-        .unwrap_or_else(|| {
-            format!(
-                "OpenCode session {}",
-                jcode_core::util::truncate_str(&session_id, 8)
-            )
-        });
-
-    let messages_root = crate::storage::user_home_path(format!(
-        ".local/share/opencode/storage/message/{}",
-        session_id
-    ))?;
-    let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part")?;
-    let mut preview = Vec::new();
-    let mut user_message_count = 0usize;
-    let mut assistant_message_count = 0usize;
-    let mut provider_key: Option<String> = Some("opencode".to_string());
-    let mut model: Option<String> = None;
-
-    if messages_root.exists() {
-        for msg_path in collect_files_recursive(&messages_root, "json") {
-            let Ok(msg_value) =
-                serde_json::from_reader::<_, serde_json::Value>(File::open(&msg_path)?)
-            else {
-                continue;
-            };
-            let role = msg_value
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            // Modern OpenCode (Go storage) stores body text in part files keyed
-            // by message id; fall back to the legacy inline summary.
-            let text = msg_value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .map(|id| extract_opencode_part_preview(&parts_base, id))
-                .filter(|text| !text.trim().is_empty())
-                .or_else(|| msg_value.get("summary").map(extract_text_from_value))
-                .unwrap_or_default();
-            match role {
-                "user" => user_message_count += 1,
-                "assistant" => assistant_message_count += 1,
-                _ => {}
-            }
-            if model.is_none() {
-                model = msg_value
-                    .get("modelID")
-                    .or_else(|| msg_value.get("model").and_then(|m| m.get("modelID")))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
-            if provider_key.is_none() {
-                provider_key = msg_value
-                    .get("providerID")
-                    .or_else(|| msg_value.get("model").and_then(|m| m.get("providerID")))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
-            push_preview_message(&mut preview, role, text);
-        }
-    }
-
-    let message_count = user_message_count + assistant_message_count;
-    if message_count == 0 {
-        return Ok(None);
-    }
-
-    let short_name = format!(
-        "opencode {}",
-        jcode_core::util::truncate_str(&session_id, 8)
-    );
-    let search_index = build_search_index(
-        &format!("opencode:{session_id}"),
-        &short_name,
-        &title,
-        working_dir.as_deref(),
-        None,
-        &preview,
-    );
-    let first_user_prompt = preview
-        .iter()
-        .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
-        .map(|msg| msg.content.clone());
-
-    Ok(Some(SessionInfo {
-        id: format!("opencode:{session_id}"),
-        parent_id: None,
-        short_name,
-        icon: "◌".to_string(),
-        title,
-        message_count,
-        user_message_count,
-        assistant_message_count,
-        created_at,
-        last_message_time,
-        last_active_at: Some(last_message_time),
-        working_dir,
-        model,
-        provider_key,
-        is_canary: false,
-        is_debug: false,
-        saved: false,
-        save_label: None,
-        status: SessionStatus::Closed,
-        needs_catchup: false,
-        estimated_tokens: 0,
-        first_user_prompt,
-        messages_preview: preview,
-        search_index,
-        server_name: None,
-        server_icon: None,
-        source: SessionSource::OpenCode,
-        resume_target: ResumeTarget::OpenCodeSession {
-            session_id,
-            session_path: path.to_string_lossy().to_string(),
-        },
-        external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -2849,12 +2611,17 @@ fn load_external_cursor_sessions(scan_limit: usize) -> Vec<SessionInfo> {
         .collect()
 }
 
+#[cfg(test)]
 pub(super) fn load_cursor_preview_from_path(path: &Path) -> Option<Vec<PreviewMessage>> {
+    load_cursor_external_preview(path).map(|preview| preview.messages)
+}
+
+pub(super) fn load_cursor_external_preview(path: &Path) -> Option<ExternalPreview> {
     // Only parse the tail of the transcript like the other external CLIs: the
     // preview shows the last ~20 messages, so reparsing large transcripts on
     // every selection change would make picker navigation lag.
     let (text, truncated) = read_file_tail_text(path, EXTERNAL_PREVIEW_TAIL_BYTES)?;
-    let mut preview = Vec::new();
+    let mut out = ExternalPreview::new();
     let skip = usize::from(truncated);
     for line in text.lines().skip(skip) {
         let trimmed = line.trim();
@@ -2880,13 +2647,10 @@ pub(super) fn load_cursor_preview_from_path(path: &Path) -> Option<Vec<PreviewMe
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         let text = crate::import::extract_external_text_from_json_value(&content, false);
-        push_preview_message(&mut preview, role, text);
+        push_preview_message(&mut out.messages, role, text);
+        classify_json_into(&mut out.search, &content, message_role_source(role));
     }
-    if preview.is_empty() {
-        None
-    } else {
-        Some(preview)
-    }
+    out.non_empty()
 }
 
 fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
@@ -3006,6 +2770,8 @@ fn load_cursor_session_stub(path: &Path) -> Result<Option<SessionInfo>> {
             session_path: path.to_string_lossy().to_string(),
         },
         external_path: Some(path.to_string_lossy().to_string()),
+        user_intention: None,
+        todo_statuses: Vec::new(),
     }))
 }
 
@@ -3021,10 +2787,135 @@ pub fn load_servers() -> Vec<ServerInfo> {
     }
 }
 
+fn include_cloud_sessions(
+    sessions_dir: &Path,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+    sessions: &mut Vec<SessionInfo>,
+) {
+    let Some(entries) = storage::session_leases_dir().and_then(|dir| std::fs::read_dir(dir).ok())
+    else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(lease) = storage::read_session_lease(id) else {
+            continue;
+        };
+        let Some(host) = lease
+            .away_host
+            .as_ref()
+            .filter(|host| !host.trim().is_empty())
+        else {
+            continue;
+        };
+        if lease.session_id != id {
+            continue;
+        }
+        if !sessions.iter().any(|session| session.id == id) {
+            let session = parse_jcode_session_info(sessions_dir, id, catchup_seen)
+                .unwrap_or_else(|| cloud_session_stub(&lease));
+            sessions.push(session);
+        }
+        if let Some(session) = sessions.iter_mut().find(|session| session.id == id) {
+            // A migrated local snapshot is historical. Verified cloud metadata
+            // must win for display, project scoping, sorting, and search.
+            if let Some(title) = mobile_inventory::title(id) {
+                session.title = title;
+                session.working_dir = lease.repo_root.clone();
+                if let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&lease.updated_at) {
+                    let updated_at = updated_at.with_timezone(&chrono::Utc);
+                    session.last_message_time = updated_at;
+                    session.last_active_at = Some(updated_at);
+                    session.needs_catchup =
+                        catchup_seen.needs_catchup(id, updated_at, &session.status);
+                }
+                session.search_index = build_search_index_from_summary(
+                    id,
+                    &session.short_name,
+                    &session.title,
+                    session.working_dir.as_deref(),
+                    session.save_label.as_deref(),
+                    &session.search_index,
+                );
+            }
+            session.server_name = Some(format!("cloud: {host}"));
+            session.server_icon = Some("☁".to_string());
+            // Host metadata, not transcript text from the preceding section.
+            push_mark(&mut session.search_index, Source::Other);
+            session
+                .search_index
+                .push_str(&format!("cloud {}", host.to_lowercase()));
+        }
+    }
+}
+
+/// A migration can leave only a lease or a hidden handoff notice locally.
+/// The ownership record is enough to attach without inventing transcript data.
+fn cloud_session_stub(lease: &storage::SessionLease) -> SessionInfo {
+    let id = &lease.session_id;
+    let short_name = extract_session_name(id).unwrap_or(id).to_string();
+    let updated_at = chrono::DateTime::parse_from_rfc3339(&lease.updated_at)
+        .map(|time| time.with_timezone(&chrono::Utc))
+        .unwrap_or_default();
+    let title =
+        mobile_inventory::title(id).unwrap_or_else(|| format!("{short_name} (cloud session)"));
+    let search_index = build_search_index(
+        id,
+        &short_name,
+        &title,
+        lease.repo_root.as_deref(),
+        None,
+        &[],
+    );
+    SessionInfo {
+        id: id.clone(),
+        parent_id: None,
+        icon: session_icon(&short_name).to_string(),
+        short_name,
+        title,
+        message_count: 0,
+        user_message_count: 0,
+        assistant_message_count: 0,
+        created_at: updated_at,
+        last_message_time: updated_at,
+        last_active_at: Some(updated_at),
+        working_dir: lease.repo_root.clone(),
+        model: None,
+        provider_key: None,
+        is_canary: false,
+        is_debug: false,
+        saved: false,
+        save_label: None,
+        status: SessionStatus::Closed,
+        needs_catchup: false,
+        estimated_tokens: 0,
+        first_user_prompt: None,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source: SessionSource::Jcode,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: id.clone(),
+        },
+        external_path: None,
+        user_intention: None,
+        todo_statuses: Vec::new(),
+    }
+}
+
 pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
-    let all_sessions = load_sessions()?;
+    // An explicit picker refresh must see newly closed/created sessions even
+    // when another scan populated the five-second in-process cache recently.
+    let all_sessions = load_sessions_inner(true)?;
     let servers = load_servers();
 
     let mut session_to_server: HashMap<String, &ServerInfo> = HashMap::new();
@@ -3035,9 +2926,17 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
     }
 
     let mut server_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
+    let mut cloud_sessions: HashMap<String, Vec<SessionInfo>> = HashMap::new();
     let mut orphan_sessions: Vec<SessionInfo> = Vec::new();
 
     for mut session in all_sessions {
+        // Remote ownership wins over a stale entry in the local live registry.
+        if session.server_icon.as_deref() == Some("☁")
+            && let Some(name) = session.server_name.clone()
+        {
+            cloud_sessions.entry(name).or_default().push(session);
+            continue;
+        }
         if let Some(server) = session_to_server.get(&session.short_name) {
             session.server_name = Some(server.name.clone());
             session.server_icon = Some(server.icon.clone());
@@ -3064,6 +2963,20 @@ pub fn load_sessions_grouped() -> Result<(Vec<ServerGroup>, Vec<SessionInfo>)> {
             }
         })
         .collect();
+
+    groups.extend(
+        cloud_sessions
+            .into_iter()
+            .map(|(name, sessions)| ServerGroup {
+                name,
+                icon: "☁".to_string(),
+                version: String::new(),
+                git_hash: String::new(),
+                // The lease records ownership, not whether the remote daemon is live.
+                is_running: false,
+                sessions,
+            }),
+    );
 
     groups.sort_by(|a, b| {
         let a_latest = a.sessions.iter().map(|s| s.last_message_time).max();

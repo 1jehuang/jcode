@@ -265,3 +265,42 @@ fn focused_cli_session_ignores_unrelated_windows() {
 
     assert_eq!(super::focused_cli_session().expect("resolve"), None);
 }
+
+/// kitty runs every OS window from one process, so a focused window's PID tree
+/// can hold several registered clients. The last-focused one must win, not the
+/// window title or the first candidate.
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_terminal_process_routes_to_last_focused_client() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+    let first = ChildGuard::spawn_named("jcode");
+    let second = ChildGuard::spawn_named("jcode");
+    let registry = temp.path().join("client_sessions");
+    std::fs::create_dir_all(&registry).expect("create registry");
+    let active = temp.path().join("active_pids");
+    std::fs::create_dir_all(&active).expect("create active_pids");
+    for (child, session) in [(&first, "session_owl_1"), (&second, "session_tiger_2")] {
+        std::fs::write(registry.join(child.pid().to_string()), session).expect("register");
+        std::fs::write(active.join(session), child.pid().to_string()).expect("active");
+    }
+    std::fs::write(
+        temp.path().join("last_focused_client_session"),
+        "session_tiger_2",
+    )
+    .expect("last focused");
+
+    // This test process stands in for the shared kitty process.
+    let window = super::NiriFocusedWindow {
+        id: Some(44),
+        pid: std::process::id(),
+        title: Some("🌐 jcode/citadel Owl".to_string()),
+        _app_id: Some("kitty".to_string()),
+    };
+    assert_eq!(
+        super::resolve_session_for_window(&window),
+        Some("session_tiger_2".to_string())
+    );
+}

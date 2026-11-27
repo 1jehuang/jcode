@@ -7,6 +7,7 @@ fn issue_1685_user_turn(
     retry_attempts: u8,
 ) -> PendingRemoteMessage {
     PendingRemoteMessage {
+        jarvis_voice: false,
         content: content.to_string(),
         images: vec![],
         is_system: false,
@@ -151,6 +152,38 @@ fn issue_1685_provider_dns_failure_has_bounded_resumes() {
     );
 }
 
+/// A Wi-Fi roam breaks the HTTP/2 stream with no timeout or reset wording.
+/// The turn must be held for an automatic network retry, not ended with an
+/// offer to switch models (every model shares the same broken network).
+#[test]
+fn wifi_roam_http2_stream_error_waits_for_network_instead_of_offering_model_switch() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.rate_limit_pending_message = Some(issue_1685_user_turn("keep going", false, 0));
+    app.last_submitted_input = Some("keep going".to_string());
+    app.is_processing = true;
+
+    app.handle_server_event(
+        issue_1685_error(
+            7,
+            "Network unstable: 6 attempts over 31s all failed at the transport level: Failed to send request to Anthropic API: error sending request for url (https://api.anthropic.com/v1/messages?beta=true): client error (SendRequest): http2 error: stream error received: unspecific protocol error detected",
+            None,
+        ),
+        &mut remote,
+    );
+
+    assert!(matches!(
+        app.status,
+        ProcessingStatus::WaitingForNetwork { .. }
+    ));
+    let pending = app.rate_limit_pending_message.as_ref().expect("turn held");
+    assert_eq!(pending.retry_attempts, 1);
+    assert!(pending.auto_retry);
+    assert!(app.pending_fallback_offer.is_none());
+}
+
 #[test]
 fn issue_1685_offline_probes_do_not_consume_retry_budget() {
     let mut app = create_test_app();
@@ -165,6 +198,40 @@ fn issue_1685_offline_probes_do_not_consume_retry_budget() {
             .retry_attempts,
         2
     );
+}
+
+#[test]
+fn accepted_stream_timeouts_do_not_restart_provider_retry_budget() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    for error in [
+        "Stream read timeout: no data received for 180 seconds",
+        "Failed after 3 retries: WebSocket stream timed out waiting for next websocket activity (1s; response_id=resp_test elapsed_ms=181701 since_last_activity_ms=180043)",
+        "timed out waiting for next websocket activity on persistent WS (180s)",
+    ] {
+        for auto_retry in [false, true] {
+            let mut app = create_test_app();
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.auto_poke_incomplete_todos = true;
+            app.auto_poke_default_on = true;
+            app.last_submitted_input = Some("keep going".to_string());
+            app.rate_limit_pending_message =
+                Some(issue_1685_user_turn("keep going", auto_retry, 0));
+            app.is_processing = true;
+
+            app.handle_server_event(issue_1685_error(42, error, None), &mut remote);
+
+            assert!(!app.is_processing, "{error}");
+            assert!(app.rate_limit_pending_message.is_none(), "{error}");
+            assert!(app.rate_limit_reset.is_none(), "{error}");
+            assert!(!app.auto_poke_incomplete_todos, "{error}");
+            assert!(!app.auto_poke_default_on, "{error}");
+            assert_eq!(app.input, "keep going", "{error}");
+            assert!(app.display_messages().iter().any(|message| {
+                message.content.contains("provider stream stalled")
+            }), "{error}");
+        }
+    }
 }
 
 #[test]

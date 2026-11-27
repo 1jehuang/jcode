@@ -1,31 +1,4 @@
 #[test]
-fn test_side_diagram_uses_left_splitter_instead_of_rounded_box() {
-    let _lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
-    app.diagram_pane_enabled = true;
-    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
-
-    crate::tui::mermaid::clear_active_diagrams();
-    crate::tui::mermaid::register_active_diagram(0x444, 900, 450, Some("side".to_string()));
-
-    let backend = ratatui::backend::TestBackend::new(120, 40);
-    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
-    let text = render_and_snap(&app, &mut terminal);
-
-    let diagram_area = crate::tui::ui::last_layout_snapshot()
-        .and_then(|layout| layout.diagram_area)
-        .expect("expected side diagram area after render");
-    let buf = terminal.backend().buffer();
-
-    assert_eq!(buf[(diagram_area.x, diagram_area.y)].symbol(), "│");
-    assert_eq!(buf[(diagram_area.x, diagram_area.y + 1)].symbol(), "│");
-    assert!(text.contains("pinned 1/1"), "rendered text: {text}");
-
-    crate::tui::mermaid::clear_active_diagrams();
-}
-
-#[test]
 fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
@@ -650,7 +623,13 @@ fn test_alt_g_opens_and_closes_commit_log_overlay() {
     };
     git(&["init", "-q"]);
     for n in 0..3 {
-        git(&["commit", "-q", "--allow-empty", "-m", &format!("commit {n}")]);
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("commit {n}"),
+        ]);
     }
     app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
     let diff_mode_before = app.diff_mode;
@@ -660,7 +639,10 @@ fn test_alt_g_opens_and_closes_commit_log_overlay() {
         KeyCode::Char('g'),
         KeyModifiers::ALT
     ));
-    assert_eq!(app.diff_mode, diff_mode_before, "Alt+G no longer cycles diffs");
+    assert_eq!(
+        app.diff_mode, diff_mode_before,
+        "Alt+G no longer cycles diffs"
+    );
     let overlay = app.commit_log_overlay.as_ref().expect("overlay opens");
     assert!(overlay.error.is_none(), "{:?}", overlay.error);
     assert!(!overlay.entries.is_empty());
@@ -688,7 +670,11 @@ fn test_swarm_effort_autocomplete_and_help() {
         .expect("swarm mode should be suggested");
     assert_eq!(*label, super::effort_display_label("swarm"));
     assert!(label.contains("[Beta]"));
-    assert!(!suggestions.iter().any(|(cmd, _)| cmd == "/effort swarm-deep"));
+    assert!(
+        !suggestions
+            .iter()
+            .any(|(cmd, _)| cmd == "/effort swarm-deep")
+    );
     let help = app.command_help("effort").expect("effort help");
     assert!(help.contains("swarm_root_effort"));
     assert!(!help.contains("swarm_deep_root_effort"));
@@ -1175,6 +1161,8 @@ fn test_context_command_reports_session_context_snapshot() {
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1184,9 +1172,12 @@ fn test_context_command_reports_session_context_snapshot() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
             }],
         )
         .expect("save todos");
@@ -1544,140 +1535,7 @@ fn test_agent_model_picker_inherit_row_uses_provider_default_when_inherited_mode
     });
 }
 
-#[test]
-fn test_panel_image_preview_click_render_dismiss_and_restore() {
-    let _lock = scroll_render_test_lock();
-    struct ResetImageMode;
-    impl Drop for ResetImageMode {
-        fn drop(&mut self) {
-            crate::tui::mermaid::set_video_export_mode(false);
-        }
-    }
-    crate::tui::mermaid::set_video_export_mode(true);
-    let _reset = ResetImageMode;
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("preview.png");
-    ::image::RgbaImage::from_pixel(800, 400, ::image::Rgba([0, 80, 255, 255]))
-        .save(&path)
-        .unwrap();
-    let mut app = create_test_app();
-    app.diff_mode = crate::config::DiffDisplayMode::Inline;
-    app.side_panel = crate::side_panel::SidePanelSnapshot {
-        focus_revision: 0,
-        focused_page_id: Some("preview".into()),
-        pages: vec![crate::side_panel::SidePanelPage {
-            id: "preview".into(),
-            title: "Preview fixture".into(),
-            file_path: "".into(),
-            format: crate::side_panel::SidePanelPageFormat::Markdown,
-            pdf_data: None,
-            source: crate::side_panel::SidePanelPageSource::Managed,
-            content: format!(
-                "# Preview fixture\n\n![Image]({})\n\nAfter image",
-                path.display()
-            ),
-            updated_at_ms: 1,
-        }],
-    };
-    app.input = "keep my draft".into();
-    app.cursor_pos = app.input.len();
-    app.diff_pane_auto_scroll = false;
-    app.diff_pane_scroll = 2;
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
-    let text = render_and_snap(&app, &mut terminal);
-    assert!(text.contains("Preview fixture"), "{text}");
-    let (x, y, hash) = (0..40)
-        .find_map(|y| {
-            (0..120).find_map(|x| {
-                crate::tui::ui::panel_image_preview::image_at(x, y).map(|hash| (x, y, hash))
-            })
-        })
-        .expect("rendered image should have a click target");
-    let mouse = |kind, column, row| MouseEvent {
-        kind,
-        column,
-        row,
-        modifiers: KeyModifiers::empty(),
-    };
-    // Click targets exclude the text header and chat.
-    assert_eq!(crate::tui::ui::panel_image_preview::image_at(0, 0), None);
-    // Dragging across image placeholder rows remains a selection, not a click.
-    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
-    app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), x, y + 1));
-    app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), x, y + 1));
-    assert_eq!(app.panel_image_preview, None);
-    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
-    assert_eq!(app.panel_image_preview, None, "open on release, not press");
-    app.handle_mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left), x, y));
-    app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
-    assert_eq!(app.panel_image_preview, Some(hash));
-    let text = render_and_snap(&app, &mut terminal);
-    assert!(text.contains("Image preview"), "{text}");
-    assert!(text.contains("Click or Esc to close"), "{text}");
-    assert!(
-        !text.contains("Preview fixture"),
-        "preview replaces the split layout"
-    );
-    assert_eq!(crate::tui::ui::panel_image_preview::image_at(x, y), None);
-    // Modal input must not edit the prompt or scroll the panel behind it.
-    app.handle_key(KeyCode::Char('x'), KeyModifiers::empty())
-        .unwrap();
-    app.handle_mouse_event(mouse(MouseEventKind::ScrollDown, x, y));
-    assert_eq!(app.input, "keep my draft");
-    assert_eq!(app.diff_pane_scroll, 2);
-    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
-    assert_eq!(app.panel_image_preview, None);
-    assert_eq!(app.diff_pane_scroll, 2);
-    let text = render_and_snap(&app, &mut terminal);
-    assert!(text.contains("Preview fixture"));
-    // Reopening and clicking anywhere closes without clicking through.
-    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), x, y));
-    app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), x, y));
-    assert_eq!(app.panel_image_preview, Some(hash));
-    app.handle_mouse_event(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
-    assert_eq!(app.panel_image_preview, Some(hash));
-    app.handle_mouse_event(mouse(MouseEventKind::Up(MouseButton::Left), 0, 0));
-    assert_eq!(app.panel_image_preview, None);
-    assert_eq!(app.input, "keep my draft");
-    // Hiding the panel must remove its old clickable regions.
-    app.side_panel = Default::default();
-    render_and_snap(&app, &mut terminal);
-    assert_eq!(crate::tui::ui::panel_image_preview::image_at(x, y), None);
-}
+include!("panel_image_preview.rs");
 
-#[test]
-fn test_panel_image_preview_missing_image_and_tiny_terminal_are_dismissible() {
-    let _lock = scroll_render_test_lock();
-    let mut app = create_test_app();
-    app.panel_image_preview = Some(u64::MAX - 123);
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 15)).unwrap();
-    assert!(render_and_snap(&app, &mut terminal).contains("Image is no longer available"));
-    let mut tiny = ratatui::Terminal::new(ratatui::backend::TestBackend::new(1, 1)).unwrap();
-    render_and_snap(&app, &mut tiny);
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-    assert_eq!(app.panel_image_preview, None);
-}
-
-#[test]
-fn test_panel_image_preview_remote_keys_and_session_reset() {
-    let mut app = create_test_app();
-    app.input = "unsent draft".into();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    for close_key in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
-        app.panel_image_preview = Some(42);
-        rt.block_on(app.handle_remote_key(KeyCode::Char('x'), KeyModifiers::empty(), &mut remote))
-            .unwrap();
-        assert_eq!(app.input, "unsent draft");
-        assert_eq!(app.panel_image_preview, Some(42));
-        rt.block_on(app.handle_remote_key(close_key, KeyModifiers::empty(), &mut remote))
-            .unwrap();
-        assert_eq!(app.panel_image_preview, None);
-        assert_eq!(app.input, "unsent draft");
-    }
-    app.panel_image_preview = Some(42);
-    crate::tui::app::commands_review::clear_side_panel_for_new_session(&mut app);
-    assert_eq!(app.panel_image_preview, None);
-}
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_side_diagram_uses_left_splitter_instead_of_rounded_box;

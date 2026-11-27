@@ -16,6 +16,10 @@
 
 ## Development Workflow
 
+- **Commit and push as you go** - Make small, scoped commits and push them to
+  the current branch's remote as meaningful work is completed, rather than
+  waiting until the end of the task. Preserve unrelated changes and never
+  force-push unless the user explicitly authorizes it.
 - **Use the user's Git identity** - Create commits with the configured
   `user.name` and `user.email`. Do not override them with `Jcode`, `Jcode agent`,
   or a fabricated agent email. Preserve existing contributor attribution when
@@ -35,6 +39,22 @@
   test, and integrate that contribution regardless of author status. Do not pull
   in unrelated branches or merge a PR without user authorization.
 
+## Provider model discovery
+
+- Model arrays are offline fallbacks, not release allowlists. Providers with a
+  catalog must discover new model IDs without a Jcode release and expose them
+  through switching lists and structured model routes.
+- Implement both cached prefetch and explicit refresh. Explicit refresh must
+  bypass fresh caches. Preserve the last good catalog on network, authentication,
+  or malformed-response failures, and scope persistent caches to their endpoint.
+- Wire new providers into the shared refresh fanout and model-update publication,
+  including long-lived sessions, not only startup or login.
+- Regression tests must discover an arbitrary future model absent from all
+  fallback arrays, using the provider's actual response schema. Check picker
+  routes, forced refresh with a fresh cache, and last-good behavior on failure.
+- If a backend has no discovery API, document that limitation instead of
+  presenting a hardcoded list or a no-op refresh as live discovery.
+
 ## Install Notes
 - `~/.local/bin/jcode` is the launcher symlink used from `PATH`.
 - `~/.jcode/builds/current/jcode` is the active local/source-build channel; self-dev builds and `scripts/install_release.sh` point the launcher here.
@@ -45,6 +65,17 @@
 - Ensure `~/.local/bin` is **before** `~/.cargo/bin` in `PATH`.
 
 ## Verifying a change at runtime
+
+### Keep benchmark sessions out of user history
+
+For synthetic prompts and streaming/CPU/power benchmarks, set a dedicated
+`JCODE_HOME` and `JCODE_TEST_SESSION=1` for both the server and its clients,
+in addition to using a unique `--socket`. A private socket alone isolates the
+daemon, not persisted sessions. Never run synthetic benchmark prompts against
+the user's normal session storage. On Unix, also give the server and clients the
+same private `TMPDIR`: background task status and output use the OS temp
+folder (`$TMPDIR/jcode-bg-tasks`), not `JCODE_HOME`. Without this, an isolated
+benchmark and the regular daemon can see each other's background tasks.
 
 `cargo build` alone proves nothing about behavior. `jcode run` and interactive
 sessions are served by the long-lived daemon at
@@ -58,8 +89,17 @@ run your build against its own socket:
 
 ```bash
 cargo build --profile selfdev
-./target/selfdev/jcode run --no-update --socket /run/user/1000/jcode-mytest.sock '<prompt>'
+(
+  root=$(mktemp -d) || exit 1
+  export JCODE_HOME="$root/home" TMPDIR="$root/tmp" JCODE_TEST_SESSION=1
+  mkdir -m 700 "$JCODE_HOME" "$TMPDIR" || exit 1
+  printf 'Isolated run directory: %s\n' "$root"
+  ./target/selfdev/jcode run --no-update --socket "$root/server.sock" '<prompt>'
+)
 ```
+
+Remove the printed directory only after the isolated daemon and its background
+tasks have stopped and you no longer need their output.
 
 Two things that waste time otherwise:
 

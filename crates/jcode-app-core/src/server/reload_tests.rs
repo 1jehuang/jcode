@@ -151,7 +151,9 @@ fn persist_reload_recovery_intents_records_running_peer_recovery() -> anyhow::Re
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_signals_all_running_sessions_including_initiator() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("initiator".to_string(), member("initiator", "running")),
         ("peer".to_string(), member("peer", "running")),
@@ -222,7 +224,9 @@ async fn graceful_shutdown_sessions_signals_all_running_sessions_including_initi
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_does_not_wait_for_triggering_session_checkpoint() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("initiator".to_string(), member("initiator", "running")),
         ("peer".to_string(), member("peer", "running")),
@@ -294,7 +298,9 @@ async fn graceful_shutdown_sessions_does_not_wait_for_triggering_session_checkpo
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_skips_idle_sessions() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         "idle".to_string(),
         member("idle", "ready"),
@@ -324,7 +330,9 @@ async fn graceful_shutdown_sessions_skips_idle_sessions() {
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_does_not_wait_on_running_sessions_without_signal() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         "orphan_running".to_string(),
         member("orphan_running", "running"),
@@ -351,7 +359,9 @@ async fn graceful_shutdown_sessions_does_not_wait_on_running_sessions_without_si
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_waits_until_target_status_change_arrives() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         "target".to_string(),
         member("target", "running"),
@@ -418,7 +428,9 @@ async fn graceful_shutdown_sessions_waits_until_target_status_change_arrives() {
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_ignores_unrelated_events_until_target_leaves() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("target".to_string(), member("target", "running")),
         ("other".to_string(), member("other", "running")),
@@ -495,7 +507,9 @@ async fn graceful_shutdown_sessions_ignores_unrelated_events_until_target_leaves
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_treats_member_left_as_unblocked() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         "target".to_string(),
         member("target", "running"),
@@ -547,7 +561,9 @@ async fn graceful_shutdown_sessions_treats_member_left_as_unblocked() {
 
 #[tokio::test]
 async fn graceful_shutdown_sessions_times_out_and_proceeds() {
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([(
         "target".to_string(),
         member("target", "running"),
@@ -586,7 +602,9 @@ async fn graceful_shutdown_sessions_times_out_and_proceeds() {
 async fn graceful_shutdown_sessions_times_out_on_partial_checkpoint() {
     // One watched session checkpoints, the other never does. The wait must
     // still terminate at the timeout instead of blocking on the laggard.
-    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::new(),
+    ));
     let swarm_members = Arc::new(RwLock::new(HashMap::from([
         ("fast".to_string(), member("fast", "running")),
         ("slow".to_string(), member("slow", "running")),

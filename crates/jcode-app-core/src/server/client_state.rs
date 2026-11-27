@@ -1,5 +1,4 @@
-use super::ClientConnectionInfo;
-use super::server_has_newer_binary;
+use super::{ClientConnectionInfo, SessionAgents, server_has_newer_binary};
 use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};
@@ -13,7 +12,6 @@ use anyhow::Result;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum HistoryPayloadMode {
@@ -24,6 +22,11 @@ use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
+
+#[path = "history_timing.rs"]
+mod history_timing;
+use history_timing::Timing;
+pub(super) use history_timing::send_resume_todos;
 
 /// Do not probe any identity until telemetry is enabled. Only the provider
 /// may identify its effective OAuth credential. An API-key route must not expose the email
@@ -79,61 +82,9 @@ fn should_debounce_attach_model_prefetch(provider_name: &str) -> bool {
     false
 }
 
-fn history_provider_name_from_session(session: &crate::session::Session) -> Option<String> {
-    let key = session.provider_key.as_deref()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-
-    let label = match key.to_ascii_lowercase().as_str() {
-        "openai" => "OpenAI".to_string(),
-        "claude" | "anthropic" => "Anthropic".to_string(),
-        "openrouter" => "OpenRouter".to_string(),
-        "copilot" => "GitHub Copilot".to_string(),
-        "cursor" => "Cursor".to_string(),
-        "gemini" => "Gemini".to_string(),
-        "bedrock" => "Bedrock".to_string(),
-        "antigravity" => "Antigravity".to_string(),
-        "jcode" => "Jcode".to_string(),
-        // A direct OpenAI-compatible profile is persisted either bare
-        // (`deepseek`, the session vocabulary) or as its source key
-        // (`openai-compatible:deepseek`). Both name the same profile, so report
-        // its display name like every other arm here; a raw key would otherwise
-        // reach the header, and `source_key_for_provider_label` maps the
-        // prefixed shape away from `openai:api-key` only by accident (#1286).
-        other => {
-            // Import-source codes are stored in the same field but are not
-            // profile routes; `opencode` in particular collides with the
-            // `OpenCode Zen` profile id, so it must stay verbatim.
-            const IMPORT_SOURCE_CODES: &[&str] = &["opencode", "claude-code", "openai-codex"];
-            if IMPORT_SOURCE_CODES.contains(&other) {
-                other.to_string()
-            } else {
-                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
-                    .unwrap_or_else(|| other.to_string())
-            }
-        }
-    };
-
-    Some(label)
-}
-
-/// The provider name a `History` payload reports.
-///
-/// The persisted session key wins when there is one. Otherwise ask for the
-/// profile-aware label: `Provider::name()` is the stable machine id for the
-/// provider *class* (`OpenRouter` for the multiplexing slot, `openrouter` for
-/// a concrete runtime instance), and that slot also serves every direct
-/// OpenAI-compatible profile, so it must not be shown as this session's
-/// provider (issue #1286).
-fn history_provider_name(
-    session: &crate::session::Session,
-    provider: &dyn Provider,
-) -> Option<String> {
-    history_provider_name_from_session(session).or_else(|| Some(provider.display_name()))
-}
+#[path = "history_provider_label.rs"]
+mod history_provider_label;
+use history_provider_label::*;
 
 pub(super) async fn handle_get_state(
     id: u64,
@@ -180,8 +131,10 @@ pub(super) async fn handle_get_history(
     server_icon: &str,
     was_interrupted: Option<bool>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("history", Some(id), client_session_id);
     let history_start = Instant::now();
     let activity =
         session_activity_snapshot(client_connections, client_session_id, client_is_processing)
@@ -195,7 +148,8 @@ pub(super) async fn handle_get_history(
             "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
             client_session_id
         ));
-        send_history_from_persisted_session(
+        timing.stage("persisted");
+        let result = send_history_from_persisted_session(
             id,
             client_session_id,
             provider,
@@ -207,9 +161,12 @@ pub(super) async fn handle_get_history(
             was_interrupted,
             activity,
             supports_pdf_panels,
+            supports_turn_identity,
             history_base,
         )
-        .await?;
+        .await;
+        timing.result(&result);
+        result?;
         crate::logging::info(&format!(
             "[TIMING] handle_get_history: session={}, persisted_fallback total={}ms",
             client_session_id,
@@ -218,7 +175,8 @@ pub(super) async fn handle_get_history(
         return Ok(());
     };
 
-    send_history_with_guard(
+    timing.stage("live");
+    let result = send_history_with_guard(
         id,
         client_session_id,
         agent_guard,
@@ -232,9 +190,12 @@ pub(super) async fn handle_get_history(
         HistoryPayloadMode::Full,
         true,
         supports_pdf_panels,
+        supports_turn_identity,
         history_base,
     )
-    .await?;
+    .await;
+    timing.result(&result);
+    result?;
     let send_history_ms = history_start.elapsed().as_millis();
 
     let prefetch_start = Instant::now();
@@ -249,15 +210,31 @@ pub(super) async fn handle_get_history(
     Ok(())
 }
 
-pub(super) async fn handle_get_model_catalog(
+async fn build_model_catalog(
     id: u64,
     session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    writer: &Arc<Mutex<WriteHalf>>,
-) -> Result<()> {
-    let started = Instant::now();
+) -> Result<(ServerEvent, &'static str, u128)> {
     let build_started = Instant::now();
+    let live = super::available_models_cache::try_for_agent(agent, |agent_guard| {
+        let provider = agent_guard.provider_handle();
+        (
+            agent_guard.active_resolved_credential(),
+            provider.service_tier(),
+            Some(
+                provider
+                    .available_service_tiers()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            provider.reasoning_effort(),
+            provider_oauth_email(provider.as_ref()),
+            provider.serving_oauth_account_label(),
+        )
+    })
+    .await?;
     let (
         provider_name,
         provider_model,
@@ -271,71 +248,69 @@ pub(super) async fn handle_get_model_catalog(
         provider_oauth_email,
         provider_oauth_account_label,
     ) = {
-        match agent.try_lock() {
-            Ok(agent_guard) => {
-                let catalog = super::available_models_cache::for_agent(&agent_guard).snapshot();
+        match live {
+            Some((catalog, (credential, tier, tiers, effort, email, account_label))) => {
+                let catalog = catalog.snapshot();
                 (
-                    Some(agent_guard.provider_name()),
-                    Some(agent_guard.provider_model()),
+                    catalog.provider_name,
+                    catalog.provider_model,
                     catalog.available_models,
                     catalog.model_routes,
-                    agent_guard.active_resolved_credential(),
-                    agent_guard.provider_handle().service_tier(),
-                    Some(
-                        agent_guard
-                            .provider_handle()
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    agent_guard.provider_handle().reasoning_effort(),
+                    credential,
+                    tier,
+                    tiers,
+                    effort,
                     "live",
-                    provider_oauth_email(agent_guard.provider_handle().as_ref()),
-                    agent_guard.provider_handle().serving_oauth_account_label(),
+                    email,
+                    account_label,
                 )
             }
-            Err(_) => {
+            None => {
                 crate::logging::warn(&format!(
                     "handle_get_model_catalog: session {} busy, using provider/persisted fallback",
                     session_id
                 ));
-                let persisted = Session::load_for_remote_startup(session_id)
-                    .or_else(|_| Session::load_startup_stub(session_id))
-                    .ok();
-                let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
-                let mut model_routes = provider.model_routes();
-                crate::model_usage::enrich_routes(&mut model_routes);
-                (
-                    // Same field the non-busy path builds: it must name the
-                    // profile, not the multiplexing slot (#1286). This fallback
-                    // is exactly the lock-contention case a client cannot
-                    // correct, so `provider.name()` here reached the header and
-                    // the spend ledger as `OpenRouter`.
-                    Some(provider.display_name()),
-                    persisted_model.or_else(|| Some(provider.model())),
-                    provider.available_models_display(),
-                    model_routes,
-                    provider.active_resolved_credential(),
-                    provider.service_tier(),
-                    Some(
-                        provider
-                            .available_service_tiers()
-                            .into_iter()
-                            .map(str::to_string)
-                            .collect(),
-                    ),
-                    provider.reasoning_effort(),
-                    "fallback",
-                    provider_oauth_email(provider.as_ref()),
-                    provider.serving_oauth_account_label(),
-                )
+                let session_id = session_id.to_string();
+                let provider = Arc::clone(provider);
+                tokio::task::spawn_blocking(move || {
+                    let persisted = Session::load_for_remote_startup(&session_id)
+                        .or_else(|_| Session::load_startup_stub(&session_id))
+                        .ok();
+                    let persisted_model =
+                        persisted.as_ref().and_then(|session| session.model.clone());
+                    let mut model_routes = provider.model_routes();
+                    crate::model_usage::enrich_routes(&mut model_routes);
+                    (
+                        // Same field the non-busy path builds: it must name the
+                        // profile, not the multiplexing slot (#1286). This fallback
+                        // is exactly the lock-contention case a client cannot
+                        // correct, so `provider.name()` here reached the header and
+                        // the spend ledger as `OpenRouter`.
+                        Some(provider.display_name()),
+                        persisted_model.or_else(|| Some(provider.model())),
+                        provider.available_models_display(),
+                        model_routes,
+                        provider.active_resolved_credential(),
+                        provider.service_tier(),
+                        Some(
+                            provider
+                                .available_service_tiers()
+                                .into_iter()
+                                .map(str::to_string)
+                                .collect(),
+                        ),
+                        provider.reasoning_effort(),
+                        "fallback",
+                        provider_oauth_email(provider.as_ref()),
+                        provider.serving_oauth_account_label(),
+                    )
+                })
+                .await?
             }
         }
     };
     let build_ms = build_started.elapsed().as_millis();
 
-    let encode_started = Instant::now();
     let event = ServerEvent::History {
         id,
         session_id: session_id.to_string(),
@@ -380,6 +355,39 @@ pub(super) async fn handle_get_model_catalog(
         side_panel: Default::default(),
         applets: Default::default(),
     };
+    Ok((event, source, build_ms))
+}
+
+pub(super) async fn handle_get_model_catalog(
+    id: u64,
+    session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
+    provider: &Arc<dyn Provider>,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let started = Instant::now();
+    // Catalog discovery is ancillary to this attachment. A refresh racing the
+    // build (or a failed blocking worker) must not close the transport and
+    // revoke an otherwise healthy cloud session's owner.
+    let built = build_model_catalog(id, session_id, agent, provider).await;
+    let (event, source, build_ms) = match built {
+        Ok(built) => built,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Model catalog request failed without disconnecting session {session_id}: {error:#}"
+            ));
+            return super::client_writer::write_direct_event(
+                writer,
+                &ServerEvent::Error {
+                    id,
+                    message: format!("Could not refresh model catalog: {error}"),
+                    retry_after_secs: None,
+                },
+            )
+            .await;
+        }
+    };
+    let encode_started = Instant::now();
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
     let write_started = Instant::now();
@@ -404,71 +412,116 @@ pub(super) async fn handle_get_model_catalog(
     Ok(())
 }
 
-pub(super) async fn handle_get_compacted_history(
-    id: u64,
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    writer: &Arc<Mutex<WriteHalf>>,
-    visible_messages: usize,
-) -> Result<()> {
-    let started = Instant::now();
-    let (messages, images, compacted_info, source) = match agent.try_lock() {
-        Ok(agent_guard) => {
-            let (messages, images, info) = agent_guard
-                .get_history_and_rendered_images_with_compacted_history(visible_messages);
-            (messages, images, info, "live")
-        }
-        Err(_) => {
-            let session = crate::session::Session::load_for_remote_startup(session_id)
-                .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
-            let (rendered_messages, images, info) =
-                crate::session::render_messages_and_images_with_compacted_history(
-                    &session,
-                    visible_messages,
-                );
-            (
-                rendered_messages
-                    .into_iter()
-                    .map(rendered_to_history_message)
-                    .collect(),
-                images,
-                info,
-                "persisted",
-            )
-        }
+#[path = "history_paging.rs"]
+mod history_paging;
+pub(super) use history_paging::handle_get_compacted_history;
+
+/// Window canonical rendered entries, not raw provider messages. Images follow
+/// their rendered entry and the synthetic marker occupies its own index.
+pub(super) fn recent_history_window(
+    mut messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    visible: usize,
+) -> (
+    Vec<HistoryMessage>,
+    Vec<crate::session::RenderedImage>,
+    crate::session::RenderedCompactedHistoryInfo,
+) {
+    let total = messages.len();
+    let start = total.saturating_sub(visible.max(1));
+    let archived_prompts = messages
+        .iter()
+        .filter(|message| {
+            message.role == "system"
+                && message
+                    .content
+                    .starts_with("Earlier conversation compacted - ")
+        })
+        .filter_map(|message| {
+            message
+                .content
+                .split("Hidden user prompts: ")
+                .nth(1)?
+                .split('.')
+                .next()?
+                .parse::<usize>()
+                .ok()
+        })
+        .sum::<usize>();
+    let is_prompt = |message: &&HistoryMessage| {
+        matches!(message.role.as_str(), "user" | "jarvis_user")
+            && !crate::session::is_attached_image_label_text(&message.content)
     };
-
-    let compacted_info = compacted_info.unwrap_or(crate::session::RenderedCompactedHistoryInfo {
-        total_messages: 0,
-        visible_messages: 0,
-        remaining_messages: 0,
-        hidden_user_prompts: 0,
+    let excluded_prompts = messages[..start].iter().filter(is_prompt).count();
+    let hidden_user_prompts = archived_prompts + excluded_prompts;
+    let info = crate::session::RenderedCompactedHistoryInfo {
+        total_messages: total,
+        visible_messages: total - start,
+        remaining_messages: start,
+        hidden_user_prompts,
+    };
+    if start == 0 {
+        return (messages, images, info);
+    }
+    messages = messages.split_off(start);
+    messages.insert(0, HistoryMessage {
+        response_stats: None,
+        role: "system".to_owned(),
+        content: format!("{}{start} older historical messages hidden. Showing {} of {total} messages. Scroll to the top to load more. Hidden user prompts: {hidden_user_prompts}.", crate::protocol::RECENT_HISTORY_MARKER_PREFIX, info.visible_messages),
+        tool_calls: None,
+        tool_data: None,
     });
-    crate::logging::info(&format!(
-        "[TIMING] get_compacted_history: session={}, source={}, requested={}, visible={}, remaining={}, messages={}, total={}ms",
-        session_id,
-        source,
-        visible_messages,
-        compacted_info.visible_messages,
-        compacted_info.remaining_messages,
-        messages.len(),
-        started.elapsed().as_millis(),
-    ));
+    let visible_prompts = messages.iter().filter(is_prompt).count();
+    let images = images
+        .into_iter()
+        .filter_map(|mut image| {
+            match &mut image.anchor {
+                Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal }) => {
+                    *ordinal = ordinal.checked_sub(excluded_prompts)?;
+                    if *ordinal >= visible_prompts {
+                        return None;
+                    }
+                }
+                Some(crate::session::RenderedImageAnchor::ToolCall { id }) => {
+                    if !messages.iter().any(|message| {
+                        message
+                            .tool_data
+                            .as_ref()
+                            .is_some_and(|tool| &tool.id == id)
+                    }) {
+                        return None;
+                    }
+                }
+                None if image.history_message_index.is_none() => return None,
+                None => {}
+            }
+            if let Some(index) = image.history_message_index {
+                if index < start || index > total {
+                    return None;
+                }
+                image.history_message_index = Some(index - start + 1);
+            }
+            Some(image)
+        })
+        .collect();
+    (messages, images, info)
+}
 
-    write_event(
-        writer,
-        &ServerEvent::CompactedHistory {
-            id,
-            session_id: session_id.to_string(),
-            messages,
-            images,
-            compacted_total: compacted_info.total_messages,
-            compacted_visible: compacted_info.visible_messages,
-            compacted_remaining: compacted_info.remaining_messages,
-            compacted_hidden_prompts: compacted_info.hidden_user_prompts,
-        },
-    )
-    .await
+fn apply_recent_history_base(
+    messages: Vec<HistoryMessage>,
+    images: Vec<crate::session::RenderedImage>,
+    history_base: Option<crate::protocol::HistoryBase>,
+    messages_base_count: Option<usize>,
+) -> (Vec<HistoryMessage>, Vec<crate::session::RenderedImage>) {
+    if messages_base_count.is_none()
+        && let Some(visible) = history_base
+            .filter(|base| base.count == 0)
+            .and_then(|base| base.recent_messages)
+    {
+        let (messages, images, _) = recent_history_window(messages, images, visible);
+        return (messages, images);
+    }
+    (messages, images)
 }
 
 /// Trim History to the messages after the client's verified prefix.
@@ -559,7 +612,19 @@ fn history_reload_recovery_snapshot_with(
             ));
             return Some(directive);
         }
-        Ok(None) => {}
+        Ok(None) => {
+            // A consumed durable intent is authoritative over leftover reload
+            // context and interruption markers. A new intent replaces it.
+            if super::reload_recovery::peek_for_session(session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    record.status == super::reload_recovery::ReloadRecoveryStatus::Delivered
+                })
+            {
+                return None;
+            }
+        }
         Err(err) => crate::logging::warn(&format!(
             "history_reload_recovery_snapshot: failed to read server-owned recovery intent for session={}: {}",
             session_id, err
@@ -644,16 +709,22 @@ fn session_interrupted_by_reload(session: &Session) -> bool {
         .map(|message| message.role == Role::User)
         .unwrap_or(false);
     let marker_active = crate::server::reload_marker_active(RELOAD_RESTORE_MARKER_MAX_AGE);
+    let pending_turn = last_is_user
+        || session
+            .messages
+            .last()
+            .is_some_and(super::client_session::last_message_has_pending_tool);
     let interrupted = matches!(session.status, SessionStatus::Crashed { .. })
-        || (matches!(session.status, SessionStatus::Active) && last_is_user && marker_active)
-        || (matches!(session.status, SessionStatus::Closed) && last_is_user && marker_active)
+        || (matches!(session.status, SessionStatus::Active) && pending_turn && marker_active)
+        || (matches!(session.status, SessionStatus::Closed) && pending_turn && marker_active)
         || persisted_session_has_reload_interruption_marker(session);
 
     crate::logging::info(&format!(
-        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} marker_active={} interrupted={}",
+        "history_reload_recovery_snapshot: fallback inspect session={} status={} last_is_user={} pending_turn={} marker_active={} interrupted={}",
         session_id,
         session.status.display(),
         last_is_user,
+        pending_turn,
         marker_active,
         interrupted
     ));
@@ -677,8 +748,10 @@ async fn send_history_from_persisted_session(
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("persisted_history", Some(id), session_id);
     let loaded = super::run_blocking_io(|| {
         crate::session::Session::load_for_remote_startup(session_id)
             .or_else(|_| crate::session::Session::load_startup_stub(session_id))
@@ -699,8 +772,12 @@ async fn send_history_from_persisted_session(
             // Do not save this synthetic snapshot or mask other I/O errors.
             Session::create_with_id(session_id.to_string(), None, None)
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            timing.result(&Err::<(), _>(()));
+            return Err(error);
+        }
     };
+    timing.stage("render");
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
@@ -728,6 +805,8 @@ async fn send_history_from_persisted_session(
         .map(rendered_to_history_message)
         .collect();
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),
@@ -798,7 +877,23 @@ async fn send_history_from_persisted_session(
         applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
-    write_event(writer, &history_event).await
+    timing.stage("encode");
+    let json = encode_event(&history_event);
+    timing.stage("writer_lock");
+    let mut writer_guard = writer.lock().await;
+    timing.stage("write");
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        let sent = writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
+    }
+    let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
+    result.map_err(Into::into)
 }
 
 /// How long the bootstrap History payload may wait on the model-name catalog.
@@ -849,8 +944,10 @@ async fn send_history_with_guard(
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
     supports_pdf_panels: bool,
+    supports_turn_identity: bool,
     history_base: Option<crate::protocol::HistoryBase>,
 ) -> Result<()> {
+    let mut timing = Timing::new("live_history", Some(id), session_id);
     let history_start = Instant::now();
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
@@ -1052,6 +1149,8 @@ async fn send_history_with_guard(
             )
         });
     let (messages, messages_base_count) = apply_history_base(messages, history_base);
+    let (messages, images) =
+        apply_recent_history_base(messages, images, history_base, messages_base_count);
     let (images, images_unchanged) = apply_history_images_base(
         images,
         history_base.filter(|_| messages_base_count.is_some()),
@@ -1099,6 +1198,7 @@ async fn send_history_with_guard(
         applets,
     };
     let build_ms = build_start.elapsed().as_millis();
+    timing.stage("encode");
     let encode_start = Instant::now();
     let json = encode_event(&history_event);
     // Free the structured event as soon as the wire bytes exist so only ~1x
@@ -1106,11 +1206,23 @@ async fn send_history_with_guard(
     drop(history_event);
     let json_len = json.len();
     let encode_ms = encode_start.elapsed().as_millis();
+    timing.stage("writer_lock");
     let writer_lock_start = Instant::now();
     let mut writer_guard = writer.lock().await;
     let writer_lock_ms = writer_lock_start.elapsed().as_millis();
+    timing.stage("write");
     let write_start = Instant::now();
+    if supports_turn_identity && let Some(state) = history_turn_state(sessions, session_id) {
+        let sent = writer_guard
+            .write_all(encode_event(&state).as_bytes())
+            .await;
+        if sent.is_err() {
+            timing.result(&sent);
+        }
+        sent?;
+    }
     let result = writer_guard.write_all(json.as_bytes()).await;
+    timing.result(&result);
     drop(writer_guard);
     // Release the serialized payload before any further work (logging below
     // only needs the captured length).
@@ -1175,6 +1287,17 @@ pub(super) async fn session_activity_snapshot(
     })
 }
 
+fn history_turn_state(sessions: &SessionAgents, session_id: &str) -> Option<ServerEvent> {
+    let observer = sessions.turn_observer(session_id)?;
+    let (latest_turn_id, active) = observer.snapshot();
+    Some(ServerEvent::TurnState {
+        session_id: session_id.to_string(),
+        runtime_generation: observer.runtime_generation().to_string(),
+        turn_id: active.map(|identity| identity.turn_id),
+        latest_turn_id,
+    })
+}
+
 async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Result<()> {
     // Serialize straight to bytes with the same framing as encode_event
     // (JSON body, "{}" on serialize failure, trailing newline) and drop the
@@ -1189,134 +1312,11 @@ async fn write_event(writer: &Arc<Mutex<WriteHalf>>, event: &ServerEvent) -> Res
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn session_with_provider_key(key: Option<&str>) -> crate::session::Session {
-        let mut session = crate::session::Session::create_with_id(
-            "test_history_provider_name".to_string(),
-            None,
-            None,
-        );
-        session.provider_key = key.map(str::to_string);
-        session
-    }
-
-    #[test]
-    fn history_provider_name_prefers_persisted_openai_key() {
-        let session = session_with_provider_key(Some("openai"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("OpenAI")
-        );
-    }
-
-    #[test]
-    fn history_provider_name_preserves_unknown_runtime_profile() {
-        let session = session_with_provider_key(Some("remote-catalog"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("remote-catalog")
-        );
-    }
-
-    /// A direct OpenAI-compatible profile is persisted as its source key.
-    /// Clients must receive a display label, not the raw key: passing the key
-    /// through would make the spend ledger bill it to `openai:api-key` (#1286).
-    #[test]
-    fn history_provider_name_maps_a_compatible_profile_key_to_its_label() {
-        let session = session_with_provider_key(Some("openai-compatible:deepseek"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("DeepSeek")
-        );
-
-        let session = session_with_provider_key(Some("openai-compatible:nvidia-nim"));
-        assert_eq!(
-            history_provider_name_from_session(&session).as_deref(),
-            Some("NVIDIA NIM")
-        );
-    }
-
-    /// The same profile is also persisted bare (`deepseek`, the session
-    /// vocabulary). Both shapes must report the profile's display name instead
-    /// of the raw key (#1286).
-    #[test]
-    fn history_provider_name_maps_a_bare_compatible_profile_key() {
-        for (key, label) in [
-            ("deepseek", "DeepSeek"),
-            ("openai-compatible", "OpenAI-compatible"),
-            ("opencode-go", "OpenCode Go"),
-            ("nvidia-nim", "NVIDIA NIM"),
-        ] {
-            let session = session_with_provider_key(Some(key));
-            assert_eq!(
-                history_provider_name_from_session(&session).as_deref(),
-                Some(label),
-                "provider key {key} must report its profile label"
-            );
-        }
-    }
-
-    /// Import-source codes live in the same field but are not profile routes:
-    /// `opencode` collides with the `OpenCode Zen` profile id, and a session
-    /// imported from that CLI must not be relabelled as the gateway.
-    #[test]
-    fn history_provider_name_keeps_import_source_codes_verbatim() {
-        for key in ["opencode", "claude-code", "openai-codex"] {
-            let session = session_with_provider_key(Some(key));
-            assert_eq!(
-                history_provider_name_from_session(&session).as_deref(),
-                Some(key),
-                "import source {key} must stay verbatim"
-            );
-        }
-    }
-
-    /// With no persisted key, the fallback must be the profile-aware label.
-    /// `Provider::name()` is the multiplexing slot (`openrouter`) that serves
-    /// every direct OpenAI-compatible profile, so it tagged DeepSeek sessions
-    /// as OpenRouter (#1286).
-    struct SlotOnlyProvider;
-
-    #[async_trait::async_trait]
-    impl Provider for SlotOnlyProvider {
-        async fn complete(
-            &self,
-            _messages: &[crate::message::Message],
-            _tools: &[crate::message::ToolDefinition],
-            _system: &str,
-            _resume_session_id: Option<&str>,
-        ) -> Result<crate::provider::EventStream> {
-            Err(anyhow::anyhow!(
-                "the history fallback test never sends a request"
-            ))
-        }
-
-        fn name(&self) -> &str {
-            "OpenRouter"
-        }
-
-        fn display_name(&self) -> String {
-            "DeepSeek".to_string()
-        }
-
-        fn fork(&self) -> Arc<dyn Provider> {
-            Arc::new(SlotOnlyProvider)
-        }
-    }
-
-    #[test]
-    fn history_provider_name_falls_back_to_the_profile_label() {
-        let session = session_with_provider_key(None);
-        assert_eq!(
-            history_provider_name(&session, &SlotOnlyProvider).as_deref(),
-            Some("DeepSeek")
-        );
-    }
-}
+#[path = "history_provider_tests.rs"]
+mod tests;
 
 pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Arc<Mutex<Agent>>) {
+    super::model_refresh::ensure_periodic_refresh(&provider);
     tokio::spawn(async move {
         let (provider_name, initial_models) = {
             let agent_guard = agent.lock().await;
@@ -1327,9 +1327,9 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
         };
 
         let needs_capability_refresh = provider.model_capabilities_need_refresh();
-        if !initial_models.is_empty() && !needs_capability_refresh {
-            return;
-        }
+        // Nonempty names may be built-in fallbacks, not a discovered catalog.
+        // Let each provider apply its own freshness policy rather than making
+        // static defaults permanently suppress discovery for the whole picker.
 
         if should_debounce_attach_model_prefetch(&provider_name) {
             crate::logging::info(&format!(
@@ -1339,8 +1339,12 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             return;
         }
 
-        if provider.prefetch_models().await.is_err() {
-            return;
+        if let Err(error) = provider.prefetch_models().await {
+            crate::logging::debug(&format!(
+                "Attach-time model prefetch failed for {provider_name}: {error}"
+            ));
+            // A unified provider can fail after other runtimes refreshed.
+            // Publish those successful discoveries rather than hiding them.
         }
 
         let refreshed = {
@@ -1355,7 +1359,6 @@ pub(super) fn spawn_model_prefetch_update(provider: Arc<dyn Provider>, agent: Ar
             return;
         }
 
-        let _ = refreshed;
         Bus::global().publish_models_updated();
     });
 }

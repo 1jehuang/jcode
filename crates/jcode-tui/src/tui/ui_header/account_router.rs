@@ -1,8 +1,17 @@
 //! Startup-only credential inventory. No credential probes or usage refreshes.
 use super::*;
+#[path = "account_router_inventory.rs"]
+mod inventory;
+pub(super) use inventory::fit_account_row;
+use inventory::inventory_lines;
+use inventory::load_inventory;
+#[cfg(test)]
+use inventory::remaining_bars;
+use inventory::remote_inventory_lines;
+
 use crate::auth::account_pool::{AccountPool, OAuthLogin, account_key};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -12,27 +21,52 @@ pub(super) fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
 }
 
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct Inventory {
     logins: Vec<OAuthLogin>,
     pool: AccountPool,
     expired: Vec<(&'static str, String)>,
+    /// Antigravity quota pools from the persisted model catalog, read on the
+    /// inventory worker so rendering never touches disk.
+    antigravity: Option<AntigravityQuota>,
+}
+
+#[derive(Default, PartialEq, Eq, Clone, Debug)]
+struct AntigravityQuota {
+    email: Option<String>,
+    /// (pool label, used per-mille, reset time) per quota pool.
+    pools: Vec<(String, u16, Option<String>)>,
 }
 
 #[derive(Default)]
 struct InventoryCache {
-    inventory: Inventory,
+    inventory: Arc<Inventory>,
     updated: Option<Instant>,
     refreshing: bool,
 }
 
-fn cached_inventory() -> Inventory {
+impl InventoryCache {
+    fn snapshot(&self) -> Arc<Inventory> {
+        Arc::clone(&self.inventory)
+    }
+
+    fn replace_inventory(&mut self, inventory: Inventory) -> bool {
+        if *self.inventory == inventory {
+            return false;
+        }
+        self.inventory = Arc::new(inventory);
+        true
+    }
+}
+
+fn cached_inventory() -> Arc<Inventory> {
     static CACHE: OnceLock<Mutex<InventoryCache>> = OnceLock::new();
+    static EMPTY: OnceLock<Arc<Inventory>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     let Ok(mut state) = cache.try_lock() else {
-        return Inventory::default();
+        return Arc::clone(EMPTY.get_or_init(Default::default));
     };
-    let inventory = state.inventory.clone();
+    let inventory = state.snapshot();
     if !state.refreshing
         && state
             .updated
@@ -45,8 +79,7 @@ fn cached_inventory() -> Inventory {
             .spawn(move || {
                 let inventory = load_inventory();
                 if let Ok(mut state) = cache.lock() {
-                    if state.inventory != inventory {
-                        state.inventory = inventory;
+                    if state.replace_inventory(inventory) {
                         GENERATION.fetch_add(1, Ordering::Release);
                     }
                     state.updated = Some(Instant::now());
@@ -58,27 +91,6 @@ fn cached_inventory() -> Inventory {
         }
     }
     inventory
-}
-
-fn load_inventory() -> Inventory {
-    // Local auth files only. Retain metadata, never access/refresh tokens.
-    let now = chrono::Utc::now().timestamp_millis();
-    let mut expired = Vec::new();
-    for account in crate::auth::claude::list_accounts().unwrap_or_default() {
-        if account.expires <= now {
-            expired.push(("claude", account.label));
-        }
-    }
-    for account in crate::auth::codex::list_accounts().unwrap_or_default() {
-        if account.expires_at.is_some_and(|expires| expires <= now) {
-            expired.push(("openai", account.label));
-        }
-    }
-    Inventory {
-        logins: crate::auth::account_pool::oauth_logins(),
-        pool: AccountPool::load(),
-        expired,
-    }
 }
 
 fn masked_identity(email: Option<&str>) -> String {
@@ -113,209 +125,161 @@ pub(super) fn lines(
     )
 }
 
-fn inventory_lines(
-    auth: &AuthStatus,
-    active: ActiveCredentialOverrides,
-    inventory: &Inventory,
+/// Rows for a remote (SSH) daemon, built only from its credential-free
+/// `AccountUsage` report. `None` until the daemon has answered.
+pub(super) fn remote_lines(
     provider_name: &str,
     selected_label: Option<&str>,
-) -> Vec<Line<'static>> {
-    use crate::auth::{ActiveCredential, resolve_dual_credential_auth};
-    use jcode_provider_core::ActiveProvider;
-    let mut entries = Vec::new();
-    let runtime = std::env::var("JCODE_RUNTIME_PROVIDER").ok();
-    let current_provider = jcode_provider_core::parse_provider_hint(provider_name);
-    // Preserve the stored login order for defaulted members. Explicit pool
-    // positions below take precedence across providers, including API keys.
-    for account in &inventory.logins {
-        let (name, provider, oauth_state, usage_provider) = if account.provider == "claude" {
-            (
-                "anthropic",
-                ActiveProvider::Claude,
-                auth.anthropic.oauth_state,
-                crate::usage::MultiAccountProviderKind::Anthropic,
-            )
-        } else {
-            (
-                "openai",
-                ActiveProvider::OpenAI,
-                auth.openai_oauth_state,
-                crate::usage::MultiAccountProviderKind::OpenAI,
-            )
-        };
-        let resolved = resolve_dual_credential_auth(provider, auth, runtime.as_deref());
-        let credential = active.get(provider).or(resolved.map(|r| r.active));
-        let bound = (current_provider == Some(provider))
-            .then_some(selected_label)
-            .flatten();
-        let selected = bound.map_or(account.active, |label| account.label == label);
-        let expired = inventory
-            .expired
-            .iter()
-            .any(|(p, label)| *p == account.provider && label == &account.label)
-            || (selected && bound.is_none() && oauth_state == AuthState::Expired);
-        let is_current = current_provider == Some(provider)
-            && selected
-            && credential == Some(ActiveCredential::OAuth);
-        let usage =
-            crate::usage::cached_account_usage_status_snapshot(usage_provider, &account.label);
-        let quota = usage.as_ref().and_then(|usage| {
-            remaining_bar(usage, crate::config::config().display.usage_display_used())
-        });
-        let mut row = detail(
-            oauth_credential_status(expired, usage.as_ref()),
-            format!("{name:<9} {}", masked_identity(account.email.as_deref())),
-            is_current,
-        );
-        row.spans
-            .push(Span::styled(" · ", Style::default().fg(dim_color())));
-        if let Some(quota) = quota {
-            row.spans.extend(quota.spans);
-        } else {
-            row.spans.push(Span::styled(
-                usage_status_label(usage.as_ref()),
-                Style::default().fg(dim_color()),
-            ));
-        }
-        entries.push((
-            account_key(account.provider, Some(&account.label)),
-            true,
-            row,
-        ));
+) -> Option<Vec<Line<'static>>> {
+    let (anthropic, openai) = crate::usage::remote_account_list()?;
+    Some(remote_inventory_lines(
+        &anthropic,
+        &openai,
+        provider_name,
+        selected_label,
+    ))
+}
+
+const QUOTA_SEPARATOR: &str = "  ";
+
+fn inline_account_row(mut identity: Line<'static>, quotas: Vec<Line<'static>>) -> Line<'static> {
+    if quotas.is_empty() {
+        return identity;
     }
-    for (name, key, provider) in [
-        ("anthropic", "anthropic-api", ActiveProvider::Claude),
-        ("openai", "openai-api", ActiveProvider::OpenAI),
-    ] {
-        if let Some(resolved) = resolve_dual_credential_auth(provider, auth, runtime.as_deref())
-            && resolved.has_api_key
-        {
-            let credential = active.get(provider).unwrap_or(resolved.active);
-            let is_current =
-                current_provider == Some(provider) && credential == ActiveCredential::ApiKey;
-            entries.push((
-                key.into(),
-                false,
-                detail(
-                    AuthState::Available,
-                    format!("{name:<9} API key"),
-                    is_current,
-                ),
-            ));
-        }
-    }
-    for (name, key, state, api_key) in [
-        ("jcode", "jcode", auth.jcode, false),
-        ("azure", "azure", auth.azure, true),
-        ("bedrock", "bedrock", auth.bedrock, true),
-        ("grok build", "grok-build", auth.grok_build, true),
-        (
-            "OpenAI-compatible profiles",
-            "openai-compatible",
-            auth.openai_compatible_any,
-            true,
-        ),
-        ("openrouter", "openrouter", auth.openrouter, true),
-        ("cursor", "cursor", auth.cursor, false),
-        ("copilot", "copilot", auth.copilot, false),
-        ("gemini", "gemini", auth.gemini, false),
-        ("antigravity", "antigravity", auth.antigravity, false),
-    ] {
-        if state != AuthState::NotConfigured {
-            let is_current = current_provider.is_some()
-                && current_provider == jcode_provider_core::parse_provider_hint(key);
-            let label = if api_key {
-                format!("{name:<9} API key")
-            } else {
-                name.into()
-            };
-            entries.push((
-                key.into(),
-                crate::auth::account_pool::default_member(key, api_key),
-                detail(state, label, is_current),
-            ));
-        }
-    }
-    let keys: Vec<_> = entries
-        .iter()
-        .map(|(key, default, _)| (key.clone(), *default))
-        .collect();
-    let (ordered, _) = inventory.pool.partition(&keys);
-    let mut lines: Vec<_> = ordered
-        .into_iter()
-        .filter_map(|key| {
-            entries
-                .iter()
-                .find(|(candidate, _, _)| candidate == key)
-                .map(|(_, _, line)| line.clone())
-        })
-        .collect();
-    if lines.is_empty() {
-        lines.push(Line::styled(
-            "No auto-routing accounts · /login to add credential",
+    // Keep status/error and banked-reset telemetry after the quotas, so fitting
+    // cannot sacrifice a model window just to retain a countdown.
+    let suffix = identity.spans.split_off(3);
+    for quota in quotas {
+        identity.spans.push(Span::styled(
+            QUOTA_SEPARATOR,
             Style::default().fg(dim_color()),
         ));
+        identity.spans.extend(quota.spans);
     }
-    lines
+    identity.spans.extend(suffix);
+    identity
+}
+
+fn priority_row(mut row: Line<'static>, priority: u32, tiers: &[u32]) -> Line<'static> {
+    let rank = tiers.binary_search(&priority).unwrap_or(0);
+    let dimming = if tiers.len() < 2 {
+        0
+    } else {
+        rank * 40 / (tiers.len() - 1)
+    };
+    // Only decorate the identity span. Arrows, status dots and the info widget's
+    // usage-limit bars retain their established glyphs and colors.
+    if let Some(identity) = row.spans.get_mut(2)
+        && dimming > 0
+        && let Some(base) = identity.style.fg
+    {
+        let (r, g, b) = match base {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Indexed(index) => jcode_tui_style::indexed_to_rgb(index),
+            _ => return row,
+        };
+        let scale = |value: u8| (usize::from(value) * (100 - dimming) / 100) as u8;
+        identity.style = identity.style.fg(Color::Rgb(scale(r), scale(g), scale(b)));
+    }
+    row
+}
+
+// Quotas already use the daemon mirror for connected local clients. Resets must
+// use the same source rather than an unrelated, process-local endpoint cache.
+fn header_account_banked_resets(
+    provider: crate::usage::MultiAccountProviderKind,
+    label: &str,
+) -> Option<crate::usage::AccountBankedResets> {
+    if crate::usage::remote_account_usage_received() {
+        crate::usage::remote_account_banked_resets(provider, label)
+    } else {
+        crate::usage::cached_account_banked_resets(provider, label)
+    }
+}
+
+/// Warmer colors mean less time to spend a reset. Unknown expiry stays blue.
+fn banked_expiry_color(expires_at: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Color {
+    let Some(expiry) = expires_at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    else {
+        return Color::Rgb(120, 190, 255);
+    };
+    let remaining = expiry.signed_duration_since(now);
+    if remaining <= chrono::Duration::hours(24) {
+        Color::Rgb(255, 100, 100)
+    } else if remaining <= chrono::Duration::days(3) {
+        Color::Rgb(255, 180, 80)
+    } else if remaining <= chrono::Duration::days(7) {
+        Color::Rgb(230, 210, 100)
+    } else {
+        Color::Rgb(100, 210, 130)
+    }
+}
+
+/// Compact banked-reset suffix: "2 resets" when claimable, otherwise when the
+/// next one unlocks. Nothing is shown when no reset is known or upcoming.
+fn banked_resets_span(banked: &crate::usage::AccountBankedResets) -> Option<Span<'static>> {
+    if banked.available > 0 {
+        let noun = if banked.available == 1 {
+            "reset"
+        } else {
+            "resets"
+        };
+        let expiry = banked
+            .expires_at
+            .as_deref()
+            .map(|at| format!(" · exp {}", crate::usage::format_reset_time(at)))
+            .unwrap_or_default();
+        return Some(Span::styled(
+            format!("↻ {} {noun}{expiry}", banked.available),
+            Style::default().fg(banked_expiry_color(
+                banked.expires_at.as_deref(),
+                chrono::Utc::now(),
+            )),
+        ));
+    }
+    let at = banked.next_available_at.as_deref()?;
+    Some(Span::styled(
+        format!("↻ in {}", crate::usage::format_reset_time(at)),
+        Style::default().fg(dim_color()),
+    ))
 }
 
 /// Explain missing bars without exposing raw endpoint errors or implying zero usage.
-fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> &'static str {
+fn usage_status_label(usage: Option<&crate::usage::AccountUsageSnapshot>) -> String {
     match usage {
-        None => "limits pending",
+        None => "limits pending".into(),
         Some(usage) => match usage.error.as_deref() {
-            Some(error) if error.contains("429") => "usage fetch failed (429)",
-            Some(error) if error.contains("401") => "usage fetch needs login",
-            Some(_) => "usage fetch failed",
-            None => "limits not reported",
+            Some(error) if error.contains("429") => {
+                match crate::usage::usage_error_retry_at(error).map(crate::usage::format_reset_time)
+                {
+                    Some(wait) if wait != "now" => format!("usage throttled, retry in {wait}"),
+                    _ => "usage throttled, retrying soon".into(),
+                }
+            }
+            Some(error) if error.contains("401") => "usage fetch needs login".into(),
+            Some(_) => "usage fetch failed".into(),
+            None => "limits not reported".into(),
         },
     }
 }
 
+#[cfg(test)]
 fn remaining_bar(
     usage: &crate::usage::AccountUsageSnapshot,
     display_used: bool,
 ) -> Option<Line<'static>> {
-    let (used, window) = match usage.five_hour_ratio {
-        Some(used) => (used, usage.primary_label.as_deref().unwrap_or("5h")),
-        None => (
-            usage.seven_day_ratio?,
-            usage.secondary_label.as_deref().unwrap_or("7d"),
-        ),
-    };
-    if !used.is_finite() || !(0.0..=1.0).contains(&used) {
+    let rows = remaining_bars(usage, display_used);
+    if rows.is_empty() {
         return None;
     }
-    let label = match window {
-        "5-hour" | "5-hour window" => "5h",
-        "7-day" | "7-day window" => "7d",
-        label => label,
-    };
-    let used_pct = (used * 100.0).round() as u8;
-    let mut bar = crate::tui::info_widget::render_usage_limit_bar(
-        label,
-        used_pct,
-        100u8.saturating_sub(used_pct),
-        None,
-        22,
-        display_used,
-    );
-    // Inline quotas do not need the info widget's fixed-width label column.
-    if let Some(label) = bar.spans.first_mut() {
-        label.content = format!(
-            "{}{} ",
-            label.content.trim_end(),
-            if usage.error.is_some() { " stale" } else { "" },
-        )
-        .into();
-    }
+    let mut spans: Vec<_> = rows.into_iter().flat_map(|row| row.spans).collect();
     if usage.error.is_some() {
-        bar.spans.push(Span::styled(
+        spans.push(Span::styled(
             format!(" · {}", usage_status_label(Some(usage))),
             Style::default().fg(dim_color()),
         ));
     }
-    Some(bar)
+    Some(Line::from(spans))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,6 +335,12 @@ fn oauth_credential_status(
     if [usage.five_hour_ratio, usage.seven_day_ratio]
         .into_iter()
         .flatten()
+        .chain(
+            usage
+                .additional_windows
+                .iter()
+                .map(|window| window.usage_ratio),
+        )
         .any(|ratio| ratio.is_finite() && (0.0..=1.0).contains(&ratio))
     {
         CredentialStatus::Available
@@ -414,6 +384,170 @@ mod tests {
             .join("\n")
     }
 
+    #[test]
+    fn remote_rows_mask_email_and_show_quota() {
+        let account = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
+            label: "work".into(),
+            email: Some("jeremy@example.com".into()),
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        let out = text(remote_inventory_lines(
+            &[],
+            &[account],
+            "openai",
+            Some("work"),
+        ));
+        assert!(out.contains("openai"), "{out}");
+        assert!(out.contains("j***y@example.com"), "{out}");
+        assert!(!out.contains("jeremy@"), "{out}");
+        assert!(out.contains("85%"), "{out}");
+    }
+
+    #[test]
+    fn inline_account_rows_prioritize_all_limits_at_80_cells() {
+        let usage = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("界界界@example.com".into()),
+            exhausted: false,
+            primary_label: Some("5-hour".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.42),
+            additional_windows: vec![crate::protocol::AccountUsageWindow {
+                label: "Fable 7d".into(),
+                usage_ratio: 0.73,
+                resets_at: None,
+            }],
+            resets_at: None,
+            error: None,
+        };
+        for display_used in [false, true] {
+            let mut identity = detail(
+                CredentialStatus::Available,
+                "anthropic 界***界@example.com".into(),
+                true,
+            );
+            identity
+                .spans
+                .push(Span::raw(" · ↻ 2 resets · exp tomorrow"));
+            let row = inline_account_row(identity, remaining_bars(&usage, display_used));
+            for budget in [79, 119, 239] {
+                let fitted = fit_account_row(row.clone(), budget);
+                assert!(fitted.width() <= budget);
+                let rendered = text(vec![fitted]);
+                for label in ["5h", "7d", "Fable 7d"] {
+                    assert!(rendered.contains(label), "{rendered}");
+                }
+                for percent in if display_used {
+                    ["15%", "42%", "73%"]
+                } else {
+                    ["85%", "58%", "27%"]
+                } {
+                    assert!(rendered.contains(percent), "{rendered}");
+                }
+            }
+            let narrow = fit_account_row(row.clone(), 39);
+            assert!(narrow.width() <= 39);
+            assert!(text(vec![narrow]).contains('…'));
+            assert!(text(vec![fit_account_row(row, 239)]).contains("2 resets"));
+        }
+    }
+
+    #[test]
+    fn account_headers_render_all_usage_windows_and_fit_unicode_widths() {
+        let mut usage = crate::usage::AccountUsageSnapshot {
+            label: "work".into(),
+            email: Some("界界@example.com".into()),
+            exhausted: false,
+            primary_label: Some("session".into()),
+            five_hour_ratio: Some(0.15),
+            secondary_label: Some("7-day".into()),
+            seven_day_ratio: Some(0.42),
+            additional_windows: vec![
+                crate::protocol::AccountUsageWindow {
+                    label: "Fable 7d".into(),
+                    usage_ratio: 0.73,
+                    resets_at: None,
+                },
+                crate::protocol::AccountUsageWindow {
+                    label: "Spark 界".into(),
+                    usage_ratio: 0.91,
+                    resets_at: None,
+                },
+                crate::protocol::AccountUsageWindow {
+                    label: "future model / month".into(),
+                    usage_ratio: 0.32,
+                    resets_at: None,
+                },
+            ],
+            resets_at: None,
+            error: None,
+        };
+        for display_used in [false, true] {
+            let rendered = text(vec![remaining_bar(&usage, display_used).unwrap()]);
+            for label in [
+                "session",
+                "7d",
+                "Fable 7d",
+                "Spark 界",
+                "future model / month",
+            ] {
+                assert!(rendered.contains(label), "{rendered}");
+            }
+            for percent in if display_used {
+                [15, 42, 73, 91, 32]
+            } else {
+                [85, 58, 27, 9, 68]
+            } {
+                assert!(rendered.contains(&format!("{percent}%")), "{rendered}");
+            }
+        }
+        for (anthropic, openai, provider) in [
+            (vec![], vec![usage.clone()], "openai"),
+            (vec![usage.clone()], vec![], "anthropic"),
+        ] {
+            let rows = remote_inventory_lines(&anthropic, &openai, provider, Some("work"));
+            assert_eq!(
+                rows.len(),
+                1,
+                "identity and all quotas share one logical row"
+            );
+            for width in [0u16, 1, 2, 8, 24, 40, 80, 120, 240] {
+                let fitted = fit_header_lines(rows.clone(), width);
+                assert_eq!(fitted.len(), rows.len());
+                for result in &fitted {
+                    assert!(result.width() <= usize::from(width.saturating_sub(1)));
+                }
+                if width >= 120 {
+                    let rendered = text(fitted);
+                    for label in [
+                        "session",
+                        "7d",
+                        "Fable 7d",
+                        "Spark 界",
+                        "future model / month",
+                    ] {
+                        assert!(rendered.contains(label), "width={width}: {rendered}");
+                    }
+                }
+            }
+        }
+        // One malformed window must not hide the valid windows that follow it.
+        usage.five_hour_ratio = Some(f32::NAN);
+        usage.seven_day_ratio = None;
+        let rendered = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(!rendered.contains("session"));
+        assert!(rendered.contains("Fable 7d"));
+        assert!(rendered.contains("future model / month"));
+    }
+
     fn auth() -> AuthStatus {
         AuthStatus {
             anthropic: ProviderAuth {
@@ -440,8 +574,124 @@ mod tests {
         }
     }
 
+    fn snapshot_fixture() -> Inventory {
+        Inventory {
+            logins: vec![login("openai", "work", "alice@example.com")],
+            pool: AccountPool {
+                members: vec!["openai:work".into()],
+                priorities: [("openai:work".into(), 1)].into_iter().collect(),
+                ..Default::default()
+            },
+            expired: vec![("openai", "old".into())],
+            antigravity: None,
+        }
+    }
+
     #[test]
-    fn router_inventory_follows_global_pool_order_without_promoting_active() {
+    fn antigravity_quota_groups_models_into_shared_pools() {
+        let model = |id: &str, remaining: Option<u16>, reset: &str| {
+            crate::provider::antigravity::CatalogModel {
+                id: id.into(),
+                display_name: None,
+                reset_time: Some(reset.into()),
+                tag_title: None,
+                model_provider: None,
+                max_tokens: None,
+                max_output_tokens: None,
+                recommended: false,
+                available: true,
+                remaining_fraction_milli: remaining,
+            }
+        };
+        let pools = inventory::antigravity_quota_pools(&[
+            model("claude-opus-5-5-high", Some(1000), "b"),
+            model("gemini-4-neon-high", Some(984), "a"),
+            model("gemini-3.8-flash-low", Some(984), "a"),
+            model("gemini-4-argon-low", Some(500), "c"),
+            model("tab_flash_lite_preview", Some(1000), "a"),
+            model("gemini-4-carbon-disabled", None, "a"),
+        ]);
+        let labels: Vec<_> = pools.iter().map(|(l, u, _)| (l.as_str(), *u)).collect();
+        assert_eq!(labels, [("Gemini", 16), ("Argon", 500), ("Claude", 0)]);
+    }
+
+    #[test]
+    fn inventory_snapshots_share_storage_instead_of_deep_copying() {
+        let mut cache = InventoryCache::default();
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let original = cache.snapshot();
+        let mut legacy_copies = 0;
+        for _ in 0..1_000 {
+            let legacy = Inventory {
+                logins: original.logins.clone(),
+                pool: original.pool.clone(),
+                expired: original.expired.clone(),
+                antigravity: original.antigravity.clone(),
+            };
+            legacy_copies += usize::from(legacy.logins.as_ptr() != original.logins.as_ptr());
+            let shared = cache.snapshot();
+            assert!(Arc::ptr_eq(&shared, &original));
+            assert_eq!(shared.logins.as_ptr(), original.logins.as_ptr());
+            assert_eq!(shared.pool.members.as_ptr(), original.pool.members.as_ptr());
+            assert_eq!(shared.expired.as_ptr(), original.expired.as_ptr());
+        }
+        assert_eq!(legacy_copies, 1_000);
+        eprintln!(
+            "inventory login-vector copies across 1000 reads: legacy={legacy_copies}, shared=0"
+        );
+    }
+
+    #[test]
+    fn inventory_snapshot_publication_preserves_exact_invalidation() {
+        let mut cache = InventoryCache::default();
+        assert!(!cache.replace_inventory(Inventory::default()));
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let original = cache.snapshot();
+        assert!(!cache.replace_inventory(snapshot_fixture()));
+        assert!(Arc::ptr_eq(&original, &cache.snapshot()));
+
+        for change in 0..3 {
+            let mut changed = snapshot_fixture();
+            match change {
+                0 => changed.logins[0].active = false,
+                1 => changed.pool.members.clear(),
+                _ => changed.expired.clear(),
+            }
+            assert!(cache.replace_inventory(changed));
+            assert!(!Arc::ptr_eq(&original, &cache.snapshot()));
+            assert!(cache.replace_inventory(snapshot_fixture()));
+        }
+        // A published update cannot mutate a snapshot already held by a frame.
+        assert!(*original == snapshot_fixture());
+    }
+
+    #[test]
+    fn inventory_shared_snapshot_preserves_header_output() {
+        let direct = snapshot_fixture();
+        let mut cache = InventoryCache::default();
+        assert!(cache.replace_inventory(snapshot_fixture()));
+        let snapshot = cache.snapshot();
+        let active = ActiveCredentialOverrides {
+            openai: Some(ActiveCredential::OAuth),
+            anthropic: Some(ActiveCredential::OAuth),
+        };
+        for provider in ["openai", "anthropic"] {
+            for selected in [None, Some("work"), Some("other")] {
+                let expected = inventory_lines(&auth(), active, &direct, provider, selected);
+                let actual = inventory_lines(&auth(), active, &snapshot, provider, selected);
+                assert_eq!(actual, expected);
+                for width in [0, 1, 20, 40, 80, 120] {
+                    assert_eq!(
+                        fit_header_lines(actual.clone(), width),
+                        fit_header_lines(expected.clone(), width)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn router_inventory_follows_pool_order_within_priority_without_promoting_active() {
         let inventory = Inventory {
             logins: vec![
                 login("claude", "a", "alice@example.com"),
@@ -456,6 +706,8 @@ mod tests {
                     "openai:a".into(),
                 ],
                 excluded: vec![],
+                priorities: [("openai-api".into(), 1)].into_iter().collect(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -511,6 +763,7 @@ mod tests {
             pool: AccountPool {
                 members: vec!["openrouter".into()],
                 excluded: vec!["openai:excluded".into()],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -588,8 +841,53 @@ mod tests {
     }
 
     #[test]
+    fn router_priorities_only_dim_original_identity_colors_and_fit_narrow_headers() {
+        let usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
+            label: "one".into(),
+            email: None,
+            exhausted: false,
+            primary_label: Some("5h".into()),
+            five_hour_ratio: Some(0.48),
+            secondary_label: None,
+            seven_day_ratio: None,
+            resets_at: None,
+            error: None,
+        };
+        for selected in [false, true] {
+            let mut row = detail(
+                AuthState::Available,
+                "openai 界界@example.com".into(),
+                selected,
+            );
+            row.spans
+                .extend(remaining_bar(&usage, false).unwrap().spans);
+            let high = priority_row(row.clone(), 20, &[20, 30, 90]);
+            let low = priority_row(row.clone(), 90, &[20, 30, 90]);
+            assert_eq!(low.spans[2].content, row.spans[2].content);
+            assert_eq!(high.spans[2].style.fg, row.spans[2].style.fg);
+            assert_eq!(low.spans[..2], row.spans[..2]);
+            assert_eq!(low.spans[3..], row.spans[3..]);
+            assert_ne!(high.spans[2].style.fg, low.spans[2].style.fg);
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 0, &[0, 1, 2]).spans[2].style.fg
+            );
+            assert_eq!(
+                high.spans[2].style.fg,
+                priority_row(row.clone(), 90, &[90]).spans[2].style.fg
+            );
+            for width in [0, 1, 4, 12, 24, 40, 80] {
+                let fitted = fit_header_lines(vec![low.clone()], width);
+                assert!(fitted[0].width() <= usize::from(width.saturating_sub(1)));
+            }
+        }
+    }
+
+    #[test]
     fn router_inventory_usability_requires_account_scoped_evidence() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -719,6 +1017,7 @@ mod tests {
     fn router_inventory_missing_usage_has_explicit_safe_status() {
         assert_eq!(usage_status_label(None), "limits pending");
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "test".into(),
             email: None,
             exhausted: false,
@@ -733,11 +1032,11 @@ mod tests {
         for (error, expected) in [
             (
                 "Usage temporarily rate limited (429)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Couldn't fetch usage (429: lookup throttled)",
-                "usage fetch failed (429)",
+                "usage throttled, retrying soon",
             ),
             (
                 "Usage authentication failed (401)",
@@ -757,8 +1056,69 @@ mod tests {
     }
 
     #[test]
+    fn banked_expiry_colors_cover_boundaries_and_unknown() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-06T08:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for (hours, expected) in [
+            (-1, Color::Rgb(255, 100, 100)),
+            (24, Color::Rgb(255, 100, 100)),
+            (25, Color::Rgb(255, 180, 80)),
+            (72, Color::Rgb(255, 180, 80)),
+            (73, Color::Rgb(230, 210, 100)),
+            (168, Color::Rgb(230, 210, 100)),
+            (169, Color::Rgb(100, 210, 130)),
+        ] {
+            let expiry = (now + chrono::Duration::hours(hours)).to_rfc3339();
+            assert_eq!(banked_expiry_color(Some(&expiry), now), expected);
+        }
+        for expiry in [None, Some("invalid")] {
+            assert_eq!(banked_expiry_color(expiry, now), Color::Rgb(120, 190, 255));
+        }
+    }
+
+    #[test]
+    fn banked_resets_suffix_shows_count_or_next_unlock() {
+        let ready = crate::usage::AccountBankedResets {
+            available: 2,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert_eq!(banked_resets_span(&ready).unwrap().content, "↻ 2 resets");
+        let expiring = crate::usage::AccountBankedResets {
+            available: 1,
+            next_available_at: None,
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+        };
+        assert!(
+            banked_resets_span(&expiring)
+                .unwrap()
+                .content
+                .starts_with("↻ 1 reset · exp ")
+        );
+        let spent = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: Some("2099-01-01T00:00:00Z".into()),
+            expires_at: None,
+        };
+        assert!(
+            banked_resets_span(&spent)
+                .unwrap()
+                .content
+                .starts_with("↻ in ")
+        );
+        let none = crate::usage::AccountBankedResets {
+            available: 0,
+            next_available_at: None,
+            expires_at: None,
+        };
+        assert!(banked_resets_span(&none).is_none());
+    }
+
+    #[test]
     fn router_inventory_weekly_only_usage_shows_reported_window() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "weekly-only".into(),
             email: None,
             exhausted: false,
@@ -789,6 +1149,7 @@ mod tests {
     #[test]
     fn router_inventory_remaining_bar_rejects_unknown_and_invalid_usage() {
         let mut usage = crate::usage::AccountUsageSnapshot {
+            additional_windows: Vec::new(),
             label: "one".into(),
             email: None,
             exhausted: false,
@@ -817,7 +1178,11 @@ mod tests {
         let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
         assert!(stale.contains("100% left"));
         assert!(stale.contains("5h stale"));
-        assert!(stale.contains("usage fetch failed (429)"));
+        assert!(stale.contains("usage throttled, retrying soon"));
+        usage.error = Some("HTTP 429 (retry at 2099-01-01T00:00:00Z)".into());
+        let stale = text(vec![remaining_bar(&usage, false).unwrap()]);
+        assert!(stale.contains("usage throttled, retry in "), "{stale}");
+        usage.error = Some("HTTP 429".into());
         assert_eq!(
             oauth_credential_status(false, Some(&usage)),
             CredentialStatus::Unknown

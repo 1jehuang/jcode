@@ -4,7 +4,7 @@ use super::{
     StepStatus, SwarmInfo, UsageInfo, UsageProvider, WidgetKind, calculate_placements,
     calculate_widget_height, effective_prompt_tokens, occasional_status_tip,
     render_kv_cache_widget, render_memory_compact, render_memory_widget, render_model_widget,
-    render_usage_compact, render_usage_widget, truncate_smart,
+    render_usage_compact, render_usage_widget,
 };
 use crate::protocol::SwarmMemberStatus;
 use ratatui::layout::Rect;
@@ -73,13 +73,6 @@ fn cache_hit_ratio_uses_effective_prompt_for_split_providers() {
 }
 
 #[test]
-fn truncate_smart_handles_unicode() {
-    let s = "eagle running - keep going";
-    let out = truncate_smart(s, 15);
-    assert_eq!(out, "eagle runnin...");
-}
-
-#[test]
 fn occasional_status_tip_only_shows_during_part_of_cycle() {
     assert!(occasional_status_tip(60, 5).is_none());
     assert!(occasional_status_tip(60, 27).is_none());
@@ -114,6 +107,11 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     };
 
     assert!(data.has_data_for(WidgetKind::KvCache));
+    assert!(!WidgetKind::all_by_priority().contains(&WidgetKind::KvCache));
+    let overview = super::render_overview_framed(&data, Rect::new(0, 0, 60, 30));
+    if let Some(overview) = overview {
+        assert!(!lines_text(&overview.all_lines()).contains("KV cache"));
+    }
     let framed = render_kv_cache_widget(&data, Rect::new(0, 0, 40, 5));
     let text = lines_text(&framed.all_lines());
 
@@ -840,9 +838,8 @@ fn managed_member(id: &str, status: &str, role: Option<&str>) -> SwarmMemberStat
     }
 }
 
-/// With managed members present, the SwarmStatus widget switches to compact
-/// mode: agents tally without plan progress, and has_data_for admits the
-/// widget into layout.
+/// The legacy renderer remains usable, but managed agents no longer make
+/// the redundant swarm margin widget eligible for layout.
 #[test]
 fn swarm_widget_dock_mode_lists_managed_agents() {
     let data = InfoWidgetData {
@@ -856,7 +853,7 @@ fn swarm_widget_dock_mode_lists_managed_agents() {
         }),
         ..Default::default()
     };
-    assert!(data.has_data_for(WidgetKind::SwarmStatus));
+    assert!(!data.has_data_for(WidgetKind::SwarmStatus));
     // Managing agents bumps the dock's effective priority near the top.
     assert!(data.effective_priority(WidgetKind::SwarmStatus) < WidgetKind::SwarmStatus.priority());
 
@@ -883,7 +880,7 @@ fn swarm_widget_dock_mode_lists_managed_agents() {
         assert!(line.width() <= 34, "row too wide: {rows:?}");
     }
     let h = calculate_widget_height(WidgetKind::SwarmStatus, &data, 36, 20);
-    assert_eq!(h, 4, "2 agent rows + 2 border: {h}");
+    assert_eq!(h, 0, "removed swarm widget must not reserve space");
 }
 
 #[test]
@@ -973,7 +970,10 @@ fn swarm_dock_shows_health_without_repeating_todo_activity() {
         !row.contains("Build the per-step"),
         "todo must stay out: {row}"
     );
-    assert!(!row.contains("..."), "single-char ellipsis: {row}");
+    assert!(
+        !row.contains("...") && !row.contains('…'),
+        "no ellipsis: {row}"
+    );
     // The compact health row still respects the available display cells.
     assert!(
         unicode_width::UnicodeWidthStr::width(row.as_str()) <= usize::from(width),
@@ -1099,7 +1099,7 @@ fn swarm_widget_renders_member_roles_and_details() {
     let text = lines_text(&super::render_swarm_widget(&data, Rect::new(0, 0, 80, 4)).all_lines());
 
     assert!(text.contains("3s"), "got: {text}");
-    assert!(text.contains("1c"), "got: {text}");
+    assert!(text.contains("1 client"), "got: {text}");
     assert!(text.contains("★"), "got: {text}");
     assert!(
         text.contains("coord running - orchestrating patch"),
@@ -1190,7 +1190,7 @@ fn swarm_widget_caps_member_rows_for_large_swarms() {
     assert_eq!(framed.lines.len(), 3, "expected capped member rows");
     let text = lines_text(&framed.all_lines());
     assert!(text.contains("500s"), "got: {text}");
-    assert!(text.contains("3c"), "got: {text}");
+    assert!(text.contains("3 clients"), "got: {text}");
 }
 
 #[test]
@@ -1607,9 +1607,8 @@ fn compact_page_height_matches_for_cost_based_usage() {
 
 /// Visual gallery: draws every text widget through the real
 /// `render_single_widget` path. Run with
-/// `cargo test -p jcode-tui --lib widget_gallery -- --ignored --nocapture`.
+/// `justrust test -p jcode-tui --lib widget_gallery -- --nocapture`.
 #[test]
-#[ignore]
 fn widget_gallery() {
     use super::{
         AmbientWidgetData, CompactionInfo, DirtyFile, GitInfo, Side, WidgetPlacement,
@@ -1874,88 +1873,62 @@ fn widget_gallery() {
         WidgetKind::Commits,
         WidgetKind::Overview,
     ];
-    let width = 44u16;
-    for kind in kinds {
-        let cap = if kind == WidgetKind::Overview { 40 } else { 12 };
-        let mut h = calculate_widget_height(kind, &data, width, cap);
-        if h <= 2 {
-            // Ambient/Tips are gated off in layout; draw them anyway.
-            h = 8;
+    for width in [12u16, 24, 44] {
+        for kind in kinds {
+            let cap = if kind == WidgetKind::Overview { 40 } else { 12 };
+            let mut h = calculate_widget_height(kind, &data, width, cap);
+            if h <= 2 {
+                // Ambient/Tips are gated off in layout; draw them anyway.
+                h = 8;
+            }
+            let backend = ratatui::backend::TestBackend::new(width, h);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    let placement = WidgetPlacement {
+                        kind,
+                        rect: f.area(),
+                        side: Side::Left,
+                    };
+                    render_single_widget(f, &placement, &data);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let bottom = (0..h)
+                .find(|&y| buf[(0, y)].symbol() == "╰")
+                .unwrap_or_else(|| panic!("{kind:?} at width {width} has no bottom border"));
+            let footer: String = (1..width - 1).map(|x| buf[(x, bottom)].symbol()).collect();
+            assert!(
+                footer.chars().any(|ch| ch != '─' && !ch.is_whitespace()),
+                "{kind:?} at width {width} has an empty footer: {footer}"
+            );
+            for redundant in [
+                "Runtime details",
+                "Session overview",
+                "Working tree",
+                "Recent history",
+                "Provider limits",
+                "Scheduled activity",
+                "Background work",
+                "Agent sessions",
+                "Memory activity",
+            ] {
+                assert!(
+                    !footer.contains(redundant),
+                    "{kind:?} has redundant footer: {footer}"
+                );
+            }
+            println!("{kind:?}");
+            for y in 0..h {
+                let row: String = (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect();
+                println!("{}", row.trim_end());
+            }
+            println!();
         }
-        let backend = ratatui::backend::TestBackend::new(width, h);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let placement = WidgetPlacement {
-                    kind,
-                    rect: f.area(),
-                    side: Side::Left,
-                };
-                render_single_widget(f, &placement, &data);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        println!("{kind:?}");
-        for y in 0..h {
-            let row: String = (0..width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect();
-            println!("{}", row.trim_end());
-        }
-        println!();
     }
 }
 
-#[test]
-fn narrow_overview_background_row_keeps_progress_visible() {
-    use crate::tui::{BackgroundTaskRow, BackgroundTaskRowStatus};
-    use ratatui::{Terminal, backend::TestBackend};
-    let data = InfoWidgetData {
-        model: Some("claude-opus-5-5".into()),
-        background_info: Some(BackgroundInfo {
-            rows: vec![BackgroundTaskRow {
-                task_id: "t".into(),
-                label: "Live verification task".into(),
-                percent: Some(20.0),
-                status: BackgroundTaskRowStatus::Running,
-                completed_at: None,
-            }],
-            ..Default::default()
-        }),
-        usage_info: Some(UsageInfo {
-            provider: UsageProvider::Anthropic,
-            five_hour: 0.3,
-            seven_day: 0.5,
-            available: true,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let (w, h) = (24u16, 9u16);
-    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| {
-        super::render_all(
-            f,
-            &[super::WidgetPlacement {
-                kind: WidgetKind::Overview,
-                rect: Rect::new(0, 0, w, h),
-                side: super::Side::Right,
-            }],
-            &data,
-        )
-    })
-    .unwrap();
-    let buf = term.backend().buffer().clone();
-    let mut out = String::new();
-    for y in 0..h {
-        for x in 0..w {
-            out.push_str(buf[(x, y)].symbol());
-        }
-        out.push('\n');
-    }
-    assert!(out.contains("◌ Live"), "{out}");
-    assert!(
-        out.contains("20%"),
-        "progress must fit at overview width:\n{out}"
-    );
-}
+#[path = "info_widget_footer_tests.rs"]
+mod footers;

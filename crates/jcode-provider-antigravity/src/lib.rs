@@ -4,11 +4,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Known-good model id used when the backend default is unknown. The literal
-/// alias `"default"` is rejected by `generateContent` with HTTP 404, so we must
-/// always resolve it to a real model id before issuing a request.
-pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-3-flash";
+/// Default Antigravity model id (`gemini-4-neon-low`) used when resolving the
+/// literal `"default"` alias or when no live catalog has been fetched yet. The
+/// literal alias `"default"` is rejected by `generateContent` with HTTP 404, so
+/// we must always resolve it to a real model id before issuing a request.
+pub const DEFAULT_FALLBACK_MODEL: &str = "gemini-4-neon-low";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-4-neon-low",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-high",
+    "gemini-4-neon-xhigh",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
     "claude-opus-4-6-thinking",
     "claude-sonnet-4-6",
     "gemini-3.1-pro-high",
@@ -32,7 +43,10 @@ pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// environments that need a different Cloud Code host.
 pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "2.30.0";
+// Google gates the Gemini 4 catalog (Neon, Argon, Hydrogen tiers) on the Hub
+// client identity: `antigravity/<v>` gets the legacy free catalog and 404s on
+// `gemini-4-neon-*`, while `antigravity/hub/<v>` gets the full paid catalog.
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
 
@@ -79,6 +93,15 @@ pub fn fetch_models_api_url() -> String {
 /// Full URL for the `generateContent` RPC against the resolved endpoint.
 pub fn generate_content_api_url() -> String {
     format!("{}/v1internal:generateContent", antigravity_endpoint())
+}
+
+/// Full URL for the SSE streaming `streamGenerateContent` RPC against the
+/// resolved endpoint.
+pub fn stream_generate_content_api_url() -> String {
+    format!(
+        "{}/v1internal:streamGenerateContent?alt=sse",
+        antigravity_endpoint()
+    )
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -206,11 +229,11 @@ pub fn antigravity_version() -> String {
 
 pub fn antigravity_user_agent() -> String {
     if cfg!(target_os = "windows") {
-        format!("antigravity/{} windows/amd64", antigravity_version())
+        format!("antigravity/hub/{} windows/amd64", antigravity_version())
     } else if cfg!(target_arch = "aarch64") {
-        format!("antigravity/{} darwin/arm64", antigravity_version())
+        format!("antigravity/hub/{} darwin/arm64", antigravity_version())
     } else {
-        format!("antigravity/{} darwin/amd64", antigravity_version())
+        format!("antigravity/hub/{} darwin/amd64", antigravity_version())
     }
 }
 
@@ -477,7 +500,8 @@ pub fn is_retryable_empty_turn(response: &CodeAssistGenerateResponse) -> bool {
         .map(|content| {
             content.parts.iter().any(|part| {
                 part.function_call.is_some()
-                    || part.text.as_deref().is_some_and(|text| !text.is_empty())
+                    || (!part.is_thought()
+                        && part.text.as_deref().is_some_and(|text| !text.is_empty()))
             })
         })
         .unwrap_or(false);
@@ -508,19 +532,11 @@ pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
         .and_then(|candidate| candidate.content.as_ref())
         .is_some_and(|content| {
             content.parts.iter().any(|part| {
-                let Some(text) = part.text.as_deref() else {
-                    return false;
-                };
-                let Some(call) = text.trim_start().strip_prefix("[previous tool call]") else {
-                    return false;
-                };
-                let call = call.trim_start();
-                let name_len = call
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
-                    .map(char::len_utf8)
-                    .sum::<usize>();
-                name_len > 0 && call[name_len..].trim_start().starts_with('(')
+                !part.is_thought()
+                    && part
+                        .text
+                        .as_deref()
+                        .is_some_and(jcode_provider_gemini::stream::is_pseudo_tool_call_text)
             })
         })
 }

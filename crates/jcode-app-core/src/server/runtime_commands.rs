@@ -287,29 +287,50 @@ pub(super) async fn execute(
             json!({"service_tier": provider.service_tier(), "provider": provider.display_name()})
         }
         RuntimeCommand::Telemetry => {
-            match args {
-                [] => {}
-                [arg] if matches!(arg.as_str(), "show" | "status") => {}
-                [arg] => {
-                    let (usage, content) = match arg.as_str() {
-                        "everything" | "all" => (true, true),
-                        "no-prompts" | "no-content" | "usage" => (true, false),
-                        "nothing" | "off" | "none" => (false, false),
-                        _ => bail!("Usage: /telemetry [everything|no-prompts|nothing]"),
-                    };
-                    if usage && crate::telemetry::opt_out_forced_by_env() {
-                        bail!("Telemetry is forced off by the runtime environment");
-                    }
-                    if !crate::telemetry::set_content_sharing_enabled(content)
-                        || !crate::telemetry::set_usage_telemetry_enabled(usage)
-                    {
-                        bail!("Could not persist telemetry setting");
-                    }
+            use crate::telemetry::TelemetryCategory;
+            let usage = "Usage: /telemetry [all|none] or /telemetry <content|usage|crashes|features|cost|accounts> on|off";
+            let parse_on = |v: &str| match v {
+                "on" | "yes" | "true" | "1" => Some(true),
+                "off" | "no" | "false" | "0" => Some(false),
+                _ => None,
+            };
+            let mut checked = crate::telemetry::category_settings();
+            let changed = match args {
+                [] => false,
+                [arg] if matches!(arg.as_str(), "show" | "status") => false,
+                [arg] if matches!(arg.as_str(), "everything" | "all" | "on") => {
+                    checked = [true; 6];
+                    true
                 }
-                _ => bail!("Expected at most one telemetry level"),
+                [arg] if matches!(arg.as_str(), "nothing" | "none" | "off") => {
+                    checked = [false; 6];
+                    true
+                }
+                [key, value] => {
+                    let (Some(category), Some(on)) =
+                        (TelemetryCategory::from_key(key), parse_on(value))
+                    else {
+                        bail!("{usage}");
+                    };
+                    if let Some(i) = TelemetryCategory::ALL.iter().position(|c| *c == category) {
+                        checked[i] = on;
+                    }
+                    true
+                }
+                _ => bail!("{usage}"),
+            };
+            if changed {
+                if checked.iter().any(|on| *on) && crate::telemetry::opt_out_forced_by_env() {
+                    bail!("Telemetry is forced off by the runtime environment");
+                }
+                crate::telemetry::set_category_settings(checked);
             }
             let status = crate::telemetry::status();
-            json!({"enabled": status.enabled, "content_sharing_enabled": status.content_sharing_enabled, "opt_out_source": status.opt_out_source.map(|source| source.as_str())})
+            let categories: serde_json::Map<String, serde_json::Value> = TelemetryCategory::ALL
+                .into_iter()
+                .map(|c| (c.key().to_string(), json!(c.enabled())))
+                .collect();
+            json!({"enabled": status.enabled, "content_sharing_enabled": status.content_sharing_enabled, "categories": categories, "opt_out_source": status.opt_out_source.map(|source| source.as_str())})
         }
         RuntimeCommand::Subscription => {
             status_only(args)?;

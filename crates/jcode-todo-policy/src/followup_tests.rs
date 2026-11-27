@@ -32,6 +32,234 @@ fn kind(decision: &Decision) -> Option<FollowUpKind> {
 }
 
 #[test]
+fn completely_blocked_pauses_retries_but_not_independent_work() {
+    let mut blocked = todo("no-way-forward", "pending");
+    blocked.requires_user_auth = Some(crate::TodoUserAuth {
+        reason: "Required data is permanently unavailable".into(),
+    });
+    assert!(todo_requires_user_auth(&blocked));
+    let mut state = snapshot(vec![blocked]);
+    state.long_session_review_due = true;
+    let mut policy = FollowUpPolicy::new(true);
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    state.long_session_review_due = false;
+    state.todos.push(todo("independent", "pending"));
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert!(followup.message.contains("independent"));
+    assert!(!followup.message.contains("no-way-forward"));
+    state.todos.pop();
+    state.todos[0].requires_user_auth = None;
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    for status in ["completed", "cancelled", "done"] {
+        state.todos[0].status = status.into();
+        state.todos[0].requires_user_auth = Some(crate::TodoUserAuth::default());
+        assert!(!todo_requires_user_auth(&state.todos[0]));
+    }
+}
+
+#[test]
+fn user_auth_ignores_invalid_programmatic_snapshots() {
+    for reason in ["", " \n\t"] {
+        let mut item = todo("still actionable", "pending");
+        item.requires_user_auth = Some(crate::TodoUserAuth {
+            reason: reason.into(),
+        });
+        assert!(!todo_requires_user_auth(&item));
+        let mut policy = FollowUpPolicy::new(true);
+        let decision = policy.decide(&snapshot(vec![item]));
+        assert_eq!(kind(&decision), Some(FollowUpKind::IncompleteTodos));
+    }
+    let mut valid = todo("owner approval", "pending");
+    valid.requires_user_auth = Some(crate::TodoUserAuth {
+        reason: " Required data is permanently unavailable ".into(),
+    });
+    assert!(todo_requires_user_auth(&valid));
+    valid.status = "completed".into();
+    assert!(!todo_requires_user_auth(&valid));
+}
+
+#[test]
+fn removed_user_action_condition_does_not_pause_work() {
+    let item: TodoItem = serde_json::from_value(serde_json::json!({
+        "id": "old", "content": "Continue work", "status": "pending", "priority": "high",
+        "requires_user_action": {"action": "Choose an option", "reason": "Preference"}
+    }))
+    .unwrap();
+    assert!(item.requires_user_auth.is_none());
+    let mut policy = FollowUpPolicy::new(true);
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![item]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn user_auth_serialization_rejects_missing_or_blank_fields() {
+    let legacy =
+        serde_json::json!({"id":"a", "content":"A", "status":"pending", "priority":"high"});
+    assert!(
+        serde_json::from_value::<TodoItem>(legacy.clone())
+            .unwrap()
+            .requires_user_auth
+            .is_none()
+    );
+    for required in [
+        serde_json::json!({"reason":""}),
+        serde_json::json!({"reason":" \n\t"}),
+        serde_json::json!({}),
+    ] {
+        let mut value = legacy.clone();
+        value["requires_user_auth"] = required;
+        assert!(serde_json::from_value::<TodoItem>(value).is_err());
+    }
+    let mut value = legacy;
+    value["requires_user_auth"] = serde_json::json!({"reason":"No implementation exists"});
+    let item: TodoItem = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(item).unwrap()["requires_user_auth"],
+        value["requires_user_auth"]
+    );
+}
+
+#[test]
+fn goal_that_cannot_complete_stops_only_its_own_todos_without_spending_budget() {
+    let mut abandoned = todo("migrate data", "pending");
+    abandoned.group = Some("migration".into());
+    let mut state = snapshot(vec![abandoned.clone()]);
+    state.goals = vec![TodoGoal {
+        group: Some(" migration ".into()),
+        cannot_complete: Some("Source data was deleted upstream".into()),
+        ..Default::default()
+    }];
+    state.long_session_review_due = true;
+    let mut policy = FollowUpPolicy::new(true);
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    assert!(is_incomplete_todo(&abandoned));
+    assert!(todo_goal_cannot_complete(&abandoned, &state.goals));
+    assert_eq!(
+        todo_cannot_complete_reason(&abandoned, &state.goals),
+        Some("Source data was deleted upstream")
+    );
+    state.long_session_review_due = false;
+    // Ungrouped work belongs to a different goal and stays actionable.
+    state.todos.push(todo("independent", "pending"));
+    assert!(!todo_goal_cannot_complete(&state.todos[1], &state.goals));
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert!(followup.message.contains("independent"));
+    assert!(!followup.message.contains("migrate data"));
+    state.todos.pop();
+    // A blank reason is not a declaration, and clearing it resumes the work.
+    for cleared in [Some(" \n".to_string()), None] {
+        state.goals[0].cannot_complete = cleared;
+        assert!(!todo_goal_cannot_complete(&state.todos[0], &state.goals));
+    }
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert_eq!(followup.kind, FollowUpKind::IncompleteTodos);
+    assert!(followup.message.contains("migrate data"));
+    assert_eq!(state.todos[0].status, "pending");
+}
+
+#[test]
+fn removed_item_blockers_never_pause_work() {
+    // Old sessions stored item-level blockers. They load as ordinary
+    // actionable todos instead of failing or staying silently suppressed.
+    let loaded: TodoItem = serde_json::from_value(serde_json::json!({
+        "id":"a", "content":"A", "status":"pending", "priority":"high",
+        "external_blocker": {"reason":"wait", "review_at":"2099-01-01T00:00:00Z"},
+        "completely_blocked": {"reason":"No way forward"}
+    }))
+    .unwrap();
+    assert!(loaded.requires_user_auth.is_none());
+    let mut policy = FollowUpPolicy::new(true);
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![loaded]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn running_dependencies_pause_without_consuming_budget_or_reviews() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![TodoItem {
+        requires_user_auth: None,
+        waiting_reason: None,
+        waiting_on: vec!["build".into()],
+        ..todo("validate", "in_progress")
+    }]);
+    // First exhaust the actionable budget, then explicitly wait. Resolution
+    // must get a fresh budget even though the todo payload did not change.
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&state), Decision::default());
+    state.running_background_tasks = vec!["build".into()];
+    state.long_session_review_due = true;
+    for _ in 0..10 {
+        assert_eq!(policy.decide(&state), Decision::default());
+    }
+    state.running_background_tasks.clear();
+    state.long_session_review_due = false;
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&state)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+}
+
+#[test]
+fn mixed_dependencies_poke_only_actionable_todos() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![
+        TodoItem {
+            requires_user_auth: None,
+            waiting_reason: None,
+            waiting_on: vec!["build".into()],
+            ..todo("blocked-validation", "pending")
+        },
+        todo("write-tests", "in_progress"),
+    ]);
+    state.running_background_tasks = vec!["build".into()];
+    let decision = policy.decide(&state);
+    let follow_up = decision
+        .follow_up
+        .expect("independent work should continue");
+    assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
+    assert!(follow_up.message.starts_with("You have 1 incomplete todo."));
+    assert!(follow_up.message.contains("write-tests"));
+    assert!(!follow_up.message.contains("blocked-validation"));
+    assert!(is_auto_poke_message(&follow_up.message));
+}
+
+#[test]
+fn dependencies_only_block_when_runtime_confirms_running() {
+    let todo = TodoItem {
+        requires_user_auth: None,
+        waiting_reason: None,
+        waiting_on: vec!["first".into(), "second".into()],
+        ..todo("work", "pending")
+    };
+    assert!(!todo_waits_on_running_task(&todo, |_| false));
+    assert!(todo_waits_on_running_task(&todo, |id| id == "second"));
+    assert!(!todo_waits_on_running_task(&todo, |id| id == "unrelated"));
+    let mut policy = FollowUpPolicy::new(true);
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![todo]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
 fn disabled_policy_never_follows_up() {
     let mut policy = FollowUpPolicy::new(false);
     assert_eq!(
@@ -46,7 +274,7 @@ fn disabled_policy_never_follows_up() {
 }
 
 #[test]
-fn pokes_open_work_once_per_distinct_state() {
+fn pokes_open_work_three_times_per_distinct_state() {
     let mut policy = FollowUpPolicy::new(true);
     let open = snapshot(vec![todo("a", "pending"), todo("b", "in_progress")]);
     let first = policy.decide(&open);
@@ -54,14 +282,80 @@ fn pokes_open_work_once_per_distinct_state() {
     assert_eq!(follow_up.kind, FollowUpKind::IncompleteTodos);
     assert!(is_auto_poke_message(&follow_up.message));
     assert!(follow_up.notice.contains("2 incomplete todos"));
-    // Unchanged open work means the model is stalled: no loop.
+    for _ in 1..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    // Three attempts without progress exhaust the budget, without disabling it.
     assert_eq!(policy.decide(&open), Decision::default());
+    assert_eq!(policy.decide(&open), Decision::default());
+    assert!(policy.is_enabled());
     // Progress re-arms the poke.
     let progressed = snapshot(vec![todo("a", "completed"), todo("b", "in_progress")]);
     assert_eq!(
         kind(&policy.decide(&progressed)),
         Some(FollowUpKind::IncompleteTodos)
     );
+}
+
+#[test]
+fn incomplete_budget_resets_after_clear_and_explicit_cycle_reset() {
+    let open = snapshot(vec![todo("a", "pending")]);
+    let mut policy = FollowUpPolicy::new(true);
+    for clear in [
+        TodoSnapshot::default(),
+        snapshot(vec![done("a", ConfidenceState::Verified)]),
+    ] {
+        for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+            assert_eq!(
+                kind(&policy.decide(&open)),
+                Some(FollowUpKind::IncompleteTodos)
+            );
+        }
+        assert_eq!(policy.decide(&open), Decision::default());
+        policy.decide(&clear);
+    }
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+    assert_eq!(policy.decide(&open), Decision::default());
+    policy.reset_cycle();
+    assert_eq!(
+        kind(&policy.decide(&open)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    policy.disable();
+    policy.reset_cycle();
+    assert_eq!(policy.decide(&open), Decision::default());
+    let changed = snapshot(vec![todo("changed", "pending")]);
+    assert_eq!(policy.decide(&changed), Decision::default());
+}
+
+#[test]
+fn incomplete_budget_tracks_open_item_state_not_just_count() {
+    let mut budget = IncompleteTodoBudget::default();
+    let mut todos = vec![todo("a", "pending"), done("b", ConfidenceState::Verified)];
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(budget.allow_follow_up(&todos));
+    }
+    assert!(!budget.allow_follow_up(&todos));
+    // Unrelated completed-item wording does not buy more retries.
+    todos[1].content = "new completed wording".into();
+    assert!(!budget.allow_follow_up(&todos));
+    todos[0].status = "in_progress".into();
+    for _ in 0..INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(budget.allow_follow_up(&todos));
+    }
+    assert!(!budget.allow_follow_up(&todos));
+    todos[0].status = "cancelled".into();
+    assert!(budget.allow_follow_up(&todos));
+    todos[0].status = "in_progress".into();
+    assert!(budget.allow_follow_up(&todos));
 }
 
 #[test]
@@ -76,8 +370,10 @@ fn no_todos_stays_armed_and_quiet() {
 }
 
 #[test]
-fn completed_work_runs_digest_then_validation_then_final_response_once() {
+fn completed_work_skips_digest_and_runs_validation_then_final_response_once() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    policy.gate_digest_delivered = true;
     let mut state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Plausible)],
         plan: TodoPlan {
@@ -92,26 +388,16 @@ fn completed_work_runs_digest_then_validation_then_final_response_once() {
         ..Default::default()
     };
 
-    let digest = policy.decide(&state);
-    assert_eq!(kind(&digest), Some(FollowUpKind::GateDigest));
-    assert!(digest.effects.clear_gate_observations);
-    assert!(is_auto_poke_message(&digest.follow_up.unwrap().message));
-    state.gate_observations.clear();
-
     let validation = policy.decide(&state);
+    assert!(validation.effects.clear_gate_observations);
+    state.gate_observations.clear();
     assert_eq!(kind(&validation), Some(FollowUpKind::CompletionValidation));
     assert!(validation.follow_up.unwrap().message.contains("\"ship\""));
 
     state.todos = vec![done("ship", ConfidenceState::Verified)];
     let final_response = policy.decide(&state);
     assert_eq!(kind(&final_response), Some(FollowUpKind::FinalResponse));
-    assert!(
-        final_response
-            .follow_up
-            .unwrap()
-            .notice
-            .contains("verified")
-    );
+    assert!(final_response.follow_up.unwrap().notice.is_empty());
     // The final-response turn itself must not trigger another cycle.
     assert_eq!(policy.decide(&state), Decision::default());
     // New work starts a fresh cycle.
@@ -120,6 +406,63 @@ fn completed_work_runs_digest_then_validation_then_final_response_once() {
         kind(&policy.decide(&state)),
         Some(FollowUpKind::IncompleteTodos)
     );
+}
+
+#[test]
+fn default_policy_skips_all_quality_reviews_but_keeps_open_work_pokes() {
+    let mut spiked = done("ship", ConfidenceState::Verified);
+    spiked.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
+    for item in [spiked, done("ship", ConfidenceState::Speculative)] {
+        let state = TodoSnapshot {
+            todos: vec![item],
+            goals: vec![TodoGoal {
+                delivery_state: Some(DeliveryState::ChangeMade),
+                ..Default::default()
+            }],
+            long_session_review_due: true,
+            ..Default::default()
+        };
+        let mut policy = FollowUpPolicy::new(true);
+        assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+        assert_eq!(policy.decide(&state), Decision::default());
+        let open = TodoSnapshot {
+            todos: vec![todo("continue", "pending")],
+            long_session_review_due: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            kind(&policy.decide(&open)),
+            Some(FollowUpKind::IncompleteTodos)
+        );
+    }
+}
+
+#[test]
+fn weak_points_do_not_delay_completed_work() {
+    let mut policy = FollowUpPolicy::new(true);
+    let state = TodoSnapshot {
+        todos: vec![done("ship", ConfidenceState::Verified)],
+        gate_observations: [
+            GateObservationKind::IntentUnderstanding,
+            GateObservationKind::ClosedFeedbackLoop,
+            GateObservationKind::FeedbackLoopRelevance,
+            GateObservationKind::FeedbackLoopCoverage,
+            GateObservationKind::FeedbackLoopTraceability,
+        ]
+        .into_iter()
+        .map(|kind| GateObservation {
+            kind,
+            group: None,
+            state: None,
+        })
+        .collect(),
+        ..Default::default()
+    };
+    let decision = policy.decide(&state);
+    assert_eq!(kind(&decision), Some(FollowUpKind::FinalResponse));
+    assert!(decision.effects.clear_gate_observations);
+    // Even an unacknowledged observation log cannot restart the cycle.
+    assert_eq!(policy.decide(&state), Decision::default());
 }
 
 #[test]
@@ -135,8 +478,58 @@ fn empty_digest_still_consumes_the_log() {
 }
 
 #[test]
+fn opted_in_digest_runs_once_and_preserves_validation() {
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    let state = TodoSnapshot {
+        todos: vec![done("ship", ConfidenceState::Plausible)],
+        gate_observations: vec![GateObservation {
+            kind: GateObservationKind::IntentUnderstanding,
+            group: None,
+            state: Some("partial".into()),
+        }],
+        ..Default::default()
+    };
+    let digest = policy.decide(&state);
+    assert_eq!(kind(&digest), Some(FollowUpKind::GateDigest));
+    assert!(digest.effects.clear_gate_observations);
+    assert!(
+        digest
+            .follow_up
+            .unwrap()
+            .message
+            .starts_with(crate::TODO_GATE_DIGEST_PREFIX)
+    );
+    // Even an unacknowledged/repeated log must not cause another digest.
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::CompletionValidation)
+    );
+    assert_eq!(
+        kind(&policy.decide(&snapshot(vec![todo("new", "pending")]))),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    assert_eq!(policy.decide(&TodoSnapshot::default()), Decision::default());
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.reset_cycle();
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.disable();
+    assert_eq!(policy.decide(&state), Decision::default());
+    policy.enable();
+    assert_eq!(kind(&policy.decide(&state)), Some(FollowUpKind::GateDigest));
+    policy.set_gate_digest_enabled(false);
+    policy.reset_cycle();
+    assert_eq!(
+        kind(&policy.decide(&state)),
+        Some(FollowUpKind::FinalResponse)
+    );
+}
+
+#[test]
 fn ownership_gate_asks_once_per_distinct_gap() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Verified)],
         goals: vec![TodoGoal {
@@ -153,6 +546,7 @@ fn ownership_gate_asks_once_per_distinct_gap() {
 #[test]
 fn confidence_spike_is_challenged_once() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let mut spiked = done("ship", ConfidenceState::Verified);
     spiked.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
     let state = snapshot(vec![spiked]);
@@ -169,6 +563,7 @@ fn confidence_spike_is_challenged_once() {
 #[test]
 fn long_session_review_precedes_poke_and_is_marked() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let state = TodoSnapshot {
         todos: vec![todo("a", "in_progress")],
         long_session_review_due: true,
@@ -182,6 +577,7 @@ fn long_session_review_precedes_poke_and_is_marked() {
 #[test]
 fn exhausted_gate_budget_disarms_with_notice_and_rearms_for_new_work() {
     let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
     let mut sent = 0;
     let mut stopped = false;
     for round in 0..(MAX_GATE_ATTEMPTS as usize + 3) {
@@ -238,5 +634,174 @@ fn snapshot_round_trips_through_json() {
     assert_eq!(
         serde_json::from_str::<TodoSnapshot>("{}").unwrap(),
         TodoSnapshot::default()
+    );
+}
+
+#[test]
+fn delivered_final_latches_completion_without_requesting_another_response() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut state = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    state.gate_observations.push(GateObservation {
+        kind: GateObservationKind::IntentUnderstanding,
+        group: None,
+        state: Some("partial".into()),
+    });
+    let decision = policy.decide_after_turn(&state, true);
+    assert_eq!(decision.follow_up, None);
+    assert!(decision.notice.is_none());
+    assert!(decision.effects.clear_gate_observations);
+    assert!(policy.final_response_requested);
+    assert_eq!(
+        policy.final_response_fingerprint,
+        Some((state.todos.clone(), state.plan.clone(), state.goals.clone()))
+    );
+    // A later turn without a response or with stale observations stays quiet.
+    assert_eq!(policy.decide_after_turn(&state, false), Decision::default());
+    assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+    assert_eq!(policy.decide(&state), Decision::default());
+
+    // Changed completed todos start a fresh cycle and can request a response.
+    state
+        .todos
+        .push(done("follow-up", ConfidenceState::Verified));
+    assert_eq!(
+        kind(&policy.decide_after_turn(&state, false)),
+        Some(FollowUpKind::FinalResponse)
+    );
+    state.todos.push(todo("new work", "pending"));
+    assert_eq!(
+        kind(&policy.decide_after_turn(&state, true)),
+        Some(FollowUpKind::IncompleteTodos)
+    );
+}
+
+#[test]
+fn absent_final_response_preserves_legacy_decision() {
+    let state = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    let mut legacy = FollowUpPolicy::new(true);
+    let mut explicit = FollowUpPolicy::new(true);
+    let decision = explicit.decide_after_turn(&state, false);
+    assert_eq!(kind(&decision), Some(FollowUpKind::FinalResponse));
+    assert_eq!(decision, legacy.decide(&state));
+    assert_eq!(explicit, legacy);
+}
+
+#[test]
+fn delivered_final_does_not_bypass_work_or_quality_gates() {
+    let mut review = snapshot(vec![todo("work", "pending")]);
+    review.long_session_review_due = true;
+    let mut ownership = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    ownership.goals.push(TodoGoal {
+        delivery_state: Some(DeliveryState::ChangeMade),
+        ..Default::default()
+    });
+    let mut spike = done("ship", ConfidenceState::Verified);
+    spike.confidence_history = vec![ConfidenceState::Speculative, ConfidenceState::Verified];
+    let mut digest = snapshot(vec![done("ship", ConfidenceState::Verified)]);
+    digest.gate_observations.push(GateObservation {
+        kind: GateObservationKind::IntentUnderstanding,
+        group: None,
+        state: Some("partial".into()),
+    });
+    for (state, expected) in [
+        (review, FollowUpKind::LongSessionReview),
+        (
+            snapshot(vec![todo("work", "pending")]),
+            FollowUpKind::IncompleteTodos,
+        ),
+        (ownership, FollowUpKind::Ownership),
+        (
+            snapshot(vec![done("ship", ConfidenceState::Plausible)]),
+            FollowUpKind::CompletionValidation,
+        ),
+        (snapshot(vec![spike]), FollowUpKind::ConfidenceSpike),
+        (digest, FollowUpKind::GateDigest),
+    ] {
+        let mut legacy = FollowUpPolicy::new(true);
+        legacy.set_gate_digest_enabled(true);
+        let mut delivered = legacy.clone();
+        let decision = delivered.decide_after_turn(&state, true);
+        assert_eq!(kind(&decision), Some(expected));
+        assert_eq!(decision, legacy.decide(&state));
+        assert_eq!(delivered, legacy);
+        assert!(!delivered.final_response_requested);
+        assert!(delivered.final_response_fingerprint.is_none());
+    }
+}
+
+#[test]
+fn delivered_final_preserves_gate_breaker_and_disabled_policy() {
+    let state = snapshot(vec![done("ship", ConfidenceState::Speculative)]);
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    for _ in 0..MAX_GATE_ATTEMPTS {
+        assert_eq!(
+            kind(&policy.decide_after_turn(&state, true)),
+            Some(FollowUpKind::CompletionValidation)
+        );
+    }
+    let stopped = policy.decide_after_turn(&state, true);
+    assert!(stopped.notice.is_some());
+    assert!(stopped.follow_up.is_none());
+    assert!(!policy.final_response_requested);
+    assert!(policy.final_response_fingerprint.is_none());
+    policy.disable();
+    assert_eq!(policy.decide_after_turn(&state, true), Decision::default());
+}
+
+/// Field report: "Validate further: <todo>" kept firing every few seconds for
+/// a todo whose goal was already marked `constraints_exhausted` with stopping
+/// evidence. More turns cannot lift an exhausted constraint.
+#[test]
+fn documented_stop_exempts_its_todos_from_validation_nudges() {
+    let mut blocked = done("ship", ConfidenceState::Plausible);
+    blocked.group = Some("release".into());
+    let mut other = done("docs", ConfidenceState::Plausible);
+    other.group = Some("docs".into());
+    let stop = |evidence: Option<&str>| crate::TodoGoal {
+        group: Some("release".into()),
+        iteration_maturity: Some(crate::IterationMaturity::ConstraintsExhausted),
+        stopping_evidence: evidence.map(str::to_string),
+        ..Default::default()
+    };
+
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    let mut state = snapshot(vec![blocked.clone()]);
+    state.goals = vec![stop(Some(
+        "staging access was revoked; cannot run the smoke test",
+    ))];
+    for _ in 0..(MAX_GATE_ATTEMPTS as usize + 2) {
+        let decision = policy.decide(&state);
+        assert_ne!(kind(&decision), Some(FollowUpKind::CompletionValidation));
+        assert!(decision.notice.is_none(), "must not trip the stall breaker");
+    }
+
+    // Without evidence the stop is unsupported, so a nudge still applies.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.goals = vec![stop(None)];
+    assert!(policy.decide(&state).follow_up.is_some());
+    assert_eq!(
+        crate::todos_needing_validation(&state.todos, &state.goals).len(),
+        1
+    );
+
+    // Other groups are still validated, and only they are named.
+    let mut policy = FollowUpPolicy::new(true);
+    policy.set_gate_digest_enabled(true);
+    state.todos = vec![blocked, other];
+    state.goals = vec![stop(Some("staging access was revoked"))];
+    let followup = policy.decide(&state).follow_up.unwrap();
+    assert_eq!(followup.kind, FollowUpKind::CompletionValidation);
+    assert!(
+        followup.message.contains("\"docs\""),
+        "{}",
+        followup.message
+    );
+    assert!(
+        !followup.message.contains("\"ship\""),
+        "{}",
+        followup.message
     );
 }

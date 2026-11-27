@@ -2,9 +2,17 @@
 
 mod clipboard_helper;
 mod git_line_cache;
+#[cfg_attr(test, allow(dead_code))]
+mod git_watch;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
+#[path = "helpers_environment.rs"]
+mod environment;
+pub(super) use environment::clipboard_image;
+use environment::gather_ambient_info_inner;
+pub(crate) use environment::gather_git_info_in;
+
 use crate::tui::info_widget::{AmbientWidgetData, GitInfo};
 use crate::tui::session_picker::ResumeTarget;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -23,6 +31,61 @@ type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 static GIT_LINE_CACHE: std::sync::LazyLock<Mutex<git_line_cache::GitLineCache>> =
     std::sync::LazyLock::new(|| Mutex::new(git_line_cache::GitLineCache::default()));
+/// Cheap `.git` metadata stamp from the last full probe, plus when that probe
+/// ran. While the stamp is unchanged, TTL expiry only re-stats a few files
+/// instead of spawning six git processes every 5s per client.
+static GIT_PROBE_STAMP: Mutex<Option<(std::time::Instant, GitStamp)>> = Mutex::new(None);
+
+/// Full probes still run this often with an unchanged stamp, because editor
+/// writes to tracked files do not touch `.git` until something stages them.
+#[cfg(not(test))]
+const GIT_FULL_PROBE_INTERVAL: Duration = Duration::from_secs(60);
+
+type GitStamp = Vec<(std::path::PathBuf, Option<(std::time::SystemTime, u64)>)>;
+
+/// mtimes of the files that change on commit, checkout, stage, fetch, and
+/// branch updates. `None` when the git dir cannot be resolved cheaply.
+fn git_stamp(repo_root: &std::path::Path) -> Option<GitStamp> {
+    let git_dir = repo_root.join(".git");
+    if !git_dir.is_dir() {
+        return None;
+    }
+    let mut paths = vec![
+        git_dir.join("HEAD"),
+        git_dir.join("index"),
+        git_dir.join("FETCH_HEAD"),
+        git_dir.join("packed-refs"),
+    ];
+    if let Ok(head) = std::fs::read_to_string(git_dir.join("HEAD"))
+        && let Some(reference) = head.trim().strip_prefix("ref: ")
+    {
+        paths.push(git_dir.join(reference));
+        if let Some(branch) = reference.strip_prefix("refs/heads/") {
+            paths.push(git_dir.join("refs/remotes/origin").join(branch));
+        }
+    }
+    Some(
+        paths
+            .into_iter()
+            .map(|path| {
+                let meta = match std::fs::metadata(&path).and_then(|m| Ok((m.modified()?, m.len())))
+                {
+                    Ok(meta) => Some(meta),
+                    Err(error) => {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            crate::logging::debug(&format!(
+                                "Git metadata probe failed for {}: {error}",
+                                path.display()
+                            ));
+                        }
+                        None
+                    }
+                };
+                (path, meta)
+            })
+            .collect(),
+    )
+}
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
 /// assessments (closed feedback loop etc.). Module-level so the app can force a
@@ -67,6 +130,7 @@ pub(crate) fn backdated_now(amount: Duration) -> std::time::Instant {
 /// immediately rather than after the 5s TTL. Stale-while-revalidate still
 /// applies: the next read returns the last value and kicks a background refresh.
 pub(crate) fn invalidate_git_info_cache() {
+    crate::tui::cloud_git::refresh_soon();
     if let Ok(mut guard) = GIT_INFO_CACHE.lock()
         && let Some((ts, _cached, refreshing)) = guard.as_mut()
     {
@@ -75,6 +139,9 @@ pub(crate) fn invalidate_git_info_cache() {
         // returning the last-known value (no flicker to empty).
         *ts = backdated_now(Duration::from_secs(3600));
         *refreshing = false;
+    }
+    if let Ok(mut stamp) = GIT_PROBE_STAMP.lock() {
+        *stamp = None;
     }
 }
 
@@ -381,12 +448,225 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
     }
 }
 
-/// Copy text to clipboard. On Windows and macOS, the native clipboard API
-/// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
-/// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
-/// the selection unlike arboard), then arboard, then OSC 52 as the
-/// remote-session fallback (SSH / Docker / tmux).
-pub(super) fn copy_to_clipboard(text: &str) -> bool {
+/// True when this process is running inside an SSH session, i.e. the user's
+/// machine (and clipboard) is elsewhere. In that case the *local* clipboard
+/// belongs to the server, and the only path to the user's clipboard is an
+/// OSC 52 sequence emitted through the terminal (and forwarded by the SSH
+/// client to the client-side terminal emulator).
+#[cfg_attr(test, allow(dead_code))]
+fn is_remote_ssh_session() -> bool {
+    std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok()
+}
+
+/// Runs the session-appropriate copy chain and reports its outcome.
+///
+/// The *order* is the contract (it is what the original bug violated):
+///
+/// - **Remote (SSH) session**: OSC 52 runs first, because it is the only path
+///   to the user's (client-side) clipboard, and the native server-side
+///   clipboard (NSPasteboard / Win32) would otherwise succeed headless and
+///   short-circuit the chain. The local clipboard is then also filled so
+///   paste inside jcode keeps working. If OSC 52 is unavailable (e.g. stdout
+///   is not a TTY), the local clipboard is still the fallback.
+/// - **Local session**: the native clipboard is authoritative and OSC 52 only
+///   runs if it fails (a working native clipboard must not emit terminal
+///   escape sequences).
+///
+/// The writers are closures so the order can be unit-tested with stubs,
+/// without touching any real clipboard.
+fn run_copy_chain(
+    remote: bool,
+    mut osc52: impl FnMut() -> bool,
+    mut local: impl FnMut() -> bool,
+) -> bool {
+    if remote {
+        if osc52() {
+            // Keep the local clipboard in sync so paste inside jcode
+            // (which reads the server-side clipboard) keeps working.
+            let _ = local();
+            return true;
+        }
+        // OSC 52 did not go through (e.g. stdout is not a TTY): still try the
+        // local clipboard rather than failing outright.
+        return local();
+    }
+    if local() {
+        return true;
+    }
+    osc52()
+}
+
+#[cfg(test)]
+mod copy_chain_tests {
+    use super::run_copy_chain;
+    use std::cell::RefCell;
+
+    /// Records the order in which the clipboard writers are invoked, so the
+    /// ordering contract of [`run_copy_chain`] is pinned by tests: a
+    /// regression that writes the server-side clipboard before OSC 52 in an
+    /// SSH session (the original bug) fails here.
+    struct OrderLog(RefCell<Vec<&'static str>>);
+
+    impl OrderLog {
+        fn writer(&self, label: &'static str, succeeds: bool) -> impl FnMut() -> bool + '_ {
+            let log = &self.0;
+            move || {
+                log.borrow_mut().push(label);
+                succeeds
+            }
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.0.borrow().clone()
+        }
+    }
+
+    #[test]
+    fn ssh_session_writes_osc52_first_then_local() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(run_copy_chain(
+            true,
+            log.writer("osc52", true),
+            log.writer("local", true),
+        ));
+        assert_eq!(log.events(), ["osc52", "local"]);
+    }
+
+    #[test]
+    fn ssh_session_still_writes_local_when_osc52_fails() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(run_copy_chain(
+            true,
+            log.writer("osc52", false),
+            log.writer("local", true),
+        ));
+        assert_eq!(log.events(), ["osc52", "local"]);
+    }
+
+    #[test]
+    fn ssh_session_reports_failure_when_both_writers_fail() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(!run_copy_chain(
+            true,
+            log.writer("osc52", false),
+            log.writer("local", false),
+        ));
+        assert_eq!(log.events(), ["osc52", "local"]);
+    }
+
+    #[test]
+    fn local_session_prefers_native_clipboard_and_skips_osc52() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(run_copy_chain(
+            false,
+            log.writer("osc52", true),
+            log.writer("local", true),
+        ));
+        // A working native clipboard must not emit terminal escape sequences.
+        assert_eq!(log.events(), ["local"]);
+    }
+
+    #[test]
+    fn local_session_falls_back_to_osc52_when_native_fails() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(run_copy_chain(
+            false,
+            log.writer("osc52", true),
+            log.writer("local", false),
+        ));
+        assert_eq!(log.events(), ["local", "osc52"]);
+    }
+
+    #[test]
+    fn local_session_reports_failure_when_both_writers_fail() {
+        let log = OrderLog(RefCell::new(Vec::new()));
+        assert!(!run_copy_chain(
+            false,
+            log.writer("osc52", false),
+            log.writer("local", false),
+        ));
+        assert_eq!(log.events(), ["local", "osc52"]);
+    }
+}
+
+/// Fill the *local* (server-side) clipboard using the platform-native chain.
+///
+/// - Windows: Win32 via arboard, which is authoritative there (issue #497).
+/// - macOS: NSPasteboard via arboard, with pbcopy as a belt-and-braces
+///   fallback (Terminal.app ignores OSC 52, so the native path must win
+///   locally).
+/// - Linux: wl-copy (Wayland), then xclip/xsel (X11, which fork and keep
+///   owning the selection unlike arboard, whose X11 backend reverts the
+///   selection on drop - issue #684), then arboard.
+#[cfg(not(test))]
+fn copy_to_local_clipboard(text: &str) -> bool {
+    #[cfg(windows)]
+    {
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text.to_string()))
+            .is_ok()
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        copy_to_local_macos_clipboard(text)
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        if clipboard_helper::copy_via_clipboard_helper("wl-copy", &[], text) {
+            return true;
+        }
+        if clipboard_helper::copy_via_clipboard_helper("xclip", &["-selection", "clipboard"], text)
+        {
+            return true;
+        }
+        if clipboard_helper::copy_via_clipboard_helper("xsel", &["--clipboard", "--input"], text) {
+            return true;
+        }
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text.to_string()))
+            .is_ok()
+    }
+}
+
+#[cfg(all(not(test), target_os = "macos"))]
+fn copy_to_local_macos_clipboard(text: &str) -> bool {
+    if arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
+    {
+        return true;
+    }
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        use std::io::Write;
+        if let Some(stdin) = child.stdin.as_mut()
+            && stdin.write_all(text.as_bytes()).is_ok()
+        {
+            drop(child.stdin.take());
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Copy text to clipboard.
+///
+/// The ordering contract lives in [`run_copy_chain`]: in a remote (SSH)
+/// session OSC 52 is emitted first, because the platform-native clipboards
+/// succeed even headless and would otherwise short-circuit the only path to
+/// the user's own clipboard; the local clipboard is then also filled so
+/// paste inside jcode keeps working. In a local session the native clipboard
+/// is authoritative and OSC 52 is the final fallback (see
+/// [`copy_to_local_clipboard`] for the per-platform native chain).
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     // Under test, never touch the OS clipboard. Beyond making results identical
     // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
     // which forks a clipboard server that does not exit; waiting on it hangs the
@@ -412,102 +692,15 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 
     #[cfg(not(test))]
     {
-        // On Windows, the native clipboard API must run before OSC 52. Writing an
-        // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
-        // older Windows Terminal) silently ignores it, which reported "Copied"
-        // while leaving the clipboard empty (issue #497). arboard talks to the
-        // Win32 clipboard directly and is authoritative there.
-        #[cfg(windows)]
-        {
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
-                return true;
-            }
-            return copy_to_clipboard_osc52(text);
-        }
-
-        // Same class of bug on macOS: Apple Terminal (Terminal.app) silently
-        // ignores OSC 52, yet writing the sequence to stdout "succeeds", so we
-        // reported "Copied" while leaving the clipboard untouched. NSPasteboard
-        // via arboard (with pbcopy as a belt-and-braces fallback) is authoritative
-        // for local sessions; OSC 52 remains as the final remote-session fallback.
-        #[cfg(target_os = "macos")]
-        {
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
-                return true;
-            }
-            if let Ok(mut child) = std::process::Command::new("pbcopy")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                use std::io::Write;
-                if let Some(stdin) = child.stdin.as_mut()
-                    && stdin.write_all(text.as_bytes()).is_ok()
-                {
-                    drop(child.stdin.take());
-                    if child.wait().map(|s| s.success()).unwrap_or(false) {
-                        return true;
-                    }
-                }
-            }
-            copy_to_clipboard_osc52(text)
-        }
-
-        // Linux has the same failure class (issue #504, Kali/X11): wl-copy fails
-        // outside Wayland, and many terminals (xterm, older VTE) silently ignore
-        // OSC 52 while the stdout write still "succeeds", so the arboard fallback
-        // never ran. Prefer native clipboards when a display is available:
-        // wl-copy (Wayland), then xclip/xsel (X11, which keep owning the
-        // selection), then arboard, and only then OSC 52 for genuinely
-        // headless/remote sessions (SSH, Docker, tmux) where the native paths
-        // fail fast for lack of a display server.
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            if clipboard_helper::copy_via_clipboard_helper("wl-copy", &[], text) {
-                return true;
-            }
-            // X11: prefer xclip/xsel over arboard. arboard's X11 backend sets the
-            // selection on a connection it owns and then closes it when the
-            // `Clipboard` is dropped, so the selection owner disappears and the
-            // clipboard silently reverts (issue #684) even though `set_text`
-            // returned Ok. xclip and xsel fork a background process that keeps
-            // owning the selection until a paste, which is what users expect.
-            if clipboard_helper::copy_via_clipboard_helper(
-                "xclip",
-                &["-selection", "clipboard"],
-                text,
-            ) {
-                return true;
-            }
-            if clipboard_helper::copy_via_clipboard_helper(
-                "xsel",
-                &["--clipboard", "--input"],
-                text,
-            ) {
-                return true;
-            }
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
-                return true;
-            }
-            copy_to_clipboard_osc52(text)
-        }
+        run_copy_chain(
+            is_remote_ssh_session(),
+            || copy_to_clipboard_osc52(text),
+            || copy_to_local_clipboard(text),
+        )
     }
 }
 
-/// Copy to clipboard using the OSC 52 terminal escape sequence. This asks the
-/// terminal emulator to set the system clipboard without needing a local
-/// display server, making it work over SSH, inside Docker, and under tmux
-/// (with `set -g set-clipboard on`). Returns false if stdout is not a TTY.
+/// Copy text to the clipboard using the OSC 52 terminal escape sequence.
 #[cfg_attr(test, allow(dead_code))]
 fn copy_to_clipboard_osc52(text: &str) -> bool {
     use base64::Engine as _;
@@ -692,6 +885,7 @@ pub(crate) fn switched_model_account_suffix(
 /// Notice after switching the active saved account. The switch rebinds this
 /// session and becomes the default for new sessions, but other sessions that
 /// are already running keep the credentials they loaded.
+#[cfg(test)]
 pub(super) fn account_switch_notice(provider: &str, label: &str) -> String {
     format!(
         "Switched {provider} account to `{label}` for this session and new sessions. \
@@ -725,6 +919,11 @@ pub(super) fn mask_email(email: &str) -> String {
 /// Spawn a new terminal window that resumes a jcode session.
 /// Returns Ok(true) if a terminal was successfully launched, Ok(false) if no terminal found.
 fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String> {
+    if let Some(lease) = crate::storage::read_session_lease(session_id)
+        && let Some(host) = lease.away_host
+    {
+        return remote_resume_invocation_args(session_id, &host, lease.repo_root.as_deref());
+    }
     let mut args = vec![
         "--fresh-spawn".to_string(),
         "--resume".to_string(),
@@ -735,6 +934,81 @@ fn resume_invocation_args(session_id: &str, socket: Option<&str>) -> Vec<String>
         args.push(socket.to_string());
     }
     args
+}
+
+fn remote_resume_invocation_args(
+    session_id: &str,
+    host: &str,
+    working_dir: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["--fresh-spawn".into(), "--ssh".into(), host.into()];
+    if let Ok(binary) = std::env::var("JCODE_CLOUD_REMOTE_BINARY") {
+        args.extend(["--ssh-binary".into(), binary]);
+    }
+    if let Some(dir) = working_dir {
+        args.extend(["--remote-working-dir".into(), dir.into()]);
+    }
+    args.extend(["--resume".into(), session_id.into()]);
+    args
+}
+
+/// Arguments that attach a second client to a session on the SSH host this
+/// client is already displaying. Everything is passed explicitly because the
+/// window may be opened by the companion, which does not share our env.
+pub(super) fn ssh_child_invocation_args(session_id: &str) -> Vec<String> {
+    let host = crate::tui::ssh_remote_host().unwrap_or_default();
+    let mut args = vec!["--fresh-spawn".to_string(), "--ssh".to_string(), host];
+    for (flag, variable) in [
+        ("--ssh-binary", "JCODE_SSH_BINARY"),
+        ("--ssh-server-socket", "JCODE_SSH_SERVER_SOCKET"),
+        ("--remote-working-dir", "JCODE_SSH_WORKING_DIR"),
+    ] {
+        if let Ok(value) = std::env::var(variable)
+            && !value.trim().is_empty()
+        {
+            args.extend([flag.to_string(), value]);
+        }
+    }
+    args.extend(["--resume".to_string(), session_id.to_string()]);
+    if jcode_selfdev_types::client_selfdev_requested() {
+        args.push("self-dev".to_string());
+    }
+    args
+}
+
+pub(super) fn ssh_child_manual_command(session_id: &str) -> String {
+    command_display(
+        Path::new("jcode"),
+        &ssh_child_invocation_args(session_id)[1..],
+    )
+}
+
+/// Open another SSH client on `session_id` in a new terminal window.
+pub(super) fn spawn_ssh_child_in_new_terminal(session_id: &str) -> anyhow::Result<bool> {
+    if cfg!(test) {
+        // Never launch real terminal windows from unit tests.
+        return Ok(false);
+    }
+    let cwd = std::env::var_os("JCODE_SSH_LOCAL_WORKING_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let host = crate::tui::ssh_remote_host().unwrap_or_default();
+    let mut command = crate::terminal_launch::TerminalCommand::new(
+        launch_client_executable(),
+        ssh_child_invocation_args(session_id),
+    )
+    .title(format!("jcode SSH {host}"))
+    // Attaching must not replay a cloud handoff from this client's env.
+    .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+    .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    if std::env::var("JCODE_SSH_LOCAL_IS_SOURCE").as_deref() != Ok("1") {
+        // Our cached client cwd is inherited by the child. It was never
+        // authorized as a migration source, so it must not become one there.
+        command = command.spawn_env("JCODE_SSH_LOCAL_INHERITED", "1");
+    }
+    crate::terminal_launch::spawn_command_in_new_terminal(&command, &cwd)
 }
 
 fn command_display(program: &Path, args: &[String]) -> String {
@@ -822,8 +1096,14 @@ fn spawn_command_in_new_terminal(
         // tests is the libtest harness and would pop up a broken window.
         return Ok(false);
     }
-    let command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
+    let mut command = crate::terminal_launch::TerminalCommand::new(program, args.to_vec())
         .title(title.to_string());
+    if args.iter().any(|arg| arg == "--ssh") {
+        // Resuming is an attachment, never a request to start another turn.
+        command = command
+            .spawn_env("JCODE_CLOUD_CONTINUE_MESSAGE", "")
+            .spawn_env("JCODE_CLOUD_HANDOFF_PREVIEW_SESSION", "");
+    }
     crate::terminal_launch::spawn_command_in_new_terminal(&command, cwd)
 }
 
@@ -906,122 +1186,6 @@ pub(super) fn spawn_in_new_terminal(
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod helpers_tests;
-
-/// Try to get an image from the system clipboard.
-///
-/// Returns `Some((media_type, base64_data))` if an image is available.
-/// Uses `wl-paste` on Wayland, `osascript` on macOS, falls back to `arboard::get_image()`.
-pub(super) fn clipboard_image() -> Option<(String, String)> {
-    use base64::Engine;
-
-    // Try wl-paste first (native Wayland - better image format support)
-    if std::env::var("WAYLAND_DISPLAY").is_ok()
-        && let Ok(output) = std::process::Command::new("wl-paste")
-            .arg("--list-types")
-            .output()
-    {
-        let types = String::from_utf8_lossy(&output.stdout);
-        crate::logging::info(&format!(
-            "clipboard_image: wl-paste types: {:?}",
-            types.trim()
-        ));
-        let (mime, wl_type) = if types.lines().any(|t| t.trim() == "image/png") {
-            ("image/png", "image/png")
-        } else if types.lines().any(|t| t.trim() == "image/jpeg") {
-            ("image/jpeg", "image/jpeg")
-        } else if types.lines().any(|t| t.trim() == "image/webp") {
-            ("image/webp", "image/webp")
-        } else if types.lines().any(|t| t.trim() == "image/gif") {
-            ("image/gif", "image/gif")
-        } else {
-            ("", "")
-        };
-
-        if !mime.is_empty()
-            && let Ok(img_output) = std::process::Command::new("wl-paste")
-                .args(["--type", wl_type, "--no-newline"])
-                .output()
-            && img_output.status.success()
-            && !img_output.stdout.is_empty()
-        {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&img_output.stdout);
-            return Some((mime.to_string(), b64));
-        }
-
-        // Fallback: check text/html for <img> tags (Discord copies HTML with image URLs)
-        if types.lines().any(|t| t.trim() == "text/html")
-            && let Ok(html_output) = std::process::Command::new("wl-paste")
-                .args(["--type", "text/html"])
-                .output()
-            && html_output.status.success()
-            && !html_output.stdout.is_empty()
-        {
-            let html = String::from_utf8_lossy(&html_output.stdout);
-            crate::logging::info(&format!(
-                "clipboard_image: checking HTML for img tags ({} bytes)",
-                html.len()
-            ));
-            if let Some(url) = extract_image_url(&html) {
-                crate::logging::info(&format!(
-                    "clipboard_image: found image URL in HTML: {}",
-                    jcode_core::util::truncate_str(&url, 80)
-                ));
-                if let Some(result) = download_image_url(&url) {
-                    return Some(result);
-                }
-            }
-        }
-    }
-
-    // macOS: use osascript to check clipboard for images and save as PNG via temp file
-    #[cfg(target_os = "macos")]
-    {
-        let temp_path = std::env::temp_dir().join("jcode_clipboard.png");
-        let script = format!(
-            r#"use framework \"AppKit\"
-            set pb to current application's NSPasteboard's generalPasteboard()
-            set imgClasses to current application's NSArray's arrayWithObject:(current application's NSImage)
-            if (pb's canReadObjectForClasses:imgClasses options:(missing value)) then
-                set imgList to pb's readObjectsForClasses:imgClasses options:(missing value)
-                set img to item 1 of imgList
-                set tiffData to img's TIFFRepresentation()
-                set bitmapRep to current application's NSBitmapImageRep's imageRepWithData:tiffData
-                set pngData to bitmapRep's representationUsingType:(current application's NSBitmapImageFileTypePNG) properties:(missing value)
-                pngData's writeToFile:\"{}\" atomically:true
-                return \"ok\"
-            else
-                return \"none\"
-            end if"#,
-            temp_path.to_string_lossy()
-        );
-        if let Ok(output) = std::process::Command::new("osascript")
-            .args(["-l", "AppleScript", "-e", &script])
-            .output()
-        {
-            let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if result == "ok"
-                && let Ok(data) = std::fs::read(&temp_path)
-            {
-                let _ = std::fs::remove_file(&temp_path);
-                if !data.is_empty() {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                    return Some(("image/png".to_string(), b64));
-                }
-            }
-        }
-    }
-
-    // Fallback: arboard (works on X11/XWayland and macOS via NSPasteboard)
-    if let Ok(mut clipboard) = arboard::Clipboard::new()
-        && let Ok(img) = clipboard.get_image()
-        && let Some(png_data) = encode_rgba_as_png(img.width, img.height, &img.bytes)
-    {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-        return Some(("image/png".to_string(), b64));
-    }
-
-    None
-}
 
 pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bool {
     use base64::Engine;
@@ -1208,6 +1372,22 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
                 if *refreshing {
                     return cached.clone();
                 }
+                // The inotify watcher refreshes on change. Nothing to poll.
+                if git_watch::is_healthy() {
+                    *ts = std::time::Instant::now();
+                    return cached.clone();
+                }
+                // Nothing in .git moved and the last full probe is recent:
+                // extend the entry without spawning any git process.
+                if let Some(root) = cached.as_ref().and_then(|info| info.repo_root.as_deref())
+                    && let Ok(stamp_guard) = GIT_PROBE_STAMP.lock()
+                    && let Some((probed_at, stamp)) = stamp_guard.as_ref()
+                    && probed_at.elapsed() < GIT_FULL_PROBE_INTERVAL
+                    && git_stamp(root).as_ref() == Some(stamp)
+                {
+                    *ts = std::time::Instant::now();
+                    return cached.clone();
+                }
                 let stale = cached.clone();
                 *refreshing = true;
                 spawn_git_info_refresh();
@@ -1228,7 +1408,36 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 #[cfg(not(test))]
 fn spawn_git_info_refresh() {
     std::thread::spawn(|| {
+        run_git_info_refresh();
+    });
+}
+
+/// Watcher callback: probe now, on the watcher thread (it is already
+/// debounced and off the render path).
+#[cfg(not(test))]
+fn git_watch_changed() {
+    if let Ok(mut guard) = GIT_INFO_CACHE.lock()
+        && let Some((_, _, refreshing)) = guard.as_mut()
+    {
+        *refreshing = true;
+    }
+    run_git_info_refresh();
+}
+
+#[cfg(not(test))]
+fn run_git_info_refresh() {
+    {
         let result = gather_git_info_inner();
+        if let Some(root) = result.as_ref().and_then(|info| info.repo_root.as_deref()) {
+            git_watch::ensure_started(root, git_watch_changed);
+        }
+        if let Ok(mut stamp) = GIT_PROBE_STAMP.lock() {
+            *stamp = result
+                .as_ref()
+                .and_then(|info| info.repo_root.as_deref())
+                .and_then(git_stamp)
+                .map(|s| (std::time::Instant::now(), s));
+        }
         let changed = if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
             let changed = guard
                 .as_ref()
@@ -1241,7 +1450,7 @@ fn spawn_git_info_refresh() {
         if changed {
             crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
         }
-    });
+    }
 }
 
 /// Start the git probe and give it up to `budget` to land before returning.
@@ -1261,10 +1470,13 @@ pub(crate) fn prime_git_info(budget: Duration) {
         let _ = gather_git_info();
         let deadline = std::time::Instant::now() + budget;
         loop {
-            let pending = GIT_INFO_CACHE
-                .lock()
-                .ok()
-                .is_some_and(|guard| guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing));
+            let pending = match GIT_INFO_CACHE.lock() {
+                Ok(guard) => guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing),
+                Err(error) => {
+                    crate::logging::warn(&format!("Git warmup cache lock poisoned: {error}"));
+                    false
+                }
+            };
             if !pending || std::time::Instant::now() >= deadline {
                 return;
             }
@@ -1278,6 +1490,7 @@ pub(crate) fn prime_git_info(budget: Duration) {
 /// Fetch a session's todos plus its goal-level assessments through the same
 /// stale-while-revalidate cache for consumers that need goal metadata
 /// (closed feedback loop and objectives) without extra disk reads per frame.
+#[cfg(test)]
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
@@ -1413,73 +1626,6 @@ fn spawn_ambient_info_refresh(ambient_enabled: bool) {
     }
 }
 
-fn gather_ambient_info_inner(ambient_enabled: bool) -> Option<AmbientWidgetData> {
-    let state = crate::ambient::AmbientState::load().unwrap_or_default();
-    let manager = crate::ambient::AmbientManager::new().ok();
-    let queue_items: Vec<_> = manager
-        .as_ref()
-        .map(|m| m.queue().items().to_vec())
-        .unwrap_or_default();
-    let queue_count = queue_items.len();
-    let next_queue_item = queue_items.iter().min_by_key(|item| item.scheduled_for);
-    let reminder_items: Vec<_> = queue_items
-        .iter()
-        .filter(|item| item.target.is_direct_delivery())
-        .collect();
-    let reminder_count = reminder_items.len();
-    let next_reminder_item = reminder_items
-        .iter()
-        .min_by_key(|item| item.scheduled_for)
-        .copied();
-
-    if !ambient_enabled && reminder_count == 0 {
-        return None;
-    }
-
-    let last_run_ago = state.last_run.map(|t| {
-        let ago = chrono::Utc::now() - t;
-        if ago.num_hours() > 0 {
-            format!("{}h ago", ago.num_hours())
-        } else {
-            format!("{}m ago", ago.num_minutes().max(0))
-        }
-    });
-    let next_wake = match &state.status {
-        crate::ambient::AmbientStatus::Scheduled { next_wake } => {
-            Some(format_countdown_until(*next_wake))
-        }
-        _ => None,
-    };
-
-    let next_queue_preview = next_queue_item.map(|item| {
-        item.task_description
-            .as_deref()
-            .unwrap_or(&item.context)
-            .to_string()
-    });
-    let next_reminder_preview = next_reminder_item.map(|item| {
-        item.task_description
-            .as_deref()
-            .unwrap_or(&item.context)
-            .to_string()
-    });
-
-    Some(AmbientWidgetData {
-        show_widget: ambient_enabled || reminder_count > 1,
-        status: state.status,
-        queue_count,
-        next_queue_preview,
-        reminder_count,
-        next_reminder_preview,
-        last_run_ago,
-        last_summary: state.last_summary,
-        next_wake,
-        next_reminder_wake: next_reminder_item
-            .map(|item| format_countdown_until(item.scheduled_for)),
-        budget_percent: None,
-    })
-}
-
 #[cfg(test)]
 pub(crate) fn clear_ambient_info_cache_for_tests() {
     if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
@@ -1517,175 +1663,6 @@ pub(crate) fn gather_git_info_inner() -> Option<GitInfo> {
     gather_git_info_in(None)
 }
 
-/// Git status for `dir` (or the process working directory when `None`).
-///
-/// The probe gates the branch, dirty counts, and commit widgets on startup,
-/// so it is latency-bound: one `rev-parse` answers "is this a work tree" and
-/// "where is its root" together, then every remaining query is spawned at
-/// once and collected afterwards. Sequentially these took the sum of seven
-/// git processes; concurrently they take roughly the slowest one.
-pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInfo> {
-    let git = || {
-        let mut cmd = std::process::Command::new("git");
-        if let Some(dir) = dir {
-            cmd.current_dir(dir);
-        }
-        // A background probe must never contend with the user's own git
-        // commands for `index.lock` (status would otherwise opportunistically
-        // refresh and rewrite the index).
-        cmd.env("GIT_OPTIONAL_LOCKS", "0");
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        cmd
-    };
-    let spawn = |args: &[&str]| git().args(args).spawn().ok();
-    let collect = |child: Option<std::process::Child>| {
-        child
-            .and_then(|child| child.wait_with_output().ok())
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-
-    let probe = collect(spawn(&[
-        "rev-parse",
-        "--is-inside-work-tree",
-        "--show-toplevel",
-    ]))?;
-    let mut probe_lines = probe.lines();
-    if probe_lines.next().map(str::trim) != Some("true") {
-        return None;
-    }
-    let repo_root = probe_lines
-        .next()
-        .map(str::trim)
-        .filter(|root| !root.is_empty())
-        .map(std::path::PathBuf::from);
-
-    let branch_child = spawn(&["branch", "--show-current"]);
-    let status_child = spawn(&["status", "--porcelain", "--untracked-files=all"]);
-    let numstat_child = spawn(&["diff", "--numstat", "HEAD"]);
-    let ahead_behind_child = spawn(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
-    let log_child = spawn(&[
-        "log",
-        "-n",
-        "8",
-        "--shortstat",
-        "--format=%x1e%h%x1f%ct%x1f%s",
-    ]);
-
-    let branch = collect(branch_child)
-        .map(|b| b.trim().to_string())
-        .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| "HEAD".to_string());
-
-    let mut modified = 0;
-    let mut staged = 0;
-    let mut untracked = 0;
-    let mut all_files: Vec<crate::tui::info_widget::DirtyFile> = Vec::new();
-
-    if let Some(status) = collect(status_child) {
-        for line in status.lines() {
-            if line.len() < 3 {
-                continue;
-            }
-            let index_status = line.as_bytes()[0];
-            let worktree_status = line.as_bytes()[1];
-            let file_path = line[3..].to_string();
-
-            if index_status == b'?' {
-                untracked += 1;
-            } else {
-                if index_status != b' ' && index_status != b'?' {
-                    staged += 1;
-                }
-                if worktree_status != b' ' && worktree_status != b'?' {
-                    modified += 1;
-                }
-            }
-
-            all_files.push(crate::tui::info_widget::DirtyFile::new(
-                porcelain_status_letter(index_status, worktree_status),
-                file_path,
-            ));
-        }
-    }
-
-    // Line counts: tracked files from one numstat against HEAD (staged plus
-    // unstaged), untracked files by counting their lines.
-    let numstat = collect(numstat_child)
-        .map(|text| parse_numstat(&text))
-        .unwrap_or_default();
-    let mut added_total = 0usize;
-    let mut removed_total = 0usize;
-    let mut line_cache = GIT_LINE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    line_cache.begin_scan();
-    for file in &mut all_files {
-        let key = file
-            .path
-            .rsplit(" -> ")
-            .next()
-            .unwrap_or(&file.path)
-            .trim_matches('"');
-        let abs = repo_root.as_ref().map(|root| root.join(key));
-        let metadata = abs
-            .as_deref()
-            .and_then(|p| std::fs::symlink_metadata(p).ok());
-        if file.status == '?' {
-            file.added = abs
-                .as_deref()
-                .zip(metadata.as_ref())
-                .and_then(|(path, meta)| line_cache.count(path, meta));
-            file.removed = file.added.map(|_| 0);
-        } else if let Some(&(a, r)) = numstat.get(key) {
-            file.added = a;
-            file.removed = r;
-        }
-        added_total += file.added.unwrap_or(0);
-        removed_total += file.removed.unwrap_or(0);
-        file.modified_at = metadata.and_then(|m| m.modified().ok());
-    }
-    line_cache.finish_scan();
-    drop(line_cache);
-    // Newest first, so the file being worked on stays visible under the cap.
-    // Deleted files have no mtime and sort last.
-    all_files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
-    let dirty_total = all_files.len();
-    all_files.truncate(10);
-    let dirty_files = all_files;
-
-    let (ahead, behind) = collect(ahead_behind_child)
-        .and_then(|text| {
-            let parts: Vec<&str> = text.trim().split('\t').collect();
-            (parts.len() == 2).then(|| {
-                (
-                    parts[0].parse::<usize>().unwrap_or(0),
-                    parts[1].parse::<usize>().unwrap_or(0),
-                )
-            })
-        })
-        .unwrap_or((0, 0));
-
-    let recent_commits = collect(log_child)
-        .map(|text| parse_recent_commits(&text, ahead))
-        .unwrap_or_default();
-
-    Some(GitInfo {
-        branch,
-        modified,
-        staged,
-        untracked,
-        ahead,
-        behind,
-        dirty_files,
-        dirty_total,
-        added_total,
-        removed_total,
-        repo_root,
-        recent_commits,
-    })
-}
-
 /// Parse `git log --shortstat --format=%x1e%h%x1f%ct%x1f%s`. The first
 /// `ahead` commits are the ones not yet on the upstream.
 pub(crate) fn parse_recent_commits(
@@ -1699,7 +1676,13 @@ pub(crate) fn parse_recent_commits(
             let mut lines = record.lines();
             let mut fields = lines.next()?.splitn(3, '\x1f');
             let hash = fields.next()?.trim().to_string();
-            let timestamp = fields.next()?.trim().parse().ok()?;
+            let timestamp = match fields.next()?.trim().parse() {
+                Ok(timestamp) => timestamp,
+                Err(error) => {
+                    crate::logging::debug(&format!("Cannot parse git commit timestamp: {error}"));
+                    return None;
+                }
+            };
             let subject = fields.next().unwrap_or("").trim().to_string();
             let (mut added, mut removed) = (None, None);
             // " 3 files changed, 12 insertions(+), 4 deletions(-)"
@@ -1772,38 +1755,22 @@ pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
 }
 
 #[cfg(test)]
-mod switched_model_account_suffix_tests {
-    use super::switched_model_account_suffix;
-
-    #[test]
-    fn email_is_masked() {
-        assert_eq!(
-            switched_model_account_suffix(Some("OAuth"), Some("jeremy@gmail.com")),
-            " (via OAuth · j***y@gmail.com)"
-        );
-        assert_eq!(
-            switched_model_account_suffix(Some("OAuth"), Some("me@example.com")),
-            " (via OAuth · m*@example.com)"
-        );
-    }
-
-    #[test]
-    fn no_email_keeps_existing_suffix() {
-        assert_eq!(
-            switched_model_account_suffix(Some("API key"), None),
-            " (via API key)"
-        );
-        assert_eq!(switched_model_account_suffix(None, Some("  ")), "");
-    }
-}
+#[path = "helpers/account_notice_tests.rs"]
+mod account_notice_tests;
 
 #[cfg(test)]
-mod account_switch_notice_tests {
+mod git_stamp_tests {
     #[test]
-    fn notice_states_that_other_running_sessions_are_unchanged() {
-        let notice = super::account_switch_notice("OpenAI", "openai-fox");
-        assert!(notice.contains("`openai-fox`"));
-        assert!(notice.contains("this session and new sessions"));
-        assert!(notice.contains("Other running sessions keep their current account"));
+    fn stamp_changes_when_head_ref_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(git.join("refs/heads/main"), "a\n").unwrap();
+        let before = super::git_stamp(dir.path()).unwrap();
+        assert_eq!(super::git_stamp(dir.path()).unwrap(), before);
+        std::fs::write(git.join("refs/heads/main"), "bb\n").unwrap();
+        assert_ne!(super::git_stamp(dir.path()).unwrap(), before);
+        assert!(super::git_stamp(&dir.path().join("missing")).is_none());
     }
 }

@@ -143,6 +143,89 @@ async fn test_agent(
 }
 
 #[tokio::test]
+async fn set_context_cap_is_deferred_isolated_and_persisted() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let (_, agent, tx, mut rx) = test_agent("session_context_cap_control").await;
+    let (_, other, _, _) = test_agent("session_context_cap_other").await;
+    let original_other_budget = other.lock().await.effective_context_budget().await;
+    handle_set_context_cap(70, "replaced-session".to_string(), Some(1), &agent, &tx).await;
+    let rejected = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(rejected, ServerEvent::Error { id: 70, .. }));
+    assert_eq!(
+        agent.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let lock = agent.lock().await;
+    timeout(
+        Duration::from_millis(100),
+        handle_set_context_cap(
+            71,
+            "session_context_cap_control".to_string(),
+            Some(8_000),
+            &agent,
+            &tx,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(rx.try_recv().is_err());
+    drop(lock);
+    let event = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        ServerEvent::ContextCapChanged {
+            id: 71,
+            max_context_tokens: Some(8_000),
+            effective_budget: 8_000,
+            ..
+        }
+    ));
+    assert_eq!(
+        other.lock().await.effective_context_budget().await,
+        original_other_budget
+    );
+    let saved = crate::session::Session::load("session_context_cap_control").unwrap();
+    assert_eq!(saved.context_cap, Some(8_000));
+    let provider: Arc<dyn Provider> = Arc::new(TestEffortProvider::default());
+    let registry = crate::tool::Registry::new(Arc::clone(&provider)).await;
+    let mut resumed = Agent::new_with_session(provider, registry, saved, None);
+    assert_eq!(resumed.effective_context_budget().await, 8_000);
+    assert_eq!(
+        resumed.set_context_cap(Some(100_000)).await.unwrap(),
+        16_000
+    );
+    let fallback = resumed.set_context_cap(Some(0)).await.unwrap();
+    assert_eq!(fallback, original_other_budget);
+    assert_eq!(
+        crate::session::Session::load("session_context_cap_control")
+            .unwrap()
+            .context_cap,
+        None
+    );
+}
+
+#[tokio::test]
 async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
@@ -171,6 +254,7 @@ async fn set_reasoning_effort_does_not_wait_for_busy_agent_lock() {
         Some(ServerEvent::ReasoningEffortChanged {
             id: 7,
             effort: Some(effort),
+            model: None,
             error: None,
         }) if effort == "low"
     ));
@@ -181,6 +265,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();
     let (provider, agent, tx, mut rx) = test_agent("session_rejected_auto_route").await;
+    let initial_model = provider.model();
     let selection = crate::provider::RouteSelection {
         model: "gpt-6.1-sol".to_string(),
         runtime_key: jcode_provider_core::RuntimeKey::OpenAIOAuth,
@@ -205,7 +290,7 @@ async fn automatic_failover_revalidates_after_waiting_for_agent_lock() {
         matches!(event, ServerEvent::ModelChanged { id: 29, error: Some(error), .. }
         if error.contains("Auto-switch canceled"))
     );
-    assert_eq!(provider.model(), "test-model-a");
+    assert_eq!(provider.model(), initial_model);
 }
 
 #[tokio::test]
@@ -434,4 +519,119 @@ async fn service_tier_control_provider_registry_tracks_rebind_and_session_lifecy
         "registry must not retain providers"
     );
     super::super::state::remove_background_tool_signal("tier_registry_other");
+}
+
+#[tokio::test]
+async fn set_reasoning_effort_propagates_sibling_model_change() {
+    struct SiblingEffortProvider {
+        model: StdMutex<String>,
+    }
+
+    #[async_trait]
+    impl Provider for SiblingEffortProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<EventStream> {
+            panic!("complete should not run in sibling effort test")
+        }
+
+        fn name(&self) -> &str {
+            "antigravity"
+        }
+
+        fn model(&self) -> String {
+            self.model.lock().expect("model lock").clone()
+        }
+
+        fn set_model(&self, model: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = model.to_string();
+            Ok(())
+        }
+
+        fn available_models_for_switching(&self) -> Vec<String> {
+            vec![
+                "gemini-4-neon-low".to_string(),
+                "gemini-4-neon-high".to_string(),
+            ]
+        }
+
+        fn available_efforts(&self) -> Vec<&'static str> {
+            vec!["low", "high", "swarm"]
+        }
+
+        fn reasoning_effort(&self) -> Option<String> {
+            let model = self.model();
+            model.rsplit('-').next().map(str::to_string)
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            *self.model.lock().expect("model lock") = format!("gemini-4-neon-{effort}");
+            Ok(())
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self {
+                model: StdMutex::new(self.model()),
+            })
+        }
+    }
+
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(SiblingEffortProvider {
+        model: StdMutex::new("gemini-4-neon-low".to_string()),
+    });
+    let registry = crate::tool::Registry::new(provider.clone()).await;
+    let mut session = crate::session::Session::create_with_id(
+        "session_sibling_effort_change".to_string(),
+        None,
+        None,
+    );
+    session.model = Some(provider.model());
+    session.save_prepared().unwrap();
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        registry,
+        session,
+        None,
+    )));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    handle_set_reasoning_effort(11, "high".to_string(), &agent, &tx).await;
+
+    let event = timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("effort change should emit event");
+    assert!(matches!(
+        event,
+        Some(ServerEvent::ReasoningEffortChanged {
+            id: 11,
+            effort: Some(effort),
+            model: Some(model),
+            error: None,
+        }) if effort == "high" && model == "gemini-4-neon-high"
+    ));
+    assert_eq!(provider.model(), "gemini-4-neon-high");
+    assert_eq!(agent.lock().await.provider_model(), "gemini-4-neon-high");
+    let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
+    assert_eq!(saved.model.as_deref(), Some("gemini-4-neon-high"));
 }

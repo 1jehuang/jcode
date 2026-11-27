@@ -1,5 +1,15 @@
 use super::*;
 
+/// Normalize CRLF/CR to LF, borrowing when the input has no carriage returns
+/// (the common case) so per-frame role checks do not copy every message.
+fn normalize_line_endings(content: &str) -> std::borrow::Cow<'_, str> {
+    if content.contains('\r') {
+        std::borrow::Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(content)
+    }
+}
+
 fn sanitize_fenced_block(text: &str) -> String {
     text.replace("```", "``\u{200b}`")
 }
@@ -254,6 +264,17 @@ pub fn format_background_task_notification_markdown(task: &BackgroundTaskComplet
         exit_code,
     );
 
+    if matches!(task.status, BackgroundTaskStatus::Failed) {
+        // Completion events are formatted on delivery. Preserve the inferred call
+        // time so the UI can show age rather than confusing runtime with age.
+        if let Ok(elapsed) = std::time::Duration::try_from_secs_f64(task.duration_secs)
+            && let Ok(elapsed) = chrono::Duration::from_std(elapsed)
+            && let Some(called_at) = chrono::Utc::now().checked_sub_signed(elapsed)
+        {
+            message.push_str(&format!("\n\n_Called at:_ `{}`", called_at.to_rfc3339()));
+        }
+    }
+
     if matches!(task.status, BackgroundTaskStatus::Failed)
         && let Some(summary) = background_task_failure_summary(&task.output_preview)
     {
@@ -311,13 +332,18 @@ pub fn parse_background_task_started_notification_markdown(
 pub fn format_background_task_stalled_markdown(
     task: &jcode_background_types::BackgroundTaskStalled,
 ) -> String {
-    let mut message = format!(
-        "**Background task stalled** `{}` · {} · no output or progress for {}s (running {:.0}s total)",
-        task.task_id,
-        background_task_header_label(&task.tool_name, task.display_name.as_deref()),
-        task.stall_wake_seconds,
-        task.running_secs,
-    );
+    let label = background_task_header_label(&task.tool_name, task.display_name.as_deref());
+    let mut message = if task.elapsed_review {
+        format!(
+            "**Background task elapsed review** `{}` · {} · running {:.0}s total",
+            task.task_id, label, task.running_secs
+        )
+    } else {
+        format!(
+            "**Background task stalled** `{}` · {} · no output or progress for {}s (running {:.0}s total)",
+            task.task_id, label, task.stall_wake_seconds, task.running_secs,
+        )
+    };
 
     if let Some(tail) = normalize_background_task_preview(&task.output_tail) {
         message.push_str(&format!("\n\nLast output:\n```text\n{}\n```", tail));
@@ -325,6 +351,10 @@ pub fn format_background_task_stalled_markdown(
         message.push_str("\n\n_No output captured yet._");
     }
 
+    if task.elapsed_review {
+        message.push_str(&format!("\n\nInspect recent progress with `bg action=\"status\" task_id=\"{}\"` and the output above. If the task is slower than expected, identify the slow step and look for avoidable waiting or repeated work. Leave healthy work running without restarting it.", task.task_id));
+        return message;
+    }
     message.push_str(&format!(
         "\n\nThe task is still running. Inspect it (`bg action=\"status\" task_id=\"{}\"`, `bg action=\"output\" task_id=\"{}\"`) and decide whether to keep waiting or cancel it (`bg action=\"cancel\" task_id=\"{}\"`). The watchdog re-arms if output resumes.",
         task.task_id, task.task_id, task.task_id
@@ -390,7 +420,7 @@ pub fn parse_background_task_progress_notification_markdown(
     static HEADER_RE: OnceLock<Option<Regex>> = OnceLock::new();
     static INLINE_RE: OnceLock<Option<Regex>> = OnceLock::new();
 
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalize_line_endings(content);
     let trimmed = normalized.trim();
 
     let header_re = HEADER_RE
@@ -483,7 +513,7 @@ pub fn parse_background_task_notification_markdown(
         .get_or_init(|| compile_static_regex(r#"^_Full output:_ `(?P<command>[^`]+)`$"#))
         .as_ref()?;
 
-    let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalize_line_endings(content);
     let mut sections = normalized.split("\n\n");
     let header = sections.next()?.trim();
     let captures = header_re.captures(header)?;

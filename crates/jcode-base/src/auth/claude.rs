@@ -465,6 +465,16 @@ pub fn update_account_tokens(label: &str, access: &str, refresh: &str, expires: 
 
 /// Update profile metadata for a specific account.
 pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> {
+    update_account_profile_metadata(label, email, None)
+}
+
+/// Merge discovered profile fields in one locked write, preserving credentials
+/// and last-known metadata when the profile endpoint omits a field.
+pub fn update_account_profile_metadata(
+    label: &str,
+    email: Option<String>,
+    subscription_type: Option<String>,
+) -> Result<()> {
     let _store_lock =
         crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
     let mut auth = load_auth_file()?;
@@ -473,7 +483,13 @@ pub fn update_account_profile(label: &str, email: Option<String>) -> Result<()> 
         .iter_mut()
         .find(|a| a.label == label)
     {
-        account.email = email;
+        if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+            account.email = Some(email);
+        }
+        if let Some(subscription_type) = subscription_type.filter(|value| !value.trim().is_empty())
+        {
+            account.subscription_type = Some(subscription_type);
+        }
         save_auth_file(&auth)?;
         Ok(())
     } else {
@@ -494,7 +510,17 @@ pub fn preferred_external_auth_source() -> Option<ExternalClaudeAuthSource> {
         ExternalClaudeAuthSource::OpenCode,
     ]
     .into_iter()
-    .find(|source| source.path().map(|path| path.exists()).unwrap_or(false))
+    .find(|source| match source {
+        ExternalClaudeAuthSource::ClaudeCode => {
+            source.path().map(|path| path.exists()).unwrap_or(false)
+        }
+        ExternalClaudeAuthSource::OpenCode => {
+            source.path().map(|path| path.exists()).unwrap_or(false)
+                && crate::auth::external::source_has_anthropic_oauth(
+                    crate::auth::external::ExternalAuthSource::OpenCode,
+                )
+        }
+    })
 }
 
 pub fn has_unconsented_external_auth() -> Option<ExternalClaudeAuthSource> {
@@ -619,11 +645,25 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("opencode", creds));
     }
 
+    if let Some(tokens) = crate::auth::external::load_anthropic_oauth_tokens() {
+        let creds = ClaudeCredentials {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at: tokens.expires_at,
+            scopes: Vec::new(),
+            subscription_type: Some("max".to_string()),
+        };
+        if creds.expires_at > now_ms {
+            return Ok(creds);
+        }
+        expired_candidates.push(("external", creds));
+    }
+
     if let Some((_source, creds)) = expired_candidates.into_iter().next() {
         return Ok(creds);
     }
 
-    anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
+    anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, external auth)")
 }
 
 /// Load credentials for a specific jcode account by label.
@@ -849,6 +889,12 @@ pub fn load_native_credentials() -> Result<ClaudeCredentials> {
 /// Whether the user has approved importing Claude Code's native credentials.
 pub fn native_source_allowed() -> bool {
     crate::config::Config::external_auth_source_allowed(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID)
+}
+
+/// Whether unapproved Claude Code native credentials (macOS Keychain or
+/// `CLAUDE_CODE_OAUTH_TOKEN`) are present and ready for import.
+pub fn has_unconsented_native_auth() -> bool {
+    native_credentials_present() && !native_source_allowed()
 }
 
 /// Human-facing name for the Claude Code native credential source, reflecting

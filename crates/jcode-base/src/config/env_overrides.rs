@@ -7,6 +7,14 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        if let Ok(endpoint) = std::env::var("JCODE_JARVIS_SPEECH_ENDPOINT") {
+            // Preserve an explicitly empty value so endpoint validation fails
+            // rather than silently changing the selected voice to eSpeak.
+            self.jarvis.speech.endpoint = Some(endpoint);
+        }
+        if let Ok(value) = std::env::var("JCODE_BROWSER_HANDOFF") {
+            self.tools.browser_handoff = value == "1" || value.eq_ignore_ascii_case("true");
+        }
         // Server/operator behavior
         if let Ok(v) = std::env::var("JCODE_WAKE_MODE")
             && let Some(parsed) = WakeMode::parse(&v)
@@ -292,6 +300,16 @@ impl Config {
                 self.display.resume_project_scope = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_RESUME_TIME") {
+            if let Some(parsed) = super::ResumeTimeMode::parse(&v) {
+                self.display.resume_time = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_RESUME_OPEN_ELSEWHERE") {
+            if let Some(parsed) = super::ResumeOpenElsewhere::parse(&v) {
+                self.display.resume_open_elsewhere = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PERFORMANCE") {
             let trimmed = v.trim().to_lowercase();
             if matches!(trimmed.as_str(), "auto" | "full" | "reduced" | "minimal") {
@@ -418,11 +436,6 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
                 self.agents.swarm_spawn_mode = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_SWARM_STRIP_LAYOUT") {
-            if let Some(parsed) = SwarmStripLayout::parse(&v) {
-                self.agents.swarm_strip_layout = parsed;
             }
         }
         if let Ok(v) = std::env::var("JCODE_SWARM_MAX_CONCURRENT_AGENTS") {

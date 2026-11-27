@@ -173,9 +173,10 @@ type TestPollFn = Box<dyn Fn(&str, u64) -> Result<auth::muse::PollOutcome> + Sen
 static TEST_POLL_OVERRIDE: std::sync::Mutex<Option<TestPollFn>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
-static TEST_SLEEP_OVERRIDE: std::sync::Mutex<
-    Option<Box<dyn Fn(std::time::Duration) + Send + Sync>>,
-> = std::sync::Mutex::new(None);
+type TestSleepFn = Box<dyn Fn(std::time::Duration) + Send + Sync>;
+
+#[cfg(test)]
+static TEST_SLEEP_OVERRIDE: std::sync::Mutex<Option<TestSleepFn>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 pub(super) struct TestPollGuard;

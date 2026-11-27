@@ -3,15 +3,14 @@ use super::{
     FileTouchService, ServerIdentity, SharedContext, SwarmMember, SwarmState, VersionedPlan,
     git_common_dir_for, swarm_id_for_dir,
 };
-use crate::agent::Agent;
 use crate::plan::{next_runnable_item_ids, summarize_plan_graph};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 #[expect(
@@ -805,7 +804,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
             .ok()
             .filter(|s| !s.trim().is_empty());
         let git_common = git_common_dir_for(&path);
-        let swarm_id = swarm_id_for_dir(Some(path.clone()));
+        let swarm_id = swarm_id_for_dir(Some(path));
         let is_git_repo = git_common.is_some();
         return Ok(Some(
             serde_json::json!({
@@ -815,7 +814,7 @@ pub(super) async fn maybe_handle_swarm_read_command(
                           else if is_git_repo { "git_common_dir" }
                           else { "none" },
                 "env_override": env_override,
-                "git_common_dir": git_common.clone(),
+                "git_common_dir": git_common,
                 "git_root": git_common,
                 "is_git_repo": is_git_repo,
             })

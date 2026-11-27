@@ -1,5 +1,14 @@
 mod response_stats;
 
+#[cfg(test)]
+mod final_text_original;
+#[cfg(test)]
+mod image_context_original;
+#[cfg(test)]
+mod image_context_tests;
+#[cfg(test)]
+mod prompt_count_tests;
+
 use super::{Session, StoredDisplayRole};
 use crate::message::{ContentBlock, Role, ToolCall};
 use jcode_config_types::ReasoningDisplayMode;
@@ -117,10 +126,28 @@ const COMPACTED_HISTORY_MIN_RENDERABLE_TO_TRUNCATE: usize = 80;
 const COMPACTED_HISTORY_MIN_TURNS_TO_TRUNCATE: usize = 5;
 
 fn stored_message_is_user_turn(msg: &super::StoredMessage) -> bool {
-    matches!(msg.role, Role::User)
-        && msg.display_role.is_none()
-        && !is_auto_poke_user_message(msg)
-        && stored_message_renders_visible_message(msg)
+    if !matches!(msg.role, Role::User)
+        || msg.has_context_display_role()
+        || is_auto_poke_user_message(msg)
+        || super::is_scheduled_task_message(msg)
+        || is_internal_system_reminder(msg)
+    {
+        return false;
+    }
+    // Tool results use the provider's user role, but render as tool cards,
+    // not prompts. Join the visible text just as the renderer does, then use
+    // the same legacy-wake classification as DisplayMessage::effective_role.
+    let text: String = msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } if !is_attached_image_label_text(text) => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    !text.is_empty() && !crate::message::is_background_task_notification_content(&text)
 }
 
 fn compacted_history_render_window(
@@ -232,7 +259,7 @@ fn image_anchor_for_message(
             id: tool.id.clone(),
         });
     }
-    if rendered_role == "user" {
+    if matches!(rendered_role, "user" | "jarvis_user") {
         return Some(RenderedImageAnchor::UserPrompt {
             ordinal: user_prompt_ordinal,
         });
@@ -380,7 +407,7 @@ pub fn render_messages_and_images_with_compacted_history(
             .as_ref()
             .map(|info| info.total_messages)
             .unwrap_or(0);
-        let content = if remaining_compacted == 0 {
+        let mut content = if remaining_compacted == 0 {
             format!(
                 "Earlier conversation compacted - showing all {} compacted historical messages. Redraw may be slower while this view is open.",
                 total_compacted
@@ -396,8 +423,18 @@ pub fn render_messages_and_images_with_compacted_history(
                 remaining_compacted, visible_compacted, total_compacted
             )
         };
+        // History can hydrate a remote client with only a metadata stub. Carry
+        // the authoritative prompt offset alongside the existing lazy-window
+        // marker rather than asking that client to count its stale local copy.
+        if let Some(info) = &compacted_info {
+            content.push_str(&format!(
+                " Hidden user prompts: {}.",
+                info.hidden_user_prompts
+            ));
+        }
         rendered.push(RenderedMessage {
             response_stats: None,
+            tool_duration_ms: None,
             role: "system".to_string(),
             content,
             tool_calls: Vec::new(),
@@ -406,14 +443,58 @@ pub fn render_messages_and_images_with_compacted_history(
         });
     }
 
+    // Error replay records are display-only: never turn provider diagnostics
+    // into assistant/user context. Merge them at their original turn boundary
+    // so a reconnect shows the failure beneath its wake, not at the latest turn.
+    let mut errors: Vec<_> = session
+        .replay_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            super::StoredReplayEventKind::DisplayMessage { role, content, .. }
+                if role == "error" =>
+            {
+                Some((event.timestamp, content))
+            }
+            _ => None,
+        })
+        .filter(|(timestamp, _)| {
+            render_start_idx == 0
+                || session
+                    .messages
+                    .get(render_start_idx)
+                    .and_then(|msg| msg.timestamp)
+                    .is_none_or(|start| *timestamp >= start)
+        })
+        .collect();
+    errors.sort_by_key(|(timestamp, _)| *timestamp);
+    let mut errors = errors.into_iter().peekable();
+    let render_error = |content: &String| RenderedMessage {
+        response_stats: None,
+        tool_duration_ms: None,
+        role: "error".to_string(),
+        content: content.clone(),
+        tool_calls: Vec::new(),
+        tool_data: None,
+        stored_index: None,
+    };
     for (stored_index, msg) in session.messages.iter().enumerate().skip(render_start_idx) {
+        while errors
+            .peek()
+            .is_some_and(|(timestamp, _)| msg.timestamp.is_some_and(|next| *timestamp < next))
+        {
+            if let Some((_, content)) = errors.next() {
+                rendered.push(render_error(content));
+            }
+        }
         if is_internal_system_reminder(msg) {
             continue;
         }
 
         let role = match msg.display_role {
+            Some(StoredDisplayRole::JarvisUser) => "jarvis_user",
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
+            Some(StoredDisplayRole::FileActivity) => "file_activity",
             None if is_auto_poke_user_message(msg) => "system",
             None if super::is_scheduled_task_message(msg) => "system",
             None => match msg.role {
@@ -427,6 +508,7 @@ pub fn render_messages_and_images_with_compacted_history(
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
                 response_stats: None,
+                tool_duration_ms: None,
                 role: "system".to_string(),
                 content: summary.to_string(),
                 tool_calls: Vec::new(),
@@ -444,7 +526,9 @@ pub fn render_messages_and_images_with_compacted_history(
         // *after* the answer on resume/re-render.
         let mut reasoning = String::new();
         let mut tool_calls: Vec<String> = Vec::new();
-        let mut current_tool: Option<ToolCall> = None;
+        // Keep the owning row, not a second copy of its potentially large input.
+        // Native result rows intentionally do not replace this association.
+        let mut current_tool: Option<usize> = None;
         let mut last_image_idx: Option<usize> = None;
         // Images from blocks with no owning tool result (e.g. a pasted user
         // screenshot). Their user-prompt ordinal is only known once we know the
@@ -495,13 +579,16 @@ pub fn render_messages_and_images_with_compacted_history(
                 } => {
                     let combined = format!("{}{}", reasoning, text);
                     if !combined.is_empty() {
-                        if role == "user" && !is_attached_image_label_text(&text) {
+                        if matches!(role, "user" | "jarvis_user")
+                            && !is_attached_image_label_text(&text)
+                        {
                             user_prompt_count += 1;
                         }
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
                             response_stats: None,
+                            tool_duration_ms: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: tool_calls.clone(),
@@ -519,10 +606,11 @@ pub fn render_messages_and_images_with_compacted_history(
                             thought_signature: None,
                         })
                     });
-                    current_tool = tool_data.clone();
+                    current_tool = Some(rendered.len());
 
                     rendered.push(RenderedMessage {
                         response_stats: None,
+                        tool_duration_ms: msg.tool_duration_ms,
                         role: "tool".to_string(),
                         content: content.clone(),
                         tool_calls: Vec::new(),
@@ -535,20 +623,17 @@ pub fn render_messages_and_images_with_compacted_history(
                 }
                 ContentBlock::AnthropicThinking { .. } | ContentBlock::OpenAIReasoning { .. } => {}
                 ContentBlock::Image { media_type, data } => {
-                    let anchor =
-                        image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
-                    let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
+                    let current_tool =
+                        current_tool.and_then(|index| rendered[index].tool_data.as_ref());
+                    let anchor = image_anchor_for_message(role, current_tool, user_prompt_count);
+                    let is_pending_prompt_anchor =
+                        current_tool.is_none() && matches!(role, "user" | "jarvis_user");
                     images.push(RenderedImage {
-                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
+                        history_message_index: current_tool.map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
-                        label: current_tool
-                            .as_ref()
-                            .and_then(fallback_image_label_for_tool),
-                        source: image_source_for_message(
-                            message_role.clone(),
-                            current_tool.as_ref(),
-                        ),
+                        label: current_tool.and_then(fallback_image_label_for_tool),
+                        source: image_source_for_message(message_role.clone(), current_tool),
                         anchor,
                     });
                     last_image_idx = Some(images.len().saturating_sub(1));
@@ -583,6 +668,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         reasoning.clear();
                         rendered.push(RenderedMessage {
                             response_stats: None,
+                            tool_duration_ms: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: std::mem::take(&mut tool_calls),
@@ -602,6 +688,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     });
                     rendered.push(RenderedMessage {
                         response_stats: None,
+                        tool_duration_ms: None,
                         role: "tool".to_string(),
                         content: output,
                         tool_calls: Vec::new(),
@@ -613,13 +700,22 @@ pub fn render_messages_and_images_with_compacted_history(
             }
         }
 
-        let combined = format!("{}{}", reasoning, text);
-        if !combined.is_empty() {
-            if role == "user" && !is_attached_image_label_text(&text) {
+        if !reasoning.is_empty() || !text.is_empty() {
+            if matches!(role, "user" | "jarvis_user") && !is_attached_image_label_text(&text) {
                 user_prompt_count += 1;
             }
+            // At EOF the buffers are no longer reused. Move the sole nonempty
+            // buffer rather than copying it into a new allocation.
+            let combined = if reasoning.is_empty() {
+                text
+            } else if text.is_empty() {
+                reasoning
+            } else {
+                format!("{}{}", reasoning, text)
+            };
             rendered.push(RenderedMessage {
                 response_stats: None,
+                tool_duration_ms: None,
                 role: role.to_string(),
                 content: combined,
                 tool_calls,
@@ -638,6 +734,7 @@ pub fn render_messages_and_images_with_compacted_history(
         }
     }
 
+    rendered.extend(errors.map(|(_, content)| render_error(content)));
     response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info)
 }

@@ -1,4 +1,7 @@
+pub mod content_capacity;
 pub mod provider_native;
+mod shared_content;
+pub use shared_content::SharedContent;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
@@ -15,6 +18,8 @@ pub struct ToolCall {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
 }
+
+mod tool_prompt_size;
 
 /// Tool definition advertised to model providers.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,13 +68,7 @@ impl ToolDefinition {
 
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
-        serde_json::json!({
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        })
-        .to_string()
-        .len()
+        tool_prompt_size::prompt_chars(self)
     }
 
     /// Approximate prompt-token cost of this tool's top-level description.
@@ -82,14 +81,7 @@ impl ToolDefinition {
 
     /// Approximate prompt-token cost of the full tool definition payload.
     pub fn prompt_token_estimate(&self) -> usize {
-        estimate_tokens(
-            &serde_json::json!({
-                "name": self.name,
-                "description": self.description,
-                "input_schema": self.input_schema,
-            })
-            .to_string(),
-        )
+        self.prompt_chars() / 4
     }
 
     pub fn aggregate_prompt_chars(defs: &[ToolDefinition]) -> usize {
@@ -118,7 +110,7 @@ pub enum Role {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +231,8 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -256,7 +249,7 @@ impl Message {
         });
         Self {
             role: Role::User,
-            content,
+            content: content.into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -268,7 +261,8 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         }
@@ -290,7 +284,8 @@ impl Message {
                 tool_use_id: tool_use_id.to_string(),
                 content: content.to_string(),
                 is_error: if is_error { Some(true) } else { None },
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms,
         }
@@ -403,14 +398,76 @@ fn stable_hash_bytes(bytes: &[u8]) -> u64 {
 }
 
 pub fn extend_stable_hash(acc: u64, next: u64) -> u64 {
-    stable_hash_bytes(&[acc.to_le_bytes().as_slice(), next.to_le_bytes().as_slice()].concat())
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&acc.to_le_bytes());
+    bytes[8..].copy_from_slice(&next.to_le_bytes());
+    stable_hash_bytes(&bytes)
 }
 
-pub fn stable_message_hash(message: &Message) -> u64 {
-    match serde_json::to_vec(message) {
-        Ok(bytes) => stable_hash_bytes(&bytes),
-        Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+impl Message {
+    fn metadata_only(&self) -> impl serde::Serialize + '_ {
+        message_metadata::Metadata::new(self)
     }
+
+    /// Exact JSON length without rescanning a shared immutable payload.
+    pub fn serialized_json_bytes(&self) -> usize {
+        message_metadata::json_bytes(&self.metadata_only())
+            .map(|metadata| metadata.saturating_sub(2) + self.content.serialized_json_bytes())
+            .unwrap_or(0)
+    }
+}
+
+mod message_metadata;
+
+/// Streaming FNV-1a sink. JSON is consumed in serializer order without retaining
+/// an allocation proportional to the message payload.
+struct MessageHashWriter {
+    hash: u64,
+    len: usize,
+}
+
+impl std::io::Write for MessageHashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut hash = self.hash;
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(STABLE_HASH_PRIME);
+        }
+        self.hash = hash;
+        self.len += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod message_hash_tests;
+
+pub fn stable_message_hash(message: &Message) -> u64 {
+    let metadata = match serde_json::to_vec(&message.metadata_only()) {
+        Ok(metadata) => metadata,
+        Err(_) => return stable_hash_bytes(format!("{:?}", message).as_bytes()),
+    };
+    message.content.cached_message_hash(&metadata, || {
+        let mut writer = MessageHashWriter {
+            hash: STABLE_HASH_SEED,
+            len: 0,
+        };
+        match serde_json::to_writer(&mut writer, message) {
+            Ok(()) => {
+                // Metadata contains the same envelope with an empty [] array.
+                // Populate the length cache from work already needed for the
+                // first hash, rather than scanning the content a second time.
+                message
+                    .content
+                    .record_serialized_json_bytes(writer.len.saturating_sub(metadata.len()) + 2);
+                writer.hash
+            }
+            Err(_) => stable_hash_bytes(format!("{:?}", message).as_bytes()),
+        }
+    })
 }
 
 /// Project a message down to the fields that actually influence a provider's
@@ -559,8 +616,8 @@ fn dynamic_system_context_message(system_dynamic: &str) -> Option<Message> {
     )))
 }
 
-/// Insert dynamic system context after the latest fresh user prompt without
-/// disturbing the stable cached history prefix.
+/// Insert dynamic system context after the latest user turn or compaction boundary
+/// without disturbing the stable cached history prefix or moving on tool rounds.
 pub fn messages_with_dynamic_system_context(
     messages: &[Message],
     system_dynamic: &str,
@@ -572,9 +629,15 @@ pub fn messages_with_dynamic_system_context(
     let mut out = messages.to_vec();
     let insert_at = out
         .iter()
-        .rposition(is_fresh_user_text_message)
+        .rposition(|message| {
+            is_fresh_user_text_message(message)
+                || message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::OpenAICompaction { .. }))
+        })
         .map(|idx| idx + 1)
-        .unwrap_or(out.len());
+        .unwrap_or(0);
     out.insert(insert_at, dynamic_message);
     out
 }
@@ -839,6 +902,9 @@ pub enum StreamEvent {
         /// Provider-native compaction artifact, if one was emitted.
         openai_encrypted_content: Option<String>,
     },
+    /// Actual model identifier reported by the upstream response. This is
+    /// attribution metadata, not a request to change the selected model.
+    ResolvedModel { model: String },
     /// Upstream provider info (e.g., which provider OpenRouter routed to)
     UpstreamProvider { provider: String },
     /// Native tool call from a provider bridge that needs execution by jcode
@@ -949,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_appends_when_no_fresh_user_prompt_exists() {
+    fn dynamic_context_prepends_when_no_turn_boundary_exists() {
         let messages = vec![
             Message::assistant_text("assistant"),
             Message::user("<system-reminder>\ninternal\n</system-reminder>"),
@@ -958,13 +1024,50 @@ mod tests {
         let out = messages_with_dynamic_system_context(&messages, "Time: 10:00:00 UTC");
 
         assert_eq!(out.len(), 3);
-        assert_role_text(&out[0], Role::Assistant, "assistant");
+        assert!(text_of(&out[0]).contains("Time: 10:00:00 UTC"));
+        assert_role_text(&out[1], Role::Assistant, "assistant");
         assert_role_text(
-            &out[1],
+            &out[2],
             Role::User,
             "<system-reminder>\ninternal\n</system-reminder>",
         );
-        assert!(text_of(&out[2]).contains("Time: 10:00:00 UTC"));
+    }
+
+    #[test]
+    fn dynamic_context_stays_anchored_across_tool_rounds() {
+        for boundary in [
+            Message::user("prompt"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::OpenAICompaction {
+                    encrypted_content: "compact".into(),
+                }]
+                .into(),
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ] {
+            let mut messages = vec![Message::user("older prompt"), boundary];
+            let before = messages_with_dynamic_system_context(&messages, "wake");
+            messages.push(Message::assistant_text("tool round"));
+            let mut result = Message::tool_result("call", "output", false);
+            result.content.push(ContentBlock::Text {
+                text: "tool-associated text is not a prompt".into(),
+                cache_control: None,
+            });
+            messages.push(result);
+            messages.push(Message::user("<system-reminder>internal</system-reminder>"));
+            let after = messages_with_dynamic_system_context(&messages, "wake");
+            assert_eq!(
+                cache_relevant_messages(&before),
+                cache_relevant_messages(&after[..before.len()])
+            );
+            assert!(text_of(&after[2]).contains("wake"));
+
+            messages.push(Message::user("fresh prompt"));
+            let fresh = messages_with_dynamic_system_context(&messages, "new turn");
+            assert!(text_of(fresh.last().unwrap()).contains("new turn"));
+        }
     }
 
     #[test]
@@ -979,7 +1082,8 @@ mod tests {
             content: vec![ContentBlock::Text {
                 text: "<system-reminder>\n# Memory\n</system-reminder>".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         };
@@ -993,7 +1097,8 @@ mod tests {
                 ContentBlock::ReasoningTrace {
                     text: "history-only scratch".to_string(),
                 },
-            ],
+            ]
+            .into(),
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(7)),
             tool_duration_ms: Some(42),
         };

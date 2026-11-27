@@ -78,7 +78,7 @@ fn all_onboarding_phases() -> Vec<(&'static str, OnboardingPhase)> {
     vec![
         ("Login{import}", OnboardingPhase::Login { import: Some(review) }),
         ("Login{recovery}", OnboardingPhase::Login { import: None }),
-        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
+        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi }),
         ("ModelSelect", OnboardingPhase::ModelSelect),
         (
             "ContinuePrompt",
@@ -357,7 +357,7 @@ fn tier3_screens() -> Vec<ScreenMetrics> {
         ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
             .unwrap();
     vec![
-        render_phase_screen("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
+        render_phase_screen("LoginOpenAi", OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi }),
         render_phase_screen("Login{import}", OnboardingPhase::Login { import: Some(review) }),
         render_phase_screen("Login{recovery}", OnboardingPhase::Login { import: None }),
         render_phase_screen(
@@ -505,11 +505,16 @@ fn tier4_metrics() -> Tier4Metrics {
         )
     };
 
-    // ---- narrow_terminal_safety: the core Yes/No affordance must still render
+    // ---- narrow_terminal_safety: all 4 login choices must still render
     // on a cramped 50-col terminal (real renderer, smaller buffer). ----
-    let narrow = app_in_phase(OnboardingPhase::LoginOpenAi { yes_highlighted: true });
+    let narrow = app_in_phase(OnboardingPhase::LoginOpenAi {
+        choice: crate::tui::OnboardingLoginChoice::OpenAi,
+    });
     let narrow_text = render_onboarding_text(&narrow, 50, 30);
-    let narrow_options_survive = narrow_text.contains("Yes") && narrow_text.contains("No");
+    let narrow_options_survive = narrow_text.contains("OpenAI")
+        && narrow_text.contains("Claude")
+        && narrow_text.contains("API key")
+        && narrow_text.contains("Skip");
 
     Tier4Metrics {
         terminology_consistent,
@@ -1357,7 +1362,7 @@ fn tier8_metrics() -> Tier8Metrics {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi };
         }
         let consumed = app.handle_onboarding_continue_prompt_key(KeyCode::Char('n'));
         // Onboarding reaches a terminal, and the recovery affordance (/login) is
@@ -1770,16 +1775,19 @@ fn is_unicode_dependence_char(c: char) -> bool {
     !GRACEFUL.contains(&c)
 }
 
-/// Render the LoginOpenAi Yes/No screen in both highlight states and confirm the
-/// selected cell differs from the unselected cell by a NON-color video attribute
-/// (reverse/bold/underline), not just by foreground/background color.
+/// Render the LoginOpenAi 4-choice screen in different highlight states and
+/// confirm the selected cell differs from unselected cells by a NON-color video
+/// attribute (reverse/bold/underline), not just by foreground/background color.
 fn selection_uses_noncolor_attribute() -> bool {
+    use crate::tui::OnboardingLoginChoice;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
 
-    fn render_modifiers_on_yesno_row(yes_highlighted: bool) -> Option<(Modifier, Modifier)> {
-        let app = app_in_phase(OnboardingPhase::LoginOpenAi { yes_highlighted });
+    fn render_modifiers_on_choice_row(
+        choice: OnboardingLoginChoice,
+    ) -> Option<(Modifier, Modifier)> {
+        let app = app_in_phase(OnboardingPhase::LoginOpenAi { choice });
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1790,15 +1798,10 @@ fn selection_uses_noncolor_attribute() -> bool {
             .ok()?;
         let buf = terminal.backend().buffer().clone();
         for y in 0..30u16 {
-            // Build a per-cell symbol list so we can locate the "Yes"/"No"
-            // labels by COLUMN, not by byte offset (the lozenge pill caps ◖/◗
-            // are multi-byte, so a string byte index would not map to a cell x).
             let cells: Vec<String> = (0..80u16).map(|x| buf[(x, y)].symbol().to_string()).collect();
             let line: String = cells.concat();
             let lt = line.to_ascii_lowercase();
-            if lt.contains("yes") && lt.contains("no") {
-                // Find the column where "Y","e","s" appear in consecutive cells,
-                // and likewise the first "N","o".
+            if lt.contains("openai") && lt.contains("claude") && lt.contains("skip") {
                 let find_seq = |needle: &[&str]| -> Option<usize> {
                     (0..cells.len()).find(|&i| {
                         needle
@@ -1807,30 +1810,28 @@ fn selection_uses_noncolor_attribute() -> bool {
                             .all(|(k, ch)| cells.get(i + k).map(|c| c == ch).unwrap_or(false))
                     })
                 };
-                let mut yes_mod = Modifier::empty();
-                let mut no_mod = Modifier::empty();
-                if let Some(i) = find_seq(&["Y", "e", "s"]) {
-                    yes_mod = buf[(i as u16, y)].modifier;
+                let mut openai_mod = Modifier::empty();
+                let mut skip_mod = Modifier::empty();
+                if let Some(i) = find_seq(&["O", "p", "e", "n", "A", "I"]) {
+                    openai_mod = buf[(i as u16, y)].modifier;
                 }
-                if let Some(i) = find_seq(&["N", "o"]) {
-                    no_mod = buf[(i as u16, y)].modifier;
+                if let Some(i) = find_seq(&["S", "k", "i", "p"]) {
+                    skip_mod = buf[(i as u16, y)].modifier;
                 }
-                return Some((yes_mod, no_mod));
+                return Some((openai_mod, skip_mod));
             }
         }
         None
     }
 
     let noncolor = Modifier::REVERSED | Modifier::BOLD | Modifier::UNDERLINED;
-    // When Yes is highlighted, Yes must carry a non-color attribute that No
-    // doesn't, and vice versa.
-    let yes_hl = render_modifiers_on_yesno_row(true);
-    let no_hl = render_modifiers_on_yesno_row(false);
-    match (yes_hl, no_hl) {
-        (Some((yes_y, no_y)), Some((yes_n, no_n))) => {
-            let yes_distinct = (yes_y & noncolor) != (no_y & noncolor);
-            let no_distinct = (no_n & noncolor) != (yes_n & noncolor);
-            yes_distinct && no_distinct
+    let openai_hl = render_modifiers_on_choice_row(OnboardingLoginChoice::OpenAi);
+    let skip_hl = render_modifiers_on_choice_row(OnboardingLoginChoice::Skip);
+    match (openai_hl, skip_hl) {
+        (Some((o1, s1)), Some((o2, s2))) => {
+            let openai_distinct = (o1 & noncolor) != (s1 & noncolor);
+            let skip_distinct = (s2 & noncolor) != (o2 & noncolor);
+            openai_distinct && skip_distinct
         }
         _ => false,
     }
@@ -1839,7 +1840,9 @@ fn selection_uses_noncolor_attribute() -> bool {
 /// Confirm the explanatory prose precedes the action row on the LoginOpenAi
 /// screen (logical top-to-bottom order for a linear/screen reader).
 fn action_row_follows_prose() -> bool {
-    let app = app_in_phase(OnboardingPhase::LoginOpenAi { yes_highlighted: true });
+    let app = app_in_phase(OnboardingPhase::LoginOpenAi {
+        choice: crate::tui::OnboardingLoginChoice::OpenAi,
+    });
     let text = render_onboarding_text(&app, 80, 30);
     let lines: Vec<&str> = text.lines().collect();
     let prose_idx = lines.iter().position(|l| {
@@ -1848,12 +1851,10 @@ fn action_row_follows_prose() -> bool {
     });
     let action_idx = lines.iter().position(|l| {
         let lc = l.to_ascii_lowercase();
-        lc.contains("yes") && lc.contains("no")
+        lc.contains("openai") && lc.contains("claude") && lc.contains("skip")
     });
     match (prose_idx, action_idx) {
         (Some(p), Some(a)) => p < a,
-        // No action row on this screen would be a different (passive) layout;
-        // treat a missing pair conservatively as a failure to assert order.
         _ => false,
     }
 }
@@ -2202,7 +2203,7 @@ fn onboarding_eval_fidelity_real_transitions() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi };
         }
         assert!(app.handle_onboarding_continue_prompt_key(crossterm::event::KeyCode::Char('n')));
         assert!(
@@ -2257,7 +2258,7 @@ fn onboarding_eval_graph_fidelity() {
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
         if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::LoginOpenAi { yes_highlighted: true };
+            flow.phase = OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi };
         }
         assert!(app.handle_onboarding_continue_prompt_key(crossterm::event::KeyCode::Char('n')));
         assert!(app.onboarding_phase().is_none(), "decline reaches terminal Done");
@@ -2948,7 +2949,7 @@ fn all_welcome_screen_texts() -> Vec<(&'static str, String)> {
         ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
             .unwrap();
     let phases: Vec<(&'static str, OnboardingPhase)> = vec![
-        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { yes_highlighted: true }),
+        ("LoginOpenAi", OnboardingPhase::LoginOpenAi { choice: crate::tui::OnboardingLoginChoice::OpenAi }),
         ("Login{import}", OnboardingPhase::Login { import: Some(review) }),
         ("Login{recovery}", OnboardingPhase::Login { import: None }),
         (

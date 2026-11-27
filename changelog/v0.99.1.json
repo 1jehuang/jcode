@@ -1,0 +1,23 @@
+{
+  "version": "0.99.1",
+  "date": "2026-10-22",
+  "title": "OpenAI request fix and stability",
+  "highlights": [
+    "Fix OpenAI models failing every turn with invalid_request_error due to a rejected tool schema",
+    "Recover the TUI from a vanished or unresponsive server instead of retrying forever",
+    "Native Muse subscription login and Venice AI provider support"
+  ],
+  "improvements": [
+    "Add configurable Kagi web search backend",
+    "Add persistent /latex rendering controls",
+    "Show live stopwatch, context, and token stats per swarm worker"
+  ],
+  "fixes": [
+    "Honor the configured model for fresh sessions",
+    "Report token counts for OpenAI native compaction",
+    "Reject stale patch hunks before any file changes",
+    "Keep swarm workers alive across reloads",
+    "Fix OAuth credential handoff and stale daemon token recovery",
+    "Fix Kitty images in Zellij"
+  ]
+}

@@ -1,6 +1,11 @@
 #[path = "ui_input/command_suggestions.rs"]
 mod command_suggestions;
 use command_suggestions::*;
+#[path = "ui_input_status_rendering.rs"]
+mod status_rendering;
+pub(super) use status_rendering::build_notification_spans;
+pub(super) use status_rendering::draw_input;
+pub(super) use status_rendering::draw_status;
 
 use super::inline_interactive_ui::format_elapsed;
 use super::selection_highlight::highlight_line_selection;
@@ -288,7 +293,7 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
-    if app.login_input_hint().is_some() {
+    if app.login_input_hint().is_some() || app.voice_composer_preview().is_some() {
         return 1;
     }
     // Command suggestions render as an overlay (see
@@ -333,7 +338,9 @@ pub(crate) fn input_prompt_len(app: &dyn TuiState, next_prompt: usize) -> usize 
 }
 
 pub(crate) fn next_input_prompt_number(app: &dyn TuiState) -> usize {
-    app.display_user_message_count() + 1
+    app.compacted_hidden_user_prompts()
+        .saturating_add(app.display_user_message_count())
+        .saturating_add(1)
 }
 
 pub(super) fn wrapped_input_line_count(
@@ -350,7 +357,8 @@ pub(super) fn wrapped_input_line_count(
 
     let num_str = next_prompt.to_string();
     let (prompt_char, caret_color) = input_prompt(app);
-    let (lines, _, _) = wrap_input_text(
+    let preview = app.voice_composer_preview();
+    let (lines, _, _) = wrap_input_text_with_ghost(
         app.input(),
         app.cursor_pos(),
         line_width,
@@ -358,6 +366,8 @@ pub(super) fn wrapped_input_line_count(
         prompt_char,
         caret_color,
         prompt_len,
+        &|number| app.input_image_attached(number),
+        voice_ghost(preview.as_ref()),
     );
     lines.len().max(1)
 }
@@ -373,7 +383,10 @@ pub(super) fn pending_prompt_count(app: &dyn TuiState) -> usize {
             .interleave_message()
             .map(|msg| !msg.is_empty())
             .unwrap_or(false);
-    app.queued_messages().len()
+    app.queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+        .count()
         + app.queued_commands().len()
         + pending_count
         + if interleave { 1 } else { 0 }
@@ -408,7 +421,11 @@ pub(super) fn pending_queue_preview(app: &dyn TuiState) -> Vec<String> {
             normalized.chars().take(100).collect::<String>()
         ));
     }
-    for msg in app.queued_messages() {
+    for msg in app
+        .queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+    {
         let normalized = normalize_repaint_sensitive_notice_text(msg);
         previews.push(format!(
             "⏳ {}",
@@ -435,7 +452,11 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &dyn TuiState, area: Rect, sta
     for msg in app.queued_commands() {
         items.push((QueuedMsgType::Queued, msg.as_str()));
     }
-    for msg in app.queued_messages() {
+    for msg in app
+        .queued_messages()
+        .iter()
+        .filter(|msg| !crate::todo::is_auto_poke_message(msg))
+    {
         items.push((QueuedMsgType::Queued, msg.as_str()));
     }
 
@@ -609,23 +630,6 @@ fn collect_transport_context_labels(
     labels
 }
 
-fn transport_context_labels(app: &dyn TuiState) -> Vec<String> {
-    collect_transport_context_labels(
-        app.status_detail()
-            .and_then(|detail| normalize_status_detail(&detail)),
-        app.connection_type()
-            .map(|conn| display_connection_type(&conn))
-            .filter(|conn| !conn.is_empty()),
-        app.upstream_provider(),
-    )
-}
-
-fn append_transport_context(status_text: &mut String, app: &dyn TuiState) {
-    for label in transport_context_labels(app) {
-        status_text.push_str(&format!(" · {}", label));
-    }
-}
-
 fn streaming_liveness_label(
     time_str: String,
     stale_secs: Option<f32>,
@@ -686,319 +690,204 @@ fn append_batch_progress_spans(
     }
 }
 
-pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pending_count: usize) {
-    if app.status_notice().as_deref() == Some(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT) {
-        crate::tui::app::oauth_telemetry::note_status_render(area);
-        frame.render_widget(
-            Paragraph::new(crate::telemetry::OAUTH_ACCOUNT_NOTICE_TEXT)
-                .style(Style::default().fg(accent_color())),
-            area,
-        );
-        return;
-    }
-    let elapsed = app.elapsed().map(|d| d.as_secs_f32()).unwrap_or(0.0);
-    let stale_secs = app.time_since_activity().map(|d| d.as_secs_f32());
-    let (cache_read, cache_creation) = app.streaming_cache_tokens();
-    let user_turn_count = app.display_user_message_count();
-    let (streaming_input_tokens, _) = app.streaming_tokens();
-    let provider_name = app.provider_name();
-    let upstream_provider = app.upstream_provider();
-    let cache_ttl = app.cache_ttl_status();
-    let kv_cache_problem = detect_kv_cache_problem(
-        &provider_name,
-        upstream_provider.as_deref(),
-        user_turn_count,
-        streaming_input_tokens,
-        cache_read,
-        cache_creation,
-        cache_ttl.as_ref(),
+/// Shared by the open session status line and its lightweight todo-lane observer.
+/// No provider or worker state is inferred here: absent telemetry stays absent.
+pub(super) fn live_processing_status_line(
+    status: &crate::protocol::SwarmLiveStatus,
+    stale_secs: Option<f32>,
+    spinner: &'static str,
+) -> Line<'static> {
+    let single_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let elapsed = format_elapsed(status.elapsed_ms as f32 / 1000.0);
+    let normalized_detail = status
+        .status_detail
+        .as_deref()
+        .and_then(normalize_status_detail)
+        .filter(|detail| {
+            !(status.phase == "streaming"
+                && matches!(detail.as_str(), "opening websocket" | "verifying websocket"))
+        });
+    let transport = collect_transport_context_labels(
+        normalized_detail,
+        status
+            .connection_type
+            .as_deref()
+            .map(display_connection_type),
+        None,
     );
-
-    let queued_suffix = if pending_count > 0 {
-        format!(" · +{} queued", pending_count)
-    } else {
-        String::new()
+    let tokens = match (status.input_tokens, status.output_tokens) {
+        (None, None) => None,
+        (input, output) => Some(format!(
+            "↑{} ↓{}",
+            input
+                .map(format_stream_tokens)
+                .unwrap_or_else(|| "?".into()),
+            output
+                .map(format_stream_tokens)
+                .unwrap_or_else(|| "?".into())
+        )),
     };
-
-    let line = if let Some(build_progress) = crate::build::read_build_progress() {
-        let spinner = super::activity_indicator(elapsed, 12.5);
-        Line::from(vec![
-            Span::styled(spinner, Style::default().fg(rgb(255, 193, 7))),
-            Span::styled(
-                format!(" {}", build_progress),
-                Style::default().fg(rgb(255, 193, 7)),
-            ),
-        ])
-    } else if let Some(remaining) = app.rate_limit_remaining() {
-        let secs = remaining.as_secs();
-        let spinner = super::activity_indicator(elapsed, 4.0);
-        let time_str = if secs >= 3600 {
-            let hours = secs / 3600;
-            let mins = (secs % 3600) / 60;
-            format!("{}h {}m", hours, mins)
-        } else if secs >= 60 {
-            let mins = secs / 60;
-            let s = secs % 60;
-            format!("{}m {}s", mins, s)
-        } else {
-            format!("{}s", secs)
-        };
-        Line::from(vec![
-            Span::styled(spinner, Style::default().fg(rgb(255, 193, 7))),
-            Span::styled(
-                format!(
-                    " Rate limited. Auto-retry in {}...{}",
-                    time_str, queued_suffix
-                ),
-                Style::default().fg(rgb(255, 193, 7)),
-            ),
-        ])
-    } else if app.is_processing() {
-        let spinner = super::activity_indicator(elapsed, 12.5);
-
-        match app.status() {
-            ProcessingStatus::Idle => Line::from(""),
-            ProcessingStatus::Sending => {
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(
-                        format!(" sending… {}", format_elapsed(elapsed)),
-                        Style::default().fg(dim_color()),
-                    ),
-                ];
-                push_queued_suffix(&mut spans, &queued_suffix);
-                Line::from(spans)
-            }
-            ProcessingStatus::Connecting(ref phase) => {
-                let mut label = format!(
-                    " {}… {}",
-                    connection_phase_label(phase),
-                    format_elapsed(elapsed)
-                );
-                append_transport_context(&mut label, app);
-                // "Suspiciously long" is measured per connection attempt, not
-                // across the whole turn, so later round-trips don't immediately
-                // render yellow just because the turn has been running a while.
-                let phase_elapsed = app
-                    .connection_phase_elapsed()
-                    .map_or(elapsed, |d| d.as_secs_f32());
-                let label_color = match phase {
-                    crate::message::ConnectionPhase::Retrying { .. } => rgb(255, 193, 7),
-                    crate::message::ConnectionPhase::Authenticating if phase_elapsed > 10.0 => {
-                        rgb(255, 193, 7)
-                    }
-                    crate::message::ConnectionPhase::Connecting if phase_elapsed > 10.0 => {
-                        rgb(255, 193, 7)
-                    }
-                    crate::message::ConnectionPhase::SendingRequest if phase_elapsed > 10.0 => {
-                        rgb(255, 193, 7)
-                    }
-                    _ => dim_color(),
-                };
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(label, Style::default().fg(label_color)),
-                ];
-                push_queued_suffix(&mut spans, &queued_suffix);
-                Line::from(spans)
-            }
-            ProcessingStatus::Thinking(_start) => {
-                let mut label = format!(" thinking… {}", format_elapsed(elapsed));
-                append_transport_context(&mut label, app);
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(ai_color())),
-                    Span::styled(label, Style::default().fg(dim_color())),
-                ];
-                push_queued_suffix(&mut spans, &queued_suffix);
-                Line::from(spans)
-            }
-            ProcessingStatus::Streaming => {
-                let time_str = format_elapsed(elapsed);
-                let (input_tokens, output_tokens) = app.streaming_tokens();
-                let stream_message_ended = app.stream_message_ended();
-                let mut status_text =
-                    streaming_liveness_label(time_str, stale_secs, stream_message_ended);
-                if let Some(tps) = app.output_tps() {
-                    status_text = format!("{} · {:.1} tps", status_text, tps);
-                }
-                if input_tokens > 0 || output_tokens > 0 {
-                    status_text = format!(
-                        "{} · ↑{} ↓{}",
-                        status_text,
-                        format_stream_tokens(input_tokens),
-                        format_stream_tokens(output_tokens)
-                    );
-                }
-                append_transport_context(&mut status_text, app);
-                if let Some(problem) = kv_cache_problem {
-                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
-                    let miss_str = if miss_tokens >= 1000 {
-                        format!("{}k", miss_tokens / 1000)
-                    } else if miss_tokens > 0 {
-                        format!("{}", miss_tokens)
-                    } else {
-                        "kv".to_string()
-                    };
-                    status_text = format!("⚠ {} cache miss · {}", miss_str, status_text);
-                }
-                let spans = streaming_status_spans(
-                    spinner,
-                    status_text,
-                    stream_message_ended,
-                    kv_cache_problem.is_some(),
-                    &queued_suffix,
-                );
-                Line::from(spans)
-            }
-            ProcessingStatus::WaitingForNetwork { listener } => {
-                let mut spans = vec![
-                    Span::styled("↻ ", Style::default().fg(rgb(255, 193, 7))),
-                    Span::styled(
-                        format!(
-                            "network disconnected, waiting to retry · {} · {}",
-                            listener,
-                            format_elapsed(elapsed)
-                        ),
-                        Style::default().fg(rgb(255, 193, 7)),
-                    ),
-                ];
-                push_queued_suffix(&mut spans, &queued_suffix);
-                Line::from(spans)
-            }
-            ProcessingStatus::RunningTool(ref name) => {
-                let anim_color = ai_color();
-                let batch_prog = app.batch_progress();
-                let is_batch = name == "batch";
-                // For batch: compute initial total from the streaming tool call input
-                let batch_total_initial = if is_batch {
-                    app.streaming_tool_calls()
-                        .last()
-                        .and_then(|tc| tc.input.get("tool_calls"))
-                        .and_then(|v| v.as_array())
-                        .map(|a| a.len())
-                } else {
-                    None
-                };
-                let tool_detail = if is_batch {
-                    None // batch always uses progress display
-                } else {
-                    app.streaming_tool_calls()
-                        .last()
-                        .map(get_tool_activity_detail)
-                        .filter(|s| !s.is_empty())
-                };
-                let experimental_notice = app.active_experimental_feature_notice();
-                let subagent = app.subagent_status();
-
-                let mut spans =
-                    running_tool_header_spans(spinner, name, tool_detail.as_deref(), anim_color);
-
-                // For batch tool: show "completed/total · last_tool" progress
-                if is_batch {
-                    append_batch_progress_spans(
-                        &mut spans,
-                        anim_color,
-                        batch_prog,
-                        batch_total_initial,
-                    );
-                }
-
-                if let Some(notice) = experimental_notice {
-                    spans.push(Span::styled(
-                        format!(" · ⚠ {}", notice),
-                        Style::default().fg(rgb(255, 193, 7)).bold(),
-                    ));
-                }
-
-                if let Some(status) = subagent {
-                    spans.push(Span::styled(
-                        format!(" ({})", status),
-                        Style::default().fg(dim_color()),
-                    ));
-                }
-                for label in transport_context_labels(app) {
-                    spans.push(Span::styled(
-                        format!(" · {}", label),
-                        Style::default().fg(dim_color()),
-                    ));
-                }
-                spans.push(Span::styled(
-                    format!(" · {}", format_elapsed(elapsed)),
+    let mut spans = match status.phase.as_str() {
+        "running" => {
+            let mut spans = vec![
+                Span::styled(spinner, Style::default().fg(ai_color())),
+                Span::styled(
+                    format!(" working… {elapsed}"),
                     Style::default().fg(dim_color()),
-                ));
-
-                if let Some(problem) = kv_cache_problem {
-                    let miss_tokens = problem.affected_tokens.unwrap_or(0);
-                    let miss_str = if miss_tokens >= 1000 {
-                        format!("{}k", miss_tokens / 1000)
-                    } else if miss_tokens > 0 {
-                        format!("{}", miss_tokens)
-                    } else {
-                        "kv".to_string()
-                    };
-                    spans.push(Span::styled(
-                        format!(" · ⚠ {} cache miss", miss_str),
-                        Style::default().fg(rgb(255, 193, 7)),
-                    ));
-                }
-
+                ),
+            ];
+            if let Some(activity) = &status.tool_intent {
                 spans.push(Span::styled(
-                    format!(" · {} bg", jcode_tui_core::keybind::alt_chord("B")),
-                    Style::default().fg(rgb(100, 100, 100)),
+                    format!(" · {}", single_line(activity)),
+                    Style::default().fg(ai_color()),
                 ));
-
-                push_queued_suffix(&mut spans, &queued_suffix);
-                Line::from(spans)
             }
+            spans
         }
-    } else if let Some((total_in, total_out)) = app.total_session_tokens() {
-        let total = total_in + total_out;
-        if let Some(warning) = occasional_session_history_warning(
-            total,
-            app.session_compaction_count(),
-            app.context_limit(),
-            area.width as usize,
-            app.animation_elapsed() as u64,
-        ) {
-            let severe_token_threshold = app
-                .context_limit()
-                .and_then(|limit| u64::try_from(limit).ok())
-                .map(|limit| limit.saturating_mul(3))
-                .unwrap_or(1_000_000);
-            let warning_color =
-                if total >= severe_token_threshold || app.session_compaction_count() >= 3 {
-                    rgb(255, 100, 100)
-                } else {
-                    rgb(255, 193, 7)
-                };
-            Line::from(vec![
-                Span::styled("⚠ ", Style::default().fg(warning_color)),
-                Span::styled(warning, Style::default().fg(warning_color)),
-            ])
-        } else if let Some(tip) =
-            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
-        {
-            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
-        } else {
-            Line::from("")
+        "running_tool" => running_tool_header_spans(
+            spinner,
+            &single_line(status.tool_name.as_deref().unwrap_or("tool")),
+            status.tool_intent.as_deref().map(single_line).as_deref(),
+            ai_color(),
+        ),
+        "streaming" => {
+            let phase_label = if status.stream_message_ended {
+                "finalizing…"
+            } else {
+                "streaming…"
+            };
+            let liveness =
+                streaming_liveness_label(elapsed.clone(), stale_secs, status.stream_message_ended);
+            let mut label = format!("{phase_label} {liveness}");
+            if let Some(tps) = status.output_tps_milli {
+                label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
+            }
+            let has_warning =
+                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
-    } else {
-        if let Some(tip) =
-            occasional_status_tip(area.width as usize, app.animation_elapsed() as u64)
-        {
-            Line::from(vec![Span::styled(tip, Style::default().fg(dim_color()))])
-        } else {
-            Line::from("")
+        "sending" | "thinking" | "connecting" => {
+            let label = if status.phase == "connecting" {
+                match status.connection_phase.as_deref().unwrap_or("connecting") {
+                    "authenticating" => "refreshing auth",
+                    "sending_request" => "sending context",
+                    "waiting_for_response" => "waiting for response",
+                    phase => phase,
+                }
+            } else {
+                status.phase.as_str()
+            };
+            vec![
+                Span::styled(spinner, Style::default().fg(ai_color())),
+                Span::styled(
+                    format!(" {}… {elapsed}", single_line(label)),
+                    Style::default().fg(dim_color()),
+                ),
+            ]
+        }
+        _ => {
+            let reason = status
+                .stop_reason
+                .as_deref()
+                .or(status.status_detail.as_deref())
+                .unwrap_or(match status.phase.as_str() {
+                    "completed" | "done" => "completed",
+                    "failed" | "crashed" => "failed",
+                    "stopped" => "stopped",
+                    "cancelled" => "cancelled",
+                    "waiting" => "waiting",
+                    "blocked" => "blocked",
+                    "waiting_network" => "network disconnected, waiting to retry",
+                    "ready" => "ready",
+                    "queued" => "queued",
+                    _ => "idle",
+                });
+            let glyph = match status.phase.as_str() {
+                "completed" | "done" => "✓",
+                "failed" | "crashed" => "✗",
+                "waiting" => "◷",
+                "blocked" => "⊘",
+                _ => "◼",
+            };
+            return Line::from(vec![Span::styled(
+                format!("{glyph} {} · {elapsed}", single_line(reason)),
+                Style::default().fg(rgb(225, 165, 90)),
+            )]);
         }
     };
-
-    crate::memory::check_staleness();
-
-    if app.centered_mode() {
-        frame.render_widget(Paragraph::new(line.alignment(Alignment::Center)), area);
-        return;
+    if let Some(tokens) = tokens {
+        spans.push(Span::styled(
+            format!(" · {tokens}"),
+            Style::default().fg(dim_color()),
+        ));
     }
-    frame.render_widget(Paragraph::new(line), area);
+    for label in transport {
+        spans.push(Span::styled(
+            format!(" · {}", single_line(&label)),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    if status.phase == "running_tool" {
+        spans.push(Span::styled(
+            format!(" · {elapsed}"),
+            Style::default().fg(dim_color()),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn live_status_snapshot(app: &dyn TuiState, elapsed: f32) -> crate::protocol::SwarmLiveStatus {
+    let (input, output) = app.streaming_tokens();
+    crate::protocol::SwarmLiveStatus {
+        elapsed_ms: (elapsed * 1000.0) as u64,
+        input_tokens: Some(input),
+        output_tokens: Some(output),
+        output_tps_milli: app.output_tps().map(|tps| (tps * 1000.0) as u64),
+        connection_type: app.connection_type(),
+        status_detail: app.status_detail(),
+        stream_message_ended: app.stream_message_ended(),
+        ..Default::default()
+    }
+}
+
+/// Background launches finish their tool call immediately, but the work and
+/// its intent must remain visible while the agent moves on to another tool.
+fn status_with_background_tasks(
+    foreground: Line<'static>,
+    tasks: &[crate::tui::BackgroundTaskRow],
+    width: usize,
+    processing: bool,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus;
+    use jcode_tui_render::truncate_line_with_ellipsis_to_width as fit;
+
+    let running: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.status == BackgroundTaskRowStatus::Running)
+        .collect();
+    if running.is_empty() {
+        return fit(&foreground, width);
+    }
+    let labels = running
+        .iter()
+        .map(|task| task.label.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let background = Line::from(Span::styled(
+        format!("bg {}: {}", running.len(), labels),
+        Style::default().fg(ai_color()),
+    ));
+    // Idle tips must not displace actual work. While processing, reserve space
+    // for both activities rather than letting a long foreground intent hide bg.
+    if !processing || foreground.width() == 0 || width < 24 {
+        return fit(&background, width);
+    }
+    let background_width = background.width().min(width / 2);
+    let mut line = fit(&foreground, width.saturating_sub(background_width + 3));
+    line.spans
+        .push(Span::styled(" · ", Style::default().fg(dim_color())));
+    line.spans.extend(fit(&background, background_width).spans);
+    line
 }
 
 fn running_tool_header_spans(
@@ -1057,755 +946,8 @@ fn streaming_status_spans(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Modifier;
-
-    #[test]
-    fn overscroll_merges_cloud_machine_with_dir_and_fits_narrow() {
-        let text =
-            |spans: &[Span<'static>]| spans.iter().map(|s| s.content.as_ref()).collect::<String>();
-        let facts = OverscrollFacts {
-            machine: Some("jcode-cloud".into()),
-            dir: Some("~/jcode".into()),
-            branch: None,
-            git: None,
-            context: None,
-            auth: None,
-            provider: None,
-            model: Some("Opus".into()),
-            effort: None,
-        };
-        let (wide, _) = overscroll_fit_facts(&facts, 80);
-        assert_eq!(text(&wide), "☁ jcode-cloud:~/jcode Opus");
-        let (narrow, fit) = overscroll_fit_facts(&facts, 14);
-        assert!(fit);
-        assert_eq!(text(&narrow), "☁ ~/jcode Opus");
-        let (tiny, _) = overscroll_fit_facts(&facts, 12);
-        assert_eq!(text(&tiny), "☁ jcode Opus");
-        let local = OverscrollFacts {
-            machine: None,
-            ..facts
-        };
-        let (spans, _) = overscroll_fit_facts(&local, 80);
-        assert!(!text(&spans).contains('☁'));
-    }
-    #[test]
-    fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
-        use crate::tui::info_widget::AuthMethod;
-        let mut usage = crate::usage::OpenAIUsageData {
-            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
-                available_count: 2,
-                available_expirations: Vec::new(),
-                account_label: Some("work".into()),
-                ordinary_usage_allowed: Some(false),
-            }),
-            fetched_at: Some(std::time::Instant::now()),
-            ..Default::default()
-        };
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            Some("2 resets available · expiry unknown · /reset".to_owned())
-        );
-        for auth in [
-            AuthMethod::OpenAIApiKey,
-            AuthMethod::AnthropicOAuth,
-            AuthMethod::Unknown,
-        ] {
-            assert_eq!(openai_reset_status_hint(auth, &usage, Some("work")), None);
-        }
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("other")),
-            None
-        );
-        usage
-            .openai_reset_credits
-            .as_mut()
-            .unwrap()
-            .ordinary_usage_allowed = Some(true);
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            None
-        );
-        usage
-            .openai_reset_credits
-            .as_mut()
-            .unwrap()
-            .ordinary_usage_allowed = Some(false);
-        usage.fetched_at = None;
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            None
-        );
-    }
-
-    #[test]
-    fn reset_status_hint_lists_each_expiry_and_marks_missing_metadata() {
-        use crate::tui::info_widget::AuthMethod;
-        let mut usage = crate::usage::OpenAIUsageData {
-            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
-                available_count: 4,
-                available_expirations: vec![
-                    Some("2099-05-01T03:30:00+03:00".into()),
-                    Some("2099-06-01T00:00:00Z".into()),
-                    Some("not-a-date".into()),
-                ],
-                account_label: None,
-                ordinary_usage_allowed: Some(false),
-            }),
-            fetched_at: Some(std::time::Instant::now()),
-            ..Default::default()
-        };
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            format!(
-                "4 resets available · expires in {} · /reset",
-                crate::usage::format_reset_time("2099-05-01T00:30:00Z")
-            )
-        );
-        let credits = usage.openai_reset_credits.as_mut().unwrap();
-        credits.available_count = 1;
-        credits.available_expirations = vec![None];
-        assert_eq!(
-            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
-            "1 reset available · expiry unknown · /reset"
-        );
-        usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
-        assert!(openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).is_none());
-    }
-
-    #[test]
-    fn swarm_effort_model_status_uses_shared_label() {
-        assert_eq!(
-            overscroll_short_reasoning("swarm"),
-            Some(crate::tui::app::effort_display_label("swarm"))
-        );
-        assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
-        assert_eq!(overscroll_short_reasoning(" "), None);
-    }
-
-    #[test]
-    fn running_tool_header_emphasizes_detail_over_tool_name() {
-        let accent = Color::Rgb(12, 34, 56);
-        let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
-
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content.as_ref(), "*");
-        assert_eq!(spans[0].style.fg, Some(accent));
-        assert_eq!(spans[1].content.as_ref(), " running bash");
-        assert_eq!(spans[1].style.fg, Some(dim_color()));
-        assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(spans[2].content.as_ref(), " · cargo test");
-        assert_eq!(spans[2].style.fg, Some(accent));
-        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn visual_line_move_follows_soft_wrapped_rows() {
-        // 20 chars, width 10 => two visual rows, no newline in the input.
-        let input = "abcdefghijklmnopqrst";
-        // Cursor at col 3 of row 1 (char 13) moving up lands on col 3 of row 0.
-        assert_eq!(visual_line_move(input, 13, 10, -1), Some(3));
-        // And back down again.
-        assert_eq!(visual_line_move(input, 3, 10, 1), Some(13));
-        // Already on the first/last row => None so history recall can take over.
-        assert_eq!(visual_line_move(input, 3, 10, -1), None);
-        assert_eq!(visual_line_move(input, 13, 10, 1), None);
-    }
-
-    #[test]
-    fn visual_line_move_clamps_to_shorter_target_row() {
-        let input = "abcdefghij\nxy";
-        // Cursor at end of the short second row, up goes to col 2 of row 0.
-        assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
-        // From far along row 0, down clamps to the end of the short row.
-        assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
-    }
-
-    #[test]
-    fn overscroll_provider_display_is_credential_neutral() {
-        // The credential (OAuth vs API key) is reported by the adjacent auth
-        // chip from canonical resolution; the provider name must not bake in a
-        // credential or the two can contradict (e.g. "Claude OAuth · API key").
-        assert_eq!(overscroll_provider_display("claude"), "Claude");
-        assert_eq!(overscroll_provider_display("anthropic"), "Anthropic");
-        assert!(!overscroll_provider_display("claude").contains("OAuth"));
-        assert!(!overscroll_provider_display("anthropic").contains("API"));
-    }
-
-    #[test]
-    fn session_history_warning_is_clear_and_occasional() {
-        assert!(occasional_session_history_warning(249_999, 0, None, 100, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, None, 63, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, None, 100, 10).is_none());
-        assert!(occasional_session_history_warning(199_999, 0, Some(200_000), 100, 0).is_none());
-        assert!(occasional_session_history_warning(300_000, 0, Some(400_000), 100, 0).is_none());
-        assert!(occasional_session_history_warning(450_000, 0, Some(400_000), 100, 0).is_none());
-
-        let warning = occasional_session_history_warning(2_500_000, 4, Some(500_000), 100, 0)
-            .expect("large sessions should get a brief reminder");
-        assert!(warning.contains("Session history: 2.5M tokens processed and 4 compacts"));
-        assert!(warning.contains("/clear starts fresh context"));
-        assert!(!warning.contains("Context usage"));
-    }
-
-    #[test]
-    fn command_suggestion_window_start_scrolls_after_visible_limit() {
-        let limit = app::COMMAND_SUGGESTION_VISIBLE_LIMIT;
-        assert_eq!(command_suggestion_window_start(0, limit + 3), 0);
-        assert_eq!(command_suggestion_window_start(limit - 1, limit + 3), 0);
-        assert_eq!(command_suggestion_window_start(limit, limit + 3), 1);
-        assert_eq!(command_suggestion_window_start(limit + 2, limit + 3), 3);
-    }
-
-    #[test]
-    fn command_suggestions_overlay_prefers_space_below_input() {
-        let frame = Rect::new(0, 0, 80, 20);
-        let input_area = Rect::new(0, 10, 80, 1);
-
-        assert_eq!(
-            command_suggestions_overlay_rect(input_area, 3, frame),
-            Some(Rect::new(0, 11, 80, 3))
-        );
-    }
-
-    #[test]
-    fn command_suggestions_overlay_flips_above_at_terminal_bottom() {
-        let frame = Rect::new(0, 0, 80, 20);
-        let input_area = Rect::new(0, 19, 80, 1);
-
-        assert_eq!(
-            command_suggestions_overlay_rect(input_area, 3, frame),
-            Some(Rect::new(0, 16, 80, 3))
-        );
-    }
-
-    #[test]
-    fn command_suggestions_overlay_handles_zero_lines_and_no_space() {
-        let frame = Rect::new(0, 0, 80, 20);
-        let input_area = Rect::new(0, 10, 80, 1);
-        assert_eq!(command_suggestions_overlay_rect(input_area, 0, frame), None);
-
-        // Input fills the whole frame: nowhere to float, so no popover.
-        let full = Rect::new(0, 0, 80, 20);
-        assert_eq!(command_suggestions_overlay_rect(full, 3, frame), None);
-    }
-
-    #[test]
-    fn batch_progress_spans_use_batch_chroma_for_initial_count() {
-        let mut spans = Vec::new();
-        let anim_color = rgb(12, 34, 56);
-
-        append_batch_progress_spans(&mut spans, anim_color, None, Some(3));
-
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), " · 0/3 done");
-        assert_eq!(spans[0].style.fg, Some(anim_color));
-        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn batch_progress_spans_make_last_completed_explicit() {
-        let mut spans = Vec::new();
-
-        append_batch_progress_spans(
-            &mut spans,
-            rgb(120, 130, 140),
-            Some(crate::bus::BatchProgress {
-                session_id: "s".to_string(),
-                tool_call_id: "tc".to_string(),
-                total: 3,
-                completed: 1,
-                last_completed: Some("read".to_string()),
-                running: Vec::new(),
-                subcalls: Vec::new(),
-            }),
-            Some(3),
-        );
-
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), " · 1/3 done");
-        assert_eq!(spans[1].content.as_ref(), " · last done: read");
-    }
-
-    #[test]
-    fn batch_progress_spans_hide_last_completed_when_batch_finished() {
-        let mut spans = Vec::new();
-
-        append_batch_progress_spans(
-            &mut spans,
-            rgb(120, 130, 140),
-            Some(crate::bus::BatchProgress {
-                session_id: "s".to_string(),
-                tool_call_id: "tc".to_string(),
-                total: 3,
-                completed: 3,
-                last_completed: Some("read".to_string()),
-                running: Vec::new(),
-                subcalls: Vec::new(),
-            }),
-            Some(3),
-        );
-
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), " · 3/3 done");
-    }
-
-    #[test]
-    fn batch_progress_spans_show_running_subcall_detail() {
-        let mut spans = Vec::new();
-
-        append_batch_progress_spans(
-            &mut spans,
-            rgb(120, 130, 140),
-            Some(crate::bus::BatchProgress {
-                session_id: "s".to_string(),
-                tool_call_id: "tc".to_string(),
-                total: 2,
-                completed: 0,
-                last_completed: None,
-                running: vec![crate::message::ToolCall {
-                    id: "batch-1-bash".to_string(),
-                    name: "bash".to_string(),
-                    input: serde_json::json!({"command": "cargo test -p jcode"}),
-                    intent: None,
-                    thought_signature: None,
-                }],
-                subcalls: Vec::new(),
-            }),
-            Some(2),
-        );
-
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), " · 0/2 done");
-        assert_eq!(spans[1].content.as_ref(), " · running: #1 bash");
-    }
-
-    #[test]
-    fn batch_progress_spans_show_multiple_running_subcalls() {
-        let mut spans = Vec::new();
-
-        append_batch_progress_spans(
-            &mut spans,
-            rgb(120, 130, 140),
-            Some(crate::bus::BatchProgress {
-                session_id: "s".to_string(),
-                tool_call_id: "tc".to_string(),
-                total: 3,
-                completed: 0,
-                last_completed: None,
-                running: vec![
-                    crate::message::ToolCall {
-                        id: "batch-2-grep".to_string(),
-                        name: "grep".to_string(),
-                        input: serde_json::json!({"pattern": "foo", "path": "src"}),
-                        intent: None,
-                        thought_signature: None,
-                    },
-                    crate::message::ToolCall {
-                        id: "batch-1-bash".to_string(),
-                        name: "bash".to_string(),
-                        input: serde_json::json!({"command": "cargo build --release --workspace"}),
-                        intent: None,
-                        thought_signature: None,
-                    },
-                    crate::message::ToolCall {
-                        id: "batch-3-read".to_string(),
-                        name: "read".to_string(),
-                        input: serde_json::json!({"file_path": "README.md"}),
-                        intent: None,
-                        thought_signature: None,
-                    },
-                ],
-                subcalls: Vec::new(),
-            }),
-            Some(3),
-        );
-
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), " · 0/3 done");
-        assert_eq!(spans[1].content.as_ref(), " · running: #1 bash +2");
-    }
-
-    #[test]
-    fn connection_phase_waiting_label_is_generic_response_wait() {
-        assert_eq!(
-            connection_phase_label(&ConnectionPhase::WaitingForResponse),
-            "waiting for response"
-        );
-    }
-
-    #[test]
-    fn streaming_liveness_label_shows_quiet_stream_warning_before_message_end() {
-        assert_eq!(
-            streaming_liveness_label("4.2s".to_string(), Some(3.4), false),
-            "(no tokens 3s) · 4.2s"
-        );
-        assert_eq!(
-            streaming_liveness_label("12.0s".to_string(), Some(12.1), false),
-            "(stalled 12s) · 12.0s"
-        );
-    }
-
-    #[test]
-    fn streaming_liveness_label_suppresses_quiet_stream_warning_after_message_end() {
-        assert_eq!(
-            streaming_liveness_label("4.2s".to_string(), Some(3.4), true),
-            "4.2s"
-        );
-        assert_eq!(
-            streaming_liveness_label("12.0s".to_string(), Some(12.1), true),
-            "12.0s"
-        );
-    }
-
-    #[test]
-    fn streaming_status_spans_keep_spinner_while_finalizing() {
-        let spans = streaming_status_spans("⠋", "4.2s".to_string(), false, false, " · +1 queued");
-
-        assert_eq!(spans.len(), 3);
-        assert_eq!(spans[0].content.as_ref(), "⠋");
-        assert_eq!(spans[1].content.as_ref(), " 4.2s");
-        assert_eq!(spans[2].content.as_ref(), " · +1 queued");
-    }
-
-    #[test]
-    fn streaming_status_spans_keep_spinner_after_message_end_while_finalizing() {
-        let spans = streaming_status_spans("⠋", "finalizing".to_string(), true, false, "");
-
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), "⠋");
-        assert_eq!(spans[1].content.as_ref(), " finalizing");
-    }
-
-    #[test]
-    fn push_queued_suffix_appends_only_when_present() {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        push_queued_suffix(&mut spans, "");
-        assert!(spans.is_empty(), "empty suffix should add no span");
-
-        push_queued_suffix(&mut spans, " · +2 queued");
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), " · +2 queued");
-        assert_eq!(spans[0].style.fg, Some(queued_color()));
-    }
-
-    #[test]
-    fn display_connection_type_uses_reader_friendly_labels() {
-        assert_eq!(display_connection_type("https/sse"), "https");
-        assert_eq!(
-            display_connection_type("websocket/persistent-fresh"),
-            "websocket"
-        );
-        assert_eq!(
-            display_connection_type("websocket/persistent-reuse"),
-            "existing websocket"
-        );
-    }
-
-    #[test]
-    fn normalize_status_detail_uses_reader_friendly_labels() {
-        assert_eq!(
-            normalize_status_detail("fresh websocket").as_deref(),
-            Some("opening websocket")
-        );
-        assert_eq!(
-            normalize_status_detail("reusing websocket").as_deref(),
-            Some("using existing websocket")
-        );
-        assert_eq!(
-            normalize_status_detail("websocket healthcheck").as_deref(),
-            Some("verifying websocket")
-        );
-        assert_eq!(
-            normalize_status_detail("https fallback").as_deref(),
-            Some("using https fallback")
-        );
-    }
-
-    #[test]
-    fn collect_transport_context_labels_dedupes_overlapping_transport_text() {
-        assert_eq!(
-            collect_transport_context_labels(
-                normalize_status_detail("reusing websocket"),
-                Some(display_connection_type("websocket/persistent-reuse")),
-                Some("OpenRouter".to_string())
-            ),
-            vec![
-                "using existing websocket".to_string(),
-                "via OpenRouter".to_string()
-            ]
-        );
-
-        assert_eq!(
-            collect_transport_context_labels(
-                normalize_status_detail("https fallback"),
-                Some(display_connection_type("https/sse")),
-                None,
-            ),
-            vec!["using https fallback".to_string()]
-        );
-    }
-
-    #[test]
-    fn composer_mode_detects_shell_input_before_commands() {
-        assert_eq!(
-            composer_mode(" ! cargo test ", false),
-            ComposerMode::ShellLocal
-        );
-        assert_eq!(
-            composer_mode("! cargo test", true),
-            ComposerMode::ShellRemote
-        );
-        assert_eq!(composer_mode(" /help", false), ComposerMode::SlashCommand);
-        assert_eq!(composer_mode("hello", false), ComposerMode::Chat);
-    }
-
-    #[test]
-    fn shell_mode_hint_reflects_execution_target() {
-        assert_eq!(
-            shell_mode_hint(ComposerMode::ShellLocal),
-            Some("  shell mode · Enter runs locally")
-        );
-        assert_eq!(
-            shell_mode_hint(ComposerMode::ShellRemote),
-            Some("  shell mode · Enter runs on server")
-        );
-        assert_eq!(shell_mode_hint(ComposerMode::Chat), None);
-    }
-
-    #[test]
-    fn shell_mode_color_is_distinct() {
-        assert_eq!(shell_mode_color(), rgb(110, 214, 151));
-    }
-
-    #[test]
-    fn normalize_repaint_sensitive_notice_text_drops_warning_variation_selector() {
-        assert_eq!(
-            normalize_repaint_sensitive_notice_text("⚠️ File activity: read lines 1-9"),
-            "⚠ File activity: read lines 1-9"
-        );
-        assert_eq!(
-            normalize_repaint_sensitive_notice_text("all clear"),
-            "all clear"
-        );
-    }
-}
-
-/// Build the spans for the notification line. Returns empty vec when there is nothing to show.
-/// This is the single source of truth for notification content - both the layout height
-/// calculation (via `has_notification`) and the renderer call this.
-pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-
-    let push_sep = |spans: &mut Vec<Span<'static>>| {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
-        }
-    };
-
-    if let Some((recording, text)) = app.voice_input_status() {
-        let color = if recording {
-            rgb(255, 110, 110)
-        } else {
-            rgb(140, 200, 255)
-        };
-        spans.push(Span::styled(text, Style::default().fg(color).bold()));
-    }
-
-    if let Some(selection) = app.copy_selection_status() {
-        let pane_label = selection.pane.label();
-        let label = if selection.has_action {
-            if selection.selected_lines > 1 {
-                format!(
-                    "{} selection · {} chars · {} lines · Enter/Y copy · Esc exit",
-                    pane_label, selection.selected_chars, selection.selected_lines
-                )
-            } else {
-                format!(
-                    "{} selection · {} chars · Enter/Y copy · Esc exit",
-                    pane_label, selection.selected_chars
-                )
-            }
-        } else if selection.dragging {
-            format!(
-                "{} selection · dragging… · Enter/Y copy · Esc exit",
-                pane_label
-            )
-        } else {
-            format!("{} selection · drag to copy", pane_label)
-        };
-        spans.push(Span::styled(label, Style::default().fg(rgb(140, 220, 200))));
-    }
-
-    if let Some(flicker_notice) = super::recent_flicker_ui_notice() {
-        let copy_badge_ui = app.copy_badge_ui();
-        let copy_badge_now = std::time::Instant::now();
-        let key = super::FLICKER_NOTICE_COPY_KEY;
-        let alt_style = if copy_badge_ui.alt_active {
-            Style::default().fg(accent_color()).bold()
-        } else {
-            Style::default().fg(dim_color())
-        };
-        let shift_style = if copy_badge_ui.shift_active {
-            Style::default().fg(accent_color()).bold()
-        } else {
-            Style::default().fg(dim_color())
-        };
-        let key_style = if copy_badge_ui.key_is_active(key, copy_badge_now) {
-            Style::default().fg(accent_color()).bold()
-        } else {
-            Style::default().fg(dim_color())
-        };
-
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            flicker_notice.summary,
-            Style::default().fg(rgb(255, 193, 7)),
-        ));
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            flicker_notice.hint,
-            Style::default().fg(rgb(140, 180, 255)),
-        ));
-        spans.push(Span::raw(" "));
-        if let Some(success) = copy_badge_ui.feedback_for_key(key, copy_badge_now) {
-            let feedback_style = if success {
-                Style::default().fg(ai_color()).bold()
-            } else {
-                Style::default().fg(Color::Red).bold()
-            };
-            let feedback_text = if success {
-                "✓ Copied! "
-            } else {
-                "✗ Copy failed "
-            };
-            spans.push(Span::styled(feedback_text, feedback_style));
-        }
-        spans.push(Span::styled(
-            super::viewport::copy_badge_alt_badge(),
-            alt_style,
-        ));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[⇧]", shift_style));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            format!("[{}]", key.to_ascii_uppercase()),
-            key_style,
-        ));
-    }
-
-    if let Some(notice) = app.status_notice() {
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            normalize_repaint_sensitive_notice_text(&notice),
-            Style::default().fg(accent_color()),
-        ));
-    }
-
-    // Learned-keybinding nudge: distinct bright color + bold so the user reads
-    // it as "the system noticed I'm not using a shortcut", not a normal status.
-    if let Some(hint) = app.learn_hint() {
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            normalize_repaint_sensitive_notice_text(&hint),
-            Style::default().fg(rgb(214, 122, 255)).bold(),
-        ));
-    }
-
-    // Inline hotkey feedback: what a rarely-used chord just did, or the nearest
-    // binding for an unbound chord. Cool cyan so it reads as informational.
-    if let Some(feedback) = app.hotkey_feedback() {
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            normalize_repaint_sensitive_notice_text(&feedback),
-            Style::default().fg(rgb(102, 204, 221)),
-        ));
-    }
-
-    if !app.is_processing() {
-        let info = app.info_widget_data();
-        if let Some(hint) = app.openai_reset_hint() {
-            push_sep(&mut spans);
-            spans.push(Span::styled(hint, Style::default().fg(rgb(255, 193, 7))));
-        }
-        if let Some(schedule_notice) =
-            crate::tui::scheduled_notification_text(info.ambient_info.as_ref())
-        {
-            push_sep(&mut spans);
-            spans.push(Span::styled(
-                schedule_notice,
-                Style::default().fg(rgb(140, 180, 255)),
-            ));
-        }
-
-        if let Some(cache_info) = app.cache_ttl_status()
-            && cache_info.expiry_notification_active()
-        {
-            if cache_info.is_cold {
-                let tokens_str = cache_info
-                    .cached_tokens
-                    .map(|t| {
-                        if t >= 1_000_000 {
-                            format!(" ({:.1}M tok)", t as f64 / 1_000_000.0)
-                        } else if t >= 1_000 {
-                            format!(" ({}K tok)", t / 1000)
-                        } else {
-                            format!(" ({} tok)", t)
-                        }
-                    })
-                    .unwrap_or_default();
-                push_sep(&mut spans);
-                spans.push(Span::styled(
-                    format!("🧊 cache cold{}", tokens_str),
-                    Style::default().fg(rgb(140, 180, 255)),
-                ));
-                // Small gray age since the retention window elapsed, e.g. `1h 1m`.
-                spans.push(Span::styled(
-                    format!(
-                        " {}",
-                        crate::tui::format_compact_age(cache_info.cold_for_secs)
-                    ),
-                    Style::default().fg(dim_color()),
-                ));
-            } else if cache_info.expiring_soon() {
-                let tokens_str = cache_info
-                    .cached_tokens
-                    .map(|t| {
-                        if t >= 1_000 {
-                            format!(" {}K", t / 1000)
-                        } else {
-                            format!(" {}", t)
-                        }
-                    })
-                    .unwrap_or_default();
-                // Above a minute, a raw seconds count is hard to read at a
-                // glance; show minutes granularity instead.
-                let remaining = cache_info.remaining_secs;
-                let time_str = if remaining > 60 {
-                    format!("{}m", remaining.div_ceil(60))
-                } else {
-                    format!("{}s", remaining)
-                };
-                push_sep(&mut spans);
-                spans.push(Span::styled(
-                    format!("⏳ cache {}{}", time_str, tokens_str),
-                    Style::default().fg(rgb(255, 193, 7)),
-                ));
-            }
-        }
-    }
-
-    if app.has_stashed_input() {
-        push_sep(&mut spans);
-        spans.push(Span::styled(
-            "📋 stash",
-            Style::default().fg(rgb(255, 193, 7)),
-        ));
-    }
-
-    spans
-}
+#[path = "ui_input/status_tests.rs"]
+mod tests;
 
 pub(crate) fn openai_reset_status_hint(
     auth_method: super::info_widget::AuthMethod,
@@ -1845,14 +987,68 @@ pub(crate) fn openai_reset_status_hint(
     Some(format!("{count} {noun} available · {detail} · /reset"))
 }
 
+fn caption_line(row: &crate::tui::JarvisCaption, width: u16) -> Line<'static> {
+    let (prefix, color) = match row.score {
+        None => ("Heard: ".to_owned(), Color::DarkGray),
+        Some((p, accepted)) => {
+            let label = if accepted { "Trigger" } else { "Heard" };
+            let color = if accepted {
+                Color::Green
+            } else if p >= 0.5 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            (format!("{:.0}% {label}: ", p * 100.0), color)
+        }
+    };
+    Line::styled(
+        truncate_cells(&format!("{prefix}{}", row.text), width as usize),
+        Style::default().fg(color),
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn caption_cells_show_score_and_do_not_wrap() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
+    for (score, expected, prefix) in [
+        (None, Color::DarkGray, "Heard:"),
+        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
+        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
+        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
+        (Some((0.95, true)), Color::Green, "95% Trigger:"),
+    ] {
+        let row = crate::tui::JarvisCaption {
+            id: 1,
+            text: "界".repeat(40),
+            score,
+        };
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (x, c) in prefix.chars().enumerate() {
+            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
+            assert_eq!(buffer[(x as u16, 0)].fg, expected);
+        }
+        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
+    }
+}
+
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
     let spans = build_notification_spans(app);
-    if spans.is_empty() || width == 0 {
+    if width == 0 {
         return Vec::new();
     }
-    let line = Line::from(spans);
-    // Notifications must never occupy a second row on narrow terminals.
-    let lines = vec![line];
+    let mut lines = Vec::new();
+    for row in app.jarvis_transcript().into_iter().flatten() {
+        lines.push(caption_line(row, width));
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
     lines
         .into_iter()
         .map(|line| {
@@ -1873,6 +1069,7 @@ pub(super) fn notification_height(app: &dyn TuiState, width: u16) -> u16 {
             .unwrap_or(u16::MAX)
     } else {
         u16::from(app.has_notification())
+            + app.jarvis_transcript().map_or(0, |rows| rows.len() as u16)
     }
 }
 
@@ -1900,11 +1097,15 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     let facts = OverscrollFacts {
-        machine: crate::tui::ssh_remote_host(),
-        dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
+        machine: app.remote_machine(),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            app.working_dir().as_deref(),
+        ),
         branch: overscroll_git_branch(&data),
-        git: data.git_info.clone(),
+        git: overscroll_git_info(&data).cloned(),
         context: overscroll_context_usage(&data),
+        account_remaining: overscroll_account_remaining(&data),
         auth: overscroll_auth_label(data.auth_method),
         provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
             .then(|| overscroll_provider_display(&provider)),
@@ -1930,6 +1131,65 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// Render only the supplied session facts. Unlike the live adapter this never
+/// falls back to the current App, process directory, SSH host or credentials.
+#[cfg(test)]
+pub(crate) fn preview_overscroll_line(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+) -> Line<'static> {
+    preview_overscroll_line_for_host(data, width, None)
+}
+
+/// The host belongs to the selected preview, never the attached live session.
+#[cfg(test)]
+pub(crate) fn preview_overscroll_line_for_host(
+    data: &crate::tui::info_widget::InfoWidgetData,
+    width: u16,
+    host: Option<&str>,
+) -> Line<'static> {
+    let facts = OverscrollFacts {
+        machine: host
+            .filter(|host| !host.trim().is_empty())
+            .map(str::to_owned),
+        dir: overscroll_directory_transition(
+            data.original_working_dir.as_deref(),
+            data.working_dir.as_deref(),
+        ),
+        branch: overscroll_git_branch(data),
+        git: overscroll_git_info(data).cloned(),
+        context: overscroll_context_usage(data),
+        account_remaining: overscroll_account_remaining(data),
+        auth: overscroll_auth_label(data.auth_method),
+        provider: data
+            .provider_name
+            .as_ref()
+            .filter(|name| !name.is_empty() && !overscroll_is_runtime_placeholder(name))
+            .map(|name| overscroll_provider_display(name)),
+        model: data
+            .model
+            .as_ref()
+            .filter(|name| !name.is_empty() && !overscroll_is_placeholder(name))
+            .map(|name| session_facts::pretty_model(name)),
+        effort: data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+            .map(str::to_string),
+    };
+    let label = if data.historical_context {
+        "saved · "
+    } else {
+        ""
+    };
+    let label_width = unicode_width::UnicodeWidthStr::width(label);
+    let mut spans = overscroll_fit_facts(&facts, (width as usize).saturating_sub(label_width)).0;
+    if !label.is_empty() && width as usize > label_width {
+        spans.insert(0, Span::styled(label, Style::default().fg(dim_color())));
+    }
+    Line::from(spans).alignment(Alignment::Right)
+}
+
 /// Model name color on the overscroll status line.
 const OVERSCROLL_MODEL_PINK: Color = Color::Rgb(255, 135, 200);
 
@@ -1941,6 +1201,7 @@ struct OverscrollFacts {
     branch: Option<String>,
     git: Option<crate::tui::info_widget::GitInfo>,
     context: Option<(usize, usize)>,
+    account_remaining: Option<u8>,
     auth: Option<(&'static str, Color)>,
     provider: Option<String>,
     model: Option<String>,
@@ -1956,6 +1217,8 @@ struct OverscrollLevels {
     branch: u8,
     git: u8,
     context: u8,
+    account_bar: u8,
+    context_bar: u8,
     auth: u8,
     provider: u8,
     model: u8,
@@ -1969,17 +1232,18 @@ struct OverscrollLevels {
 /// only shortened, so the line always answers "where am I, what am I running,
 /// how full is the context".
 const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
-    |l| l.auth = 1,     // hide auth ("OAuth"/"API key")
-    |l| l.git = 1,      // "~3 +1 ?2 ↑1" -> "±6 ↑1"
-    |l| l.context = 1,  // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
-    |l| l.branch = 1,   // long branch -> 12 chars
-    |l| l.provider = 1, // hide provider
-    |l| l.context = 2,  // "▰▱▱▱ 29%" -> "29%"
-    |l| l.git = 2,      // hide git status
-    |l| l.branch = 2,   // hide branch
-    |l| l.model = 1,    // drop reasoning effort
-    |l| l.machine = 1,  // "☁ jcode-cloud:" -> "☁ "
-    |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
+    |l| l.account_bar = 1, // drop account bar before shortening other facts
+    |l| l.context_bar = 1, // keep token counts when the context bar cannot fit
+    |l| l.auth = 1,        // hide auth ("OAuth"/"API key")
+    |l| l.git = 1,         // "~3 +1 ?2 ↑1" -> "±6 ↑1"
+    |l| l.branch = 1,      // long branch -> 12 chars
+    |l| l.provider = 1,    // hide provider
+    |l| l.context = 1,     // "74k/256k 29%" -> "29%"
+    |l| l.git = 2,         // hide git status
+    |l| l.branch = 2,      // hide branch
+    |l| l.model = 1,       // drop reasoning effort
+    |l| l.machine = 1,     // "☁ jcode-cloud:" -> "☁ "
+    |l| l.dir = 1,         // "~/…/jcode" -> "jcode"
 ];
 
 fn overscroll_fact_spans(
@@ -2011,10 +1275,10 @@ fn overscroll_fact_spans(
         let label = if levels.dir == 0 {
             dir.clone()
         } else {
-            dir.rsplit('/')
-                .find(|seg| !seg.is_empty())
-                .unwrap_or(dir)
-                .to_string()
+            dir.split(" → ")
+                .map(|path| path.rsplit('/').find(|seg| !seg.is_empty()).unwrap_or(path))
+                .collect::<Vec<_>>()
+                .join(" → ")
         };
         let mut group = machine_spans(levels);
         if group.is_empty() {
@@ -2047,40 +1311,28 @@ fn overscroll_fact_spans(
     }
 
     if let Some((used, limit)) = facts.context {
-        match levels.context {
-            // Roomy: token counts plus the full-width bar.
-            0 => {
-                let mut group = vec![Span::styled(
-                    format!(
-                        "{}/{} ",
-                        overscroll_format_tokens(used),
-                        overscroll_format_tokens(limit)
-                    ),
-                    muted,
-                )];
-                group.extend(overscroll_context_bar(
-                    used,
-                    limit,
-                    OVERSCROLL_CONTEXT_CELLS_FULL,
-                ));
-                out.push(group);
-            }
-            // Compact bar plus percentage.
-            1 => out.push(overscroll_context_bar(
-                used,
-                limit,
-                OVERSCROLL_CONTEXT_CELLS_COMPACT,
-            )),
-            // Percentage only (the colored last span of the bar).
-            _ => out.push(
-                overscroll_context_bar(used, limit, 0)
-                    .into_iter()
-                    .last()
-                    .map(|span| Span::styled(span.content.trim_start().to_string(), span.style))
-                    .into_iter()
-                    .collect(),
-            ),
+        let mut spans = Vec::new();
+        if levels.context == 0 {
+            spans.push(Span::styled(
+                format!(
+                    "{}/{} ",
+                    overscroll_format_tokens(used),
+                    overscroll_format_tokens(limit)
+                ),
+                muted,
+            ));
         }
+        if levels.context == 0 && levels.context_bar == 0 {
+            let pct = ((used as f64 / limit.max(1) as f64).clamp(0.0, 1.0) * 100.0).round() as u8;
+            spans.extend(crate::tui::info_widget::render_inline_limit_bar(
+                100 - pct,
+                4,
+                true,
+            ));
+        } else {
+            spans.push(overscroll_context_percentage(used, limit));
+        }
+        out.push(spans);
     }
 
     if levels.auth == 0
@@ -2095,7 +1347,17 @@ fn overscroll_fact_spans(
     if levels.provider == 0
         && let Some(provider) = &facts.provider
     {
-        out.push(vec![Span::styled(provider.clone(), muted)]);
+        let mut group = vec![Span::styled(provider.clone(), muted)];
+        if let Some(remaining) = facts.account_remaining {
+            let cells = if levels.account_bar == 0 { 4 } else { 0 };
+            if cells > 0 {
+                group.push(Span::raw(" "));
+            }
+            group.extend(crate::tui::info_widget::render_inline_limit_bar(
+                remaining, cells, false,
+            ));
+        }
+        out.push(group);
     }
 
     if let Some(model) = &facts.model {
@@ -2105,6 +1367,7 @@ fn overscroll_fact_spans(
         )];
         if levels.model == 0
             && let Some(effort) = &facts.effort
+            && !overscroll_model_already_includes_effort(model, effort)
         {
             group.push(Span::styled(format!(" {effort}"), muted));
         }
@@ -2112,6 +1375,32 @@ fn overscroll_fact_spans(
     }
 
     out
+}
+
+fn overscroll_is_standard_effort_word(word: &str) -> bool {
+    let trimmed = word.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']'));
+    matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+fn overscroll_model_already_includes_effort(model: &str, effort: &str) -> bool {
+    let effort = effort.trim();
+    if effort.is_empty() {
+        return false;
+    }
+    let Some(last_word) = model.split_whitespace().last() else {
+        return false;
+    };
+    if last_word.eq_ignore_ascii_case(effort) {
+        return true;
+    }
+    // Models that encode their own thinking/effort level in their name (e.g.
+    // "Gemini 4 Neon Low") should never render a second standard effort suffix
+    // like "Gemini 4 Neon Low medium". Non-standard sentinels like "swarm"
+    // remain visible.
+    overscroll_is_standard_effort_word(last_word) && overscroll_is_standard_effort_word(effort)
 }
 
 /// Fit the facts into `max_width` by walking the compaction ladder. Returns
@@ -2200,10 +1489,23 @@ fn overscroll_truncate_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec
 }
 
 /// Format a working dir path home-relative (~/foo/bar), keeping the last 2 segments.
+/// Git facts for the status line. Cloud sessions keep their repository in
+/// `dual_git_info.cloud`, so prefer that over the (absent) local `git_info`.
+fn overscroll_git_info(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<&crate::tui::info_widget::GitInfo> {
+    if let Some(dual) = &data.dual_git_info
+        && let crate::tui::cloud_git::RepoState::Ready(info) = &dual.cloud
+    {
+        return Some(info);
+    }
+    data.git_info.as_ref()
+}
+
 /// Compact git branch label for the status line and fact stack. Truncated so
 /// long branch names cannot crowd out the other facts.
 fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Option<String> {
-    let branch = data.git_info.as_ref()?.branch.trim();
+    let branch = overscroll_git_info(data)?.branch.trim();
     if branch.is_empty() {
         return None;
     }
@@ -2259,6 +1561,27 @@ fn overscroll_git_status_spans(
 
 fn overscroll_dir_label(path: &str) -> Option<String> {
     session_facts::dir_label_short(path)
+}
+
+fn overscroll_directory_transition(
+    original: Option<&str>,
+    current: Option<&str>,
+) -> Option<String> {
+    let current = current.filter(|path| !path.trim().is_empty())?;
+    let label = overscroll_dir_label(current).unwrap_or_else(|| current.to_string());
+    let Some(original) = original.filter(|path| !path.trim().is_empty()) else {
+        return Some(label);
+    };
+    if std::path::Path::new(original) == std::path::Path::new(current) {
+        return Some(label);
+    }
+    let origin_label = overscroll_dir_label(original).unwrap_or_else(|| original.to_string());
+    // Elision can hide the differing ancestor. Keep both paths distinguishable.
+    if origin_label == label {
+        Some(format!("{original} → {current}"))
+    } else {
+        Some(format!("{origin_label} → {label}"))
+    }
 }
 
 /// Placeholder header strings used during remote startup; not real model names.
@@ -2355,7 +1678,32 @@ fn overscroll_context_usage(
     Some((used_tokens, limit))
 }
 
-/// Format a token count compactly: 1234 -> "1.2k", 200000 -> "200k", 1_500_000 -> "1.5M".
+/// The tightest subscription window determines the remaining account allowance.
+/// Never turn missing usage or an API-key cost total into a fictional quota.
+fn overscroll_account_remaining(data: &crate::tui::info_widget::InfoWidgetData) -> Option<u8> {
+    use crate::tui::info_widget::{AuthMethod, UsageProvider};
+    let info = data.usage_info.as_ref()?;
+    if !matches!(
+        (data.auth_method, info.provider),
+        (AuthMethod::OpenAIOAuth, UsageProvider::OpenAI)
+            | (AuthMethod::AnthropicOAuth, UsageProvider::Anthropic)
+    ) {
+        return None;
+    }
+    if info.limit_reached {
+        return Some(0);
+    }
+    if !info.available
+        || !info.five_hour.is_finite()
+        || !info.seven_day.is_finite()
+        || info.spark.is_some_and(|value| !value.is_finite())
+    {
+        return None;
+    }
+    Some(100u8.saturating_sub(info.max_usage_pct()))
+}
+
+/// Format context counts compactly while retaining useful precision.
 fn overscroll_format_tokens(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
@@ -2368,13 +1716,11 @@ fn overscroll_format_tokens(tokens: usize) -> String {
     }
 }
 
-/// Render a compact rounded progress bar (◖████░░◗) plus a percentage label.
-fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'static>> {
+/// Render the colored percentage alongside the context token counts.
+fn overscroll_context_percentage(used: usize, limit: usize) -> Span<'static> {
     let limit = limit.max(1);
     let ratio = (used as f64 / limit as f64).clamp(0.0, 1.0);
     let pct = (ratio * 100.0).round() as u16;
-    let filled = (ratio * cells as f64).round() as usize;
-    let filled = filled.min(cells);
 
     // Match the info widget usage bar palette (based on remaining context).
     let left_pct = 100u16.saturating_sub(pct);
@@ -2385,250 +1731,31 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
     } else {
         rgb(100, 200, 100)
     };
-    let track_color = rgb(50, 50, 60);
-
-    let mut spans = Vec::with_capacity(cells + 2);
-    // Slim segmented pill (▰ filled / ▱ empty) reads thinner than full blocks.
-    spans.push(Span::styled(
-        "▰".repeat(filled),
-        Style::default().fg(fill_color),
-    ));
-    spans.push(Span::styled(
-        "▱".repeat(cells.saturating_sub(filled)),
-        Style::default().fg(track_color),
-    ));
-    spans.push(Span::styled(
-        format!(" {}%", pct),
-        Style::default().fg(fill_color).bold(),
-    ));
-    spans
+    Span::styled(format!("{}%", pct), Style::default().fg(fill_color).bold())
 }
 
-/// Context bar widths in the overscroll status line: full when there is room,
-/// compact when the directory and model need the space.
-const OVERSCROLL_CONTEXT_CELLS_FULL: usize = 10;
-const OVERSCROLL_CONTEXT_CELLS_COMPACT: usize = 4;
-pub(super) fn draw_input(
-    frame: &mut Frame,
-    app: &dyn TuiState,
-    area: Rect,
-    next_prompt: usize,
-    debug_capture: &mut Option<FrameCaptureBuilder>,
-) -> Option<Position> {
-    let input_text = app.input();
-    let cursor_pos = app.cursor_pos();
-
-    let mode = composer_mode(input_text, app.is_remote_mode());
-    // Command suggestions render later as an overlay pass
-    // (`draw_command_suggestions_overlay`), never inline: they must not shift
-    // the input rows or anything below them.
-    let has_suggestions = command_suggestions_active(app, &app.command_suggestions());
-
-    let (prompt_char, caret_color) = input_prompt(app);
-    let num_str = format!("{}", next_prompt);
-    let prompt_len = input_prompt_len(app, next_prompt);
-    let reserved_width = send_mode_reserved_width(app);
-    let line_width = (area.width as usize).saturating_sub(prompt_len + reserved_width);
-
-    if line_width == 0 {
-        return None;
+/// The idle resume composer uses the live input wrapper, but never reads the
+/// currently open session's draft, queue, selection, or cursor state.
+#[cfg(test)]
+pub(crate) fn draw_preview_input(frame: &mut Frame, area: Rect, next_prompt: usize) {
+    let number = next_prompt.to_string();
+    let prompt = "> ";
+    let prompt_len = number.len() + prompt.len();
+    let line_width = (area.width as usize).saturating_sub(prompt_len);
+    if area.height == 0 || line_width == 0 {
+        return;
     }
-
-    let (all_lines, cursor_line, cursor_col) = wrap_input_text(
-        input_text,
-        cursor_pos,
+    let (lines, _, _) = wrap_input_text_with_images(
+        "",
+        0,
         line_width,
-        &num_str,
-        prompt_char,
-        caret_color,
+        &number,
+        prompt,
+        user_color(),
         prompt_len,
+        &|_| false,
     );
-
-    let mut lines: Vec<Line> = Vec::new();
-    let mut hint_shown = false;
-    let mut hint_line: Option<String> = None;
-    if let Some(hint) = app.login_input_hint() {
-        hint_shown = true;
-        hint_line = Some(hint.to_string());
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(accent_color()),
-        )));
-    } else if has_suggestions {
-        // Overlay pass owns the palette rows; no inline hint line competes
-        // with it.
-    } else if let Some(shell_hint) = shell_mode_hint(mode) {
-        hint_shown = true;
-        hint_line = Some(shell_hint.trim().to_string());
-        lines.push(Line::from(Span::styled(
-            shell_hint,
-            Style::default().fg(shell_mode_color()),
-        )));
-    } else if app.next_prompt_new_session_armed() {
-        hint_shown = true;
-        let hint = "  ↗ Next prompt opens a new session";
-        hint_line = Some(hint.trim().to_string());
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(rgb(120, 200, 255)),
-        )));
-    } else if app.is_processing() && !input_text.is_empty() {
-        hint_shown = true;
-        let hint = if app.queue_mode() {
-            "  Ctrl/Cmd+Enter to send now"
-        } else {
-            "  Ctrl/Cmd+Enter to queue"
-        };
-        hint_line = Some(hint.trim().to_string());
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(dim_color()),
-        )));
-    }
-
-    if let Some(capture) = debug_capture {
-        capture.rendered_text.input_area = input_text.to_string();
-        if let Some(hint) = &hint_line {
-            capture.rendered_text.input_hint = Some(hint.clone());
-        }
-        visual_debug::check_shift_enter_anomaly(
-            capture,
-            app.is_processing(),
-            input_text,
-            hint_shown,
-        );
-    }
-
-    let suggestions_offset = lines.len();
-    let total_input_lines = all_lines.len();
-    let visible_height = area.height as usize;
-
-    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
-        0
-    } else {
-        let available_for_input = visible_height.saturating_sub(suggestions_offset);
-        if cursor_line < available_for_input {
-            0
-        } else {
-            cursor_line.saturating_sub(available_for_input.saturating_sub(1))
-        }
-    };
-
-    for line in all_lines.into_iter().skip(scroll_offset) {
-        lines.push(line);
-        if lines.len() >= visible_height {
-            break;
-        }
-    }
-    let visible_input_rows = lines.len().saturating_sub(suggestions_offset);
-
-    let centered = app.centered_mode();
-
-    // Register the composer's visible rows with the shared copy-selection
-    // machinery so mouse drags can select and copy the text being typed
-    // (issue #430). The prompt prefix / continuation indent is excluded via
-    // per-row left margins, so hit-testing and the copied text only ever
-    // cover the typed text, never the prompt decoration.
-    if visible_input_rows > 0 {
-        let (wrapped_plain, raw_plain, line_map) =
-            input_copy_snapshot_parts(input_text, line_width);
-        let left_margins: Vec<u16> = (0..visible_input_rows)
-            .map(|rel| {
-                let abs = scroll_offset + rel;
-                let text_width = wrapped_plain
-                    .get(abs)
-                    .map(|text| unicode_width::UnicodeWidthStr::width(text.as_str()))
-                    .unwrap_or(0);
-                let mut margin = prompt_len;
-                if centered {
-                    margin += (area.width as usize).saturating_sub(prompt_len + text_width) / 2;
-                }
-                margin.min(area.width as usize) as u16
-            })
-            .collect();
-        let input_rows_area = Rect::new(
-            area.x,
-            area.y.saturating_add(suggestions_offset as u16),
-            area.width,
-            visible_input_rows as u16,
-        );
-        super::record_input_copy_snapshot(
-            wrapped_plain,
-            raw_plain,
-            line_map,
-            scroll_offset,
-            scroll_offset + visible_input_rows,
-            input_rows_area,
-            &left_margins,
-        );
-    }
-
-    // Highlight an active copy selection over the composer text, mirroring the
-    // chat/side-pane selection rendering. Columns are selection-space (typed
-    // text only), so shift them right by the prompt width for display.
-    if let Some(range) = app.copy_selection_range().filter(|range| {
-        range.start.pane == crate::tui::CopySelectionPane::Input
-            && range.end.pane == crate::tui::CopySelectionPane::Input
-    }) {
-        let (start, end) = if (range.start.abs_line, range.start.column)
-            <= (range.end.abs_line, range.end.column)
-        {
-            (range.start, range.end)
-        } else {
-            (range.end, range.start)
-        };
-        for rel in 0..visible_input_rows {
-            let abs = scroll_offset + rel;
-            if abs < start.abs_line || abs > end.abs_line {
-                continue;
-            }
-            if let Some(line) = lines.get_mut(suggestions_offset + rel) {
-                let start_col = if abs == start.abs_line {
-                    prompt_len + start.column
-                } else {
-                    prompt_len
-                };
-                let end_col = if abs == end.abs_line {
-                    prompt_len + end.column
-                } else {
-                    line.width()
-                };
-                *line = highlight_line_selection(line, start_col, end_col);
-            }
-        }
-    }
-
-    let paragraph = if centered {
-        Paragraph::new(
-            lines
-                .iter()
-                .map(|l| l.clone().alignment(Alignment::Center))
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        Paragraph::new(lines.clone())
-    };
-    frame.render_widget(paragraph, area);
-
-    let cursor_screen_line = cursor_line.saturating_sub(scroll_offset) + suggestions_offset;
-    let cursor_y = area.y + (cursor_screen_line as u16).min(area.height.saturating_sub(1));
-
-    let cursor_x = if centered {
-        let actual_line_width = lines
-            .get(cursor_screen_line)
-            .map(|l| l.width())
-            .unwrap_or(prompt_len);
-        let center_offset = (area.width as usize).saturating_sub(actual_line_width) / 2;
-        let cursor_offset = prompt_len + cursor_col;
-        area.x + center_offset as u16 + cursor_offset as u16
-    } else {
-        area.x + prompt_len as u16 + cursor_col as u16
-    };
-
-    let cursor = Position::new(cursor_x, cursor_y);
-    frame.set_cursor_position(cursor);
-    draw_send_mode_indicator(frame, app, area);
-    Some(cursor)
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2867,6 +1994,7 @@ pub(crate) fn input_cursor_pos_from_screen(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn wrap_input_text<'a>(
     input: &str,
     cursor_pos: usize,
@@ -2876,6 +2004,85 @@ pub(crate) fn wrap_input_text<'a>(
     caret_color: Color,
     prompt_len: usize,
 ) -> (Vec<Line<'a>>, usize, usize) {
+    wrap_input_text_with_images(
+        input,
+        cursor_pos,
+        line_width,
+        num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+        &|_| false,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn wrap_input_text_with_images<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+    attached: &dyn Fn(usize) -> bool,
+) -> (Vec<Line<'a>>, usize, usize) {
+    wrap_input_text_with_ghost(
+        input,
+        cursor_pos,
+        line_width,
+        num_str,
+        prompt_char,
+        caret_color,
+        prompt_len,
+        attached,
+        None,
+    )
+}
+
+/// Like [`wrap_input_text_with_images`], with an optional live voice
+/// transcript appended as ghost text. The ghost wraps with the input but is
+/// never editable, so the cursor stays at its real position.
+#[allow(clippy::too_many_arguments)]
+fn wrap_input_text_with_ghost<'a>(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    num_str: &str,
+    prompt_char: &'a str,
+    caret_color: Color,
+    prompt_len: usize,
+    attached: &dyn Fn(usize) -> bool,
+    ghost: Option<(&str, Style)>,
+) -> (Vec<Line<'a>>, usize, usize) {
+    let ghost_start = input.chars().count();
+    let combined;
+    let (input, ghost_style) = match ghost.filter(|(text, _)| !text.is_empty()) {
+        Some((text, style)) => {
+            let sep = if input.is_empty() || input.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
+            combined = format!("{input}{sep}{text}");
+            (combined.as_str(), Some(style))
+        }
+        None => (input, None),
+    };
+    let image_ranges: Vec<(std::ops::Range<usize>, bool)> = input
+        .match_indices("[image ")
+        .filter_map(|(start, _)| {
+            let suffix = &input[start + 7..];
+            let digits = suffix.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 || !suffix[digits..].starts_with(']') {
+                return None;
+            }
+            let char_start = input[..start].chars().count();
+            let present = suffix[..digits].parse::<usize>().is_ok_and(attached);
+            Some((char_start..char_start + 8 + digits, present))
+        })
+        .collect();
     let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
     let wrapped_segments = wrap_input_segments(input, line_width);
     let mut lines: Vec<Line> = Vec::new();
@@ -2893,19 +2100,46 @@ pub(crate) fn wrap_input_text<'a>(
             found_cursor = true;
         }
 
-        if idx == 0 {
+        let mut spans = if idx == 0 {
             let num_color = rainbow_prompt_color(0);
-            lines.push(Line::from(vec![
+            vec![
                 Span::styled(num_str.to_string(), Style::default().fg(num_color)),
                 Span::styled(prompt_char.to_string(), Style::default().fg(caret_color)),
-                Span::raw(segment.text.clone()),
-            ]));
+            ]
         } else {
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(prompt_len)),
-                Span::raw(segment.text.clone()),
-            ]));
+            vec![Span::raw(" ".repeat(prompt_len))]
+        };
+        // Apply styling after wrapping, preserving cursor and click geometry
+        // even when an attachment tag crosses a terminal row boundary.
+        let mut text = String::new();
+        let mut previous_style = Style::default();
+        for (offset, ch) in segment.text.chars().enumerate() {
+            let position = segment.start_char + offset;
+            let style = if let Some(ghost_style) = ghost_style.filter(|_| position >= ghost_start) {
+                ghost_style
+            } else if let Some((_, present)) = image_ranges
+                .iter()
+                .find(|(range, _)| range.contains(&position))
+            {
+                let color = if *present {
+                    rgb(102, 204, 221)
+                } else {
+                    rgb(255, 193, 7)
+                };
+                Style::default().fg(color).bold()
+            } else {
+                Style::default()
+            };
+            if style != previous_style && !text.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut text), previous_style));
+            }
+            previous_style = style;
+            text.push(ch);
         }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, previous_style));
+        }
+        lines.push(Line::from(spans));
     }
 
     if !found_cursor {
@@ -2918,6 +2152,12 @@ pub(crate) fn wrap_input_text<'a>(
 
     (lines, cursor_line, cursor_col)
 }
+
+/// Ghost text for the live voice transcript: italic and dim while
+/// recording, accent colored while the final pass runs.
+#[path = "ui_input/voice_preview.rs"]
+mod voice_preview;
+use voice_preview::{truncate_cells, voice_ghost, voice_waveform_line};
 
 fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
     let mode = composer_mode(app.input(), app.is_remote_mode());

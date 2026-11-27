@@ -11,22 +11,29 @@ use jcode_message_types::{ConnectionPhase, Message, StreamEvent, ToolDefinition}
 use jcode_provider_antigravity::{
     AVAILABLE_MODELS, CatalogModel, CatalogSnapshot, DEFAULT_FALLBACK_MODEL, PersistedCatalog,
     X_GOOG_API_CLIENT, antigravity_compatible_schema, antigravity_user_agent, catalog_is_stale,
-    catalog_model_detail, client_metadata_header, generate_content_api_url,
-    is_retryable_empty_turn, merge_antigravity_model_ids, remap_unsupported_model,
+    catalog_model_detail, client_metadata_header, merge_antigravity_model_ids,
+    remap_unsupported_model, stream_generate_content_api_url,
 };
 #[cfg(test)]
 use jcode_provider_antigravity::{
-    flatten_schema_combiners, metadata_platform, model_is_claude, model_is_gemini,
-    strip_numeric_schema_bounds,
+    flatten_schema_combiners, generate_content_api_url, is_retryable_empty_turn, metadata_platform,
+    model_is_claude, model_is_gemini, strip_numeric_schema_bounds,
 };
 use jcode_provider_core::{EventStream, Provider};
+#[cfg(test)]
+use jcode_provider_gemini::CodeAssistGenerateResponse;
+use jcode_provider_gemini::stream::{
+    GeminiSseEnvelope, GeminiSseParser, GeminiStreamAccumulator, GeminiStreamFinish,
+    decode_sse_chunk,
+};
 use jcode_provider_gemini::{
-    CodeAssistGenerateRequest, CodeAssistGenerateResponse, GeminiFunctionCallingConfig,
-    GeminiToolConfig, VertexGenerateContentRequest,
+    CodeAssistGenerateRequest, GeminiFunctionCallingConfig, GeminiThinkingRequestMode,
+    GeminiToolConfig, VertexGenerateContentRequest, build_generation_config_for_thoughts_with_mode,
 };
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -39,6 +46,11 @@ pub struct AntigravityProvider {
     /// Backend-advertised default agent model id (from `fetchAvailableModels`).
     /// Used to resolve the `"default"` alias to a real model for inference.
     backend_default_model: Arc<RwLock<Option<String>>>,
+    /// Whether Jcode's `swarm` orchestration sentinel is active. Antigravity
+    /// encodes real reasoning effort in sibling model IDs (`-low`, `-medium`,
+    /// `-high`, `-xhigh`), while `swarm` retains the sentinel in UI/session
+    /// state and routes requests to the configured swarm root effort sibling.
+    swarm_mode: Arc<RwLock<bool>>,
 }
 
 impl Clone for AntigravityProvider {
@@ -48,6 +60,7 @@ impl Clone for AntigravityProvider {
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            swarm_mode: self.swarm_mode.clone(),
         }
     }
 }
@@ -89,6 +102,7 @@ impl AntigravityProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
             backend_default_model: Arc::new(RwLock::new(None)),
+            swarm_mode: Arc::new(RwLock::new(false)),
         };
         provider.seed_cached_catalog();
         provider
@@ -106,6 +120,65 @@ impl AntigravityProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn is_swarm_mode(&self) -> bool {
+        *self
+            .swarm_mode
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn catalog_effort_candidates(&self) -> Vec<String> {
+        let catalog = self.fetched_catalog();
+        if !catalog.is_empty() {
+            return catalog
+                .into_iter()
+                .filter(|entry| entry.available)
+                .map(|entry| entry.id)
+                .collect();
+        }
+        AVAILABLE_MODELS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect()
+    }
+
+    fn resolve_sibling_model_for_effort(
+        &self,
+        effective_model: &str,
+        target_effort: &str,
+    ) -> Option<String> {
+        let (base, _) = jcode_provider_core::split_antigravity_model_effort(effective_model)?;
+        self.catalog_effort_candidates()
+            .into_iter()
+            .find(|candidate| {
+                jcode_provider_core::split_antigravity_model_effort(candidate).is_some_and(
+                    |(candidate_base, effort)| {
+                        candidate_base.eq_ignore_ascii_case(base)
+                            && effort.eq_ignore_ascii_case(target_effort)
+                    },
+                )
+            })
+    }
+
+    fn resolve_swarm_request_model(&self, effective_model: &str) -> String {
+        let root_effort = jcode_base::config::config().agents.root_effort_for_swarm();
+        let preference: &[&str] = match root_effort {
+            "none" | "minimal" | "low" => &["low", "medium", "high", "xhigh"],
+            "medium" => &["medium", "low", "high", "xhigh"],
+            "high" => &["high", "medium", "xhigh", "low"],
+            "xhigh" | "max" => &["xhigh", "high", "medium", "low"],
+            _ => &["low", "medium", "high", "xhigh"],
+        };
+        for &candidate_effort in preference {
+            if let Some(sibling) =
+                self.resolve_sibling_model_for_effort(effective_model, candidate_effort)
+            {
+                return sibling;
+            }
+        }
+        effective_model.to_string()
     }
 
     /// Resolve the live OAuth credential the runtime would use, for the
@@ -175,20 +248,20 @@ impl AntigravityProvider {
         Ok(snapshot)
     }
 
-    /// Resolve a requested model id into a real backend model id. The literal
-    /// alias `"default"` (and the empty string) is rejected by the
-    /// `generateContent` endpoint with HTTP 404, so it is mapped to the
-    /// backend-advertised default, then to a known-good catalog model, and
-    /// finally to a hardcoded fallback.
-    ///
-    /// Note: this only resolves the `"default"` alias / empty input. An
-    /// explicit model id from the user is honoured verbatim, except for ids
-    /// the backend advertises but cannot actually service, which are remapped
-    /// to an equivalent working id via [`remap_unsupported_model`].
-    fn resolve_model_for_request(&self, model: &str) -> String {
+    /// Resolve `"default"` / empty to a concrete model id without applying
+    /// request-time remaps or swarm-mode root overrides.
+    fn effective_selected_model_for(&self, model: &str) -> String {
         let trimmed = model.trim();
         if !trimmed.is_empty() && trimmed != DEFAULT_MODEL {
-            return remap_unsupported_model(trimmed).to_string();
+            return trimmed.to_string();
+        }
+
+        let catalog = self.fetched_catalog();
+        if catalog
+            .iter()
+            .any(|model| model.available && model.id == DEFAULT_FALLBACK_MODEL)
+        {
+            return DEFAULT_FALLBACK_MODEL.to_string();
         }
 
         if let Some(backend_default) = self
@@ -204,7 +277,6 @@ impl AntigravityProvider {
         // Claude models on the Cloud Code backend currently reject jcode's tool
         // schemas (they require JSON Schema draft 2020-12), so they are a poor
         // automatic default even when listed first in the catalog.
-        let catalog = self.fetched_catalog();
         if let Some(gemini_model) = catalog
             .iter()
             .find(|model| {
@@ -227,6 +299,28 @@ impl AntigravityProvider {
         DEFAULT_FALLBACK_MODEL.to_string()
     }
 
+    /// Resolve a requested model id into a real backend model id. The literal
+    /// alias `"default"` (and the empty string) is rejected by the
+    /// `generateContent` endpoint with HTTP 404, so it is mapped to the
+    /// backend-advertised default, then to a known-good catalog model, and
+    /// finally to a hardcoded fallback.
+    ///
+    /// Note: this only resolves the `"default"` alias / empty input. An
+    /// explicit model id from the user is honoured verbatim, except for ids
+    /// the backend advertises but cannot actually service, which are remapped
+    /// to an equivalent working id via [`remap_unsupported_model`], and when
+    /// Jcode's `swarm` sentinel is active, which routes requests to the
+    /// configured swarm root effort sibling.
+    fn resolve_model_for_request(&self, model: &str) -> String {
+        let effective = self.effective_selected_model_for(model);
+        let selected = if self.is_swarm_mode() {
+            self.resolve_swarm_request_model(&effective)
+        } else {
+            effective
+        };
+        remap_unsupported_model(&selected).to_string()
+    }
+
     async fn fetch_available_models(&self) -> Result<CatalogSnapshot> {
         jcode_base::provider::antigravity::fetch_catalog_snapshot(&self.client).await
     }
@@ -247,7 +341,7 @@ impl AntigravityProvider {
     /// this to a single retry per distinct construct.
     #[expect(
         clippy::too_many_arguments,
-        reason = "mirrors generate_content's explicit per-request settings so the retry re-sends an identical turn"
+        reason = "mirrors stream_generate_content's explicit per-request settings so the retry re-sends an identical turn"
     )]
     async fn retry_after_schema_rejection(
         &self,
@@ -258,7 +352,8 @@ impl AntigravityProvider {
         system: &str,
         resume_session_id: Option<&str>,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-    ) -> Option<Result<CodeAssistGenerateResponse>> {
+        thinking_mode: GeminiThinkingRequestMode,
+    ) -> Option<Result<reqwest::Response>> {
         let resolved = self.resolve_model_for_request(model);
         let dialect = jcode_provider_antigravity::antigravity_dialect(&resolved);
         match jcode_schema_dialect::recover_from_error(error, dialect) {
@@ -270,7 +365,7 @@ impl AntigravityProvider {
             jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
                 jcode_base::logging::warn(&format!("Antigravity {description}"));
                 Some(
-                    self.generate_content(
+                    self.stream_generate_content(
                         model,
                         messages,
                         tools,
@@ -278,6 +373,7 @@ impl AntigravityProvider {
                         resume_session_id,
                         false,
                         signature_policy,
+                        thinking_mode,
                     )
                     .await,
                 )
@@ -287,9 +383,9 @@ impl AntigravityProvider {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "the Code Assist call threads explicit per-request settings, including the signature policy, without hidden state"
+        reason = "the Code Assist call threads explicit per-request settings, including signature and thought policies, without hidden state"
     )]
-    async fn generate_content(
+    async fn stream_generate_content(
         &self,
         model: &str,
         messages: &[Message],
@@ -298,7 +394,8 @@ impl AntigravityProvider {
         resume_session_id: Option<&str>,
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
-    ) -> Result<CodeAssistGenerateResponse> {
+        thinking_mode: GeminiThinkingRequestMode,
+    ) -> Result<reqwest::Response> {
         let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
         let project = match tokens
             .project_id
@@ -309,7 +406,11 @@ impl AntigravityProvider {
             None => {
                 let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
                 tokens.project_id = Some(project_id.clone());
-                let _ = antigravity_auth::save_tokens(&tokens);
+                if let Err(error) = antigravity_auth::save_tokens(&tokens) {
+                    jcode_base::logging::warn(&format!(
+                        "Cannot persist discovered Antigravity project: {error}"
+                    ));
+                }
                 project_id
             }
         };
@@ -330,6 +431,8 @@ impl AntigravityProvider {
                 }
             }
         }
+        let generation_config =
+            build_generation_config_for_thoughts_with_mode(&resolved_model, thinking_mode);
         let request = CodeAssistGenerateRequest {
             model: resolved_model,
             project,
@@ -358,54 +461,21 @@ impl AntigravityProvider {
                         },
                     })
                 },
+                generation_config,
                 session_id: resume_session_id
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string),
             },
         };
 
-        let contents_value = serde_json::to_value(&request.request.contents).unwrap_or(Value::Null);
-        let content_items = contents_value.as_array().cloned().unwrap_or_default();
-        let system_value = request
-            .request
-            .system_instruction
-            .as_ref()
-            .and_then(|system| serde_json::to_value(system).ok());
-        let tools_value = request
-            .request
-            .tools
-            .as_ref()
-            .and_then(|tools| serde_json::to_value(tools).ok());
-        let payload = json!({
-            "model": &request.model,
-            "contents": contents_value,
-            "system_instruction": system_value.as_ref(),
-            "tools": tools_value.as_ref(),
-            "tool_config": &request.request.tool_config,
-        });
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
-            "antigravity",
-            model,
-            "gemini_generate_content",
-            &payload,
-            &content_items,
-            system_value.as_ref(),
-            tools_value.as_ref(),
-            request.request.tools.as_ref().map(|tools| tools.len()),
-            &[
-                (
-                    "session_id_present",
-                    request.request.session_id.is_some().to_string(),
-                ),
-                ("project_present", (!request.project.is_empty()).to_string()),
-            ],
-        );
+        log_canonical_input(model, &request);
 
         let response = self
             .client
-            .post(generate_content_api_url())
+            .post(stream_generate_content_api_url())
             .bearer_auth(&tokens.access_token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
             .header(reqwest::header::USER_AGENT, antigravity_user_agent())
             .header("x-goog-api-client", X_GOOG_API_CLIENT)
             .header(
@@ -416,22 +486,174 @@ impl AntigravityProvider {
             .json(&request)
             .send()
             .await
-            .context("Failed to send Antigravity generateContent request")?;
+            .context("Failed to send Antigravity streamGenerateContent request")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = jcode_base::util::http_error_body(response, "HTTP error").await;
             anyhow::bail!(
-                "Antigravity generateContent failed (HTTP {}): {}",
+                "Antigravity streamGenerateContent failed (HTTP {}): {}",
                 status,
                 body.trim()
             );
         }
 
-        response
-            .json()
-            .await
-            .context("Failed to decode Antigravity generateContent response")
+        Ok(response)
+    }
+}
+
+fn canonical_payload(request: &CodeAssistGenerateRequest) -> Value {
+    let mut payload = json!({
+        "model": &request.model,
+        "tool_config": &request.request.tool_config,
+    });
+    let Value::Object(object) = &mut payload else {
+        return Value::Null;
+    };
+    object.insert(
+        "contents".into(),
+        serde_json::to_value(&request.request.contents).unwrap_or(Value::Null),
+    );
+    object.insert(
+        "system_instruction".into(),
+        request
+            .request
+            .system_instruction
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok())
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "tools".into(),
+        request
+            .request
+            .tools
+            .as_ref()
+            .and_then(|value| serde_json::to_value(value).ok())
+            .unwrap_or(Value::Null),
+    );
+    payload
+}
+
+// Keep diagnostic JSON trees in this synchronous frame, never across HTTP awaits.
+fn log_canonical_input(model: &str, request: &CodeAssistGenerateRequest) {
+    let payload = canonical_payload(request);
+    let items = payload["contents"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    jcode_provider_core::fingerprint::log_provider_canonical_input(
+        "antigravity",
+        model,
+        "gemini_generate_content",
+        &payload,
+        items,
+        payload
+            .get("system_instruction")
+            .filter(|value| !value.is_null()),
+        payload.get("tools").filter(|value| !value.is_null()),
+        request.request.tools.as_ref().map(Vec::len),
+        &[
+            (
+                "session_id_present",
+                request.request.session_id.is_some().to_string(),
+            ),
+            ("project_present", (!request.project.is_empty()).to_string()),
+        ],
+    );
+}
+
+#[cfg(test)]
+mod canonical_input_tests {
+    use super::*;
+    use jcode_provider_gemini::{GeminiContent, GeminiFunctionDeclaration, GeminiPart, GeminiTool};
+
+    #[test]
+    fn canonical_payload_preserves_exact_schema_hashes_nulls_and_counts() {
+        for variant in 0..3 {
+            let content = GeminiContent {
+                role: "user".into(),
+                parts: vec![GeminiPart {
+                    text: Some("hello 雪".into()),
+                    ..Default::default()
+                }],
+            };
+            let request = CodeAssistGenerateRequest {
+                model: "fixture-model".into(),
+                project: "project".into(),
+                user_prompt_id: "volatile".into(),
+                request: VertexGenerateContentRequest {
+                    contents: vec![content.clone()],
+                    system_instruction: (variant > 0).then(|| content.clone()),
+                    tools: match variant {
+                        0 => None,
+                        1 => Some(vec![]),
+                        _ => Some(vec![GeminiTool {
+                            function_declarations: vec![GeminiFunctionDeclaration {
+                                name: "lookup".into(),
+                                description: "find".into(),
+                                parameters: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+                            }],
+                        }]),
+                    },
+                    tool_config: (variant > 0).then_some(GeminiToolConfig {
+                        function_calling_config: GeminiFunctionCallingConfig { mode: "AUTO" },
+                    }),
+                    generation_config: None,
+                    session_id: Some("session".into()),
+                },
+            };
+            let original_wire = serde_json::to_vec(&request).unwrap();
+            let contents = serde_json::to_value(&request.request.contents).unwrap();
+            let system = request
+                .request
+                .system_instruction
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap());
+            let tools = request
+                .request
+                .tools
+                .as_ref()
+                .map(|value| serde_json::to_value(value).unwrap());
+            let legacy = json!({"model": request.model, "contents": contents, "system_instruction": system.as_ref(), "tools": tools.as_ref(), "tool_config": request.request.tool_config});
+            let payload = canonical_payload(&request);
+            assert_eq!(
+                serde_json::to_vec(&payload).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            assert_eq!(payload.as_object().unwrap().len(), 5);
+            assert!(!payload.to_string().contains("volatile"));
+            assert_eq!(payload["contents"].as_array().unwrap().len(), 1);
+            assert_eq!(payload["system_instruction"].is_null(), variant == 0);
+            assert_eq!(payload["tools"].is_null(), variant == 0);
+            assert_eq!(
+                request.request.tools.as_ref().map(Vec::len),
+                match variant {
+                    0 => None,
+                    1 => Some(0),
+                    _ => Some(1),
+                }
+            );
+            let hash = jcode_provider_core::fingerprint::stable_hash_json;
+            assert_eq!(hash(&payload), hash(&legacy));
+            assert_eq!(hash(&payload["contents"]), hash(&contents));
+            assert_eq!(
+                payload
+                    .get("system_instruction")
+                    .filter(|value| !value.is_null())
+                    .map(hash),
+                system.as_ref().map(hash)
+            );
+            assert_eq!(
+                payload
+                    .get("tools")
+                    .filter(|value| !value.is_null())
+                    .map(hash),
+                tools.as_ref().map(hash)
+            );
+            log_canonical_input("fixture-model", &request);
+            assert_eq!(serde_json::to_vec(&request).unwrap(), original_wire);
+        }
     }
 }
 
@@ -439,6 +661,66 @@ impl Default for AntigravityProvider {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn ensure_account_model(model: &str, ids: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        ids.iter().any(|id| id == model),
+        "Antigravity does not offer '{model}' for this account. Use /model to choose an available route. No generation request was sent."
+    );
+    Ok(())
+}
+
+async fn consume_antigravity_sse_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> Result<GeminiStreamFinish> {
+    let mut byte_stream = response.bytes_stream();
+    let mut utf8 = jcode_base::util::Utf8StreamDecoder::new();
+    let mut sse = GeminiSseParser::new();
+    let mut acc = GeminiStreamAccumulator::new("Antigravity", false, true);
+    let mut next_call_id = || Uuid::new_v4().to_string();
+
+    while let Some(chunk_res) = byte_stream.next().await {
+        let bytes = chunk_res.context("Failed reading Antigravity SSE stream")?;
+        let text = utf8.decode(&bytes);
+        for data in sse.push(&text) {
+            let Some(resp) = decode_sse_chunk(GeminiSseEnvelope::CodeAssist, &data)
+                .context("Failed to decode Antigravity SSE chunk")?
+            else {
+                continue;
+            };
+            let result = acc.push_response(resp, &mut next_call_id);
+            for event in result.events {
+                if tx.send(Ok(event)).await.is_err() {
+                    return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+                }
+            }
+            if result.pseudo_tool_call_detected {
+                return Ok(GeminiStreamFinish::PseudoToolCall { events: Vec::new() });
+            }
+        }
+    }
+
+    let trailing = utf8.flush();
+    for data in sse.push(&trailing).into_iter().chain(sse.finish()) {
+        let Some(resp) = decode_sse_chunk(GeminiSseEnvelope::CodeAssist, &data)
+            .context("Failed to decode trailing Antigravity SSE chunk")?
+        else {
+            continue;
+        };
+        let result = acc.push_response(resp, &mut next_call_id);
+        for event in result.events {
+            if tx.send(Ok(event)).await.is_err() {
+                return Ok(GeminiStreamFinish::Completed { events: Vec::new() });
+            }
+        }
+        if result.pseudo_tool_call_detected {
+            return Ok(GeminiStreamFinish::PseudoToolCall { events: Vec::new() });
+        }
+    }
+
+    Ok(acc.finish())
 }
 
 #[async_trait]
@@ -456,6 +738,21 @@ impl Provider for AntigravityProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let messages = messages.to_vec();
+        // A saved session or manual route can name a model from another
+        // provider. Confirm cache misses against this account before sending
+        // user content. A stale cache alone must not reject a new launch.
+        if model != DEFAULT_MODEL
+            && !model.trim().is_empty()
+            && !self
+                .fetched_catalog()
+                .iter()
+                .any(|entry| entry.id == model && entry.available)
+        {
+            let ids = self.fetch_live_model_ids_for_doctor().await.context(
+                "Could not verify the selected Antigravity model against this account's catalog",
+            )?;
+            ensure_account_model(&model, &ids)?;
+        }
         let tools = _tools.to_vec();
         let system = system.to_string();
         let resume_session_id = _resume_session_id.map(str::to_string);
@@ -489,278 +786,191 @@ impl Provider for AntigravityProvider {
             // downgraded to plain text. Content is preserved, the turn completes,
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
-            let response = match provider
-                .generate_content(
-                    &model,
-                    &messages,
-                    &tools,
-                    &system,
-                    resume_session_id.as_deref(),
-                    false,
-                    signature_policy,
-                )
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    // A tool schema the backend rejects 400s every single turn,
-                    // so the provider is unusable until jcode ships a new
-                    // deny-list entry. Instead, learn the rejected construct
-                    // from the error, persist it, and retry the same turn
-                    // without it. See `jcode-schema-dialect`.
-                    if let Some(retried) = provider
-                        .retry_after_schema_rejection(
-                            &err.to_string(),
+            let mut thinking_mode = GeminiThinkingRequestMode::Full;
+            let mut force_function_call = false;
+            let mut malformed_retries = 0u8;
+            let mut pseudo_retried = false;
+            const MAX_MALFORMED_RETRIES: u8 = 2;
+            let mut emitted_streaming_phase = false;
+
+            loop {
+                let response = if !force_function_call {
+                    match provider
+                        .stream_generate_content(
                             &model,
                             &messages,
                             &tools,
                             &system,
                             resume_session_id.as_deref(),
+                            false,
                             signature_policy,
+                            thinking_mode,
                         )
                         .await
                     {
-                        match retried {
-                            Ok(response) => response,
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
+                        Ok(response) => response,
+                        Err(err) => {
+                            let err_str = format!("{err:#}");
+                            let resolved_for_downgrade = provider.resolve_model_for_request(&model);
+                            if let Some(next_mode) =
+                                thinking_mode.downgrade_for_error(&resolved_for_downgrade, &err_str)
+                            {
+                                jcode_base::logging::warn(&format!(
+                                    "Antigravity rejected thinkingConfig ({thinking_mode:?}); retrying with {next_mode:?}"
+                                ));
+                                thinking_mode = next_mode;
+                                continue;
+                            } else if let Some(retried) = provider
+                                .retry_after_schema_rejection(
+                                    &err_str,
+                                    &model,
+                                    &messages,
+                                    &tools,
+                                    &system,
+                                    resume_session_id.as_deref(),
+                                    signature_policy,
+                                    thinking_mode,
+                                )
+                                .await
+                            {
+                                match retried {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let _ = tx.send(Err(retry_err)).await;
+                                        return;
+                                    }
+                                }
+                            } else if !jcode_provider_gemini::is_missing_thought_signature_error(
+                                &err_str,
+                            ) {
+                                let _ = tx.send(Err(err)).await;
                                 return;
-                            }
-                        }
-                    } else if !jcode_provider_gemini::is_missing_thought_signature_error(
-                        &err.to_string(),
-                    ) {
-                        let _ = tx.send(Err(err)).await;
-                        return;
-                    } else {
-                        jcode_base::logging::warn(
-                            "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
-                        );
-                        signature_policy =
-                            jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
-                        match provider
-                            .generate_content(
-                                &model,
-                                &messages,
-                                &tools,
-                                &system,
-                                resume_session_id.as_deref(),
-                                false,
-                                signature_policy,
-                            )
-                            .await
-                        {
-                            Ok(response) => response,
-                            Err(retry_err) => {
-                                let _ = tx.send(Err(retry_err)).await;
-                                return;
+                            } else {
+                                jcode_base::logging::warn(
+                                    "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
+                                );
+                                signature_policy =
+                                    jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
+                                match provider
+                                    .stream_generate_content(
+                                        &model,
+                                        &messages,
+                                        &tools,
+                                        &system,
+                                        resume_session_id.as_deref(),
+                                        false,
+                                        signature_policy,
+                                        thinking_mode,
+                                    )
+                                    .await
+                                {
+                                    Ok(response) => response,
+                                    Err(retry_err) => {
+                                        let _ = tx.send(Err(retry_err)).await;
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            };
-            // Gemini-3 thinking models intermittently return an empty
-            // `MALFORMED_FUNCTION_CALL` turn (pseudo-code instead of a clean
-            // functionCall). It is transient, so transparently re-request a few
-            // times before surfacing it; this turns a frequent hard failure into a
-            // near-always-successful turn without the agent loop seeing the blip.
-            // The retries force function-calling mode `ANY` so the model must emit
-            // a real functionCall rather than the pseudo-code that failed.
-            let mut response = response;
-            let mut malformed_retries = 0u8;
-            const MAX_MALFORMED_RETRIES: u8 = 2;
-            while is_retryable_empty_turn(&response) && malformed_retries < MAX_MALFORMED_RETRIES {
-                malformed_retries += 1;
-                match provider
-                    .generate_content(
-                        &model,
-                        &messages,
-                        &tools,
-                        &system,
-                        resume_session_id.as_deref(),
-                        true,
-                        signature_policy,
-                    )
-                    .await
-                {
-                    Ok(retried) => response = retried,
-                    Err(err) => {
-                        let _ = tx.send(Err(err)).await;
-                        return;
+                } else {
+                    match provider
+                        .stream_generate_content(
+                            &model,
+                            &messages,
+                            &tools,
+                            &system,
+                            resume_session_id.as_deref(),
+                            true,
+                            signature_policy,
+                            thinking_mode,
+                        )
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(err) => {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
                     }
-                }
-            }
+                };
 
-            // The unsigned-history fallback contains a deliberately distinctive
-            // marker. Gemini 3 Flash can imitate it as fresh assistant text,
-            // making the session look productive while no tool is dispatched
-            // (#845). Never execute or render that pseudo-call. Retry exactly
-            // once with native function calling forced, then fail clearly.
-            if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
-                response = match provider
-                    .generate_content(
-                        &model,
-                        &messages,
-                        &tools,
-                        &system,
-                        resume_session_id.as_deref(),
-                        true,
-                        signature_policy,
-                    )
-                    .await
-                {
-                    Ok(retried) => retried,
+                if !emitted_streaming_phase {
+                    emitted_streaming_phase = true;
+                    let _ = tx
+                        .send(Ok(StreamEvent::ConnectionPhase {
+                            phase: ConnectionPhase::Streaming,
+                        }))
+                        .await;
+                }
+
+                let finish = match consume_antigravity_sse_stream(response, &tx).await {
+                    Ok(finish) => finish,
                     Err(err) => {
                         let _ = tx.send(Err(err)).await;
                         return;
                     }
                 };
-                if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Antigravity returned a textual pseudo-tool call after a forced native-call retry; start a new turn or choose another model"
-                        )))
-                        .await;
-                    return;
-                }
-            }
-            let _ = tx
-                .send(Ok(StreamEvent::ConnectionPhase {
-                    phase: ConnectionPhase::Streaming,
-                }))
-                .await;
-            if let Some(usage) = response
-                .response
-                .as_ref()
-                .and_then(|r| r.usage_metadata.as_ref())
-            {
-                let _ = tx
-                    .send(Ok(StreamEvent::TokenUsage {
-                        input_tokens: usage.input_token_count(),
-                        output_tokens: usage.output_token_count(),
-                        cache_read_input_tokens: usage.cached_content_token_count,
-                        cache_creation_input_tokens: None,
-                    }))
-                    .await;
-            }
-            let Some(candidate) = response
-                .response
-                .and_then(|r| r.candidates)
-                .and_then(|mut c| c.drain(..).next())
-            else {
-                let _ = tx
-                    .send(Err(anyhow::anyhow!(
-                        "Antigravity returned no candidates for generateContent"
-                    )))
-                    .await;
-                return;
-            };
-            // Track whether this candidate produced any usable output (text or a
-            // tool call). Gemini-3 thinking models intermittently emit Python-style
-            // pseudo-code instead of a clean functionCall and finish with
-            // `MALFORMED_FUNCTION_CALL` (or a bare `OTHER`) and empty content. If we
-            // silently end the turn the agent loop looks like it stalled with no
-            // answer, so we surface an actionable error below instead.
-            let mut produced_output = false;
-            if let Some(content) = candidate.content {
-                // Gemini 3 attaches a `thoughtSignature` to function-call parts
-                // (and occasionally to a standalone preceding part). Emit tool
-                // calls through the standard ToolUseStart/End path so jcode
-                // drives the multi-turn loop, and replay the signature via a
-                // dedicated ToolUseSignature event so it can be persisted on the
-                // ToolUse block and resent on later turns (required by the
-                // Cloud Code backend, which rejects function calls missing it).
-                let mut pending_signature: Option<String> = None;
-                for part in content.parts {
-                    let part_signature = part
-                        .thought_signature
-                        .as_ref()
-                        .filter(|sig| !sig.is_empty())
-                        .cloned();
-                    if let Some(text) = part.text.filter(|text| !text.is_empty()) {
-                        produced_output = true;
-                        let _ = tx.send(Ok(StreamEvent::TextDelta(text))).await;
+
+                match finish {
+                    GeminiStreamFinish::Completed { events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        return;
                     }
-                    if let Some(function_call) = part.function_call {
-                        produced_output = true;
-                        let signature = part_signature.clone().or_else(|| pending_signature.take());
-                        let raw_call_id = function_call
-                            .id
-                            .clone()
-                            .unwrap_or_else(|| Uuid::new_v4().to_string());
-                        let call_id = jcode_message_types::sanitize_tool_id(&raw_call_id);
+                    GeminiStreamFinish::RetryableEmpty {
+                        finish_reason,
+                        finish_message,
+                        events,
+                    } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        if malformed_retries < MAX_MALFORMED_RETRIES {
+                            malformed_retries += 1;
+                            force_function_call = true;
+                            continue;
+                        }
+                        let detail = finish_message
+                            .as_deref()
+                            .filter(|msg| !msg.trim().is_empty())
+                            .map(|msg| {
+                                format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300))
+                            })
+                            .unwrap_or_default();
                         let _ = tx
-                            .send(Ok(StreamEvent::ToolUseStart {
-                                id: call_id,
-                                name: function_call.name,
-                            }))
-                            .await;
-                        let _ = tx
-                            .send(Ok(StreamEvent::ToolInputDelta(
-                                function_call.args.to_string(),
+                            .send(Err(anyhow::anyhow!(
+                                "Antigravity returned no usable output (finish_reason={finish_reason}){detail}"
                             )))
                             .await;
-                        let _ = tx.send(Ok(StreamEvent::ToolUseEnd)).await;
-                        if let Some(signature) = signature {
-                            let _ = tx.send(Ok(StreamEvent::ToolUseSignature(signature))).await;
+                        return;
+                    }
+                    GeminiStreamFinish::PseudoToolCall { events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
                         }
-                    } else if let Some(signature) = part_signature {
-                        // Standalone signature part; remember it for the next
-                        // function call in this candidate.
-                        pending_signature = Some(signature);
+                        if !pseudo_retried {
+                            pseudo_retried = true;
+                            force_function_call = true;
+                            continue;
+                        }
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "Antigravity returned a textual pseudo-tool call after a forced native-call retry; start a new turn or choose another model"
+                            )))
+                            .await;
+                        return;
+                    }
+                    GeminiStreamFinish::Error { message, events } => {
+                        for event in events {
+                            let _ = tx.send(Ok(event)).await;
+                        }
+                        let _ = tx.send(Err(anyhow::anyhow!(message))).await;
+                        return;
                     }
                 }
-                // A thought signature that was never consumed by a following
-                // function call (e.g. a pure-text reasoning turn) is still an
-                // opaque reasoning signal. Surface it as a ThinkingSignatureDelta
-                // rather than dropping it, so reasoning-aware consumers (and the
-                // provider-doctor reasoning probe) can see the model reasoned.
-                if let Some(signature) = pending_signature.take() {
-                    let _ = tx
-                        .send(Ok(StreamEvent::ThinkingSignatureDelta(signature)))
-                        .await;
-                }
             }
-
-            // An abnormal finish (typically Gemini-3's intermittent
-            // `MALFORMED_FUNCTION_CALL`, where the model writes pseudo-code rather
-            // than a valid functionCall) that yielded no text and no tool call is a
-            // dead turn: surface it as a retryable error instead of a silent empty
-            // `MessageEnd` that looks like the agent gave up. `STOP`/`MAX_TOKENS`
-            // are normal terminal reasons and are left to flow through as usual.
-            if !produced_output {
-                let abnormal = candidate
-                    .finish_reason
-                    .as_deref()
-                    .map(|reason| {
-                        !matches!(
-                            reason.to_ascii_uppercase().as_str(),
-                            "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED" | ""
-                        )
-                    })
-                    .unwrap_or(false);
-                if abnormal {
-                    let reason = candidate.finish_reason.as_deref().unwrap_or("unknown");
-                    let detail = candidate
-                        .finish_message
-                        .as_deref()
-                        .filter(|msg| !msg.trim().is_empty())
-                        .map(|msg| format!(": {}", jcode_base::util::truncate_str(msg.trim(), 300)))
-                        .unwrap_or_default();
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Antigravity returned no usable output (finish_reason={reason}){detail}"
-                        )))
-                        .await;
-                    return;
-                }
-            }
-
-            let _ = tx
-                .send(Ok(StreamEvent::MessageEnd {
-                    stop_reason: candidate.finish_reason.clone(),
-                }))
-                .await;
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
@@ -777,6 +987,10 @@ impl Provider for AntigravityProvider {
             .clone()
     }
 
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         // `--provider antigravity` uses this runtime directly, so session
         // restore hands it the routing spec `antigravity:<model>` rather than a
@@ -790,7 +1004,90 @@ impl Provider for AntigravityProvider {
             .model
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = trimmed.to_string();
+        *self
+            .swarm_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         Ok(())
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        if self.available_efforts().is_empty() {
+            return None;
+        }
+        if self.is_swarm_mode() {
+            return Some(jcode_base::prompt::SWARM_EFFORT.to_string());
+        }
+        let effective = self.effective_selected_model_for(&self.model());
+        jcode_provider_core::split_antigravity_model_effort(&effective)
+            .map(|(_, effort)| effort.to_string())
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        let requested = effort.trim().to_ascii_lowercase();
+        let effective = self.effective_selected_model_for(&self.model());
+        let available = self.available_efforts();
+        if available.is_empty() {
+            anyhow::bail!(
+                "Antigravity model '{}' does not support reasoning effort switching",
+                effective
+            );
+        }
+        if requested.is_empty() {
+            *self
+                .swarm_mode
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+            return Ok(());
+        }
+        if jcode_base::prompt::is_swarm_effort(&requested) {
+            *self
+                .swarm_mode
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            return Ok(());
+        }
+        if !available.iter().any(|candidate| *candidate == requested) {
+            let levels = available
+                .into_iter()
+                .filter(|candidate| !jcode_base::prompt::is_swarm_effort(candidate))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "Invalid reasoning effort '{}' for Antigravity model '{}'. Valid values: {}, {}",
+                requested,
+                effective,
+                levels,
+                jcode_base::prompt::SWARM_EFFORT
+            );
+        }
+        let target_model = self
+            .resolve_sibling_model_for_effort(&effective, &requested)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No Antigravity model variant available for '{}' at effort '{}'",
+                    effective,
+                    requested
+                )
+            })?;
+        *self
+            .model
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = target_model;
+        *self
+            .swarm_mode
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        Ok(())
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        let effective = self.effective_selected_model_for(&self.model());
+        let candidates = self.catalog_effort_candidates();
+        jcode_provider_core::antigravity_efforts_from_catalog(
+            &effective,
+            candidates.iter().map(String::as_str),
+        )
     }
 
     fn available_models(&self) -> Vec<&'static str> {
@@ -808,7 +1105,16 @@ impl Provider for AntigravityProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
-        self.available_models_display()
+        let catalog = self.fetched_catalog();
+        if catalog.is_empty() {
+            return self.available_models_display();
+        }
+        merge_antigravity_model_ids(
+            catalog
+                .into_iter()
+                .filter(|model| model.available)
+                .map(|model| model.id),
+        )
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
@@ -890,10 +1196,35 @@ impl Provider for AntigravityProvider {
                     "Antigravity model catalog refresh failed; keeping fallback list: {}",
                     err
                 ));
+                return Err(err);
             }
         }
 
         Ok(())
+    }
+
+    fn context_window(&self) -> usize {
+        let selected = self.model();
+        let resolved = self.resolve_model_for_request(&selected);
+        let catalog = self.fetched_catalog();
+        // Use this route's limit and resolve aliases just as inference does.
+        let limit_for = |id: &str| {
+            catalog
+                .iter()
+                .find(|entry| entry.id == id)
+                .and_then(|entry| entry.max_tokens)
+                .and_then(|limit| usize::try_from(limit).ok())
+                .filter(|limit| *limit > 0)
+        };
+        limit_for(&resolved)
+            .or_else(|| limit_for(&selected))
+            .or_else(|| {
+                jcode_provider_core::models::context_limit_for_model_with_provider(
+                    &resolved,
+                    Some("antigravity"),
+                )
+            })
+            .unwrap_or(jcode_provider_core::models::DEFAULT_CONTEXT_LIMIT)
     }
 
     fn supports_compaction(&self) -> bool {
@@ -912,6 +1243,7 @@ impl Provider for AntigravityProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            swarm_mode: Arc::new(RwLock::new(self.is_swarm_mode())),
         })
     }
 }

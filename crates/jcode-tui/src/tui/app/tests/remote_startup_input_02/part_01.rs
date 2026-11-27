@@ -1,49 +1,4 @@
 #[test]
-fn test_model_picker_copilot_selection_prefixes_model() {
-    let mut app = create_test_app();
-    configure_test_remote_models_with_copilot(&mut app);
-
-    app.open_model_picker();
-
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-
-    // Find grok-code-fast-1 (which should only be a copilot route)
-    let grok_idx = picker
-        .entries
-        .iter()
-        .position(|m| m.name == "grok-code-fast-1")
-        .expect("grok-code-fast-1 should be in picker");
-
-    // Navigate to it and select
-    let filtered_pos = picker
-        .filtered
-        .iter()
-        .position(|&i| i == grok_idx)
-        .expect("grok-code-fast-1 should be in filtered list");
-
-    // Set the selected position to grok's position
-    app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
-
-    // Press Enter to select
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
-
-    // In remote mode, selection should produce a pending_model_switch with copilot: prefix
-    if let Some(ref spec) = app.pending_model_switch {
-        assert!(
-            spec.starts_with("copilot:"),
-            "copilot model should be prefixed with 'copilot:', got: {}",
-            spec
-        );
-    }
-    // Picker should be closed
-    assert!(app.inline_interactive_state.is_none());
-}
-
-#[test]
 fn test_model_picker_cursor_models_have_cursor_route() {
     let mut app = create_test_app();
     configure_test_remote_models_with_cursor(&mut app);
@@ -469,6 +424,7 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
             std::collections::BTreeSet::from([
                 "claude-opus-5-5",
                 "claude-sonnet-5-5",
+                "claude-sonnet-4-6",
                 "claude-haiku-5-5",
                 "gpt-6.1-sol",
             ])
@@ -1391,7 +1347,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             content: vec![ContentBlock::Text {
                 text: "full transcript should not be copied".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             display_role: None,
             timestamp: None,
             tool_duration_ms: None,
@@ -1407,6 +1364,8 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         crate::todo::save_todos(
             &app.session.id,
             &[crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1419,6 +1378,9 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: vec!["parent-build-task".to_string()],
             }],
         )
         .expect("save todos");
@@ -1434,13 +1396,18 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
 
         assert_eq!(child.parent_id.as_deref(), Some(app.session.id.as_str()));
         assert!(child.messages.is_empty());
-        assert_eq!(child.compaction, Some(transfer_compaction));
+        assert_eq!(child.compaction.as_deref(), Some(&transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
         assert_eq!(child.system_prompt, app.session.system_prompt);
         assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
         assert_eq!(child_todos.len(), 1);
         assert_eq!(child_todos[0].content, "Carry this forward");
+        assert!(child_todos[0].waiting_on.is_empty());
+        assert_eq!(
+            crate::todo::load_todos(&app.session.id).unwrap()[0].waiting_on,
+            ["parent-build-task"]
+        );
         for prompt in [None, Some("")] {
             app.session.system_prompt = prompt.map(str::to_string);
             let (child_id, _) = super::commands::create_transfer_session_from_parent(
@@ -1586,6 +1553,8 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
     app.queued_messages
         .push(super::commands::build_poke_message(&[
             crate::todo::TodoItem {
+                lane_after: None,
+                lane_owner: None,
                 stage: None,
                 details: None,
                 group: None,
@@ -1598,6 +1567,9 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
                 confidence: None,
                 completion_confidence: None,
                 confidence_history: Vec::new(),
+                waiting_reason: None,
+                requires_user_auth: None,
+                waiting_on: Vec::new(),
             },
         ]));
 
@@ -2317,97 +2289,7 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
     });
 }
 
-#[test]
-fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_favorite() {
-    with_temp_jcode_home(|| {
-        let model = "placeholder-favorite-hotkey-model";
-        let mut app = create_test_app();
-        app.is_remote = true;
-        app.remote_provider_name = Some("Some Server".to_string());
-        app.remote_provider_model = Some(model.to_string());
-        app.remote_available_entries = vec![model.to_string()];
-        app.remote_model_options = vec![crate::provider::ModelRoute {
-            model: model.to_string(),
-            provider: "Some Server".to_string(),
-            api_method: "remote-catalog".to_string(),
-            available: true,
-            detail: "refreshing route details…".to_string(),
-            usage: None,
-            cheapness: None,
-        }];
+include!("catalog_refresh.rs");
 
-        app.cycle_model_favorite_hotkey();
-
-        assert!(app.inline_interactive_state.is_some());
-        assert!(app.pending_model_switch.is_none());
-    });
-}
-
-#[test]
-fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
-    // A picker opened while the catalog is still names-only shows placeholder
-    // rows. When the detailed catalog lands, the open picker must be rebuilt
-    // rather than left stale until the user reopens it.
-    with_temp_jcode_home(|| {
-        let model = "gpt-5.5";
-        let mut app = create_test_app();
-        app.is_remote = true;
-        app.remote_provider_name = Some("OpenAI".to_string());
-        app.remote_provider_model = Some(model.to_string());
-        app.remote_available_entries = vec![model.to_string()];
-        app.remote_model_options = vec![crate::provider::ModelRoute {
-            model: model.to_string(),
-            provider: "OpenAI".to_string(),
-            api_method: "remote-catalog".to_string(),
-            available: true,
-            detail: "refreshing route details…".to_string(),
-            usage: None,
-            cheapness: None,
-        }];
-
-        app.open_model_picker();
-        assert!(app.inline_interactive_state.is_some());
-
-        app.remote_model_options = vec![crate::provider::ModelRoute {
-            model: model.to_string(),
-            provider: "OpenAI".to_string(),
-            api_method: "openai-api".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        }];
-        app.invalidate_model_picker_cache();
-        app.refresh_open_model_picker_after_catalog_update();
-
-        let picker = app
-            .inline_interactive_state
-            .as_ref()
-            .expect("picker should still be open after the catalog update");
-        assert!(
-            picker
-                .entries
-                .iter()
-                .any(|entry| entry.name.starts_with(model)),
-            "rebuilt picker should still list the model"
-        );
-        assert!(
-            picker.entries.iter().all(|entry| {
-                entry
-                    .options
-                    .iter()
-                    .all(|route| route.api_method != "remote-catalog")
-            }),
-            "rebuilt picker should not keep placeholder rows"
-        );
-        assert!(
-            picker.entries.iter().any(|entry| {
-                entry
-                    .options
-                    .iter()
-                    .any(|route| route.api_method == "openai-api")
-            }),
-            "rebuilt picker should expose the real route"
-        );
-    });
-}
+#[path = "part_01_additional_tests.rs"]
+mod additional_test_model_picker_copilot_selection_prefixes_model;

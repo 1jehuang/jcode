@@ -1,87 +1,8 @@
 use super::*;
-
-#[tokio::test]
-async fn catalog_request_headers_follow_provider_auth_rules() {
-    for base in [
-        "https://api.anthropic.com/v1",
-        "https://API.ANTHROPIC.COM/v1",
-    ] {
-        for auth in [
-            ProviderAuth::AuthorizationBearer {
-                token: "test-key".into(),
-                label: "test".into(),
-            },
-            ProviderAuth::HeaderValue {
-                header_name: HeaderName::from_static("x-api-key"),
-                value: "test-key".into(),
-                label: "test".into(),
-            },
-        ] {
-            let request = auth
-                .apply_catalog(Client::new().get(format!("{base}/models")), base)
-                .await
-                .unwrap()
-                .build()
-                .unwrap();
-            assert_eq!(request.method(), reqwest::Method::GET);
-            assert_eq!(request.url().path(), "/v1/models");
-            assert_eq!(request.headers()["anthropic-version"], "2023-06-01");
-            assert_eq!(request.headers()["x-api-key"], "test-key");
-            assert!(request.headers().get("authorization").is_none());
-            assert_eq!(request.headers().get_all("x-api-key").iter().count(), 1);
-        }
-    }
-
-    for base in [
-        "https://openrouter.ai/api/v1",
-        "https://api.openai.com/v1",
-        "http://localhost:11434/v1",
-    ] {
-        for (auth, expected_header, expected_value) in [
-            (
-                ProviderAuth::AuthorizationBearer {
-                    token: "test-key".into(),
-                    label: "test".into(),
-                },
-                Some("authorization"),
-                "Bearer test-key",
-            ),
-            (
-                ProviderAuth::HeaderValue {
-                    header_name: HeaderName::from_static("api-key"),
-                    value: "test-key".into(),
-                    label: "test".into(),
-                },
-                Some("api-key"),
-                "test-key",
-            ),
-            (
-                ProviderAuth::None {
-                    label: "test".into(),
-                },
-                None,
-                "",
-            ),
-        ] {
-            let request = auth
-                .apply_catalog(Client::new().get(format!("{base}/models")), base)
-                .await
-                .unwrap()
-                .build()
-                .unwrap();
-            assert!(request.headers().get("anthropic-version").is_none());
-            assert!(request.headers().get("x-api-key").is_none());
-            if let Some(header) = expected_header {
-                assert_eq!(request.headers()[header], expected_value);
-            } else {
-                assert!(request.headers().is_empty());
-            }
-        }
-    }
-}
 use bytes::Bytes;
 use futures::StreamExt;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -193,65 +114,8 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
     guards
 }
 
-#[test]
-fn test_has_credentials() {
-    let _has_creds = OpenRouterProvider::has_credentials();
-}
-
 #[path = "openrouter_tests/catalog_shape_tests.rs"]
 mod catalog_shape_tests;
-
-#[test]
-fn named_openai_compatible_provider_sets_catalog_cache_namespace() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("example-model".to_string()),
-        ..Default::default()
-    };
-
-    let _provider = OpenRouterProvider::new_named_openai_compatible("example-compat", &profile)
-        .expect("named profile should initialize");
-
-    assert_eq!(
-        std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").as_deref(),
-        Ok("example-compat")
-    );
-}
-
-#[test]
-fn named_openai_compatible_provider_exposes_static_models_as_routes() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let _key = EnvVarGuard::set("TEST_NAMED_COMPAT_KEY", "test-key");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "https://llm.example.com/v1".to_string(),
-        api_key_env: Some("TEST_NAMED_COMPAT_KEY".to_string()),
-        model_catalog: true,
-        default_model: Some("glm-51-nvfp4".to_string()),
-        models: vec![jcode_base::config::NamedProviderModelConfig {
-            id: "glm-51-nvfp4".to_string(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    let provider = OpenRouterProvider::new_named_openai_compatible("comtegra-test", &profile)
-        .expect("named profile should initialize");
-    let routes = provider.model_routes();
-
-    assert!(routes.iter().any(|route| {
-        route.model == "glm-51-nvfp4"
-            && route.api_method == "openai-compatible:comtegra-test"
-            && route.available
-    }));
-}
 
 #[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
@@ -454,7 +318,8 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
                 media_type: "image/png".to_string(),
                 data: pixels.to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -552,7 +417,8 @@ fn direct_deepseek_profile_omits_image_url_parts() {
                 media_type: "image/png".to_string(),
                 data: "aW1hZ2U=".to_string(),
             },
-        ],
+        ]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -621,7 +487,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -631,7 +498,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -640,7 +508,8 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -714,7 +583,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "do a thing".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -722,7 +592,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             role: Role::Assistant,
             content: vec![ContentBlock::Reasoning {
                 text: "thinking about the request".to_string(),
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -731,7 +602,8 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
             content: vec![ContentBlock::Text {
                 text: "actually do this instead".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -808,7 +680,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -821,7 +694,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
                 thought_signature: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -831,7 +705,8 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -902,7 +777,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
             content: vec![ContentBlock::Text {
                 text: "list the files".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -918,7 +794,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                     input: serde_json::json!({"command": "ls"}),
                     thought_signature: None,
                 },
-            ],
+            ]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -928,7 +805,8 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
                 tool_use_id: "call_1".to_string(),
                 content: "a.txt\nb.txt".to_string(),
                 is_error: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         },
@@ -1629,7 +1507,8 @@ fn openrouter_chat_request_sends_unified_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1741,7 +1620,8 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
             content: vec![ContentBlock::Text {
                 text: "Live smoke test: answer exactly OK.".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: None,
             tool_duration_ms: None,
         }];
@@ -1794,7 +1674,8 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -1831,6 +1712,58 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
 }
 
 #[test]
+fn sol_compatible_request_sends_low_reasoning_effort() {
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("gpt-6.1-sol".to_string())),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        send_openrouter_headers: false,
+        ..make_custom_compatible_provider()
+    };
+    provider
+        .set_reasoning_effort("low")
+        .expect("Sol supports low effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }]
+        .into(),
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    });
+    let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(request.contains(r#""model":"gpt-6.1-sol""#), "{request}");
+    assert!(request.contains(r#""reasoning_effort":"low""#), "{request}");
+
+    let disabled = OpenRouterProvider {
+        reasoning_effort_support: Some(false),
+        ..make_custom_compatible_provider()
+    };
+    disabled.set_model("gpt-6.1-sol").unwrap();
+    assert!(disabled.set_reasoning_effort("low").is_err());
+    for unknown in ["gpt-6", "gpt-6.1-sol-pro", "gpt-7"] {
+        assert!(!OpenRouterProvider::model_is_openai_reasoning_family(
+            unknown
+        ));
+    }
+}
+
+#[test]
 fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
     let (api_base, request_rx) = spawn_single_response_chat_server();
     let provider = OpenRouterProvider {
@@ -1851,7 +1784,8 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3249,6 +3183,7 @@ fn compat_profile_serving_gpt_family_model_supports_reasoning_effort() {
 
     for model in [
         "gpt-5.3-codex-spark",
+        "gpt-6.1-sol",
         "gpt-5.5",
         "gpt-5.1-codex-mini",
         "o1",
@@ -3477,7 +3412,8 @@ model_catalog = false
         content: vec![ContentBlock::Text {
             text: "hello".to_string(),
             cache_control: None,
-        }],
+        }]
+        .into(),
         timestamp: None,
         tool_duration_ms: None,
     }];
@@ -3548,3 +3484,27 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
 
 #[path = "openrouter_wire_tests.rs"]
 mod wire_tests;
+
+#[test]
+fn venice_disables_venice_system_prompt_by_default_but_user_can_override() {
+    let body = OpenRouterProvider::with_profile_default_extra_body(Some("venice"), None).unwrap();
+    assert_eq!(
+        body["venice_parameters"]["include_venice_system_prompt"],
+        serde_json::json!(false)
+    );
+    let user = serde_json::json!({"venice_parameters": {"include_venice_system_prompt": true}})
+        .as_object()
+        .cloned();
+    let body = OpenRouterProvider::with_profile_default_extra_body(Some("venice"), user).unwrap();
+    assert_eq!(
+        body["venice_parameters"]["include_venice_system_prompt"],
+        serde_json::json!(true)
+    );
+    assert!(OpenRouterProvider::with_profile_default_extra_body(Some("cerebras"), None).is_none());
+}
+
+#[path = "catalog_auth_tests.rs"]
+mod catalog_auth;
+
+#[path = "openrouter_tests_additional_tests.rs"]
+mod additional_cache_breakpoint_preserves_shared_payload_when_already_marked;

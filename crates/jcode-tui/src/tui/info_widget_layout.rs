@@ -520,6 +520,15 @@ pub(crate) fn calculate_placements_anchored(
         };
     }
 
+    // A high-priority mergeable card can be seated before Overview, either
+    // from an existing anchor or earlier in Phase 2 (notably usage >= 80%).
+    // Once Overview has a home, retire those standalone cards and their anchors
+    // so the same information is not rendered twice on this or the next frame.
+    if overview_placed {
+        placements.retain(|p| !is_overview_mergeable(p.kind));
+        next_anchors.retain(|a| !is_overview_mergeable(a.placement.kind));
+    }
+
     PlacementOutcome {
         visible: placements,
         anchors: next_anchors,

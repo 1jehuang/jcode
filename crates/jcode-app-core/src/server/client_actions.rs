@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_reserved_message_streaming_mpsc;
 use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmMember, SwarmState,
     VersionedPlan, broadcast_swarm_status, fanout_session_event, persist_swarm_state_for,
@@ -19,7 +19,7 @@ use std::time::Instant;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const INPUT_SHELL_MAX_OUTPUT_LEN: usize = 30_000;
@@ -33,52 +33,9 @@ fn derive_subagent_description(prompt: &str) -> String {
     }
 }
 
-fn build_input_shell_command(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
-fn combine_input_shell_output(stdout: &[u8], stderr: &[u8]) -> (String, bool) {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let mut output = String::new();
-
-    if !stdout.is_empty() {
-        output.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("[stderr]\n");
-        output.push_str(&stderr);
-    }
-
-    let truncated = if output.len() > INPUT_SHELL_MAX_OUTPUT_LEN {
-        output = truncate_str(&output, INPUT_SHELL_MAX_OUTPUT_LEN).to_string();
-        if !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str("… output truncated");
-        true
-    } else {
-        false
-    };
-
-    (output, truncated)
-}
-
+#[path = "input_shell_output.rs"]
+mod input_shell_output;
+use input_shell_output::{build_input_shell_command, combine_input_shell_output};
 pub(super) struct NotifySessionContext<'a> {
     pub sessions: &'a SessionAgents,
     pub soft_interrupt_queues: &'a SessionInterruptQueues,
@@ -816,84 +773,9 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-fn clone_split_session(
-    parent_session_id: &str,
-    live_parent: Option<&Session>,
-) -> anyhow::Result<(String, String)> {
-    // Keep the persisted snapshot authoritative, including while the parent is
-    // busy. A brand-new Agent may not have saved anything yet, however. Only a
-    // missing snapshot permits an in-memory fallback, never corrupt/unreadable
-    // history or a session belonging to a different client.
-    let parent = Session::load(parent_session_id).or_else(|error| {
-        let missing = error
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        match live_parent.filter(|parent| missing && parent.id == parent_session_id) {
-            Some(parent) => Ok(parent.clone()),
-            None => Err(error),
-        }
-    })?;
-
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.replace_messages(parent.messages.clone());
-    child.compaction = parent.compaction.clone();
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    // Keep the same provider account. Replayed provider-native blocks (Anthropic
-    // web search `encrypted_content`) are bound to the account that produced
-    // them, and another account rejects the whole request with a 400.
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.status = crate::session::SessionStatus::Closed;
-    // The parent agent keeps ownership of any in-flight request; tell the
-    // forked agent so it treats the next prompt as fresh work instead of
-    // continuing (and duplicating) the parent's current turn.
-    child.append_fork_notice(parent_session_id, parent.display_name());
-    child.save()?;
-
-    let name = child.display_name().to_string();
-    Ok((child.id.clone(), name))
-}
-
-fn transfer_active_messages(session: &Session) -> Vec<crate::message::Message> {
-    let start = session
-        .compaction
-        .as_ref()
-        .map(|state| state.compacted_count.min(session.messages.len()))
-        .unwrap_or(0);
-    session.messages[start..]
-        .iter()
-        .map(crate::session::StoredMessage::to_message)
-        .collect()
-}
-
-fn create_transfer_child_session(
-    parent_session_id: &str,
-    parent: &Session,
-    compaction: Option<crate::session::StoredCompactionState>,
-) -> anyhow::Result<(String, String)> {
-    let todos = crate::todo::load_todos(parent_session_id).unwrap_or_default();
-    let mut child = Session::create(Some(parent_session_id.to_string()), None);
-    child.messages.clear();
-    child.compaction = compaction;
-    child.system_prompt = parent.system_prompt.clone();
-    child.working_dir = parent.working_dir.clone();
-    child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
-    child.subagent_model = parent.subagent_model.clone();
-    child.improve_mode = parent.improve_mode;
-    child.autoreview_enabled = parent.autoreview_enabled;
-    child.autojudge_enabled = parent.autojudge_enabled;
-    child.is_canary = parent.is_canary;
-    child.testing_build = parent.testing_build.clone();
-    child.provider_session_id = None;
-    child.status = crate::session::SessionStatus::Closed;
-    child.save()?;
-    crate::todo::save_todos(&child.id, &todos)?;
-    Ok((child.id.clone(), child.display_name().to_string()))
-}
+#[path = "session_transfer_snapshot.rs"]
+mod session_transfer_snapshot;
+use session_transfer_snapshot::*;
 
 pub(super) async fn handle_split(
     id: u64,
@@ -1003,7 +885,7 @@ pub(super) async fn handle_transfer(
     let transfer_compaction = match crate::compaction::build_transfer_compaction_state(
         provider,
         transfer_active_messages(&parent),
-        parent.compaction.clone(),
+        parent.compaction.as_deref().cloned(),
     )
     .await
     {
@@ -1028,28 +910,31 @@ pub(super) async fn handle_transfer(
         }
     };
 
-    let (new_session_id, new_session_name) =
-        match create_transfer_child_session(client_session_id, &parent, transfer_compaction) {
-            Ok(result) => result,
-            Err(error) => {
-                crate::logging::event_warn(
-                    "SESSION_LIFECYCLE",
-                    vec![
-                        ("phase", "transfer_create_error".to_string()),
-                        ("request_id", id.to_string()),
-                        ("session_id", client_session_id.to_string()),
-                        ("error", crate::util::format_error_chain(&error)),
-                        ("elapsed_ms", started.elapsed().as_millis().to_string()),
-                    ],
-                );
-                let _ = client_event_tx.send(ServerEvent::Error {
-                    id,
-                    message: format!("Failed to create transfer session: {error}"),
-                    retry_after_secs: None,
-                });
-                return;
-            }
-        };
+    let (new_session_id, new_session_name) = match create_transfer_child_session(
+        client_session_id,
+        &parent,
+        transfer_compaction.map(Arc::new),
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::logging::event_warn(
+                "SESSION_LIFECYCLE",
+                vec![
+                    ("phase", "transfer_create_error".to_string()),
+                    ("request_id", id.to_string()),
+                    ("session_id", client_session_id.to_string()),
+                    ("error", crate::util::format_error_chain(&error)),
+                    ("elapsed_ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Failed to create transfer session: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
         vec![
@@ -1290,6 +1175,24 @@ pub(super) async fn handle_agent_task(
     agent: &Arc<Mutex<Agent>>,
     ctx: &AgentTaskContext<'_>,
 ) {
+    let mut agent = agent.lock().await;
+    let lease = match agent.claim_server_turn() {
+        Ok(lease) => lease,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let events = super::state::TurnEventChannel::new(
+        client_session_id.into(),
+        Arc::clone(ctx.swarm_members),
+        ctx.client_event_tx.clone(),
+        &lease,
+    );
     update_member_status(
         client_session_id,
         "running",
@@ -1302,12 +1205,13 @@ pub(super) async fn handle_agent_task(
     )
     .await;
 
-    let result = process_message_streaming_mpsc(
-        Arc::clone(agent),
+    let result = process_reserved_message_streaming_mpsc(
+        &mut agent,
+        &lease,
         &task,
         vec![],
         None,
-        ctx.client_event_tx.clone(),
+        events.sender(),
     )
     .await;
     match result {
@@ -1323,7 +1227,7 @@ pub(super) async fn handle_agent_task(
                 Some(ctx.swarm_event_tx),
             )
             .await;
-            let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+            let _ = events.sender().send(ServerEvent::Done { id });
         }
         Err(e) => {
             update_member_status(
@@ -1340,11 +1244,13 @@ pub(super) async fn handle_agent_task(
             let retry_after_secs = e
                 .downcast_ref::<StreamError>()
                 .and_then(|stream_error| stream_error.retry_after_secs);
-            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+            let _ = events.sender().send(ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(&e),
                 retry_after_secs,
             });
         }
     }
+    drop(agent);
+    events.finish().await;
 }

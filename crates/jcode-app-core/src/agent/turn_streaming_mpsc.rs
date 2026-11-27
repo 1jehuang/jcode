@@ -1,65 +1,153 @@
-use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
-use super::streaming::{StreamUsageRecorder, find_wrap_marker_incremental};
+use super::streaming::StreamUsageRecorder;
 
-fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, bool) {
-    if tc.name == "selfdev" {
-        return ("Reload initiated. Process restarting...".to_string(), false);
-    }
+#[path = "tool_handoff.rs"]
+mod tool_handoff;
+pub(super) use tool_handoff::execute_with_background;
+use tool_handoff::{
+    auto_background_allowed, incomplete_turn_stop, reload_interrupted_tool_result,
+    wait_for_tool_handoff,
+};
+#[path = "stream_request_preparation.rs"]
+mod stream_request_preparation;
 
-    let action = tc
-        .input
-        .get("action")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
-    let is_wait_like = (tc.name == "bg" && action == "wait")
-        || (tc.name == "swarm" && matches!(action, "await_members" | "run_plan"));
-
-    if is_wait_like {
-        let input = serde_json::to_string(&tc.input).unwrap_or_else(|_| "{}".to_string());
-        return (
-            format!(
-                "[Tool '{}' wait interrupted by server reload after {:.1}s. The underlying operation may still be running. Resume the wait by rerunning the same tool call with input: {}]",
-                tc.name, elapsed_secs, input
-            ),
-            false,
-        );
-    }
-
-    (
-        format!(
-            "[Tool '{}' interrupted by server reload after {:.1}s]",
-            tc.name, elapsed_secs
-        ),
-        true,
-    )
-}
-
-/// Called only after automatic continuations have been exhausted.
-fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
-    let reason = stop_reason?;
-    if Agent::should_continue_after_stop_reason(reason)
-        || Agent::is_stranded_tool_use_stop(Some(reason))
-    {
-        Some(ServerEvent::TurnStopped {
-            reason: crate::protocol::TurnStopReason::LimitReached,
-            message: format!(
-                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
-            ),
-            provider_stop_reason: Some(reason.to_string()),
-        })
-    } else {
-        None
-    }
+pub(super) enum NetworkRecoveryAction {
+    Retry,
+    Cancelled,
+    GiveUp,
 }
 
 impl Agent {
+    async fn wait_for_network_recovery_mpsc(
+        &mut self,
+        tracker: &mut crate::network_retry::NetworkRecoveryTracker,
+        reason: &str,
+        error_detail: &str,
+        offline_only: bool,
+        has_partial_output: bool,
+        event_tx: &crate::stream_batching::BatchingSender,
+    ) -> NetworkRecoveryAction {
+        use crate::network_retry::{NetworkRecoveryOutcome, NetworkWaitNotice};
+
+        let cancel_signal = self.graceful_shutdown.clone();
+        let cancel_fut = async move {
+            cancel_signal.notified().await;
+        };
+        tokio::pin!(cancel_fut);
+
+        let raw_tx = event_tx.raw().clone();
+        let mut rollback_emitted = false;
+        let session_id = self.session.id.clone();
+
+        let outcome = tracker
+            .wait_for_recovery(
+                offline_only,
+                cancel_fut,
+                |notice| {
+                    if has_partial_output && !rollback_emitted {
+                        rollback_emitted = true;
+                        let (attempt, max) = match &notice {
+                            NetworkWaitNotice::Offline { .. } => (1, 1),
+                            NetworkWaitNotice::OnlineRetry { attempt, max, .. } => (*attempt, *max),
+                        };
+                        let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
+                    }
+                    match notice {
+                        NetworkWaitNotice::Offline { listener_summary } => {
+                            logging::warn(&format!(
+                                "Network disconnect during turn for {}: {} ({}). Waiting for connectivity ({}).",
+                                session_id, reason, error_detail, listener_summary
+                            ));
+                            let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                                phase: crate::network_retry::waiting_for_network_connection_phase(
+                                    &listener_summary,
+                                ),
+                            });
+                            let _ = event_tx.send(ServerEvent::StatusDetail {
+                                detail: format!(
+                                    "Network disconnected; waiting to reconnect ({})",
+                                    listener_summary
+                                ),
+                            });
+                        }
+                        NetworkWaitNotice::OnlineRetry {
+                            attempt,
+                            max,
+                            delay_secs,
+                        } => {
+                            logging::warn(&format!(
+                                "Transient network error during turn for {}: {} ({}). Retrying in {}s ({}/{}).",
+                                session_id, reason, error_detail, delay_secs, attempt, max
+                            ));
+                            let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                                phase: crate::message::ConnectionPhase::Retrying { attempt, max }
+                                    .to_string(),
+                            });
+                            let _ = event_tx.send(ServerEvent::StatusDetail {
+                                detail: format!(
+                                    "Connection interrupted; retrying in {}s ({}/{})",
+                                    delay_secs, attempt, max
+                                ),
+                            });
+                        }
+                    }
+                },
+                std::time::Duration::from_secs(20),
+                || {
+                    send_stream_keepalive_mpsc(&raw_tx);
+                },
+            )
+            .await;
+
+        match outcome {
+            NetworkRecoveryOutcome::RestoredAfterOffline => {
+                logging::info(&format!(
+                    "Network connectivity restored for {}; automatically resuming turn",
+                    self.session.id
+                ));
+                let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                    phase: crate::message::ConnectionPhase::Connecting.to_string(),
+                });
+                let _ = event_tx.send(ServerEvent::StatusDetail {
+                    detail: "Network restored; resuming...".to_string(),
+                });
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::RetryingWhileOnline { attempt, max } => {
+                logging::info(&format!(
+                    "Retrying turn for {} after transient network error ({}/{})",
+                    self.session.id, attempt, max
+                ));
+                let _ = event_tx.send(ServerEvent::ConnectionPhase {
+                    phase: crate::message::ConnectionPhase::Retrying { attempt, max }.to_string(),
+                });
+                NetworkRecoveryAction::Retry
+            }
+            NetworkRecoveryOutcome::Cancelled => {
+                logging::info(&format!(
+                    "Turn cancelled while waiting for network recovery in {}",
+                    self.session.id
+                ));
+                NetworkRecoveryAction::Cancelled
+            }
+            NetworkRecoveryOutcome::OnlineRetryBudgetExhausted { .. } => {
+                NetworkRecoveryAction::GiveUp
+            }
+        }
+    }
+
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
-        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        raw_event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
-        let _runtime_activity = crate::runtime_activity::global().try_enter()?;
+        // Holds streamed text back while no attached client is focused. Every
+        // other event flushes it first, and so does dropping this on return.
+        let event_tx =
+            crate::stream_batching::BatchingSender::new(raw_event_tx, self.session.id.clone());
+        let _runtime_activity =
+            crate::runtime_activity::global().try_enter_session(&self.session.id)?;
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -80,9 +168,9 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
-        let mut unparsed_tool_markup_nudges = 0u32;
+        let mut network_recovery = crate::network_retry::NetworkRecoveryTracker::new();
 
-        loop {
+        'turn_loop: loop {
             // Never open a new provider request after a cancel. Several paths
             // `continue` this loop (compaction retry, incomplete/stranded
             // continuation, empty-response recovery, soft-interrupt injection),
@@ -106,51 +194,14 @@ impl Agent {
                     repaired
                 ));
             }
-            // Start provider transport setup before deriving and potentially
-            // compacting the request history. This is the first point where the
-            // stable request settings are available.
-            let mut tools = self.tool_definitions().await;
-            let mut split_prompt = self.build_system_prompt_split(None);
-            self.provider
-                .prewarm(&tools, &split_prompt.static_part)
-                .await;
-            let (messages, compaction_event) = self.messages_for_provider();
-            if let Some(event) = compaction_event {
-                // Reset cache tracker and tool lock on compaction since the message history changes
-                self.cache_tracker.reset();
-                self.kv_cache_monitor.reset();
-                self.locked_tools = None;
-                logging::info(&format!(
-                    "Context compacted ({}{})",
-                    event.trigger,
-                    event
-                        .pre_tokens
-                        .map(|t| format!(" {} tokens", t))
-                        .unwrap_or_default()
-                ));
-                let _ = event_tx.send(ServerEvent::Compaction {
-                    trigger: event.trigger.clone(),
-                    pre_tokens: event.pre_tokens,
-                    post_tokens: event.post_tokens,
-                    tokens_saved: event.tokens_saved,
-                    duration_ms: event.duration_ms,
-                    messages_dropped: event.messages_dropped,
-                    messages_compacted: event.messages_compacted,
-                    summary_chars: event.summary_chars,
-                    active_messages: event.active_messages,
-                });
-                // Compaction clears the tool lock, so rebuild the foreground
-                // request metadata rather than relying on the pre-compaction snapshot.
-                tools = self.tool_definitions().await;
-                split_prompt = self.build_system_prompt_split(None);
-            }
+            let (tools, split_prompt, messages) = self.prepare_stream_request(&event_tx).await;
 
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking_shared(
                 std::sync::Arc::clone(&messages),
                 Some(std::sync::Arc::new({
-                    let event_tx = event_tx.clone();
+                    let event_tx = event_tx.raw().clone();
                     move |event| {
                         let _ = event_tx.send(event);
                     }
@@ -264,7 +315,9 @@ impl Agent {
             );
             drop(system_signature_text);
             self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
-            let _ = event_tx.send(kv_request);
+            if let Err(error) = event_tx.send(kv_request) {
+                logging::debug(&format!("KV request event receiver disconnected: {error}"));
+            }
             // These vectors are only needed to build the cache telemetry event.
             // Explicitly release their deeply cloned transcript strings before
             // waiting for the provider stream.
@@ -283,7 +336,7 @@ impl Agent {
                 loop {
                     tokio::select! {
                         _ = keepalive.tick() => {
-                            send_stream_keepalive_mpsc(&event_tx);
+                            send_stream_keepalive_mpsc(event_tx.raw());
                         }
                         _ = self.graceful_shutdown.notified() => {
                             logging::info(
@@ -296,8 +349,9 @@ impl Agent {
                             match result {
                                 Ok(stream) => break stream,
                                 Err(e) => {
-                                    self.record_failed_account_route(&e.to_string());
-                                    if self.try_auto_compact_after_context_limit(&e.to_string()) {
+                                    let err_chain = crate::util::format_error_chain(&e);
+                                    if self.try_auto_compact_after_context_limit(&err_chain) {
+                                        self.record_failed_account_route(&err_chain);
                                         context_limit_retries += 1;
                                         if context_limit_retries > Self::MAX_CONTEXT_LIMIT_RETRIES {
                                             logging::warn(
@@ -314,8 +368,30 @@ impl Agent {
                                             ));
                                         }
                                         let _ = event_tx.send(self.take_recovery_compaction_event());
-                                        continue;
+                                        continue 'turn_loop;
                                     }
+                                    if let Some(reason) =
+                                        crate::network_retry::classify_network_interruption(
+                                            e.as_ref(),
+                                        )
+                                    {
+                                        match self
+                                            .wait_for_network_recovery_mpsc(
+                                                &mut network_recovery,
+                                                &reason,
+                                                &err_chain,
+                                                false,
+                                                false,
+                                                &event_tx,
+                                            )
+                                            .await
+                                        {
+                                            NetworkRecoveryAction::Retry => continue 'turn_loop,
+                                            NetworkRecoveryAction::Cancelled => return Ok(()),
+                                            NetworkRecoveryAction::GiveUp => {}
+                                        }
+                                    }
+                                    self.record_failed_account_route(&err_chain);
                                     return Err(e);
                                 }
                             }
@@ -349,7 +425,6 @@ impl Agent {
             );
 
             let mut text_content = String::new();
-            let mut text_wrapped_detected = false;
             // Inline swarm worker output tap: publish a throttled tail of the
             // in-progress assistant text to the bus so a coordinator can render
             // a live inline gallery viewport.
@@ -373,6 +448,8 @@ impl Agent {
             let mut usage_cache_creation: Option<u64> = None;
             let mut usage_recorder = StreamUsageRecorder::new(&self.session.id);
             let mut saw_message_end = false;
+            let mut executed_native_tool = false;
+            let mut retry_after_network_recovery = false;
             let mut stop_reason: Option<String> = None;
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -406,7 +483,16 @@ impl Agent {
                 let next_event = std::pin::pin!(stream.next());
                 let event = tokio::select! {
                     _ = keepalive.tick() => {
-                        send_stream_keepalive_mpsc(&event_tx);
+                        send_stream_keepalive_mpsc(event_tx.raw());
+                        continue;
+                    }
+                    _ = async {
+                        match event_tx.deadline() {
+                            Some(at) => tokio::time::sleep_until(at).await,
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        event_tx.flush();
                         continue;
                     }
                     _ = self.graceful_shutdown.notified() => {
@@ -447,15 +533,45 @@ impl Agent {
                             ("saw_message_end", saw_message_end.to_string()),
                         ],
                     );
+                    let has_partial_output = !text_content.is_empty()
+                        || !tool_calls.is_empty()
+                        || !streaming_tools.is_empty()
+                        || reasoning_open
+                        || !reasoning_content.is_empty()
+                        || !provider_native_items.is_empty();
+                    if !saw_message_end
+                        && !executed_native_tool
+                        && !has_partial_output
+                        && !self.is_graceful_shutdown()
+                    {
+                        match self
+                            .wait_for_network_recovery_mpsc(
+                                &mut network_recovery,
+                                "stream ended unexpectedly without message completion",
+                                "stream EOF before message_end",
+                                true,
+                                false,
+                                &event_tx,
+                            )
+                            .await
+                        {
+                            NetworkRecoveryAction::Retry => {
+                                retry_after_network_recovery = true;
+                                break;
+                            }
+                            NetworkRecoveryAction::Cancelled => return Ok(()),
+                            NetworkRecoveryAction::GiveUp => {}
+                        }
+                    }
                     break;
                 };
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
-                        self.record_failed_account_route(&e.to_string());
                         usage_recorder.finish();
-                        let err_str = e.to_string();
+                        let err_str = crate::util::format_error_chain(&e);
                         if self.try_auto_compact_after_context_limit(&err_str) {
+                            self.record_failed_account_route(&err_str);
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
                                 self,
@@ -492,6 +608,37 @@ impl Agent {
                             let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
+                        if !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) =
+                                crate::network_retry::classify_network_interruption(e.as_ref())
+                        {
+                            let has_partial_output = !text_content.is_empty()
+                                || !tool_calls.is_empty()
+                                || !streaming_tools.is_empty()
+                                || reasoning_open
+                                || !reasoning_content.is_empty()
+                                || !provider_native_items.is_empty();
+                            match self
+                                .wait_for_network_recovery_mpsc(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &err_str,
+                                    false,
+                                    has_partial_output,
+                                    &event_tx,
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(()),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
+                        self.record_failed_account_route(&err_str);
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
@@ -542,7 +689,7 @@ impl Agent {
                             // identical to a dead connection and the client stall
                             // guard would cancel a healthy stream (issue #451).
                             hidden_activity_last = Instant::now();
-                            send_stream_keepalive_mpsc(&event_tx);
+                            send_stream_keepalive_mpsc(event_tx.raw());
                         }
                         // Always capture reasoning text so it can be persisted as a
                         // history-only trace, regardless of provider replay support.
@@ -606,6 +753,16 @@ impl Agent {
                                 output,
                                 is_error,
                             }) => {
+                                if already_open
+                                    && provider == jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI
+                                {
+                                    // OpenAI only supplies action/query metadata in
+                                    // the final snapshot, after execution started.
+                                    let _ = event_tx.send(ServerEvent::ToolInput {
+                                        id: Some(id.clone()),
+                                        delta: input.to_string(),
+                                    });
+                                }
                                 if !already_open {
                                     // Result without a start (e.g. OpenAI items
                                     // arrive whole): open the row first.
@@ -657,23 +814,7 @@ impl Agent {
                                 self.publish_inline_tail();
                             }
                         }
-                        if !text_wrapped_detected {
-                            // Scan only the new delta (plus a short overlap for
-                            // markers straddling the boundary) instead of the
-                            // whole accumulated response on every token.
-                            if let Some(marker_idx) =
-                                find_wrap_marker_incremental(&text_content, text.len())
-                            {
-                                text_wrapped_detected = true;
-                                let clean_prefix =
-                                    text_content[..marker_idx].trim_end().to_string();
-                                let _ =
-                                    event_tx.send(ServerEvent::TextReplace { text: clean_prefix });
-                            } else {
-                                let _ =
-                                    event_tx.send(ServerEvent::TextDelta { text: text.clone() });
-                            }
-                        }
+                        let _ = event_tx.send(ServerEvent::TextDelta { text: text.clone() });
                         if self.is_graceful_shutdown() {
                             logging::info(
                                 "Graceful shutdown during streaming - checkpointing partial response",
@@ -775,6 +916,7 @@ impl Agent {
                         content,
                         is_error,
                     } => {
+                        executed_native_tool = true;
                         let tool_name = tool_id_to_name
                             .get(&tool_use_id)
                             .cloned()
@@ -852,6 +994,18 @@ impl Agent {
                         if cache_creation_input_tokens.is_some() {
                             usage_cache_creation = cache_creation_input_tokens;
                         }
+                        // Publish observed counters immediately, not only when
+                        // the response finishes. Do not manufacture a missing
+                        // input or output count from context/session totals.
+                        if let (Some(input), Some(output)) = (usage_input, usage_output) {
+                            let _ = event_tx.send(ServerEvent::TokenUsage {
+                                input,
+                                output,
+                                cache_read_input: usage_cache_read,
+                                cache_creation_input: usage_cache_creation,
+                                effective_budget: Some(self.effective_context_budget().await),
+                            });
+                        }
                         usage_recorder.observe(
                             provider.name(),
                             &provider.model(),
@@ -887,7 +1041,17 @@ impl Agent {
                     StreamEvent::ServiceTier { tier, requested } => {
                         let _ = event_tx.send(ServerEvent::ServiceTierReported { requested, tier });
                     }
+                    StreamEvent::ResolvedModel { model } => {
+                        usage_recorder.resolve_model(model);
+                    }
                     StreamEvent::RetryRollback { attempt, max } => {
+                        // Preserve reported usage from the failed attempt, but
+                        // never let its model or counters bleed into the retry.
+                        usage_recorder.finish();
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         // A transient transport fault hit mid-stream after partial
                         // output was already emitted; the provider is replaying the
                         // request from the top. Discard everything accumulated for
@@ -919,7 +1083,6 @@ impl Agent {
                             // discarded partial from the live tail too.
                             self.inline_tail.clear_live();
                         }
-                        text_wrapped_detected = false;
                         tool_calls.clear();
                         current_tool = None;
                         streaming_tools.clear();
@@ -1012,6 +1175,7 @@ impl Agent {
                         tool_name,
                         input,
                     } => {
+                        executed_native_tool = true;
                         // Execute native tool and send result back to SDK bridge
                         let ctx = ToolContext {
                             session_id: self.session.id.clone(),
@@ -1023,10 +1187,13 @@ impl Agent {
                             execution_mode: ToolExecutionMode::AgentTurn,
                         };
                         crate::telemetry::record_tool_call();
-                        let tool_result = self
-                            .registry
-                            .execute(&tool_name, ToolCall::normalize_input_to_object(input), ctx)
-                            .await;
+                        let tool_result = super::turn_streaming_mpsc::execute_with_background(
+                            self.registry.clone(),
+                            tool_name.clone(),
+                            ToolCall::normalize_input_to_object(input),
+                            ctx,
+                        )
+                        .await;
                         if tool_result.is_err() {
                             crate::telemetry::record_tool_failure();
                         }
@@ -1090,6 +1257,36 @@ impl Agent {
                             let _ = event_tx.send(self.take_recovery_compaction_event());
                             break;
                         }
+                        if retry_after_secs.is_none()
+                            && !executed_native_tool
+                            && !saw_message_end
+                            && let Some(reason) = crate::network_retry::classify_message(&message)
+                        {
+                            let has_partial_output = !text_content.is_empty()
+                                || !tool_calls.is_empty()
+                                || !streaming_tools.is_empty()
+                                || reasoning_open
+                                || !reasoning_content.is_empty()
+                                || !provider_native_items.is_empty();
+                            match self
+                                .wait_for_network_recovery_mpsc(
+                                    &mut network_recovery,
+                                    &reason,
+                                    &message,
+                                    false,
+                                    has_partial_output,
+                                    &event_tx,
+                                )
+                                .await
+                            {
+                                NetworkRecoveryAction::Retry => {
+                                    retry_after_network_recovery = true;
+                                    break;
+                                }
+                                NetworkRecoveryAction::Cancelled => return Ok(()),
+                                NetworkRecoveryAction::GiveUp => {}
+                            }
+                        }
                         log_agent_provider_stream_lifecycle(
                             logging::LogLevel::Error,
                             self,
@@ -1111,6 +1308,8 @@ impl Agent {
                 }
             }
 
+            // The stream is over, so no timer will flush what is still held.
+            event_tx.flush();
             usage_recorder.finish();
             if retry_after_compaction {
                 log_agent_provider_stream_lifecycle(
@@ -1120,8 +1319,19 @@ impl Agent {
                     api_start,
                     vec![("mode", "mpsc".to_string())],
                 );
-                continue;
+                continue 'turn_loop;
             }
+            if retry_after_network_recovery {
+                log_agent_provider_stream_lifecycle(
+                    logging::LogLevel::Info,
+                    self,
+                    "retry_after_network_recovery",
+                    api_start,
+                    vec![("mode", "mpsc".to_string())],
+                );
+                continue 'turn_loop;
+            }
+            network_recovery.record_success();
 
             let api_elapsed = api_start.elapsed();
             logging::info(&format!(
@@ -1173,6 +1383,16 @@ impl Agent {
                     )
                     .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
+                if usage_input.is_some() {
+                    crate::session_telemetry::save_context(
+                        &self.session,
+                        total.saturating_sub(output),
+                        Some(self.effective_context_budget().await),
+                        self.provider.name(),
+                        self.provider.active_resolved_credential(),
+                        self.provider.serving_oauth_account_label(),
+                    );
+                }
             }
 
             if usage_input.is_some()
@@ -1185,6 +1405,7 @@ impl Agent {
                     output: usage_output.unwrap_or(0),
                     cache_read_input: usage_cache_read,
                     cache_creation_input: usage_cache_creation,
+                    effective_budget: Some(self.effective_context_budget().await),
                 });
                 // Native compaction is applied and announced below, after
                 // usage. Attribute this response's cache refresh now using
@@ -1256,35 +1477,6 @@ impl Agent {
                 });
             }
 
-            let had_tool_calls_before = !tool_calls.is_empty();
-            let text_tool_recovery =
-                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
-
-            if !had_tool_calls_before && text_tool_recovery == TextToolRecovery::Recovered {
-                let _ = event_tx.send(ServerEvent::TextReplace {
-                    text: text_content.clone(),
-                });
-                // Markup envelopes can carry several calls, so announce each.
-                for tc in tool_calls
-                    .iter()
-                    .filter(|tc| tc.id.starts_with("fallback_text_call_"))
-                {
-                    let _ = event_tx.send(ServerEvent::ToolStart {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                    });
-                    tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                    let _ = event_tx.send(ServerEvent::ToolInput {
-                        id: Some(tc.id.clone()),
-                        delta: tc.input.to_string(),
-                    });
-                    let _ = event_tx.send(ServerEvent::ToolExec {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                    });
-                }
-            }
-
             // Add assistant message to history
             let mut content_blocks = Vec::new();
             if !provider_native_items.is_empty() {
@@ -1321,6 +1513,7 @@ impl Agent {
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
                     cache_creation_input_tokens: self.last_usage.cache_creation_input_tokens,
+                    request_elapsed_ms: Some(api_elapsed.as_millis() as u64),
                 });
                 let message_id =
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
@@ -1388,26 +1581,6 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
-                // The model printed a tool call as markup we could not parse
-                // (issue #1702): say so visibly and ask it to re-issue the
-                // call natively instead of silently ending the turn.
-                if saw_message_end
-                    && !self.is_graceful_shutdown()
-                    && let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
-                        &text_tool_recovery,
-                        stop_reason.as_deref(),
-                        &mut unparsed_tool_markup_nudges,
-                    )?
-                {
-                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
-                        content: notice,
-                        display_role: Some("system".to_string()),
-                        point: "B".to_string(),
-                        tools_skipped: None,
-                        client_ids: Vec::new(),
-                    });
-                    continue;
-                }
                 if saw_message_end
                     && !self.is_graceful_shutdown()
                     && self.maybe_reconsider_fable_guardrail(
@@ -1422,7 +1595,7 @@ impl Agent {
                 // non-streaming loop's recovery behavior (issue #672).
                 if saw_message_end
                     && !self.is_graceful_shutdown()
-                    && self.maybe_continue_empty_post_tool_response(
+                    && self.maybe_retry_streaming_empty_post_tool_response(
                         text_content.trim().is_empty(),
                         prompt_has_recent_tool_result,
                         stop_reason.as_deref(),
@@ -1649,25 +1822,31 @@ impl Agent {
                 }
                 let tool_start = Instant::now();
 
-                // Spawn tool in its own task so we can detach it to background on Alt+B
+                // Spawn independently so automatic and Alt+B handoffs keep it running.
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle = tokio::spawn(async move {
-                    registry_clone
-                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                        .await
-                });
+                let tool_handle =
+                    crate::runtime_activity::spawn_session(&self.session.id, async move {
+                        registry_clone
+                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                            .await
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Session transfer in progress; tool not accepted")
+                    })?;
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // Wait for tool completion OR background signal from user (Alt+B)
-                // OR graceful shutdown signal from server reload
+                // All tools share the same default foreground budget, including
+                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
+                let foreground_budget = tool_handoff::foreground_budget();
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
+                let mut automatic_background = false;
                 let mut tool_handle = tool_handle;
                 let running_tool_guard =
                     crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
@@ -1679,12 +1858,8 @@ impl Agent {
                             Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
                         });
                     }
-                    _ = async {
-                        tokio::select! {
-                            _ = bg_signal.notified() => {}
-                            _ = shutdown_signal.notified() => {}
-                        }
-                    } => {
+                    automatic = wait_for_tool_handoff(&bg_signal, &shutdown_signal, auto_background_allowed(&tc.name, &tc.input), foreground_budget) => {
+                        automatic_background = automatic;
                         if self.is_graceful_shutdown() && allow_reload_handoff {
                             tool_result = match tokio::time::timeout(
                                 Duration::from_millis(750),
@@ -1828,7 +2003,7 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // User pressed Alt+B — move tool to background
+                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
@@ -1836,14 +2011,27 @@ impl Agent {
                     ));
 
                     let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
+                        .adopt_with_options(
+                            &tc.name,
+                            tool_handoff::handoff_display_name(&tc.input),
+                            &self.session.id,
+                            true,
+                            false,
+                            tool_handle,
+                        )
                         .await;
 
+                    let reason = if automatic_background {
+                        tool_handoff::automatic_handoff_reason(foreground_budget)
+                    } else {
+                        "by the user".to_string()
+                    };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background by the user (task_id: {}). \
-                         Use the `bg` tool with action 'wait' to wait for completion/checkpoints, \
-                         or action 'status'/'output' to inspect it.",
-                        tc.name, bg_info.task_id
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        tc.name,
+                        reason,
+                        bg_info.task_id,
+                        crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 
                     let _ = event_tx.send(ServerEvent::ToolDone {

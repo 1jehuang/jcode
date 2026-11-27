@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
+use jcode_message_types::{ContentBlock, Message, Role, SharedContent, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -76,6 +76,9 @@ pub struct ResponseStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
+    /// Execution duration for a completed tool row, when recorded by the runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
     /// Present only on the final visible assistant row of a completed stored
     /// user turn. Tool-only intermediate rounds contribute to these totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -268,7 +271,7 @@ pub struct StoredMemoryInjection {
 pub struct StoredMessage {
     pub id: String,
     pub role: Role,
-    pub content: Vec<ContentBlock>,
+    pub content: SharedContent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_role: Option<StoredDisplayRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,8 +285,25 @@ pub struct StoredMessage {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StoredDisplayRole {
+    JarvisUser,
     System,
     BackgroundTask,
+    FileActivity,
+}
+
+impl StoredMessage {
+    /// Explicit notification roles exclude a message from user-turn accounting.
+    /// Jarvis provenance affects presentation only, never the conversation role.
+    pub fn has_context_display_role(&self) -> bool {
+        matches!(
+            self.display_role,
+            Some(
+                StoredDisplayRole::System
+                    | StoredDisplayRole::BackgroundTask
+                    | StoredDisplayRole::FileActivity
+            )
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,13 +318,19 @@ pub struct StoredTokenUsage {
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
+    /// Wall-clock time for the provider request that produced this usage,
+    /// in milliseconds. Raw input for throughput calculations; absent for
+    /// older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCompactionState {
     pub summary_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openai_encrypted_content: Option<String>,
+    // Shared with manager summaries and copy-on-write session snapshots.
+    pub openai_encrypted_content: Option<std::sync::Arc<str>>,
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
     pub compacted_count: usize,
@@ -437,12 +463,15 @@ pub fn session_search_raw_matches_query(raw: &[u8], query: &SessionSearchQueryPr
         if contains_case_insensitive_bytes(raw, query.normalized.as_bytes()) {
             return true;
         }
-        let matched_terms = query
-            .terms
-            .iter()
-            .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
-            .count();
-        return matched_terms >= query.min_term_matches;
+        // Public profiles may request zero hits. Avoid underflow, and stop once
+        // enough terms match without changing duplicate or empty-term semantics.
+        return query.min_term_matches == 0
+            || query
+                .terms
+                .iter()
+                .filter(|term| contains_case_insensitive_bytes(raw, term.as_bytes()))
+                .nth(query.min_term_matches - 1)
+                .is_some();
     }
 
     let Ok(raw_text) = std::str::from_utf8(raw) else {
@@ -498,6 +527,26 @@ pub fn tokenize_session_search_query(query: &str) -> Vec<String> {
 
     terms
 }
+
+/// Tokenize text already lowercased as a whole, preserving index Unicode boundaries.
+/// Ordinary queries intentionally retain split-then-lowercase behavior.
+pub fn tokenize_prelowercased_session_search_text(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for token in text.split(|c: char| !c.is_alphanumeric()) {
+        if token.is_empty() || is_session_search_stop_word(token) {
+            continue;
+        }
+        let keep = token.chars().count() >= 2 || token.chars().all(|c| c.is_ascii_digit());
+        if keep && seen.insert(token) {
+            terms.push(token.to_owned());
+        }
+    }
+    terms
+}
+
+#[cfg(test)]
+mod prelowercased_tokenization_tests;
 
 pub fn is_session_search_stop_word(token: &str) -> bool {
     matches!(

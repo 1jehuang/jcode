@@ -14,14 +14,18 @@ mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
+mod runtime_recovery;
 mod status;
 mod streaming;
 #[cfg(test)]
 mod swarm_reminder_tests;
-mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;
+mod turn_ownership;
+pub(crate) use turn_ownership::{
+    RuntimeMutationLease, TurnLease, TurnObserver, TurnPublicationPin,
+};
 mod turn_streaming_mpsc;
 mod utils;
 
@@ -48,7 +52,6 @@ use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
@@ -62,8 +65,6 @@ pub use jcode_agent_runtime::{
 };
 
 const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
-static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
     crate::build::get_repo_dir()
         .map(|repo_dir| {
@@ -78,63 +79,9 @@ static WORKING_GIT_STATE_CACHE: LazyLock<StdMutex<HashMap<PathBuf, Option<GitSta
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 const STREAM_KEEPALIVE_PONG_ID: u64 = 0;
 
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    // Hash the cache-relevant projection, not the raw Message. Raw hashing
-    // keys off non-transmitted metadata (timestamp, tool_duration_ms,
-    // ReasoningTrace blocks, cache_control markers), which triggers spurious
-    // harness:_prefix_changed KV-cache miss reports when the same message is
-    // re-serialized with backfilled metadata on the next turn.
-    crate::message::cache_relevant_message_hashes(messages)
-}
-
-fn kv_cache_request_event(
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    system_static: &str,
-    ephemeral_messages: &[Message],
-) -> ServerEvent {
-    // Provider-native deferred definitions are outside the cached prefix.
-    // Late MCP discovery must not look like a harness-induced tools change
-    // when the provider reports a cache miss for some unrelated reason.
-    // Borrow definitions rather than cloning potentially large MCP schemas.
-    let eager_tools: Vec<_> = tools.iter().filter(|tool| !tool.defer_loading).collect();
-    let ephemeral_hash = if ephemeral_messages.is_empty() {
-        None
-    } else {
-        Some(stable_hash_json(ephemeral_messages))
-    };
-    ServerEvent::KvCacheRequest {
-        system_static_hash: stable_hash_str(system_static),
-        tools_hash: stable_hash_json(&eager_tools),
-        messages_hash: stable_hash_json(&crate::message::cache_relevant_messages(messages)),
-        message_hashes: message_hashes(messages),
-        message_count: messages.len(),
-        tool_count: eager_tools.len(),
-        system_static_chars: system_static.chars().count(),
-        tools_json_chars: stable_json_len(&eager_tools),
-        messages_json_chars: stable_json_len(messages),
-        ephemeral_hash,
-        ephemeral_chars: stable_json_len(ephemeral_messages),
-        ephemeral_message_count: ephemeral_messages.len(),
-    }
-}
+#[path = "agent/cache_request.rs"]
+mod cache_request;
+use cache_request::kv_cache_request_event;
 
 impl Agent {
     /// Provider identity used for cache retention lookups. Generic OpenAI is
@@ -317,6 +264,7 @@ struct RewindUndoSnapshot {
 }
 
 pub struct Agent {
+    turn_ownership: turn_ownership::TurnOwnership,
     provider: Arc<dyn Provider>,
     registry: Registry,
     skills: Arc<SkillRegistry>,
@@ -423,12 +371,32 @@ pub struct Agent {
     /// it never begins or ends one (that was a phantom zero-turn session plus
     /// sync file I/O on every reconnect's accept path).
     telemetry_session_deferred: bool,
+    /// Whether reasoning effort was explicitly chosen by the user or restored from a saved session.
+    reasoning_effort_user_override: bool,
+    /// Whether the Jarvis default reasoning effort (`none`) has already been applied to this session.
+    jarvis_default_effort_applied: bool,
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
 }
 
 impl Agent {
+    pub(crate) fn server_turn_observer(&self) -> TurnObserver {
+        self.turn_ownership.observer()
+    }
+
+    pub(crate) fn claim_runtime_mutation(&self) -> Result<RuntimeMutationLease> {
+        self.turn_ownership.claim_mutation()
+    }
+
+    pub(crate) fn claim_server_turn(&self) -> Result<TurnLease> {
+        self.turn_ownership.claim()
+    }
+
+    pub(crate) fn validate_server_turn(&self, lease: &TurnLease) -> Result<()> {
+        self.turn_ownership.validate(lease)
+    }
+
     fn refresh_agents_md_snapshot(&mut self) {
         let working_dir = self
             .session
@@ -495,6 +463,7 @@ impl Agent {
             disabled_tools.clone(),
         );
         let mut agent = Self {
+            turn_ownership: Default::default(),
             provider,
             registry,
             skills,
@@ -536,6 +505,8 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
+            reasoning_effort_user_override: false,
+            jarvis_default_effort_applied: false,
             concurrency_session: None,
         };
         let t = Instant::now();
@@ -742,8 +713,9 @@ impl Agent {
             }
         };
         manager.reset();
+        manager.set_context_cap_override(self.session.context_cap);
         let budget = self.provider.context_window();
-        manager.set_budget(budget);
+        manager.set_budget_for_provider(budget, self.provider.name());
         if let Some(state) = self.session.compaction.as_ref() {
             manager.restore_persisted_stored_state_with(state, &self.session.messages);
         } else {
@@ -760,7 +732,7 @@ impl Agent {
         ));
         drop(manager);
         if let Some(state) = sanitized_state {
-            self.session.compaction = state;
+            self.session.compaction = state.map(Arc::new);
             self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
         }
     }
@@ -900,9 +872,8 @@ impl Agent {
         &mut self,
         manager: &crate::compaction::CompactionManager,
     ) {
-        let new_state = manager.persisted_state();
-        if self.session.compaction != new_state {
-            self.session.compaction = new_state;
+        if !manager.persisted_state_matches(self.session.compaction.as_deref()) {
+            self.session.compaction = manager.persisted_state().map(Arc::new);
             if let Err(err) = self.session.save() {
                 logging::error(&format!(
                     "Failed to persist compaction state for session {}: {}",
@@ -945,16 +916,16 @@ impl Agent {
             };
         let state = crate::session::StoredCompactionState {
             summary_text,
-            openai_encrypted_content,
+            openai_encrypted_content: openai_encrypted_content.map(Into::into),
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
         };
 
-        self.session.compaction = Some(state.clone());
+        self.session.compaction = Some(Arc::new(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.provider.context_window());
+            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
@@ -1175,7 +1146,7 @@ impl Agent {
                 let stored_message = StoredMessage {
                     id: id::new_id("message"),
                     role: Role::User,
-                    content: vec![tool_block],
+                    content: vec![tool_block].into(),
                     display_role: None,
                     timestamp: Some(chrono::Utc::now()),
                     tool_duration_ms: None,
@@ -1225,6 +1196,16 @@ impl Agent {
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
+            if self.session.original_working_dir.is_none()
+                && self.session.working_dir != working_dir
+                && self
+                    .session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User)
+            {
+                self.session.original_working_dir = self.session.working_dir.clone();
+            }
             self.session.working_dir = working_dir;
             self.unlock_tools();
             self.session.refresh_initial_session_context_message();

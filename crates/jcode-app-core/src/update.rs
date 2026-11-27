@@ -239,6 +239,15 @@ pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
     Ok(release)
 }
 
+#[path = "update_preview.rs"]
+mod update_preview;
+#[path = "update_stable.rs"]
+mod update_stable;
+pub use update_preview::{check_for_update_with_channel_blocking, fetch_latest_preview_blocking};
+use update_preview::{
+    is_prerelease_tag, prepare_preview_update_blocking, prepare_stable_update_blocking,
+};
+
 fn github_api_request(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -290,7 +299,15 @@ fn platform_asset(release: &GitHubRelease) -> Result<&GitHubAsset> {
     release
         .assets
         .iter()
-        .find(|a| a.name.starts_with(asset_name))
+        .find(|a| {
+            if is_prerelease_tag(&release.tag_name) {
+                (a.name == asset_name || a.name == format!("{asset_name}.tar.gz"))
+                    && a._size > 0
+                    && !a.browser_download_url.is_empty()
+            } else {
+                a.name.starts_with(asset_name)
+            }
+        })
         .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))
 }
 
@@ -305,6 +322,9 @@ fn verify_asset_checksum_if_available(
     bytes: &[u8],
 ) -> Result<()> {
     let Some(checksum_asset) = checksum_asset(release) else {
+        if is_prerelease_tag(&release.tag_name) {
+            anyhow::bail!("Preview release is missing SHA256SUMS");
+        }
         crate::logging::info(&format!(
             "Release {} does not include SHA256SUMS; skipping checksum verification",
             release.tag_name
@@ -368,15 +388,8 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
+fn prepare_release_update(release: GitHubRelease) -> Result<PreparedUpdate> {
     let current_version = jcode_build_meta::version();
-    let release = fetch_latest_release_blocking()?;
-
-    if !release_is_update(&release)? {
-        return Ok(PreparedUpdate::None {
-            current: current_version.to_string(),
-        });
-    }
 
     let Ok(asset) = platform_asset(&release) else {
         return Ok(PreparedUpdate::None {
@@ -472,14 +485,26 @@ fn prepare_main_update_blocking() -> Result<PreparedUpdate> {
     }
 
     crate::logging::info("Main channel: cargo not found, falling back to latest release");
-    prepare_stable_update_blocking()
+    prepare_stable_update_blocking(false)
 }
 
 pub fn prepare_update_blocking() -> Result<PreparedUpdate> {
-    let channel = crate::config::config().features.update_channel;
+    prepare_update_with_channel_blocking(None)
+}
+
+pub fn prepare_update_with_channel_blocking(
+    explicit_channel: Option<crate::config::UpdateChannel>,
+) -> Result<PreparedUpdate> {
+    let channel =
+        explicit_channel.unwrap_or_else(|| crate::config::config().features.update_channel);
     match channel {
         crate::config::UpdateChannel::Main => prepare_main_update_blocking(),
-        crate::config::UpdateChannel::Stable => prepare_stable_update_blocking(),
+        crate::config::UpdateChannel::Stable => {
+            prepare_stable_update_blocking(explicit_channel.is_some())
+        }
+        crate::config::UpdateChannel::Preview => {
+            prepare_preview_update_blocking(explicit_channel.is_some())
+        }
     }
 }
 
@@ -493,6 +518,13 @@ fn short_update_error(context: &str, error: &anyhow::Error) -> String {
 }
 
 pub fn spawn_background_session_update(session_id: String) {
+    spawn_background_session_update_with_channel(session_id, None);
+}
+
+pub fn spawn_background_session_update_with_channel(
+    session_id: String,
+    explicit_channel: Option<crate::config::UpdateChannel>,
+) {
     std::thread::spawn(move || {
         use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
 
@@ -500,7 +532,7 @@ pub fn spawn_background_session_update(session_id: String) {
 
         let publish = |status| Bus::global().publish(BusEvent::SessionUpdateStatus(status));
 
-        match prepare_update_blocking() {
+        match prepare_update_with_channel_blocking(explicit_channel) {
             Ok(PreparedUpdate::None { current }) => {
                 publish(SessionUpdateStatus::NoUpdate {
                     session_id,
@@ -588,29 +620,7 @@ pub fn spawn_background_session_update(session_id: String) {
 }
 
 pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
-    let channel = crate::config::config().features.update_channel;
-    match channel {
-        crate::config::UpdateChannel::Main => check_for_main_update_blocking(),
-        crate::config::UpdateChannel::Stable => check_for_stable_update_blocking(),
-    }
-}
-
-fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
-    let release = fetch_latest_release_blocking()?;
-
-    if release_is_update(&release)? {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-
-        if has_asset {
-            return Ok(Some(release));
-        }
-    }
-
-    Ok(None)
+    check_for_update_with_channel_blocking(None)
 }
 
 /// Check for updates on the main branch (cutting edge channel).
@@ -664,16 +674,9 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
         crate::logging::info("Main channel: cargo not found, falling back to latest release");
     }
 
-    // Fallback: use latest stable release if available
-    if let Ok(release) = fetch_latest_release_blocking() {
-        let asset_name = get_asset_name();
-        let has_asset = release
-            .assets
-            .iter()
-            .any(|a| a.name.starts_with(asset_name));
-        if has_asset && release_is_update(&release)? {
-            return Ok(Some(release));
-        }
+    // Fallback: newest installable stable release, if any.
+    if let Ok(Some(release)) = update_stable::find_stable_update_blocking() {
+        return Ok(Some(release));
     }
 
     Ok(None)
@@ -972,12 +975,7 @@ pub fn download_and_install_blocking_with_progress(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PathBuf> {
     let started = Instant::now();
-    let asset_name = get_asset_name();
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.starts_with(asset_name))
-        .ok_or_else(|| anyhow::anyhow!("No asset found for platform: {}", asset_name))?;
+    let asset = platform_asset(release)?;
 
     let download_url = asset.browser_download_url.clone();
 
@@ -1112,6 +1110,12 @@ pub fn download_and_install_blocking_with_progress(
         ));
     }
     build::update_stable_symlink(version)?;
+    if let Err(error) = build::repair_stale_shared_server_channel() {
+        crate::logging::warn(&format!(
+            "update: failed to repair stale shared-server channel after installing {}: {}",
+            version, error
+        ));
+    }
     build::update_current_symlink(version)?;
     build::update_launcher_symlink_to_current()?;
 

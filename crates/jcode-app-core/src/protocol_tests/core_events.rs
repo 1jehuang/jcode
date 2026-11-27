@@ -17,6 +17,7 @@ fn test_request_roundtrip() -> Result<()> {
 fn test_compacted_history_request_roundtrip() -> Result<()> {
     let req = Request::GetCompactedHistory {
         id: 7,
+        recent_history: false,
         visible_messages: 64,
     };
     let json = serde_json::to_string(&req)?;

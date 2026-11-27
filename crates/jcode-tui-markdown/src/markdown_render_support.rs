@@ -425,13 +425,7 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
 
         match highlighted {
             Ok(ranges) => {
-                let spans: Vec<Span<'static>> = ranges
-                    .into_iter()
-                    .map(|(style, text)| {
-                        Span::styled(text.to_string(), syntect_to_ratatui_style(style))
-                    })
-                    .collect();
-                lines.push(Line::from(spans));
+                lines.push(Line::from(syntect_ranges_to_spans(ranges)));
             }
             Err(_) => {
                 // Fallback to plain text
@@ -444,6 +438,37 @@ pub(super) fn highlight_code(code: &str, lang: Option<&str>) -> Vec<Line<'static
     }
 
     lines
+}
+
+/// Convert syntect ranges to spans, merging neighbours whose terminal style is
+/// identical. Syntect emits one range per scope token, so code lines produced
+/// ~3 bytes per span; each `Span` is ~56 bytes, which made span structs the
+/// dominant cost (20 MB of 26 MB) of a long session's prepared body cache.
+fn syntect_ranges_to_spans(ranges: Vec<(SynStyle, &str)>) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(ranges.len().min(8));
+    for (style, text) in ranges {
+        let style = syntect_to_ratatui_style(style);
+        if let Some(last) = spans.last_mut() {
+            // Whitespace shows no foreground colour, so a whitespace run can
+            // join either neighbour when background and modifiers match.
+            let same_ink = last.style.bg == style.bg
+                && last.style.add_modifier == style.add_modifier
+                && last.style.sub_modifier == style.sub_modifier
+                && last.style.underline_color == style.underline_color;
+            if last.style == style || (same_ink && text.trim().is_empty()) {
+                last.content.to_mut().push_str(text);
+                continue;
+            }
+            if same_ink && last.content.trim().is_empty() {
+                last.content.to_mut().push_str(text);
+                last.style = style;
+                continue;
+            }
+        }
+        spans.push(Span::styled(text.to_string(), style));
+    }
+    spans.shrink_to_fit();
+    spans
 }
 
 /// Convert syntect style to ratatui style
@@ -465,10 +490,7 @@ pub fn highlight_line(code: &str, ext: Option<&str>) -> Vec<Span<'static>> {
     let mut highlighter = HighlightLines::new(syntax, theme);
 
     match highlighter.highlight_line(code, &SYNTAX_SET) {
-        Ok(ranges) => ranges
-            .into_iter()
-            .map(|(style, text)| Span::styled(text.to_string(), syntect_to_ratatui_style(style)))
-            .collect(),
+        Ok(ranges) => syntect_ranges_to_spans(ranges),
         Err(_) => {
             vec![Span::raw(code.to_string())]
         }
@@ -498,13 +520,7 @@ pub fn highlight_file_lines(
         if let Ok(ranges) = highlighter.highlight_line(line, &SYNTAX_SET)
             && line_numbers.contains(&line_num)
         {
-            let spans: Vec<Span<'static>> = ranges
-                .into_iter()
-                .map(|(style, text)| {
-                    Span::styled(text.to_string(), syntect_to_ratatui_style(style))
-                })
-                .collect();
-            results.push((line_num, spans));
+            results.push((line_num, syntect_ranges_to_spans(ranges)));
         }
     }
 

@@ -9,8 +9,8 @@
 //! - top-right: a secondary stat
 //! - bottom-left / bottom-right: overflow counts, legends, meters, page dots
 //!
-//! Border text is fitted to the available width: the left slot is truncated
-//! with an ellipsis, and the right slot is dropped entirely rather than
+//! Border text is fitted to the available width: the left slot is cut at the
+//! edge with no ellipsis, and the right slot is dropped entirely rather than
 //! colliding with the left.
 
 use crate::tui::color_support::rgb;
@@ -71,6 +71,23 @@ impl Framed {
 
     pub(crate) fn footer_right(mut self, line: impl Into<Line<'static>>) -> Self {
         self.footer_right = Some(line.into());
+        self
+    }
+
+    /// Keep existing footer details, but never leave a visible frame's bottom
+    /// border empty when neither slot contains text.
+    pub(crate) fn footer_if_empty(mut self, line: impl Into<Line<'static>>) -> Self {
+        if ![&self.footer, &self.footer_right]
+            .into_iter()
+            .flatten()
+            .any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| !span.content.trim().is_empty())
+            })
+        {
+            self.footer = Some(line.into());
+        }
         self
     }
 
@@ -156,7 +173,8 @@ fn place<'a>(
     block
 }
 
-/// Truncate `line` to `max` display columns, ending in `… ` when cut.
+/// Cut `line` to `max` display columns, keeping the closing pad. No ellipsis:
+/// in a narrow margin every cell is better spent on text.
 /// Returns `None` when there is no room for anything meaningful.
 pub(crate) fn fit(line: &Line<'static>, max: usize) -> Option<Line<'static>> {
     if line.width() <= max {
@@ -165,7 +183,7 @@ pub(crate) fn fit(line: &Line<'static>, max: usize) -> Option<Line<'static>> {
     if max < 4 {
         return None;
     }
-    let budget = max - 2; // room for "…" and the closing pad
+    let budget = max - 1; // room for the closing pad
     let mut used = 0usize;
     let mut spans: Vec<Span<'static>> = Vec::new();
     'outer: for span in &line.spans {
@@ -183,8 +201,6 @@ pub(crate) fn fit(line: &Line<'static>, max: usize) -> Option<Line<'static>> {
         }
         spans.push(Span::styled(kept, span.style));
     }
-    let tail_style = spans.last().map(|s| s.style).unwrap_or_default();
-    spans.push(Span::styled("…", tail_style));
     spans.push(Span::raw(" "));
     Some(Line::from(spans))
 }
@@ -240,10 +256,10 @@ mod tests {
     }
 
     #[test]
-    fn left_slot_truncates_with_ellipsis() {
+    fn left_slot_is_cut_at_the_edge_without_ellipsis() {
         let f = Framed::body(vec![Line::from("x")]).title("abcdefghijklmnopqrstuvwxyz");
         let rows = render(&f, 12);
-        assert!(rows[0].contains('…'), "{}", rows[0]);
+        assert_eq!(rows[0], "╭ abcdefgh ╮");
         assert_eq!(rows[0].chars().count(), 12);
         assert!(rows[0].ends_with('╮'), "{}", rows[0]);
     }
@@ -259,10 +275,43 @@ mod tests {
     }
 
     #[test]
-    fn lone_right_footer_truncates_with_ellipsis() {
+    fn missing_or_blank_footers_receive_fallback_text() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]),
+            Framed::body(vec![Line::from("x")])
+                .footer("  ")
+                .footer_right(""),
+        ] {
+            let framed = framed.footer_if_empty(dim("Working tree"));
+            for width in [8, 12, 30] {
+                let rows = render(&framed, width);
+                assert!(rows[2].contains("Wor"), "{}", rows[2]);
+                assert_eq!(UnicodeWidthStr::width(rows[2].as_str()), usize::from(width));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_preserves_existing_footer_slots() {
+        for framed in [
+            Framed::body(vec![Line::from("x")]).footer("+3 more"),
+            Framed::body(vec![Line::from("x")]).footer_right("● edited"),
+            Framed::body(vec![Line::from("x")])
+                .footer("+3 more")
+                .footer_right("● edited"),
+        ] {
+            let before = render(&framed, 30);
+            let after = render(&framed.footer_if_empty(dim("fallback")), 30);
+            assert_eq!(before, after);
+        }
+    }
+
+    #[test]
+    fn lone_right_footer_is_cut_at_the_edge_without_ellipsis() {
         let f = Framed::body(vec![Line::from("x")]).footer_right("abcdefghijklmnopqrstuvwxyz");
         let rows = render(&f, 12);
-        assert!(rows[2].contains('…'), "{}", rows[2]);
+        assert!(!rows[2].contains('…'), "{}", rows[2]);
+        assert!(rows[2].contains("abcdefgh"), "{}", rows[2]);
         assert_eq!(rows[2].chars().count(), 12);
         assert!(rows[2].ends_with('╯'), "{}", rows[2]);
     }

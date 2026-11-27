@@ -1,4 +1,7 @@
 #![cfg_attr(test, allow(clippy::clone_on_copy))]
+mod tool_duration;
+include!("tests/streaming_hash.rs");
+include!("tests/provider_env.rs");
 include!("tests/cache_diagnostics.rs");
 include!("tests/support_failover/part_01.rs");
 include!("tests/support_failover/part_02.rs");
@@ -11,6 +14,8 @@ include!("tests/state_model_poke_01/part_02.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");
+#[path = "tests/daemon_poke.rs"]
+mod daemon_poke;
 include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
@@ -29,6 +34,7 @@ include!("tests/service_tier_dedup.rs");
 include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
+include!("tests/idle_soft_interrupt_cancel.rs");
 include!("tests/native_citations.rs");
 include!("tests/remote_events_reload_05.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
@@ -41,6 +47,7 @@ include!("tests/scroll_copy_03.rs");
 include!("tests/resize_viewport.rs");
 include!("tests/issue_1642_panel_dismiss.rs");
 include!("tests/resize_anchor.rs");
+include!("tests/recent_history.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
@@ -48,13 +55,19 @@ include!("tests/onboarding_eval.rs");
 include!("tests/onboarding_sim.rs");
 include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
+include!("tests/long_transcript_scroll_perf.rs");
 include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
+include!("tests/background_todo_dependencies.rs");
+include!("tests/todo_completion.rs");
+include!("tests/final_response_followup.rs");
+include!("tests/reload_recovery_replay.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/oauth_login_progress.rs");
 include!("tests/issue_544_paste_enter.rs");
 include!("tests/keybinding_hot_reload.rs");
 include!("tests/latex_command.rs");
+include!("tests/key_release_redraw.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");
@@ -62,6 +75,7 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/voice_input.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/issue_1685_bounded_auto_resume.rs");
+include!("tests/held_retry_dispatch.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
@@ -71,44 +85,6 @@ include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
-#[test]
-fn kv_cache_signature_prefix_match_allows_appended_messages() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let mut current_messages = baseline_messages.clone();
-    current_messages.push(crate::message::Message::user("follow up"));
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "memory a");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "memory b");
-
-    assert!(App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(
-        App::kv_cache_common_prefix_messages(&current, &baseline),
-        baseline_messages.len()
-    );
-    assert_ne!(baseline.ephemeral_hash, current.ephemeral_hash);
-}
-
-#[test]
-fn kv_cache_signature_prefix_match_detects_prefix_mutation() {
-    let baseline_messages = vec![
-        crate::message::Message::user("first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-    ];
-    let current_messages = vec![
-        crate::message::Message::user("changed first prompt"),
-        crate::message::Message::assistant_text("first answer"),
-        crate::message::Message::user("follow up"),
-    ];
-
-    let baseline = App::kv_cache_request_signature(&baseline_messages, &[], "system", "");
-    let current = App::kv_cache_request_signature(&current_messages, &[], "system", "");
-
-    assert!(!App::kv_cache_signatures_prefix_match(&current, &baseline));
-    assert_eq!(App::kv_cache_common_prefix_messages(&current, &baseline), 0);
-}
 
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
@@ -125,7 +101,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             content: vec![ContentBlock::Text {
                 text: "boundary answer".to_string(),
                 cache_control: None,
-            }],
+            }]
+            .into(),
             timestamp: Some(chrono::Utc::now()),
             tool_duration_ms: None,
         },
@@ -149,7 +126,8 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
                 ContentBlock::ReasoningTrace {
                     text: "internal scratch thinking".to_string(),
                 },
-            ],
+            ]
+            .into(),
             // Backfilled after the tool ran / a newer turn was committed.
             timestamp: Some(chrono::Utc::now() + chrono::Duration::seconds(5)),
             tool_duration_ms: Some(1234),
@@ -909,6 +887,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -932,6 +911,7 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
+            effective_budget: None,
             input: 63_762,
             output: 153,
             cache_read_input: Some(0),
@@ -1923,108 +1903,13 @@ fn oversized_pasted_submit_is_rejected_and_preserves_input() {
     );
 }
 
-fn seed_stale_clear_usage(app: &mut App) {
-    app.streaming.streaming_input_tokens = 40_000;
-    app.streaming.streaming_output_tokens = 2_000;
-    app.streaming.streaming_cache_read_tokens = Some(30_000);
-    app.streaming.streaming_cache_creation_tokens = Some(5_000);
-    app.streaming.streaming_context_stale = true;
-    app.streaming.streaming_usage_call_reset_pending = true;
-    app.kv_cache.current_api_usage_recorded = true;
-}
+include!("tests/clear_runtime_state.rs");
 
-fn assert_clear_usage_reset(app: &App) {
-    assert_eq!(app.current_stream_context_tokens(), None);
-    assert_eq!(app.streaming.streaming_input_tokens, 0);
-    assert_eq!(app.streaming.streaming_output_tokens, 0);
-    assert_eq!(app.streaming.streaming_cache_read_tokens, None);
-    assert_eq!(app.streaming.streaming_cache_creation_tokens, None);
-    assert!(!app.streaming.streaming_context_stale);
-    assert!(!app.streaming.streaming_usage_call_reset_pending);
-    assert!(!app.kv_cache.current_api_usage_recorded);
-}
-
-fn seed_stale_clear_image(app: &mut App) -> u64 {
-    app.remote_side_pane_images = vec![crate::session::RenderedImage {
-        history_message_index: None,
-        media_type: "image/png".to_string(),
-        data: "stale-image".to_string(),
-        label: Some("stale.png".to_string()),
-        source: crate::session::RenderedImageSource::UserInput,
-        anchor: None,
-    }];
-    let _ = crate::tui::TuiState::side_pane_images_signature(app);
-    app.expanded_images_version
-}
-
-fn assert_clear_image_reset(app: &App, previous_version: u64) {
-    assert!(app.remote_side_pane_images.is_empty());
-    assert_eq!(app.side_pane_images_signature_cache.get(), None);
-    assert!(app.expanded_images.is_empty());
-    assert_eq!(
-        app.expanded_images_version,
-        previous_version.wrapping_add(1)
-    );
-}
-
-#[test]
-fn local_clear_resets_provider_reported_context_usage() {
-    let mut app = create_test_app();
-    seed_stale_clear_usage(&mut app);
-    seed_stale_clear_swarm_plan(&mut app);
-    let image_version = seed_stale_clear_image(&mut app);
-
-    assert!(super::commands::handle_session_command(&mut app, "/clear"));
-
-    assert_clear_usage_reset(&app);
-    assert_clear_swarm_plan_reset(&app);
-    assert_clear_image_reset(&app, image_version);
-}
-
-#[test]
-fn remote_clear_resets_provider_reported_context_usage() {
-    let mut app = create_test_app();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
-    app.is_remote = true;
-    seed_stale_clear_usage(&mut app);
-    seed_stale_clear_swarm_plan(&mut app);
-    let image_version = seed_stale_clear_image(&mut app);
-    app.input = "/clear".to_string();
-    app.cursor_pos = app.input.len();
-
-    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
-        .expect("remote /clear should succeed");
-
-    assert_clear_usage_reset(&app);
-    assert_clear_swarm_plan_reset(&app);
-    assert_clear_image_reset(&app, image_version);
-}
-
-fn seed_stale_clear_swarm_plan(app: &mut App) {
-    app.swarm_plan_items = vec![crate::plan::PlanItem {
-        content: "old session task".to_string(),
-        status: "queued".to_string(),
-        priority: "high".to_string(),
-        id: "old-task".to_string(),
-        subsystem: None,
-        file_scope: Vec::new(),
-        blocked_by: Vec::new(),
-        assigned_to: None,
-    }];
-    app.swarm_plan_version = Some(19);
-    app.swarm_plan_swarm_id = Some("old-swarm".to_string());
-}
-
-fn assert_clear_swarm_plan_reset(app: &App) {
-    assert!(app.swarm_plan_items.is_empty());
-    assert_eq!(app.swarm_plan_version, None);
-    assert_eq!(app.swarm_plan_swarm_id, None);
-}
 include!("tests/kv_cache_provider_identity.rs");
 
 include!("tests/cache_retention_routes.rs");
 
 include!("tests/cache_prompt_accounting.rs");
+
+#[path = "tests_additional_tests.rs"]
+mod additional_materialized_provider_messages_share_payload_and_detach_on_edit;

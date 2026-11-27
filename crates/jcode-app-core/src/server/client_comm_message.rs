@@ -3,15 +3,14 @@ use super::{
     ClientConnectionInfo, SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember,
     fanout_session_event, queue_soft_interrupt_for_session, record_swarm_event, truncate_detail,
 };
-use crate::agent::Agent;
 use crate::protocol::{CommDeliveryMode, NotificationType, ServerEvent};
 use jcode_agent_runtime::SoftInterruptSource;
 use jcode_swarm_core::ChannelIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
-type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
+use super::SessionAgents;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 async fn swarm_id_for_session(
@@ -452,6 +451,13 @@ pub(super) async fn handle_comm_message(
                         if crate::config::config().server.wake_mode
                             == crate::config::WakeMode::External
                         {
+                            crate::mobile_push::notify(
+                                crate::mobile_push::PushKind::Wake,
+                                session_id,
+                                None,
+                                &notification_msg,
+                                None,
+                            );
                             let _ = fanout_session_event(
                                 swarm_members,
                                 session_id,

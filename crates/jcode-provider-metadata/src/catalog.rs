@@ -122,14 +122,10 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
-// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
-// endpoints, so they can be driven by `provider-doctor` /
-// `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
-// alias the native login-provider ids (`anthropic-api`, `openai-api`); auth
-// activation deliberately routes them through the native runtime, while the
-// live HTTP probes hit these hosts (Anthropic needs `x-api-key` +
-// `anthropic-version`, handled in the probe layer). `default_model` is None so
-// the doctor selects from the live catalog unless `--model` is passed.
+// Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions` endpoints for
+// `provider-doctor` / `provider-test-coverage`. These ids alias `anthropic-api` / `openai-api`:
+// auth activation uses the native runtime while live HTTP probes hit these hosts (Anthropic uses
+// `x-api-key` + `anthropic-version` in the probe layer). `default_model` is None for live catalog.
 pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "anthropic-api",
     display_name: "Anthropic API",
@@ -471,6 +467,18 @@ pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const VENICE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "venice",
+    display_name: "Venice AI",
+    api_base: "https://api.venice.ai/api/v1",
+    api_key_env: "VENICE_API_KEY",
+    env_file: "venice.env",
+    setup_url: "https://venice.ai/settings/api",
+    // Venice's catalog changes often; pick from the live /models list.
+    default_model: None,
+    requires_api_key: true,
+};
+
 // Yolo-Auto is an OpenAI-compatible gateway. Its `/v1/models` listing is
 // authenticated, so the full catalog is discovered with the account key after
 // login; `default_model` keeps the documented `yolo` alias selected until that
@@ -497,7 +505,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 45] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -538,6 +546,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     META_MUSE_PROFILE,
     MUSE_SUBSCRIPTION_PROFILE,
     CELERIS_PROFILE,
+    VENICE_PROFILE,
     YOLO_AUTO_PROFILE,
     LMSTUDIO_PROFILE,
     OLLAMA_PROFILE,
@@ -1170,15 +1179,18 @@ pub const COPILOT_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
 
 pub const GEMINI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "gemini",
-    display_name: "Google Gemini",
+    display_name: "Gemini Code Assist (Cloud)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Gemini,
     auth_status_method: "OAuth",
-    aliases: &[],
-    menu_detail: "Google Gemini Code Assist OAuth login",
+    aliases: &["gemini-code-assist"],
+    menu_detail: "Paid Code Assist Standard/Enterprise (needs GOOGLE_CLOUD_PROJECT)",
     recommended: false,
     target: LoginProviderTarget::Gemini,
-    order: LoginProviderSurfaceOrder::new(Some(13), Some(11), Some(4), Some(11), Some(13)),
+    // Hidden from CLI/TUI login pickers: Google retired Code Assist for individuals,
+    // so personal accounts use Antigravity. Still reachable via `--provider gemini`,
+    // auto-init, and auth status so paid Cloud users and existing logins keep working.
+    order: LoginProviderSurfaceOrder::new(None, None, Some(4), Some(11), Some(13)),
 };
 
 pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1201,15 +1213,15 @@ pub const GEMINI_API_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
 
 pub const ANTIGRAVITY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "antigravity",
-    display_name: "Antigravity",
+    display_name: "Google (Antigravity)",
     auth_kind: LoginProviderAuthKind::OAuth,
     auth_state_key: LoginProviderAuthStateKey::Antigravity,
     auth_status_method: "OAuth",
     aliases: &[],
-    menu_detail: "Google Antigravity OAuth login",
+    menu_detail: "Google account, AI Pro/Ultra (Gemini 4, Claude)",
     recommended: false,
     target: LoginProviderTarget::Antigravity,
-    order: LoginProviderSurfaceOrder::new(Some(12), Some(12), None, Some(12), Some(12)),
+    order: LoginProviderSurfaceOrder::new(Some(12), Some(11), None, Some(12), Some(12)),
 };
 
 pub const XIAOMI_MIMO_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1235,6 +1247,19 @@ pub const CELERIS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     menu_detail: "OpenAI-compatible low-latency Celeris API",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(CELERIS_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
+};
+
+pub const VENICE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "venice",
+    display_name: "Venice AI",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["venice-ai", "veniceai", "venice.ai"],
+    menu_detail: "OpenAI-compatible private, uncensored inference",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(VENICE_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(38), Some(38), Some(38), Some(38), Some(38)),
 };
 
@@ -1264,7 +1289,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 57] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1311,6 +1336,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     META_MUSE_LOGIN_PROVIDER,
     MUSE_SUBSCRIPTION_LOGIN_PROVIDER,
     CELERIS_LOGIN_PROVIDER,
+    VENICE_LOGIN_PROVIDER,
     YOLO_AUTO_LOGIN_PROVIDER,
     LMSTUDIO_LOGIN_PROVIDER,
     OLLAMA_LOGIN_PROVIDER,

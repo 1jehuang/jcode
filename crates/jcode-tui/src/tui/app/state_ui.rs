@@ -1,7 +1,13 @@
+#[path = "state_ui_count_format.rs"]
+mod count_format;
 use super::state_ui_storage::infer_spawned_session_startup_hints;
+#[path = "state_ui_reload_input.rs"]
+mod reload_input;
+
 use super::*;
 use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
+use count_format::*;
 
 pub(super) struct RestoredReloadInput {
     pub input: String,
@@ -9,6 +15,7 @@ pub(super) struct RestoredReloadInput {
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: Vec<String>,
+    pub queued_images: Vec<(String, String)>,
     pub queued_commands: Vec<String>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
@@ -26,9 +33,50 @@ pub(super) struct RestoredReloadInput {
     pub todo_confidence_spike_challenged: bool,
     pub last_todo_ownership_fingerprint: Option<String>,
     pub final_response_todo_fingerprint: Option<String>,
+    pub last_auto_poke_fingerprint: Option<String>,
+    pub auto_poke_attempts: u8,
 }
 
 impl App {
+    /// Publish attachments immediately, without waiting for a history refresh.
+    /// The user prompt must already have been echoed into the transcript.
+    pub(super) fn publish_user_image_previews(&mut self, images: &[(String, String)]) {
+        let Some(ordinal) = self
+            .display_messages
+            .iter()
+            .filter(|message| {
+                message.effective_role() == "user"
+                    && !crate::session::is_attached_image_label_text(&message.content)
+            })
+            .count()
+            .checked_sub(1)
+        else {
+            return;
+        };
+        let anchor = Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal });
+        let previews = images
+            .iter()
+            .filter(|(media_type, data)| {
+                !media_type.is_empty()
+                    && !data.is_empty()
+                    && !self.remote_side_pane_images.iter().any(|existing| {
+                        existing.anchor == anchor
+                            && existing.media_type == *media_type
+                            && existing.data == *data
+                    })
+            })
+            .map(|(media_type, data)| crate::session::RenderedImage {
+                media_type: media_type.clone(),
+                data: data.clone(),
+                label: None,
+                source: crate::session::RenderedImageSource::UserInput,
+                anchor: anchor.clone(),
+                history_message_index: None,
+            })
+            .collect();
+        self.append_live_inline_images(previews);
+    }
+
     pub(super) fn append_live_inline_images(
         &mut self,
         images: Vec<crate::session::RenderedImage>,
@@ -143,6 +191,10 @@ impl App {
         // wrongly stuck as "unfocused idle". In that state the run loop throttles
         // repaints to ~1 Hz, so scrolling updates state but the screen only
         // repaints about once a second -- the intermittent "can't scroll" bug.
+        if !self.client_focus_confirmed {
+            self.client_focus_confirmed = true;
+            crate::tui::focus_carryover::confirm();
+        }
         if !self.client_focused {
             self.set_client_focused(true);
         }
@@ -164,19 +216,57 @@ impl App {
     /// backend here. Doing so sends an ED2 clear followed by every terminal cell on
     /// each tab switch, which makes focus changes visibly lag on large terminals.
     pub(super) fn set_client_focused(&mut self, focused: bool) -> bool {
+        // Every caller acts on a focus report or an input event.
+        if !self.client_focus_confirmed {
+            self.client_focus_confirmed = true;
+            crate::tui::focus_carryover::confirm();
+        }
         if self.client_focused == focused {
             return false;
         }
         self.client_focused = focused;
+        crate::tui::focus_carryover::record(focused);
+        crate::tui::cloud_git::note_client_focus(focused);
         if focused {
             // Schedule an immediate differential frame so a newly-focused window
             // catches up and resumes animation timing from "now".
             self.note_client_focus(true);
+            // The todo poll runs slowly while unfocused, so catch up now.
+            self.request_remote_todos_refresh_soon();
             true
         } else {
             false
         }
     }
+
+    /// Stop presuming focus that nothing has confirmed.
+    ///
+    /// A client starts out assuming it is focused, because a terminal reports
+    /// focus *changes* only and some terminals report nothing at all. A window
+    /// that started in the background, or re-executed from a build that did
+    /// not carry its focus state over, therefore stays "focused" until the
+    /// user visits it. Measured on such a window on a hidden workspace: 13
+    /// full frames and about 55 wakeups a second animating swarm spinners.
+    ///
+    /// If neither a focus report nor a single key, mouse or paste event has
+    /// arrived after [`Self::PRESUMED_FOCUS_TIMEOUT`], treat the window as
+    /// unfocused. Any later input or focus report restores it at once, and a
+    /// client that has been confirmed once is never expired, so terminals
+    /// without focus reporting keep today's behaviour after the first key.
+    /// Confirmation is carried across a re-exec, so a window the user is
+    /// only watching is not demoted two minutes after every reload.
+    pub(super) fn expire_presumed_focus(&mut self) {
+        if self.client_focus_confirmed
+            || !self.client_focused
+            || self.app_started.elapsed() < Self::PRESUMED_FOCUS_TIMEOUT
+        {
+            return;
+        }
+        self.set_client_focused(false);
+    }
+
+    pub(super) const PRESUMED_FOCUS_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(120);
 
     /// Whether a redraw is worth performing while the terminal is unfocused.
     ///
@@ -231,137 +321,6 @@ impl App {
         self.context_revision = self.context_revision.wrapping_add(1);
     }
 
-    pub(super) fn save_input_for_reload(&self, session_id: &str) {
-        let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            !pending.auto_retry
-                && !pending.is_system
-                && (!pending.content.trim().is_empty() || !pending.images.is_empty())
-        });
-        // A queued follow-up that was dequeued and is currently in flight lives
-        // only in `rate_limit_pending_message` (is_system). Without a scheduled
-        // retry reset, that shape has no dispatch path after a restore (the
-        // tick resend requires `rate_limit_reset`), so persist it back into
-        // the queued/hidden lists instead; the restored queue re-sends it once
-        // the turn is proven idle (issue #391).
-        let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            pending.is_system
-                && self.rate_limit_reset.is_none()
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
-        });
-        if self.input.is_empty()
-            && self.pending_images.is_empty()
-            && self.queued_messages.is_empty()
-            && self.queued_commands.is_empty()
-            && self.hidden_queued_system_messages.is_empty()
-            && self.interleave_message.is_none()
-            && self.pending_soft_interrupts.is_empty()
-            && self.pending_soft_interrupt_requests.is_empty()
-            && self.rate_limit_pending_message.is_none()
-            && resume_prompt.is_none()
-            && !self.observe_mode_enabled
-            && !self.split_view_enabled
-            && !self.todos_view_enabled
-            && !self.todo_confidence_spike_challenged
-            && self.last_todo_ownership_fingerprint.is_none()
-            && self.final_response_todo_fingerprint.is_none()
-        {
-            // Nothing to save, but a stale file from an earlier run could
-            // still hold old queued messages/input. Leaving it behind would
-            // resurrect that stale state on the next restore. Only remove
-            // clearly stale files: another client attached to the same session
-            // may have just saved ITS queued messages during the same reload
-            // handoff, and deleting a fresh file here would drop them.
-            if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-                let path = jcode_dir.join(format!("client-input-{}", session_id));
-                let is_stale = std::fs::metadata(&path)
-                    .and_then(|meta| meta.modified())
-                    .ok()
-                    .and_then(|mtime| mtime.elapsed().ok())
-                    .is_some_and(|age| age > Duration::from_secs(300));
-                if is_stale {
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
-            return;
-        }
-        if let Ok(jcode_dir) = crate::storage::jcode_dir() {
-            let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let rate_limit_reset_in_ms =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_reset.map(|reset| {
-                        let now = Instant::now();
-                        if reset <= now {
-                            0
-                        } else {
-                            (reset - now).as_millis().min(u64::MAX as u128) as u64
-                        }
-                    })
-                };
-            let rate_limit_pending_message =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_pending_message.as_ref().map(|pending| {
-                        serde_json::json!({
-                            "content": pending.content,
-                            "images": pending.images,
-                            "is_system": pending.is_system,
-                            "system_reminder": pending.system_reminder,
-                            "auto_retry": pending.auto_retry,
-                            "retry_attempts": pending.retry_attempts,
-                        })
-                    })
-                };
-            let mut queued_messages = self.queued_messages.clone();
-            let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
-            if let Some(pending) = inflight_continuation {
-                if !pending.content.trim().is_empty() {
-                    queued_messages.insert(0, pending.content.clone());
-                }
-                if let Some(reminder) = pending.system_reminder.clone() {
-                    hidden_queued_system_messages.insert(0, reminder);
-                }
-            }
-            let resume_input = resume_prompt.map(|pending| pending.content.as_str());
-            let resume_images = resume_prompt.map(|pending| pending.images.as_slice());
-            let rate_limit_reset_in_ms =
-                rate_limit_reset_in_ms.or_else(|| resume_prompt.map(|_| 0));
-            let pending_soft_interrupt_resend = self
-                .pending_soft_interrupt_requests
-                .iter()
-                .map(|(_, content)| content.clone())
-                .collect::<Vec<_>>();
-            let data = serde_json::json!({
-                "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
-                "input": resume_input.unwrap_or(self.input.as_str()),
-                "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
-                    "media_type": media_type,
-                    "data": data,
-                })).collect::<Vec<_>>(),
-                "submit_on_restore": resume_prompt.is_some(),
-                "queued_messages": queued_messages,
-                "queued_commands": self.queued_commands,
-                "hidden_queued_system_messages": hidden_queued_system_messages,
-                "interleave_message": self.interleave_message,
-                "pending_soft_interrupts": self.pending_soft_interrupts,
-                "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
-                "rate_limit_pending_message": rate_limit_pending_message,
-                "rate_limit_reset_in_ms": rate_limit_reset_in_ms,
-                "observe_mode_enabled": self.observe_mode_enabled,
-                "observe_page_markdown": self.observe_page_markdown,
-                "observe_page_updated_at_ms": self.observe_page_updated_at_ms,
-                "split_view_enabled": self.split_view_enabled,
-                "todos_view_enabled": self.todos_view_enabled,
-                "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
-                "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
-                "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
-            });
-            let _ = std::fs::write(&path, data.to_string());
-        }
-    }
-
     pub(crate) fn save_startup_message_for_session(session_id: &str, message: String) {
         if message.trim().is_empty() {
             return;
@@ -390,7 +349,9 @@ impl App {
                 "split_view_enabled": false,
                 "todos_view_enabled": false,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if let Err(error) = std::fs::write(&path, data.to_string()) {
+                crate::logging::warn(&format!("Could not save reload input: {error}"));
+            }
         }
     }
 
@@ -409,7 +370,11 @@ impl App {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logging::warn(&format!("Could not remove restored input file: {error}"));
+        }
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             let input = value
@@ -514,6 +479,10 @@ impl App {
                 .get("rate_limit_pending_message")
                 .and_then(|pending| pending.as_object())
                 .map(|pending| super::PendingRemoteMessage {
+                    jarvis_voice: pending
+                        .get("jarvis_voice")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                     content: pending
                         .get("content")
                         .and_then(|v| v.as_str())
@@ -594,6 +563,17 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                queued_images: match value.get("queued_images") {
+                    None => Vec::new(),
+                    Some(images) => {
+                        serde_json::from_value(images.clone()).unwrap_or_else(|error| {
+                            crate::logging::warn(&format!(
+                                "Cannot restore queued image list: {error}"
+                            ));
+                            Vec::new()
+                        })
+                    }
+                },
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
@@ -613,6 +593,15 @@ impl App {
                     .get("final_response_todo_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
+                last_auto_poke_fingerprint: value
+                    .get("last_auto_poke_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                auto_poke_attempts: value
+                    .get("auto_poke_attempts")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .min(u8::MAX as u64) as u8,
                 last_todo_ownership_fingerprint: value
                     .get("last_todo_ownership_fingerprint")
                     .and_then(|v| v.as_str())
@@ -629,6 +618,7 @@ impl App {
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
@@ -646,6 +636,8 @@ impl App {
             todo_confidence_spike_challenged: false,
             last_todo_ownership_fingerprint: None,
             final_response_todo_fingerprint: None,
+            last_auto_poke_fingerprint: None,
+            auto_poke_attempts: 0,
         })
     }
 
@@ -1000,8 +992,16 @@ impl App {
                 let (_, writer) = stream.into_split();
                 let mut writer = writer;
 
-                let snapshot_json =
-                    serde_json::to_string(&initial_snapshot).unwrap_or_default() + "\n";
+                let mut snapshot_json = match serde_json::to_string(&initial_snapshot) {
+                    Ok(json) => json,
+                    Err(error) => {
+                        crate::logging::warn(&format!(
+                            "Cannot encode initial debug snapshot: {error}"
+                        ));
+                        continue;
+                    }
+                };
+                snapshot_json.push('\n');
                 if writer.write_all(snapshot_json.as_bytes()).await.is_ok() {
                     clients.lock().await.push(writer);
                 }
@@ -1016,89 +1016,6 @@ impl App {
     pub fn debug_socket_path() -> std::path::PathBuf {
         crate::storage::runtime_dir().join("jcode-debug.sock")
     }
-}
-
-fn cache_ratio_pct(numerator: u64, denominator: u64) -> u8 {
-    if denominator == 0 {
-        0
-    } else {
-        ((numerator as f64 / denominator as f64) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u8
-    }
-}
-
-fn grouped_u64(value: u64) -> String {
-    let raw = value.to_string();
-    let mut grouped = String::with_capacity(raw.len() + raw.len() / 3);
-    for (index, ch) in raw.chars().enumerate() {
-        if index > 0 && (raw.len() - index).is_multiple_of(3) {
-            grouped.push(',');
-        }
-        grouped.push(ch);
-    }
-    grouped
-}
-
-fn trim_decimal_zeros(mut value: String) -> String {
-    if value.contains('.') {
-        while value.ends_with('0') {
-            value.pop();
-        }
-        if value.ends_with('.') {
-            value.pop();
-        }
-    }
-    value
-}
-
-fn compact_count(value: u64) -> String {
-    let Some((unit, suffix)) = [(1_000_000_000_u64, "b"), (1_000_000, "m"), (1_000, "k")]
-        .into_iter()
-        .find(|(unit, _)| value >= *unit)
-    else {
-        return value.to_string();
-    };
-
-    let scaled = value as f64 / unit as f64;
-    let decimals = if scaled >= 10.0 { 1 } else { 2 };
-    format!(
-        "{}{}",
-        trim_decimal_zeros(format!("{scaled:.decimals$}")),
-        suffix
-    )
-}
-
-fn human_count(value: u64) -> String {
-    if value < 1_000 {
-        value.to_string()
-    } else {
-        format!("{} ({})", compact_count(value), grouped_u64(value))
-    }
-}
-
-fn bold_count(value: u64) -> String {
-    human_count(value).to_string()
-}
-
-fn bold_count_usize(value: usize) -> String {
-    bold_count(value as u64)
-}
-
-fn opt_u64(value: Option<u64>) -> String {
-    value.map(human_count).unwrap_or_else(|| "None".to_string())
-}
-
-fn opt_usize(value: Option<usize>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "None".to_string())
-}
-
-fn opt_string(value: Option<&str>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "None".to_string())
 }
 
 fn push_cache_signature(
@@ -1771,109 +1688,9 @@ fn format_cache_stats(app: &App) -> String {
     lines.join("\n")
 }
 
-/// Build the `/skills` report: currently loaded skills (marking the active one)
-/// plus the curated list of jcode-endorsed skills (marking which are installed).
-fn build_skills_report(app: &App) -> String {
-    let mut out = String::new();
-
-    let active = app.active_skill().map(|s| s.to_string());
-
-    // Loaded skills. In remote mode we only have names; locally we have full
-    // skill metadata (description + path).
-    out.push_str("Loaded skills\n");
-    if app.is_remote && !app.remote_skills.is_empty() {
-        let mut names = app.remote_skills.clone();
-        names.sort();
-        for name in &names {
-            let marker = if active.as_deref() == Some(name.as_str()) {
-                " (active)"
-            } else {
-                ""
-            };
-            out.push_str(&format!("- /{}{}\n", name, marker));
-        }
-    } else {
-        let snapshot = app.current_skills_snapshot();
-        let mut skills = snapshot.list();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        if skills.is_empty() {
-            out.push_str(
-                "- none loaded\n  Add skills under ~/.jcode/skills/<name>/SKILL.md or ./.jcode/skills/<name>/SKILL.md\n",
-            );
-        } else {
-            for skill in skills {
-                let marker = if active.as_deref() == Some(skill.name.as_str()) {
-                    " (active)"
-                } else {
-                    ""
-                };
-                out.push_str(&format!("- /{}{}\n", skill.name, marker));
-                out.push_str(&format!("    {}\n", skill.description));
-                out.push_str(&format!("    path: {}\n", skill.path.display()));
-            }
-        }
-    }
-
-    // Endorsed skills, marking which are installed. Build the installed set in a
-    // remote-aware way (the inherent `available_skills()` ignores remote skills).
-    let installed: std::collections::HashSet<String> =
-        if app.is_remote && !app.remote_skills.is_empty() {
-            app.remote_skills.iter().cloned().collect()
-        } else {
-            app.current_skills_snapshot()
-                .list()
-                .iter()
-                .map(|s| s.name.clone())
-                .collect()
-        };
-    out.push_str("\nEndorsed skills (recommended by jcode)\n");
-    // Group by category, preserving first-seen category order.
-    let mut category_order: Vec<&str> = Vec::new();
-    for endorsed in crate::skill::endorsed_skills() {
-        if !category_order.contains(&endorsed.category) {
-            category_order.push(endorsed.category);
-        }
-    }
-    for category in category_order {
-        let installed_in_category = crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category && installed.contains(e.name))
-            .count();
-        let total_in_category = crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category)
-            .count();
-        out.push_str(&format!(
-            "\n  {} ({}/{} installed)\n",
-            category, installed_in_category, total_in_category
-        ));
-        for endorsed in crate::skill::endorsed_skills()
-            .iter()
-            .filter(|e| e.category == category)
-        {
-            let is_installed = installed.contains(endorsed.name);
-            let status = if is_installed {
-                "installed"
-            } else {
-                "not installed"
-            };
-            out.push_str(&format!("  - /{} [{}]\n", endorsed.name, status));
-            out.push_str(&format!("      {}\n", endorsed.description));
-            out.push_str(&format!("      source: {}\n", endorsed.source));
-            if !is_installed && let Some(install) = endorsed.install {
-                out.push_str(&format!("      install: {}\n", install));
-            }
-        }
-    }
-
-    out.push_str("\nActivate a skill by typing its slash command (e.g. /optimization).\n");
-    out.push_str("Manage skills with the skill_manage tool (list/load/read/reload).\n");
-    out.push_str(
-        "NVIDIA CUDA-X skills come from the official catalog at https://github.com/NVIDIA/skills.\n",
-    );
-
-    out.trim_end().to_string()
-}
+#[path = "state_ui_skills_report.rs"]
+mod skills_report;
+use skills_report::build_skills_report;
 
 pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/skills" {

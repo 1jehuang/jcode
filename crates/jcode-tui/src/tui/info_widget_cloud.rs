@@ -14,8 +14,8 @@ fn fit(line: Line<'static>, width: u16) -> Line<'static> {
     if width == 0 {
         return Line::default();
     }
-    let truncated = line.width() > usize::from(width);
-    let mut left = usize::from(width).saturating_sub(usize::from(truncated));
+    // Cut at the widget edge with no ellipsis so every cell carries content.
+    let mut left = usize::from(width);
     let mut spans = Vec::new();
     for span in line.spans {
         let mut text = String::new();
@@ -27,13 +27,16 @@ fn fit(line: Line<'static>, width: u16) -> Line<'static> {
             text.push(ch);
             left -= cells;
         }
-        spans.push(Span::styled(text, span.style));
+        // Never let unstyled text fall back to the terminal's pure white.
+        let style = if span.style.fg.is_none() {
+            span.style.patch(value_style())
+        } else {
+            span.style
+        };
+        spans.push(Span::styled(text, style));
         if left == 0 {
             break;
         }
-    }
-    if truncated {
-        spans.push(Span::raw("…"));
     }
     Line::from(spans)
 }
@@ -45,13 +48,44 @@ fn clean(text: &str) -> String {
 fn row(text: impl Into<String>, width: u16) -> Line<'static> {
     fit(Line::from(clean(&text.into())), width)
 }
+fn value_style() -> Style {
+    Style::default().fg(crate::tui::color_support::rgb(170, 170, 185))
+}
+/// Dim label, bright value. `label` should include its trailing separator.
+fn kv(label: &str, value: impl Into<String>, width: u16) -> Line<'static> {
+    fit(
+        Line::from(vec![
+            frame::dim(clean(label)),
+            Span::styled(clean(&value.into()), value_style()),
+        ]),
+        width,
+    )
+}
+fn state_style(state: &str) -> Style {
+    use crate::tui::color_support::rgb;
+    match state {
+        "Ready" => Style::default().fg(rgb(110, 200, 120)),
+        "Loading" | "Reconnecting" => Style::default().fg(rgb(230, 190, 90)),
+        _ => Style::default().fg(rgb(230, 100, 100)),
+    }
+}
+/// Show RFC 3339 transfer stamps as local `YYYY-MM-DD HH:MM`.
+fn transfer_time(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw.trim())
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
 fn path_row(prefix: &str, path: &str, width: u16) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
     let path = clean(path);
     let full = format!("{prefix}{path}");
     let budget = usize::from(width).saturating_sub(prefix.width() + 1);
     if full.width() <= usize::from(width) || budget == 0 {
-        return row(full, width);
+        return kv(prefix, path, width);
     }
     let mut suffix = Vec::new();
     let mut cells = 0;
@@ -62,8 +96,9 @@ fn path_row(prefix: &str, path: &str, width: u16) -> Line<'static> {
         }
         suffix.push(ch);
     }
-    row(
-        format!("{prefix}…{}", suffix.into_iter().rev().collect::<String>()),
+    kv(
+        prefix,
+        format!("…{}", suffix.into_iter().rev().collect::<String>()),
         width,
     )
 }
@@ -106,7 +141,7 @@ fn resource(label: &str, used: Option<f64>, width: u16, display_used: bool) -> L
                 width,
             )
         }
-        None => row(format!("{label}: unavailable"), width),
+        None => kv(&format!("{label}: "), "unavailable", width),
     }
 }
 fn bytes(value: Option<u64>) -> String {
@@ -159,7 +194,11 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     } else {
         ""
     };
-    let mut lines = vec![row(format!("Machine{stale_note}: {host}{cores}"), w)];
+    let mut lines = vec![kv(
+        &format!("Machine{stale_note}: "),
+        format!("{host}{cores}"),
+        w,
+    )];
     lines.push(resource(
         "CPU",
         machine.and_then(|m| m.cpu_percent),
@@ -182,16 +221,33 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     let used = total
         .zip(machine.and_then(|m| m.memory_available_bytes))
         .and_then(|(t, a)| t.checked_sub(a));
-    lines.push(row(
-        format!(
-            "RAM {}/{} GiB · disk {} GiB free",
-            bytes(used),
-            bytes(total),
-            bytes(machine.and_then(|m| m.disk_available_bytes))
-        ),
+    lines.push(fit(
+        Line::from(vec![
+            frame::dim("RAM "),
+            Span::styled(
+                format!("{}/{} GiB", bytes(used), bytes(total)),
+                value_style(),
+            ),
+            frame::dim(" · disk "),
+            Span::styled(
+                format!(
+                    "{} GiB",
+                    bytes(machine.and_then(|m| m.disk_available_bytes))
+                ),
+                value_style(),
+            ),
+            frame::dim(" free"),
+        ]),
         w,
     ));
-    lines.push(row(format!("Connection: {}", status(data, info)), w));
+    let state = status(data, info).to_string();
+    lines.push(fit(
+        Line::from(vec![
+            frame::dim("Connection: "),
+            Span::styled(clean(&state), state_style(&state)),
+        ]),
+        w,
+    ));
     let age = info
         .last_success
         .map(|t| format!("{} ago", elapsed(t)))
@@ -199,29 +255,38 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     let probe = info
         .probe_duration_ms
         .map(|v| format!("{v}ms"))
-        .unwrap_or_else(|| "unavailable".into());
-    lines.push(row(format!("Updated {age} · probe {probe}"), w));
-    lines.push(row(
-        format!(
-            "Lifecycle · session {}",
-            if data.cloud_working {
-                "Working"
-            } else {
-                "Idle"
-            }
-        ),
+        .unwrap_or_else(|| "n/a".into());
+    lines.push(fit(
+        Line::from(vec![
+            frame::dim("Updated "),
+            Span::styled(age, value_style()),
+        ]),
+        w,
+    ));
+    lines.push(kv(
+        "Session: ",
+        if data.cloud_working {
+            "Working"
+        } else {
+            "Idle"
+        },
         w,
     ));
     let uptime = machine
         .and_then(|m| m.uptime_secs)
         .map(duration)
         .unwrap_or_else(|| "unavailable".into());
-    lines.push(row(
-        format!("Uptime {uptime} · attached {}", elapsed(info.started_at)),
+    lines.push(fit(
+        Line::from(vec![
+            frame::dim("Uptime "),
+            Span::styled(uptime, value_style()),
+            frame::dim(" · attached "),
+            Span::styled(elapsed(info.started_at), value_style()),
+        ]),
         w,
     ));
-    lines.push(row("Sleep: policy unavailable", w));
-    lines.push(row("Workspace", w));
+    lines.push(kv("Sleep: ", "policy unavailable", w));
+    lines.push(fit(Line::from(frame::label("Workspace")), w));
     lines.push(path_row("Cloud: ", &info.remote_dir, w));
     lines.push(path_row(
         if info.local_is_source {
@@ -232,14 +297,17 @@ pub(super) fn render_cloud_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
         info.local_dir.as_deref().unwrap_or("unavailable"),
         w,
     ));
-    lines.push(row(
-        format!(
-            "Transferred: {}",
-            info.last_transfer_at.as_deref().unwrap_or("unknown")
-        ),
+    lines.push(kv(
+        "Transferred: ",
+        info.last_transfer_at
+            .as_deref()
+            .map(transfer_time)
+            .unwrap_or_else(|| "unknown".into()),
         w,
     ));
-    Framed::body(lines).title(frame::label("Cloud VM"))
+    Framed::body(lines)
+        .title(frame::label("Cloud VM"))
+        .footer(frame::dim(format!("probe {probe}")))
 }
 
 #[cfg(test)]
@@ -272,6 +340,8 @@ mod tests {
                     uptime_secs: Some(3600),
                 }),
                 last_transfer_at: Some("2026-10-20T07:00:00Z".into()),
+                directories: None,
+                directories_stale: false,
             }),
             ..Default::default()
         }
@@ -290,6 +360,26 @@ mod tests {
         assert!(!data.has_data_for(WidgetKind::CloudVm));
         assert!(render_cloud_widget(&data, Rect::default()).is_empty());
         assert!(render_cloud_summary(&data, 60).is_empty());
+    }
+
+    #[test]
+    fn cloud_probe_timing_is_only_in_footer() {
+        let mut data = fixture();
+        let card = render_cloud_widget(&data, Rect::new(0, 0, 40, 20));
+        assert_eq!(card.footer.unwrap().to_string(), "probe 120ms");
+        assert!(
+            card.lines
+                .iter()
+                .all(|line| !line.to_string().contains("probe"))
+        );
+        data.cloud_info.as_mut().unwrap().probe_duration_ms = None;
+        assert_eq!(
+            render_cloud_widget(&data, Rect::new(0, 0, 40, 20))
+                .footer
+                .unwrap()
+                .to_string(),
+            "probe n/a"
+        );
     }
     #[test]
     fn cloud_populated_and_used_convention() {

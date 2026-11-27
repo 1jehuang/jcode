@@ -136,8 +136,8 @@ impl Agent {
     ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
             return crate::prompt::SplitSystemPrompt {
-                static_part: override_prompt.clone(),
-                dynamic_part: String::new(),
+                static_part: self.append_session_system_prompt(override_prompt.clone()),
+                dynamic_part: crate::screen_context::dynamic_prompt(self.session_id()),
             };
         }
 
@@ -156,7 +156,7 @@ impl Agent {
             .as_ref()
             .map(std::path::PathBuf::from);
 
-        let (split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
+        let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
             available_skills,
             self.session.is_canary,
@@ -165,7 +165,36 @@ impl Agent {
             self.agents_md_snapshot.clone(),
         );
 
+        split.static_part = self.append_session_system_prompt(split.static_part);
         split
+            .dynamic_part
+            .push_str(&crate::screen_context::dynamic_prompt(self.session_id()));
+        split
+    }
+
+    pub(super) fn is_jarvis_root(&self, config: &crate::protocol::SessionToolConfig) -> bool {
+        self.session.parent_id.is_none()
+            && config.custom.iter().any(|tool| tool.name == "speak")
+            && config
+                .system_prompt_append
+                .as_deref()
+                .is_some_and(|p| p.lines().any(|line| line == "## Jarvis voice interaction"))
+    }
+
+    fn append_session_system_prompt(&self, mut prompt: String) -> String {
+        if let Some(config) = crate::tool::sdk::config(self.session_id())
+            && let Some(append) = &config.system_prompt_append
+        {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(append);
+            if self.is_jarvis_root(&config) {
+                prompt.push_str("\n\n");
+                prompt.push_str(include_str!("jarvis_coordinator.md").trim());
+            }
+        }
+        prompt
     }
 
     /// Non-blocking memory prompt - takes pending result and spawns check for next turn

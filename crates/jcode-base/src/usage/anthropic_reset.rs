@@ -5,13 +5,18 @@
 //! account's reset for the week.
 
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://api.anthropic.com";
 const STATUS_PATH: &str = "/api/oauth/usage?at_wall=1&skip_spend=1";
 const PROFILE_PATH: &str = "/api/oauth/profile";
 /// Server-side program name of the weekly session-limit reset.
 const PROGRAM: &str = "juniper_tide";
+
+#[derive(Serialize)]
+struct ResetRequest {
+    program: &'static str,
+}
 
 pub use jcode_usage_types::AnthropicLimitResetOffer;
 
@@ -57,7 +62,10 @@ fn valid_timestamp(value: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(value).is_ok()
 }
 
-fn authorize(request: reqwest::RequestBuilder, access_token: &str) -> reqwest::RequestBuilder {
+pub(super) fn authorize(
+    request: reqwest::RequestBuilder,
+    access_token: &str,
+) -> reqwest::RequestBuilder {
     crate::provider::anthropic::apply_oauth_attribution_headers(
         request
             .bearer_auth(access_token)
@@ -67,12 +75,12 @@ fn authorize(request: reqwest::RequestBuilder, access_token: &str) -> reqwest::R
                 "User-Agent",
                 crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
             )
-            .header("anthropic-beta", "oauth-2025-04-20,claude-code-20250219"),
+            .header("anthropic-beta", "oauth-2025-04-20"),
         &crate::provider::anthropic::new_oauth_request_id(),
     )
 }
 
-fn reset_client() -> Result<reqwest::Client> {
+pub(super) fn reset_client() -> Result<reqwest::Client> {
     // Never follow redirects with credentials or retry the claim automatically.
     reqwest::Client::builder()
         .timeout(Duration::from_secs(35))
@@ -96,7 +104,11 @@ fn http_failure(status: reqwest::StatusCode) -> anyhow::Error {
     )
 }
 
-async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Result<serde_json::Value> {
+pub(super) async fn get_json(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<serde_json::Value> {
     let response = authorize(client.get(url), token)
         .timeout(Duration::from_secs(12))
         .send()
@@ -113,15 +125,16 @@ async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Result<se
 
 /// Read-only offer lookup, including before the five-hour wall. A missing or
 /// malformed availability field is unknown, never a confirmed zero balance.
-pub(super) async fn fetch_limit_reset_offer(
+pub(super) fn cached_limit_reset_offer(
     access_token: &str,
     account_label: Option<&str>,
 ) -> (Option<AnthropicLimitResetOffer>, bool) {
-    let Ok(client) = reset_client() else {
-        return (None, false);
-    };
-    let Ok(value) = get_json(&client, &format!("{API_BASE}{STATUS_PATH}"), access_token).await
-    else {
+    // This endpoint is the quota endpoint too. A second uncached request here
+    // used to bypass its cross-process flight lock and Retry-After backoff on
+    // every /usage report, even when the quota itself came from cache.
+    // Explicit reset preparation below still validates with a fresh request.
+    let key = anthropic_usage_cache_key(access_token, account_label);
+    let Some(value) = super::disk_cache::reset_status(&key) else {
         return (None, false);
     };
     (
@@ -231,7 +244,7 @@ fn display_text(value: &str) -> String {
         .collect()
 }
 
-async fn fresh_access_token(account_label: Option<&str>) -> Result<String> {
+pub(super) async fn fresh_access_token(account_label: Option<&str>) -> Result<String> {
     let credentials = match account_label {
         Some(label) => auth::claude::load_credentials_for_account(label),
         None => auth::claude::load_credentials(),
@@ -384,7 +397,7 @@ async fn consume_with_client(
     );
     let result = async {
         let response = authorize(client.post(url), &pending.access_token)
-            .json(&serde_json::json!({ "program": PROGRAM }))
+            .json(&ResetRequest { program: PROGRAM })
             .send()
             .await
             .context("Could not receive the Claude reset result")?;
@@ -408,9 +421,27 @@ async fn consume_with_client(
 /// reset. Only local state changes, so this is safe to repeat.
 pub fn invalidate_anthropic_usage_reset_state(account_label: Option<&str>) {
     super::cache::invalidate_anthropic_usage_after_reset(account_label);
+    if let Some(label) = account_label {
+        super::banked::record_anthropic_offer(label, None);
+    }
     crate::provider::clear_claude_provider_unavailability_for_account_label(account_label);
 }
 
 #[cfg(test)]
 #[path = "anthropic_reset_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod request_serialization_tests {
+    use super::*;
+
+    #[test]
+    fn reset_request_matches_legacy_bytes_without_sending() {
+        let expected = serde_json::to_vec(&serde_json::json!({ "program": PROGRAM })).unwrap();
+        let builder = reqwest::Client::new()
+            .post("https://example.invalid/reset")
+            .json(&ResetRequest { program: PROGRAM });
+        let request = builder.build().unwrap();
+        assert_eq!(request.body().unwrap().as_bytes().unwrap(), expected);
+    }
+}

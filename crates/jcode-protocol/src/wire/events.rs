@@ -2,9 +2,19 @@
 
 use super::*;
 
+/// A provider-reported account limit beyond the two legacy quota slots.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageWindow {
+    pub label: String,
+    pub usage_ratio: f32,
+    pub resets_at: Option<String>,
+}
+
 /// Credential-free usage attributed to an OAuth account on the daemon host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_windows: Vec<AccountUsageWindow>,
     pub label: String,
     pub email: Option<String>,
     pub exhausted: bool,
@@ -14,6 +24,15 @@ pub struct AccountUsageSnapshot {
     pub seven_day_ratio: Option<f32>,
     pub resets_at: Option<String>,
     pub error: Option<String>,
+    /// Banked usage resets claimable now. `None` when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_resets: Option<u64>,
+    /// RFC3339 expiry of the soonest-expiring banked reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_expires_at: Option<String>,
+    /// RFC3339 time the next banked reset unlocks when none are claimable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banked_next_at: Option<String>,
 }
 
 #[cfg(test)]
@@ -29,6 +48,11 @@ mod account_usage_tests {
             serde_json::from_str(&serde_json::to_string(&request).unwrap()).unwrap();
         assert!(matches!(decoded, Request::AccountUsage { id: 71 }));
         let snapshot = AccountUsageSnapshot {
+            additional_windows: vec![AccountUsageWindow {
+                label: "Future model / month".into(),
+                usage_ratio: 0.61,
+                resets_at: Some("2099-01-01T00:00:00Z".into()),
+            }],
             label: "remote-account".into(),
             email: None,
             exhausted: false,
@@ -38,6 +62,9 @@ mod account_usage_tests {
             seven_day_ratio: None,
             resets_at: None,
             error: None,
+            banked_resets: None,
+            banked_expires_at: None,
+            banked_next_at: None,
         };
         let event = ServerEvent::AccountUsage {
             id: 71,
@@ -55,9 +82,20 @@ mod account_usage_tests {
             panic!("wrong response")
         };
         assert_eq!(id, 71);
-        assert_eq!(anthropic, vec![snapshot]);
+        assert_eq!(anthropic, vec![snapshot.clone()]);
         assert!(openai.is_empty());
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        legacy.as_object_mut().unwrap().remove("additional_windows");
+        let legacy: AccountUsageSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.additional_windows.is_empty());
     }
+}
+
+/// Identity of a turn within one runtime incarnation. Request IDs are not turn IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnIdentity {
+    pub runtime_generation: String,
+    pub turn_id: u64,
 }
 
 /// Server event sent to client
@@ -68,6 +106,34 @@ mod account_usage_tests {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    /// Authoritative attachment boundary, sent before the corresponding History.
+    #[serde(rename = "turn_state")]
+    TurnState {
+        session_id: String,
+        runtime_generation: String,
+        turn_id: Option<u64>,
+        latest_turn_id: u64,
+    },
+    /// Published before any output from an accepted server turn.
+    #[serde(rename = "turn_started")]
+    TurnStarted { identity: TurnIdentity },
+    /// All events owned by a turn, including its terminal, share this scope.
+    #[serde(rename = "turn_event")]
+    TurnEvent {
+        identity: TurnIdentity,
+        event: Box<ServerEvent>,
+    },
+    /// Serialized todo card snapshot containing todos, plan, and goals.
+    #[serde(rename = "todos")]
+    Todos {
+        session_id: String,
+        payload: String,
+        /// True when this daemon sends a fresh snapshot whenever the stored
+        /// todo state changes, so the client need not poll. Absent on older
+        /// daemons, which only answer `get_todos`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        pushes: bool,
+    },
     #[serde(rename = "account_usage")]
     AccountUsage {
         id: u64,
@@ -144,9 +210,8 @@ pub enum ServerEvent {
         duration_secs: Option<f64>,
     },
 
-    /// Replace the current turn's streamed text content
-    /// Used when text-wrapped tool calls are recovered: the garbled text
-    /// shown during streaming is replaced with the clean prefix text.
+    /// Replace the current turn's streamed text content, for example when a
+    /// provider retry rolls back a partial response.
     #[serde(rename = "text_replace")]
     TextReplace { text: String },
 
@@ -216,6 +281,9 @@ pub enum ServerEvent {
         cache_read_input: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
+        /// Authoritative session context budget after applying its override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_budget: Option<usize>,
     },
 
     /// Prompt-shape signature for the API request that will later report token
@@ -727,6 +795,16 @@ pub enum ServerEvent {
         output: Option<String>,
     },
 
+    /// Session context cap changed, including the authoritative budget.
+    #[serde(rename = "context_cap_changed")]
+    ContextCapChanged {
+        id: u64,
+        session_id: String,
+        /// Normalized override, null when cleared.
+        max_context_tokens: Option<usize>,
+        effective_budget: usize,
+    },
+
     /// Model changed (response to cycle_model)
     #[serde(rename = "model_changed")]
     ModelChanged {
@@ -773,6 +851,10 @@ pub enum ServerEvent {
         id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         effort: Option<String>,
+        /// Updated model ID when changing effort switches to a sibling model
+        /// variant (for example Antigravity `gemini-4-neon-low` -> `gemini-4-neon-medium`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -844,6 +926,10 @@ pub enum ServerEvent {
     /// External transcript text targeted at the active TUI input.
     #[serde(rename = "transcript")]
     Transcript { text: String, mode: TranscriptMode },
+
+    /// Push-to-talk captured outside this client (e.g. `jcode companion`).
+    #[serde(rename = "voice_activity")]
+    VoiceActivity { activity: VoiceActivity },
 
     /// Completed `!cmd` shell execution for a connected remote client.
     #[serde(rename = "input_shell_result")]

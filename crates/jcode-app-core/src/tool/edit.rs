@@ -157,13 +157,13 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by exact replacement. All edits apply or none do."
+        "Atomically edit a file using a nonempty array of exact replacements."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["file_path"],
+            "required": ["file_path", "edits"],
             "properties": {
                 "intent": super::intent_schema_property(),
                 "file_path": {
@@ -172,7 +172,7 @@ impl Tool for EditTool {
                 },
                 "edits": {
                     "type": "array",
-                    "description": "Replacements applied in order. Each old_string must match exactly once unless replace_all is set.",
+                    "description": "Required replacements in order. Each old_string must match once unless replace_all is set.",
                     "minItems": 1,
                     "items": {
                         "type": "object",
@@ -183,18 +183,6 @@ impl Tool for EditTool {
                             "replace_all": {"type": "boolean", "description": "Replace every match."}
                         }
                     }
-                },
-                "old_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: exact text to replace. Omit when using edits."
-                },
-                "new_string": {
-                    "type": "string",
-                    "description": "Single-edit shorthand: replacement text."
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Single-edit shorthand: replace every match."
                 }
             }
         })
@@ -220,6 +208,7 @@ impl Tool for EditTool {
             .intent
             .clone()
             .filter(|value| !value.trim().is_empty());
+        let (added, removed) = super::edit_stats::line_delta(&content, &new_content);
 
         let mut body = if let [edit] = edits.as_slice() {
             let applied = &applied[0];
@@ -238,6 +227,8 @@ impl Tool for EditTool {
                     if applied.occurrences == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let context = extract_context(&new_content, applied.start_line, end_line, 3);
             format!(
@@ -258,6 +249,8 @@ impl Tool for EditTool {
                     if replaced == 1 { "" } else { "s" }
                 )),
                 detail: build_file_touch_preview(&diff),
+                added,
+                removed,
             }));
             let mut body = format!(
                 "Edited {}: applied {} edits\n",
@@ -472,6 +465,87 @@ fn generate_diff_summary(old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_requires_canonical_nonempty_edits() {
+        let schema = EditTool::new().parameters_schema();
+        assert_eq!(schema["required"], json!(["file_path", "edits"]));
+        for legacy_field in ["old_string", "new_string", "replace_all"] {
+            assert!(schema["properties"].get(legacy_field).is_none());
+        }
+        let edits = &schema["properties"]["edits"];
+        assert_eq!(edits["type"], "array");
+        assert_eq!(edits["minItems"], 1);
+        assert_eq!(edits["items"]["type"], "object");
+        assert_eq!(
+            edits["items"]["required"],
+            json!(["old_string", "new_string"])
+        );
+        for field in ["old_string", "new_string"] {
+            assert_eq!(edits["items"]["properties"][field]["type"], "string");
+        }
+    }
+
+    #[test]
+    fn legacy_single_edit_remains_executable_without_advertising_it() {
+        let input: EditInput = serde_json::from_value(json!({
+            "file_path": "f", "old_string": "a", "new_string": "b", "replace_all": true
+        }))
+        .unwrap();
+        let operations = input.operations().unwrap();
+        let (updated, applied) = apply_edits("a a", &operations, "f").unwrap();
+        assert_eq!(updated, "b b");
+        assert_eq!(applied[0].occurrences, 2);
+    }
+
+    #[test]
+    fn schema_normalization_preserves_required_edit_operations() {
+        let schema = EditTool::new().parameters_schema();
+        for spec in jcode_schema_dialect::registry::ALL {
+            let normalized = jcode_schema_dialect::dialect::apply(&schema, spec);
+            assert_eq!(normalized["required"], schema["required"], "{}", spec.id);
+            assert_eq!(
+                normalized["properties"]["edits"]["items"]["required"],
+                json!(["old_string", "new_string"]),
+                "{}",
+                spec.id
+            );
+            assert!(
+                jcode_schema_dialect::must_not_contain_unsupported_constructs(&normalized, spec)
+                    .is_empty(),
+                "{}",
+                spec.id
+            );
+            // Some dialects strip minItems, so executor validation remains essential.
+        }
+        let strict = jcode_provider_core::openai_schema::strict_normalize_schema(&schema);
+        // Strict mode makes optional fields nullable. Canonical edits and their
+        // replacement strings must remain non-nullable now that they are required.
+        assert_eq!(strict["properties"]["edits"]["type"], "array");
+        assert_eq!(strict["properties"]["edits"]["minItems"], 1);
+        for field in ["old_string", "new_string"] {
+            assert_eq!(
+                strict["properties"]["edits"]["items"]["properties"][field]["type"],
+                "string"
+            );
+        }
+    }
+
+    #[test]
+    fn input_rejects_empty_or_incomplete_canonical_edits() {
+        let empty: EditInput = serde_json::from_value(json!({"file_path":"f","edits":[]})).unwrap();
+        assert!(empty.operations().is_err());
+        for edit in [
+            json!({}),
+            json!({"old_string":"a"}),
+            json!({"new_string":"b"}),
+        ] {
+            assert!(
+                serde_json::from_value::<EditInput>(json!({"file_path":"f","edits":[edit]}))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_generate_diff_single_line_change() {
