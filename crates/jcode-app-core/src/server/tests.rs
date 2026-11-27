@@ -148,6 +148,201 @@ async fn removing_server_session_clears_active_pid_marker() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn session_end_hook_keeps_worker_swarm_identity_after_session_removal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let record = home.path().join("session_end.txt");
+    let script = home.path().join("session_end.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s' \"$JCODE_HOOK_SWARM_ID\" \"$JCODE_HOOK_AGENT_TYPE\" > {}\n",
+            crate::terminal_launch::sh_escape(&record.to_string_lossy())
+        ),
+    )
+    .expect("write hook");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+    let _hook = ScopedEnvVar::set("JCODE_HOOK_SESSION_END", script.as_os_str());
+    for _ in 0..200 {
+        if crate::hooks::hook_configured("session_end") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(crate::hooks::hook_configured("session_end"));
+
+    let agent = test_agent(Arc::new(StreamingMockProvider::default())).await;
+    let sid = agent.lock().await.session_id().to_string();
+    crate::hooks::register_swarm_identity(
+        &sid,
+        crate::hooks::SwarmIdentity {
+            swarm_id: "swarm-end-identity".into(),
+            coordinator_session_id: "coord".into(),
+            parent_session_id: "coord".into(),
+            label: Some("task".into()),
+            agent_type: Some("reviewer".into()),
+        },
+    );
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(sid.clone(), agent.clone())]),
+    ));
+
+    // Same order as the stop/disconnect/reap paths: remove the entry, then
+    // close the agent, which fires `session_end`.
+    let removed = remove_session_entry(&sessions, &sid).await.unwrap();
+    removed.lock().await.mark_closed();
+    crate::hooks::forget_swarm_identity(&sid);
+
+    let mut recorded = String::new();
+    for _ in 0..200 {
+        if let Ok(data) = std::fs::read_to_string(&record)
+            && !data.is_empty()
+        {
+            recorded = data;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(recorded, "swarm-end-identity|reviewer");
+    assert!(crate::hooks::swarm_identity(&sid).is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn comm_stop_fires_swarm_member_end_for_running_worker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create temporary JCODE_HOME");
+    let _home_guard = ScopedEnvVar::set("JCODE_HOME", home.path());
+    let record = home.path().join("member_end.txt");
+    let script = home.path().join("member_end.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat > {}\n",
+            crate::terminal_launch::sh_escape(&record.to_string_lossy())
+        ),
+    )
+    .expect("write hook");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+    let _hook = ScopedEnvVar::set("JCODE_HOOK_SWARM_MEMBER_END", script.as_os_str());
+    for _ in 0..200 {
+        if crate::hooks::hook_configured("swarm_member_end") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(crate::hooks::hook_configured("swarm_member_end"));
+
+    let worker = test_agent(Arc::new(StreamingMockProvider::default())).await;
+    let worker_id = worker.lock().await.session_id().to_string();
+    let coord_id = "coord-stop-hook".to_string();
+    let swarm_id = "swarm-stop-hook".to_string();
+    crate::hooks::register_swarm_identity(
+        &worker_id,
+        crate::hooks::SwarmIdentity {
+            swarm_id: swarm_id.clone(),
+            coordinator_session_id: coord_id.clone(),
+            parent_session_id: coord_id.clone(),
+            label: Some("task".into()),
+            agent_type: Some("reviewer".into()),
+        },
+    );
+
+    let member = |id: &str, role: &str, status: &str, report_back: Option<&str>| SwarmMember {
+        session_id: id.to_string(),
+        event_tx: mpsc::unbounded_channel().0,
+        event_txs: HashMap::new(),
+        working_dir: None,
+        swarm_id: Some(swarm_id.clone()),
+        swarm_enabled: true,
+        status: status.to_string(),
+        detail: None,
+        task_label: None,
+        friendly_name: Some(id.to_string()),
+        report_back_to_session_id: report_back.map(str::to_string),
+        latest_completion_report: None,
+        role: role.to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: true,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+    };
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (
+            coord_id.clone(),
+            member(&coord_id, "coordinator", "ready", None),
+        ),
+        (
+            worker_id.clone(),
+            member(&worker_id, "agent", "running", Some(&coord_id)),
+        ),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.clone(),
+        std::collections::HashSet::from([coord_id.clone(), worker_id.clone()]),
+    )])));
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(worker_id.clone(), worker.clone())]),
+    ));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(16);
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+
+    super::comm_session::handle_comm_stop(
+        1,
+        coord_id.clone(),
+        worker_id.clone(),
+        false,
+        &client_event_tx,
+        &sessions,
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_coordinators,
+        &swarm_plans,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        &soft_interrupt_queues,
+        &super::SwarmMutationRuntime::default(),
+    )
+    .await;
+
+    let mut recorded = String::new();
+    for _ in 0..200 {
+        if let Ok(data) = std::fs::read_to_string(&record)
+            && !data.is_empty()
+        {
+            recorded = data;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        recorded.contains("swarm_member_end") && recorded.contains(&worker_id),
+        "swarm_member_end must fire when a running worker is stopped, got: {recorded:?}"
+    );
+    assert!(recorded.contains("stopped"));
+    assert!(crate::hooks::swarm_identity(&worker_id).is_none());
+}
+
 #[test]
 fn configured_server_name_normalizes_operator_labels() {
     assert_eq!(
