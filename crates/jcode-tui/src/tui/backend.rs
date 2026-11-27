@@ -161,6 +161,8 @@ pub struct RemoteConnection {
     pub(crate) local_tools_request: Option<u64>,
     cloud_callbacks: Vec<tokio::task::AbortHandle>,
     client_instance_id: Option<String>,
+    /// Origin of the next `Message` (`auto` = client-generated). Absent means typed.
+    next_message_origin: Option<&'static str>,
     next_request_id: u64,
     pending_runtime_commands: std::collections::HashSet<u64>,
     // Bootstrap Done is not turn completion. Retain ids for duplicate acks.
@@ -375,6 +377,7 @@ impl RemoteConnection {
             next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            next_message_origin: None,
             request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -680,6 +683,11 @@ impl RemoteConnection {
             .await
     }
 
+    /// Mark the next message as client-generated (poke, retry, system send).
+    pub fn mark_next_message_auto(&mut self) {
+        self.next_message_origin = Some("auto");
+    }
+
     pub async fn send_message_with_images_reminder_and_skill(
         &mut self,
         content: String,
@@ -711,6 +719,7 @@ impl RemoteConnection {
             images,
             system_reminder,
             active_skill,
+            origin: self.next_message_origin.take().map(str::to_string),
             no_reply: false,
         };
         self.next_request_id += 1;
@@ -1374,6 +1383,7 @@ impl RemoteConnection {
             next_request_id: 1,
             pending_runtime_commands: Default::default(),
             control_done_ids: Default::default(),
+            next_message_origin: None,
             request_timings: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),

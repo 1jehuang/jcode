@@ -396,6 +396,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
         let combined = messages.join("\n\n");
         let auto_retry = reminder.is_some() && messages.is_empty();
+        // Text a person queued keeps its human origin even though it is sent as `is_system`.
+        let queued_origin_is_auto = messages
+            .iter()
+            .all(|msg| super::commands::is_poke_message(msg));
         if !messages.is_empty() && !super::commands::queued_messages_are_only_pokes(&messages) {
             app.automatic_failover_targets.clear();
             app.automatic_failover_stopped = false;
@@ -419,15 +423,17 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             return true;
         }
         let images = std::mem::take(&mut app.queued_images);
-        if begin_remote_send(
+        if begin_remote_send_with_origin(
             app,
             remote,
             combined.clone(),
             images.clone(),
             true,
+            queued_origin_is_auto,
             reminder.clone(),
             auto_retry,
             0,
+            false,
         )
         .await
         .is_err()
@@ -566,6 +572,7 @@ pub(super) async fn dispatch_due_remote_retry(
         remote,
         pending.content,
         pending.images,
+        pending.is_system,
         pending.is_system,
         pending.system_reminder,
         pending.auto_retry,

@@ -34,6 +34,7 @@ pub(super) async fn submit(
             text.to_owned(),
             vec![],
             false,
+            false,
             None,
             false,
             0,

@@ -884,6 +884,8 @@ impl Agent {
                         tool_name,
                         input,
                     } => {
+                        // The model is calling a tool, so any stop-hook streak is over.
+                        crate::hooks::reset_stop_continuations(&self.session.id);
                         executed_native_tool = true;
                         // Execute native tool and send result back to SDK bridge
                         if trace {
@@ -1259,6 +1261,9 @@ impl Agent {
                     if text_content.trim().is_empty() {
                         text_content = format!("[provider guardrail] {}", notice);
                     }
+                }
+                if self.stop_continues(&text_content, &stop_reason).await? {
+                    continue;
                 }
                 logging::info("Turn complete - no tool calls, returning");
                 if print_output {

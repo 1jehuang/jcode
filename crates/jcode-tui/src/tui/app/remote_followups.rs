@@ -353,16 +353,22 @@ pub(in super::super) async fn process_remote_followups(
                 app.visible_turn_started = Some(Instant::now());
             }
         }
+        // Text a person queued keeps its human origin even though it is sent as `is_system`.
+        let queued_origin_is_auto = messages
+            .iter()
+            .all(|msg| super::super::commands::is_poke_message(msg));
         let images = std::mem::take(&mut app.queued_images);
-        if begin_remote_send(
+        if begin_remote_send_with_origin(
             app,
             remote,
             combined.clone(),
             images.clone(),
             true,
+            queued_origin_is_auto,
             reminder.clone(),
             auto_retry,
             0,
+            false,
         )
         .await
         .is_err()

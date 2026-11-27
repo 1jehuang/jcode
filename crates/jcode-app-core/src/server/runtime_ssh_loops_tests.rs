@@ -323,6 +323,11 @@ async fn ordinary_session_enables_real_followups_without_client_opt_in() {
     drop(rx);
     run_followups(&mut agent, tx.clone()).await.unwrap();
     assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+    // Server-owned continuations are generated work, never a person's prompt.
+    assert_eq!(
+        crate::hooks::current_prompt_origin(&session_id),
+        Some(crate::hooks::PromptOrigin::Auto)
+    );
     let persisted = std::fs::read(state_path(&session_id).unwrap()).unwrap();
     initialize_remote_session(&session_id, true).unwrap();
     assert_eq!(
