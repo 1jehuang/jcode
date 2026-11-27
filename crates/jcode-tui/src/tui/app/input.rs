@@ -530,8 +530,7 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     }
 
     let placeholder = paste_placeholder(&text);
-    insert_input_text(app, &placeholder);
-    app.pasted_contents.push(text);
+    insert_input_text_with_undo(app, &placeholder, false, Some(text));
 }
 
 fn expand_matching_paste(app: &mut App, text: &str) -> bool {
@@ -542,52 +541,80 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
     else {
         return false;
     };
-
-    let placeholder = paste_placeholder(text);
-    // Placeholders only encode a line count. Skip placeholders belonging to
-    // newer stored pastes with the same shape so equal-length, different text
-    // cannot cause the wrong placeholder to expand.
-    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
-        .iter()
-        .filter(|content| paste_placeholder(content) == placeholder)
-        .count();
-    let Some(placeholder_start) = app
-        .input
-        .rmatch_indices(placeholder.as_str())
-        .map(|(position, _)| position)
-        .nth(newer_same_placeholder_count)
+    let Some((start, _, _)) = paste_placeholder_spans(&app.pasted_contents, &app.input)
+        .into_iter()
+        .find(|&(_, _, index)| index == content_index)
     else {
         return false;
     };
-
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
-    expand_paste_at(app, placeholder_start, text);
+    expand_paste_at(app, start, text);
     true
 }
 
+/// Map only original labels; inserted payloads must never become replacement targets.
+pub(super) fn paste_placeholder_spans(
+    pasted_contents: &[String],
+    input: &str,
+) -> Vec<(usize, usize, usize)> {
+    let mut search_ends = std::collections::HashMap::new();
+    let mut spans: Vec<_> = pasted_contents
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, content)| {
+            let label = paste_placeholder(content);
+            let search_end = search_ends.entry(label.clone()).or_insert(input.len());
+            let start = input[..*search_end].rfind(&label)?;
+            *search_end = start;
+            Some((start, start + label.len(), index))
+        })
+        .collect();
+    spans.sort_unstable_by_key(|&(start, _, _)| std::cmp::Reverse(start));
+    spans
+}
+
+fn expand_paste_spans(app: &mut App, spans: &[(usize, usize, usize)], mut cursor: usize) {
+    let contents = std::mem::take(&mut app.pasted_contents);
+    for &(start, end, index) in spans {
+        let content = &contents[index];
+        app.remove_input_range(start, end);
+        app.input.insert_str(start, content);
+        app.input_images_inserted(start, content.len(), None);
+        if cursor >= end {
+            cursor = cursor - (end - start) + content.len();
+        } else if cursor > start {
+            cursor = start + content.len();
+        }
+    }
+    app.cursor_pos = cursor;
+}
+
 fn expand_paste_at(app: &mut App, start: usize, text: &str) {
-    app.remove_input_range(start, start + paste_placeholder(text).len());
-    app.input.insert_str(start, text);
-    app.input_images_inserted(start, text.len(), None);
-    app.cursor_pos = start + text.len();
+    let spans = paste_placeholder_spans(&app.pasted_contents, &app.input);
+    if spans.iter().any(|&(other, _, index)| {
+        other != start && text.contains(paste_placeholder(&app.pasted_contents[index]).as_str())
+    }) {
+        // Expose colliding payloads together, before literal labels can claim them.
+        expand_paste_spans(app, &spans, start + paste_placeholder(text).len());
+    } else {
+        app.remove_input_range(start, start + paste_placeholder(text).len());
+        app.input.insert_str(start, text);
+        app.input_images_inserted(start, text.len(), None);
+        app.cursor_pos = start + text.len();
+    }
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
 }
 
-/// Edit the saved text, rather than damage a label that another paste can match.
-/// The insertion caller has already recorded the original collapsed draft for undo.
+/// The insertion caller has already saved the original collapsed draft for undo.
 pub(super) fn expand_paste_for_edit(app: &mut App) {
-    let mut search_ends = std::collections::HashMap::new();
-    let paste = app.pasted_contents.iter().rev().find_map(|content| {
-        let label = paste_placeholder(content);
-        let search_end = search_ends.entry(label.clone()).or_insert(app.input.len());
-        let start = app.input[..*search_end].rfind(&label)?;
-        *search_end = start;
-        (start < app.cursor_pos && app.cursor_pos < start + label.len())
-            .then(|| (start, content.clone()))
-    });
-    if let Some((start, text)) = paste {
+    if let Some((start, _, index)) = paste_placeholder_spans(&app.pasted_contents, &app.input)
+        .into_iter()
+        .find(|&(start, end, _)| start < app.cursor_pos && app.cursor_pos < end)
+    {
+        let text = app.pasted_contents[index].clone();
         expand_paste_at(app, start, &text);
     }
 }
@@ -757,10 +784,15 @@ pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(Str
 }
 
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
-    insert_input_text_with_undo(app, text, false);
+    insert_input_text_with_undo(app, text, false, None);
 }
 
-fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
+fn insert_input_text_with_undo(
+    app: &mut App,
+    text: &str,
+    typed: bool,
+    pasted_content: Option<String>,
+) {
     if text.is_empty() {
         return;
     }
@@ -806,6 +838,24 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     }
 
     expand_paste_for_edit(app);
+    // A newer collapsed paste maps to the last matching label. If that would
+    // claim existing text after the caret, keep the new paste expanded instead.
+    let full_paste = pasted_content
+        .as_deref()
+        .filter(|_| app.input[app.cursor_pos..].contains(text));
+    let collapsed = full_paste.is_none();
+    let text = if let Some(content) = full_paste {
+        let spans = paste_placeholder_spans(&app.pasted_contents, &app.input);
+        if spans
+            .iter()
+            .any(|&(start, end, _)| content.contains(&app.input[start..end]))
+        {
+            expand_paste_spans(app, &spans, app.cursor_pos);
+        }
+        content
+    } else {
+        text
+    };
 
     // After a picker command is fully typed (or completed without a trailing
     // space), the next printable character starts its filter. Insert the
@@ -838,6 +888,9 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
 
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
+    if collapsed && let Some(content) = pasted_content {
+        app.pasted_contents.push(content);
+    }
 }
 
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
@@ -876,7 +929,7 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
         }
     }
 
-    insert_input_text_with_undo(app, text, true);
+    insert_input_text_with_undo(app, text, true, None);
     // A key stream may still be receiving the rest of a multi-file drop. Do not
     // strip quoting from a verified non-image prefix until submission, otherwise
     // later paths make its now-unquoted spaces ambiguous.
@@ -1247,11 +1300,8 @@ pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
 
 pub(super) fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
-    for content in pasted_contents.iter().rev() {
-        let placeholder = paste_placeholder(content);
-        if let Some(pos) = result.rfind(&placeholder) {
-            result.replace_range(pos..pos + placeholder.len(), content);
-        }
+    for (start, end, index) in paste_placeholder_spans(pasted_contents, input) {
+        result.replace_range(start..end, &pasted_contents[index]);
     }
     result
 }

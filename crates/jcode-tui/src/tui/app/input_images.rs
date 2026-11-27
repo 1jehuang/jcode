@@ -276,17 +276,11 @@ impl App {
                 end = end.max(marker_end);
             }
         }
-        // Match the expansion order before editing, so removing one label
-        // cannot leave its payload assigned to a later, same-size paste.
-        let mut search_ends = std::collections::HashMap::new();
         let mut retained = vec![false; self.pasted_contents.len()];
-        for (index, content) in self.pasted_contents.iter().enumerate().rev() {
-            let label = super::input::paste_placeholder(content);
-            let search_end = search_ends.entry(label.clone()).or_insert(self.input.len());
-            if let Some(at) = self.input[..*search_end].rfind(&label) {
-                *search_end = at;
-                retained[index] = at >= end || at + label.len() <= start;
-            }
+        for (at, label_end, index) in
+            super::input::paste_placeholder_spans(&self.pasted_contents, &self.input)
+        {
+            retained[index] = at >= end || label_end <= start;
         }
         let mut index = 0;
         self.pasted_contents.retain(|_| {
