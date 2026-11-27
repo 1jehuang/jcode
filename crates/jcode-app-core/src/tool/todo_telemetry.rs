@@ -130,38 +130,38 @@ pub(super) fn todo_telemetry_update(
         confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
             current_by_id
                 .values()
-                .filter_map(|todo| todo.confidence.map(|state| state.legacy_score())),
+                .filter_map(|todo| todo.confidence.map(|state| state.telemetry_score())),
         ),
         completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
             current_by_id
                 .values()
-                .filter_map(|todo| todo.completion_confidence.map(|state| state.legacy_score())),
+                .filter_map(|todo| todo.completion_confidence.map(|state| state.telemetry_score())),
         ),
         understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
             plan.understands_user_intent
-                .map(|state| state.legacy_score()),
+                .map(|state| state.telemetry_score()),
         ),
         closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals
                 .iter()
-                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.legacy_score())),
+                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.telemetry_score())),
         ),
         feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals.iter().filter_map(|goal| {
                 goal.feedback_loop_relevance
-                    .map(|state| state.legacy_score())
+                    .map(|state| state.telemetry_score())
             }),
         ),
         feedback_loop_coverage: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals.iter().filter_map(|goal| {
                 goal.feedback_loop_coverage
-                    .map(|state| state.legacy_score())
+                    .map(|state| state.telemetry_score())
             }),
         ),
         end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals
                 .iter()
-                .filter_map(|goal| goal.delivery_state.map(|state| state.legacy_score())),
+                .filter_map(|goal| goal.delivery_state.map(|state| state.telemetry_score())),
         ),
     }
 }

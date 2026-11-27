@@ -1294,7 +1294,7 @@ impl Tool for TodoTool {
                         },
                         "understands_user_intent": {
                             "type": "string",
-                            "enum": ["uncertain", "partial", "clear", "complete"]
+                            "enum": ["uncertain", "partial", "clear"]
                         }
                     }
                 },

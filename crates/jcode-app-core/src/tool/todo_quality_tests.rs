@@ -403,8 +403,8 @@ fn garbage_string_still_errors() {
 fn pre_rename_hill_climbability_keys_still_load() {
     let goal: crate::todo::TodoGoal = serde_json::from_value(json!({
         "group": "optimize grep",
-        "hill_climbability": 91,
-        "hill_climbability_history": [70, 91],
+        "hill_climbability": "strong",
+        "hill_climbability_history": ["usable", "strong"],
         "feedback_loop": "cargo bench grep"
     }))
     .expect("the pre-rename key must still deserialize");
@@ -421,7 +421,7 @@ fn pre_rename_hill_climbability_keys_still_load() {
     );
 
     let goals = parse(json!({
-        "goals": [{"group": "optimize grep", "hill_climbability": "88", "feedback_loop": "bench"}]
+        "goals": [{"group": "optimize grep", "hill_climbability": "strong", "feedback_loop": "bench"}]
     }))
     .expect("a pre-rename tool call must still parse")
     .goals

@@ -486,8 +486,8 @@ impl FollowUpPolicy {
 /// Completion-confidence summary over the completed todos.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfidenceSummary {
-    /// Priority-weighted average of recorded completion confidence (0-100).
-    pub average: Option<u8>,
+    /// Priority-weighted average of recorded completion confidence.
+    pub average: Option<ConfidenceState>,
     pub needs_validation: bool,
     pub spike_detected: bool,
 }
@@ -510,11 +510,11 @@ impl ConfidenceSummary {
         for todo in &completed {
             if let Some(state) = todo.completion_confidence {
                 let w = priority_weight(&todo.priority);
-                sum += u32::from(state.legacy_score()) * w;
+                sum += u32::from(state.level()) * w;
                 weight += w;
             }
         }
-        let average = (weight > 0).then(|| ((sum + weight / 2) / weight) as u8);
+        let average = (weight > 0).then(|| ConfidenceState::from_level(((sum + weight / 2) / weight) as u8));
         let needs_validation = !completed.is_empty()
             && completed.iter().any(|todo| {
                 todo.completion_confidence.is_none()
@@ -529,7 +529,6 @@ impl ConfidenceSummary {
 
     pub fn label(&self) -> String {
         self.average
-            .map(ConfidenceState::from_legacy_score)
             .map(|state| state.as_str().to_string())
             .unwrap_or_else(|| "unknown".to_string())
     }

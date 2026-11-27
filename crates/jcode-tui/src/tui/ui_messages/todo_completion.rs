@@ -293,7 +293,7 @@ mod tests {
             let mut msg = DisplayMessage::system(serde_json::json!({
                 "todo_completion_version":1,
                 "todos":[{"id":"done","content":"Finished","status":"completed","priority":"high"}],
-                "plan":{"understands_user_intent":"complete","user_intention":intention}
+                "plan":{"understands_user_intent":"clear","user_intention":intention}
             }).to_string());
             msg.title = Some("Todo completion".into());
             let lines = render(&msg, 80, crate::config::DiffDisplayMode::Off).unwrap();

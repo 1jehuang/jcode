@@ -1775,8 +1775,7 @@ fn push_todo_plan_details(
         let state_color = match state {
             crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
             crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
-            crate::todo::IntentUnderstanding::Clear
-            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
+            crate::todo::IntentUnderstanding::Clear => todo_score_color(),
         };
         let mut spans = vec![
             Span::styled("Intent ", Style::default().fg(todo_label_color())),

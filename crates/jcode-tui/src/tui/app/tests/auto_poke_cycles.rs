@@ -73,7 +73,7 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
                 content: "Finish the thing".to_string(),
                 status: "pending".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
                 ..Default::default()
             }],
         )
@@ -96,7 +96,7 @@ fn auto_poke_retries_three_times_until_incomplete_todos_change() {
             content: content.to_string(),
             status: "pending".to_string(),
             priority: "high".to_string(),
-            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+            confidence: Some(crate::todo::ConfidenceState::Plausible),
             ..Default::default()
         };
 
@@ -157,8 +157,8 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             content: "Done".to_string(),
             status: "completed".to_string(),
             priority: "high".to_string(),
-            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-            completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+            confidence: Some(crate::todo::ConfidenceState::Verified),
+            completion_confidence: Some(crate::todo::ConfidenceState::Verified),
             waiting_reason: None,
             requires_user_auth: None,
             waiting_on: Vec::new(),
@@ -317,7 +317,7 @@ fn peer_auto_poke_is_shown_and_suppresses_duplicate_local_poke() {
                 content: "Send the email".to_string(),
                 status: "pending".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
                 ..Default::default()
             }],
         )
