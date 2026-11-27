@@ -676,8 +676,14 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
     ) -> Result<u64> {
-        self.send_message_with_images_reminder_and_skill(content, images, system_reminder, None)
-            .await
+        self.send_message_with_images_reminder_and_skill(
+            content,
+            images,
+            system_reminder,
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn send_message_with_images_reminder_and_skill(
@@ -686,9 +692,17 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         active_skill: Option<String>,
+        skill_arguments: Option<String>,
     ) -> Result<u64> {
-        self.send_message_with_origin(content, images, system_reminder, active_skill, false)
-            .await
+        self.send_message_with_origin(
+            content,
+            images,
+            system_reminder,
+            active_skill,
+            skill_arguments,
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn send_message_with_origin(
@@ -697,6 +711,7 @@ impl RemoteConnection {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         active_skill: Option<String>,
+        skill_arguments: Option<String>,
         jarvis_voice: bool,
     ) -> Result<u64> {
         // Output token usage snapshots are cumulative within a single API call.
@@ -711,6 +726,7 @@ impl RemoteConnection {
             images,
             system_reminder,
             active_skill,
+            skill_arguments,
             no_reply: false,
         };
         self.next_request_id += 1;

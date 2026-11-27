@@ -81,18 +81,23 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
             reminder
         }
     });
+    // Keep the pending arguments (including an explicit empty reset) until the
+    // write succeeds, so a retry of the same draft still carries them.
+    let skill_arguments = app.pending_skill_arguments.take();
     let msg_id = remote
         .send_message_with_origin(
             content.clone(),
             images.clone(),
             system_reminder.clone(),
             app.active_skill.clone(),
+            skill_arguments.clone(),
             jarvis_voice,
         )
         .await;
     let msg_id = match msg_id {
         Ok(id) => id,
         Err(error) => {
+            app.pending_skill_arguments = skill_arguments;
             // Errors can contain wire data, so keep diagnostics metadata-only.
             crate::logging::info(&format!(
                 "RECOVERY_SEND_FAILED session_id={:?} request_id=unassigned previous_request_id={:?} phase=write content_bytes={} images={} retry_attempts={}",
@@ -222,6 +227,9 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
             app.pending_prompt_after_model_switch.is_some()
         ));
         app.pending_prompt_after_model_switch = Some(prepared);
+        // Arguments travel with the prompt: a replacement prompt takes over
+        // (or clears) the previous invocation's arguments.
+        app.pending_skill_arguments_after_model_switch = app.pending_skill_arguments.take();
         app.set_status_notice(if app.auth_catalog_refresh_pending {
             "Prompt queued until model setup completes"
         } else {
@@ -389,6 +397,21 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
+    // Arguments keep the quoting the user typed so `"two words"` stays one
+    // argument; only the prompt sent to the model has its quotes stripped.
+    // Take the tail from the expanded text: `raw_input` may hold a compact
+    // paste label where the model receives the pasted content.
+    app.pending_skill_arguments = Some(
+        prepared
+            .expanded
+            .trim()
+            .strip_prefix('/')
+            .and_then(|rest| rest.get(skill_name.len()..))
+            .map(str::trim)
+            .filter(|args| !args.is_empty())
+            .unwrap_or(trailing_prompt)
+            .to_string(),
+    );
     let expanded_prompt = app
         .current_skills_snapshot()
         .resolve_invocation(&prepared.expanded)

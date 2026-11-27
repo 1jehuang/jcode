@@ -10,6 +10,16 @@ use super::{
 mod followups;
 pub(super) use followups::process_remote_followups;
 
+/// Restore skill arguments deferred with a queued prompt, but never over a
+/// later explicit skill selection (a bare `/skill` entered while the switch was
+/// in flight sets empty arguments that stale ones must not replace).
+pub(super) fn restore_deferred_skill_arguments(app: &mut App) {
+    let deferred = app.pending_skill_arguments_after_model_switch.take();
+    if app.pending_skill_arguments.is_none() {
+        app.pending_skill_arguments = deferred;
+    }
+}
+
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
 use crate::protocol::{ServerEvent, TranscriptMode};

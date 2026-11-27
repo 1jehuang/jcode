@@ -1173,5 +1173,82 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
 
 include!("detailed_catalog.rs");
 
+#[test]
+fn test_deferred_skill_arguments_do_not_override_later_selection() {
+    let mut app = create_test_app();
+    app.pending_skill_arguments_after_model_switch = Some("42".to_string());
+    app.pending_skill_arguments = Some(String::new());
+    crate::tui::app::remote::restore_deferred_skill_arguments(&mut app);
+    assert_eq!(app.pending_skill_arguments.as_deref(), Some(""));
+    assert!(app.pending_skill_arguments_after_model_switch.is_none());
+
+    app.pending_skill_arguments = None;
+    app.pending_skill_arguments_after_model_switch = Some("42".to_string());
+    crate::tui::app::remote::restore_deferred_skill_arguments(&mut app);
+    assert_eq!(app.pending_skill_arguments.as_deref(), Some("42"));
+}
+
+#[test]
+fn test_replacement_prompt_does_not_inherit_deferred_skill_arguments() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+
+    app.is_remote = true;
+    app.remote_model_switch_in_flight = true;
+    let prepared = |text: &str| crate::tui::app::input::PreparedInput {
+        raw_input: text.to_string(),
+        expanded: text.to_string(),
+        images: vec![],
+    };
+
+    app.pending_skill_arguments = Some("42".to_string());
+    rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
+        &mut app,
+        &mut remote,
+        prepared("skill prompt"),
+    ))
+    .unwrap();
+    assert_eq!(
+        app.pending_skill_arguments_after_model_switch.as_deref(),
+        Some("42")
+    );
+
+    rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
+        &mut app,
+        &mut remote,
+        prepared("ordinary replacement"),
+    ))
+    .unwrap();
+    assert!(app.pending_skill_arguments_after_model_switch.is_none());
+    assert!(app.pending_skill_arguments.is_none());
+}
+#[test]
+fn test_failed_remote_send_keeps_pending_skill_arguments() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+    // Closing the peer makes the socket write fail.
+    drop(remote.take_dummy_peer());
+    app.is_remote = true;
+
+    // An explicit empty value is a deliberate reset and must survive too.
+    for pending in [String::new(), "42".to_string()] {
+        app.pending_skill_arguments = Some(pending.clone());
+        let result = rt.block_on(crate::tui::app::remote::begin_remote_send(
+            &mut app,
+            &mut remote,
+            "hello".to_string(),
+            vec![],
+            false,
+            None,
+            false,
+            0,
+        ));
+        assert!(result.is_err(), "send should fail with a closed peer");
+        assert_eq!(app.pending_skill_arguments, Some(pending));
+    }
+}
+
 #[path = "part_01_additional_tests.rs"]
 mod additional_test_pending_split_launch_shows_processing_status_in_ui;

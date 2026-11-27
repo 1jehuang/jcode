@@ -241,7 +241,13 @@ mod tests {
             assert_eq!(row.user_row_text(false), "hello\n\"again\"");
             assert_eq!(row.content, payload);
             let typed_id = remote
-                .send_message_with_images_reminder_and_skill(payload.clone(), vec![], None, None)
+                .send_message_with_images_reminder_and_skill(
+                    payload.clone(),
+                    vec![],
+                    None,
+                    None,
+                    None,
+                )
                 .await
                 .unwrap();
             for (id, voice) in [(voice_id, true), (typed_id, false)] {
