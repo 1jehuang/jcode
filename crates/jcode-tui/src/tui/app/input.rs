@@ -3732,9 +3732,9 @@ impl App {
         // Check for skill invocation.
         if let Some(invocation) = skill_invocation {
             let skill_name = invocation.name.to_string();
-            let trailing_prompt = initial_snapshot
-                .resolve_invocation(&input)
-                .and_then(|invocation| invocation.prompt)
+            let trailing_prompt = invocation
+                .prompt_from_input(&input)
+                .filter(|prompt| !prompt.is_empty())
                 .map(str::to_string);
             let mut skill = initial_snapshot.get(&skill_name).cloned();
 

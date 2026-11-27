@@ -74,7 +74,7 @@ fn test_improve_status_summarizes_current_todos() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(82)),
+                    confidence: Some(crate::todo::ConfidenceState::Plausible),
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                     waiting_reason: None,

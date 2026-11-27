@@ -7,6 +7,23 @@ pub struct SkillInvocation<'a> {
     pub prompt: Option<&'a str>,
 }
 
+impl SkillInvocation<'_> {
+    /// Read a prepared prompt without selecting a different skill.
+    pub fn prompt_from_input<'a>(&self, input: &'a str) -> Option<&'a str> {
+        let prompt = input.trim().strip_prefix('/')?.strip_prefix(self.name)?;
+        if prompt.starts_with(|ch: char| !ch.is_whitespace()) {
+            return None;
+        }
+        let prompt = prompt.trim();
+        Some(match prompt.as_bytes() {
+            [b'"', .., b'"'] | [b'\'', .., b'\''] if prompt.len() >= 2 => {
+                &prompt[1..prompt.len() - 1]
+            }
+            _ => prompt,
+        })
+    }
+}
+
 impl SkillRegistry {
     /// Resolve a slash invocation against registered names, including names
     /// containing spaces. The longest registered name wins; unknown names fall
@@ -144,5 +161,31 @@ mod tests {
                 prompt: Some("build a settings page"),
             })
         );
+    }
+
+    #[test]
+    fn selected_prompt_keeps_exact_name_boundary_and_quote_rules() {
+        let selected = SkillInvocation {
+            name: "my",
+            prompt: None,
+        };
+        for (input, expected) in [
+            ("/my skill question", Some("skill question")),
+            (" \t/my\u{3000}\"skill question\"  ", Some("skill question")),
+            ("/my", Some("")),
+            ("/my ''", Some("")),
+            ("/my 'literal", Some("'literal")),
+            ("/my2 question", None),
+            ("/my-skill question", None),
+            ("/other question", None),
+            ("my question", None),
+        ] {
+            assert_eq!(selected.prompt_from_input(input), expected, "{input}");
+        }
+        let selected = SkillInvocation {
+            name: "my 技能",
+            prompt: None,
+        };
+        assert_eq!(selected.prompt_from_input(" /my 技能\t问题 "), Some("问题"));
     }
 }

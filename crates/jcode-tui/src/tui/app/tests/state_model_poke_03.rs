@@ -2731,10 +2731,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
-                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
-                        80,
-                    )),
+                    confidence: Some(crate::todo::ConfidenceState::Plausible),
+                    completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                     confidence_history: Vec::new(),
                     waiting_reason: None,
                     requires_user_auth: None,
@@ -2752,10 +2750,8 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                     priority: "medium".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
-                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(
-                        95,
-                    )),
+                    confidence: Some(crate::todo::ConfidenceState::Plausible),
+                    completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                     confidence_history: Vec::new(),
                     waiting_reason: None,
                     requires_user_auth: None,
@@ -2822,7 +2818,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         // todo tool, the next completion check requests one clean final answer.
         let mut validated = crate::todo::load_todos(&app.session.id).expect("load todos");
         for todo in &mut validated {
-            todo.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(100));
+            todo.completion_confidence = Some(crate::todo::ConfidenceState::Verified);
             todo.confidence_history = match todo.id.as_str() {
                 "todo-1" => vec![
                     crate::todo::ConfidenceState::Speculative,
@@ -2871,19 +2867,19 @@ fn test_todo_completion_gate_detects_abrupt_confidence_increase() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
-        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence: Some(crate::todo::ConfidenceState::Speculative),
+        completion_confidence: Some(crate::todo::ConfidenceState::Verified),
         waiting_reason: None,
         requires_user_auth: None,
         waiting_on: Vec::new(),
         confidence_history: vec![
-            crate::todo::ConfidenceState::from_legacy_score(0),
-            crate::todo::ConfidenceState::from_legacy_score(100),
+            crate::todo::ConfidenceState::Speculative,
+            crate::todo::ConfidenceState::Verified,
         ],
         ..Default::default()
     }]);
 
-    assert_eq!(summary.completion_average, Some(100));
+    assert_eq!(summary.completion_average, Some(crate::todo::ConfidenceState::Verified));
     assert!(!summary.completion_confidence_needs_validation);
     assert!(summary.confidence_spike_detected);
     assert!(summary.needs_more_work);
@@ -2894,8 +2890,8 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
     let summary = super::commands::todo_confidence_summary(&[crate::todo::TodoItem {
         status: "completed".to_string(),
         priority: "high".to_string(),
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-        completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+        confidence: Some(crate::todo::ConfidenceState::Verified),
+        completion_confidence: Some(crate::todo::ConfidenceState::Verified),
         waiting_reason: None,
         requires_user_auth: None,
         waiting_on: Vec::new(),
@@ -2908,7 +2904,7 @@ fn test_todo_completion_gate_allows_evidence_backed_confidence_steps() {
         ..Default::default()
     }]);
 
-    assert_eq!(summary.completion_average, Some(100));
+    assert_eq!(summary.completion_average, Some(crate::todo::ConfidenceState::Verified));
     assert!(!summary.completion_confidence_needs_validation);
     assert!(!summary.confidence_spike_detected);
     assert!(!summary.needs_more_work);
@@ -2926,14 +2922,14 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 content: "Validate provider result".to_string(),
                 status: "completed".to_string(),
                 priority: "high".to_string(),
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
                 waiting_reason: None,
                 requires_user_auth: None,
                 waiting_on: Vec::new(),
                 confidence_history: vec![
                     crate::todo::ConfidenceState::Speculative,
-                    crate::todo::ConfidenceState::from_legacy_score(100),
+                    crate::todo::ConfidenceState::Verified,
                 ],
                 ..Default::default()
             }],
@@ -3038,8 +3034,8 @@ fn test_finish_turn_without_auto_poke_does_not_queue_confidence_summary() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
-                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(90)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
+                completion_confidence: Some(crate::todo::ConfidenceState::Plausible),
                 confidence_history: Vec::new(),
                 waiting_reason: None,
                 requires_user_auth: None,

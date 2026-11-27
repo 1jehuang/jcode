@@ -132,6 +132,7 @@ fn unattributed_legacy_requests_never_become_current_context_or_quota() {
                 output_tokens: 90_000,
                 cache_read_input_tokens: Some(300_000),
                 cache_creation_input_tokens: None,
+                request_elapsed_ms: None,
             }),
         );
     }
