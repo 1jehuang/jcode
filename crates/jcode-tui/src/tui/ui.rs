@@ -10,6 +10,13 @@
     )
 )]
 
+#[path = "ui_copy_selection_offsets.rs"]
+mod copy_selection_offsets;
+pub(crate) use copy_selection_offsets::{
+    copy_viewport_line_count, copy_viewport_line_text, input_byte_offset_for_copy_point,
+    input_copy_point_for_byte_offset, input_pane_line_count, input_pane_line_text,
+    side_pane_line_count, side_pane_line_text,
+};
 #[path = "ui_copy_pane_drag.rs"]
 mod copy_pane_drag;
 pub(crate) use copy_pane_drag::*;
@@ -2472,40 +2479,6 @@ pub(crate) fn side_pane_point_from_screen(
 ) -> Option<crate::tui::CopySelectionPoint> {
     let point = copy_point_from_screen(column, row)?;
     (point.pane == crate::tui::CopySelectionPane::SidePane).then_some(point)
-}
-
-fn copy_pane_line_text(pane: crate::tui::CopySelectionPane, abs_line: usize) -> Option<String> {
-    copy_snapshot_for_pane(pane)?
-        .wrapped_plain_line(abs_line)
-        .map(str::to_owned)
-}
-
-pub(crate) fn copy_viewport_line_text(abs_line: usize) -> Option<String> {
-    copy_pane_line_text(crate::tui::CopySelectionPane::Chat, abs_line)
-}
-
-pub(crate) fn side_pane_line_text(abs_line: usize) -> Option<String> {
-    copy_pane_line_text(crate::tui::CopySelectionPane::SidePane, abs_line)
-}
-
-pub(crate) fn input_pane_line_text(abs_line: usize) -> Option<String> {
-    copy_pane_line_text(crate::tui::CopySelectionPane::Input, abs_line)
-}
-
-fn copy_pane_line_count(pane: crate::tui::CopySelectionPane) -> Option<usize> {
-    Some(copy_snapshot_for_pane(pane)?.wrapped_plain_line_count())
-}
-
-pub(crate) fn copy_viewport_line_count() -> Option<usize> {
-    copy_pane_line_count(crate::tui::CopySelectionPane::Chat)
-}
-
-pub(crate) fn side_pane_line_count() -> Option<usize> {
-    copy_pane_line_count(crate::tui::CopySelectionPane::SidePane)
-}
-
-pub(crate) fn input_pane_line_count() -> Option<usize> {
-    copy_pane_line_count(crate::tui::CopySelectionPane::Input)
 }
 
 pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {

@@ -32,6 +32,7 @@ pub(super) async fn process_turn_with_input(
         Ok(()) => {
             app.last_stream_error = None;
             app.last_submitted_input = None;
+            app.last_submitted_draft = None;
         }
         Err(error) => {
             let err_str = crate::util::format_error_chain(&error);

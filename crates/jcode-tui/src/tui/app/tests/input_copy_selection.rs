@@ -296,11 +296,15 @@ fn test_input_composer_drag_selects_and_copies_typed_text() {
         app.status_notice(),
         Some("Copied selection · highlight remains visible".to_string())
     );
-    // The highlight stays visible after copying (c7afd6620), but the drag ends.
+    // Release transfers the highlight to the editable composer selection.
     assert!(!app.copy_selection_mode);
     assert!(!app.copy_selection_dragging);
-    assert!(app.copy_selection_anchor.is_some());
-    assert!(app.copy_selection_cursor.is_some());
+    assert_eq!(
+        app.input_selection_text().as_deref(),
+        Some("select this draft")
+    );
+    assert!(app.copy_selection_anchor.is_none());
+    assert!(app.copy_selection_cursor.is_none());
 }
 
 #[test]

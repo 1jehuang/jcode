@@ -1,9 +1,8 @@
 #[path = "tui_lifecycle_keybindings.rs"]
 mod keybindings;
 #[path = "tui_lifecycle_reload_input.rs"]
-mod reload_input;
+pub(super) mod reload_input;
 
-use super::state_ui::RestoredReloadInput;
 #[path = "tui_lifecycle_remote_startup.rs"]
 mod remote_startup;
 
@@ -131,6 +130,7 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
+        self.last_submitted_draft = None;
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
     }
@@ -403,7 +403,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
-            detached_images: Default::default(),
+            input_image_markers: Default::default(),
             prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
@@ -624,6 +624,8 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -678,6 +680,7 @@ impl App {
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
+            last_submitted_draft: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
@@ -928,7 +931,7 @@ impl App {
             cloud_recovery_auto_attempted: Default::default(),
             pasted_contents: Vec::new(),
             pending_images: Vec::new(),
-            detached_images: Default::default(),
+            input_image_markers: Default::default(),
             prompt_history_backfill: (None, 0),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
@@ -1149,6 +1152,8 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_selection_anchor: None,
+            input_selection_clicks: Default::default(),
             input_typing_undo: None,
             history_draft: None,
             status_notice: None,
@@ -1203,6 +1208,7 @@ impl App {
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
+            last_submitted_draft: None,
             reload_info: Vec::new(),
             debug_trace: DebugTrace::new(),
             streaming_md_renderer: RefCell::new(IncrementalMarkdownRenderer::new(None)),
@@ -1464,28 +1470,5 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
-    }
-
-    /// Mark that a server was just spawned - run_remote will retry initial connection
-    /// instead of failing fatally, allowing the TUI to show while the server starts.
-    pub fn set_server_spawning(&mut self) {
-        self.server_spawning = true;
-        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
-        self.remote_startup_phase_started = Some(Instant::now());
-    }
-
-    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
-    /// after connecting to an already-running shared server.
-    pub fn set_initial_model_spec(&mut self, model_spec: String) {
-        self.pending_initial_model_spec = Some(model_spec);
-    }
-
-    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
-        self.pending_initial_model_spec.take()
     }
 }

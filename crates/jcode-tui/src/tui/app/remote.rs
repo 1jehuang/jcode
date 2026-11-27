@@ -21,7 +21,7 @@ use crossterm::event::{
 use ratatui::{DefaultTerminal, Terminal, backend::Backend};
 use std::time::{Duration, Instant};
 
-mod input_dispatch;
+pub(super) mod input_dispatch;
 mod key_handling;
 mod latency;
 mod queue_recovery;
@@ -534,6 +534,9 @@ pub(super) async fn dispatch_due_remote_retry(
         app.rate_limit_reset = None;
         return false;
     };
+    if !app.restore_remote_replay_skill() {
+        return true;
+    }
     app.rate_limit_reset = None;
     if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. })
         && !crate::network_retry::is_probably_online().await
@@ -774,7 +777,7 @@ async fn apply_terminal_event<B: Backend>(
             input_attribution.scroll_delta = mouse_scroll_delta(&mouse);
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
                 needs_redraw |= dispatch_compacted_history_load(app, remote).await;
             }
@@ -1091,7 +1094,7 @@ where
         Some(Ok(Event::Mouse(mouse))) => {
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
             }
         }
@@ -1247,15 +1250,7 @@ fn restore_unconfirmed_model_switch_prompts(app: &mut App) {
         app.restore_failover_payload(payload);
     }
     if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
-        app.restore_failover_payload(super::FallbackResendPayload {
-            content: prepared.expanded,
-            images: prepared.images,
-            is_system: false,
-            system_reminder: None,
-            auto_retry: false,
-            retry_attempts: 0,
-            raw_input: Some(prepared.raw_input),
-        });
+        input_dispatch::restore_undelivered_prepared_input(app, prepared);
     }
 }
 
@@ -1337,7 +1332,7 @@ pub(super) fn handle_disconnect(
         }
     }
     let recovered_local = recover_local_interleave_to_queue(app, "disconnect");
-    app.current_message_id = None;
+    app.hold_current_remote_request();
     app.last_stream_activity = None;
     app.remote_resume_activity = None;
     let ops = app.stream_buffer.flush();
@@ -1728,7 +1723,7 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
             app.is_processing = false;
             app.clear_visible_turn_started();
             app.status = ProcessingStatus::Idle;
-            app.current_message_id = None;
+            app.hold_current_remote_request();
             app.processing_started = None;
             app.last_stream_activity = None;
             if !app.streaming.streaming_text.is_empty() {
@@ -1765,10 +1760,6 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
             }
         }
     }
-}
-
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    app.handle_mouse_event(mouse);
 }
 
 async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConnection) -> String {
@@ -1939,12 +1930,10 @@ pub(super) fn handle_disconnected_key_event(app: &mut App, event: KeyEvent) -> R
 
 fn handle_disconnected_key_internal(
     app: &mut App,
-    code: KeyCode,
-    modifiers: KeyModifiers,
+    mut code: KeyCode,
+    mut modifiers: KeyModifiers,
     text_input: Option<String>,
 ) -> Result<()> {
-    let mut code = code;
-    let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
@@ -1955,7 +1944,13 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if input::handle_account_shortcut(app, code, modifiers) {
+    if app.copy_selection_mode && input::handle_modal_key(app, code, modifiers)? {
+        return Ok(());
+    }
+
+    if input::handle_account_shortcut(app, code, modifiers)
+        || super::input_selection::handle_input_selection_key(app, code, modifiers)
+    {
         return Ok(());
     }
 
@@ -2068,8 +2063,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos > 0 {
                 let prev = super::super::core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2078,7 +2072,7 @@ fn handle_disconnected_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = super::super::core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }

@@ -75,86 +75,6 @@ fn ensure_test_jcode_home_if_unset() {
     crate::env::set_var("JCODE_HOME", path);
 }
 
-#[test]
-fn idle_donut_pauses_while_unfocused() {
-    let mut app = create_test_app();
-
-    // Whether the donut runs while focused depends on the machine's perf tier
-    // and `display.idle_animation` config, so we do not assert the focused case
-    // absolutely. We only assert the invariant that matters for the swarm CPU
-    // regression: it must never run while the terminal is unfocused.
-    let redraw = app.set_client_focused(false);
-    assert!(
-        !redraw,
-        "losing focus should not request an immediate redraw"
-    );
-    assert!(!app.client_focused());
-    assert!(
-        !crate::tui::idle_donut_active(&app),
-        "idle animation must pause while the terminal is unfocused"
-    );
-
-    // Regaining focus requests a differential redraw so the window catches up
-    // without clearing and retransmitting every terminal cell.
-    app.force_full_redraw = false;
-    let redraw = app.set_client_focused(true);
-    assert!(redraw, "regaining focus should request a redraw");
-    assert!(app.client_focused());
-    assert!(
-        !app.force_full_redraw,
-        "focus changes must not force an expensive full-terminal repaint"
-    );
-}
-
-#[test]
-fn unfocused_redraw_warranted_tracks_live_activity() {
-    let mut app = create_test_app();
-    // `unfocused_redraw_warranted` is only consulted while unfocused, and the
-    // decorative donut is force-disabled when unfocused, so evaluate it in that
-    // state to mirror the run loop.
-    app.set_client_focused(false);
-
-    // Idle empty session: no live output to paint while unfocused.
-    assert!(
-        !app.unfocused_redraw_warranted(),
-        "an idle unfocused session has nothing changing worth a full-rate redraw"
-    );
-
-    // A streaming/processing session keeps painting even while unfocused so a
-    // visible-but-unfocused window in a tiling WM still shows live progress.
-    app.is_processing = true;
-    assert!(
-        app.unfocused_redraw_warranted(),
-        "a processing session should keep redrawing while unfocused"
-    );
-}
-
-#[test]
-fn client_interaction_restores_focus_so_scroll_redraws_at_full_rate() {
-    // Regression for the intermittent "can't scroll" bug. If a FocusGained is
-    // dropped (flaky under tiling WMs / multiplexers) the window can get stuck
-    // as "unfocused idle", which the run loop throttles to ~1 Hz. Any terminal
-    // input (key/mouse/scroll) is only delivered to the focused window, so it
-    // must restore the focused state and full-rate redraws immediately.
-    let mut app = create_test_app();
-
-    // Simulate a stuck-unfocused window (FocusLost seen, FocusGained dropped).
-    app.set_client_focused(false);
-    assert!(!app.client_focused());
-    assert!(
-        !app.unfocused_redraw_warranted(),
-        "an idle unfocused session is throttled to ~1 Hz redraws"
-    );
-
-    // A mouse-wheel / key event arrives: the terminal only routes input to the
-    // focused window, so interacting proves focus and must restore it.
-    app.note_client_interaction();
-    assert!(
-        app.client_focused(),
-        "interaction must restore focus so scrolling repaints at full rate"
-    );
-}
-
 include!("remote_tests/auth_mapping.rs");
 
 #[test]
@@ -241,111 +161,7 @@ fn reload_wait_status_message_uses_waiting_language() {
     assert!(!message.contains("retrying"));
 }
 
-#[test]
-fn submit_prepared_remote_input_defers_until_history_loads() {
-    // Regression for the intermittent "first prompt vanishes / weird render"
-    // bug: when a manual submit lands before the bootstrap History payload is
-    // applied, the History handler's `session_changed` branch calls
-    // `clear_display_messages()` and wipes the just-echoed user message. The
-    // submit path must hold the prompt until history loads instead of echoing
-    // and sending it into that race.
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
-
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    // History has NOT loaded yet (fresh connect window).
-    assert!(!remote.has_loaded_history());
-
-    let prepared = crate::tui::app::input::PreparedInput {
-        raw_input: "hi".to_string(),
-        expanded: "hi".to_string(),
-        images: vec![],
-    };
-    rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
-        &mut app,
-        &mut remote,
-        prepared,
-    ))
-    .expect("submit should not error while history is loading");
-
-    // The prompt must be held, not echoed or sent.
-    assert!(
-        !app.is_processing,
-        "submit must not begin a remote send before history loads"
-    );
-    assert!(
-        app.display_messages().iter().all(|m| m.role != "user"),
-        "user message must not be echoed before history loads (would be clobbered)"
-    );
-    let held = app
-        .pending_prompt_before_history
-        .as_ref()
-        .expect("prompt should be held until history loads");
-    assert_eq!(held.raw_input, "hi");
-
-    // Once history loads, the post-connect dispatcher fires the held prompt.
-    remote.mark_history_loaded();
-    rt.block_on(process_remote_followups(&mut app, &mut remote));
-
-    assert!(
-        app.pending_prompt_before_history.is_none(),
-        "held prompt should be consumed once history is loaded"
-    );
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "user" && m.content == "hi"),
-        "the held prompt should be echoed as a user message after history loads"
-    );
-    assert!(
-        app.is_processing,
-        "the held prompt should be sent once history is loaded"
-    );
-}
-
-#[test]
-fn remote_skill_invocation_with_prompt_sends_remote_turn() {
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
-    let temp = tempfile::tempdir().expect("create skill dir");
-    let skill_dir = temp.path().join(".jcode/skills/remote-skill");
-    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: remote-skill\ndescription: Remote prompt regression skill\n---\nUse it.\n",
-    )
-    .expect("write skill");
-    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
-
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    remote.mark_history_loaded();
-    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
-        &mut app,
-        &mut remote,
-        crate::tui::app::input::PreparedInput {
-            raw_input: "/remote-skill explain the change".to_string(),
-            expanded: "/remote-skill explain the change".to_string(),
-            images: vec![],
-        },
-    ))
-    .expect("remote skill prompt should send");
-
-    assert_eq!(app.active_skill.as_deref(), Some("remote-skill"));
-    assert!(app.is_processing, "remote skill prompt should start a turn");
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|message| message.role == "user"
-                && message.content == "/remote-skill explain the change"),
-        "remote skill prompt should be visible as the submitted user turn"
-    );
-}
+include!("remote_tests/prepared_input.rs");
 
 #[test]
 fn process_remote_followups_auto_submits_staged_startup_prompt() {
@@ -457,7 +273,7 @@ fn process_remote_followups_waits_for_history_before_sending_startup_image() {
         app.display_messages()
             .iter()
             .filter(|message| {
-                message.role == "user" && message.content == "Start the fork immediately"
+                message.role == "user" && message.content == "Start the fork immediately [image 1]"
             })
             .count(),
         1
@@ -1237,6 +1053,9 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
@@ -1274,6 +1093,9 @@ fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: prompt.to_string(),
             expanded: prompt.to_string(),
             images: vec![],
@@ -1310,6 +1132,9 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],

@@ -10,10 +10,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
     );
     session.add_message_ext(
         Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "first".to_string(),
-            cache_control: None,
-        }],
+        vec![text_block("first")],
         None,
         Some(StoredTokenUsage {
             prompt_tokens: None,
@@ -26,10 +23,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
     );
     session.add_message_ext(
         Role::Assistant,
-        vec![ContentBlock::Text {
-            text: "second".to_string(),
-            cache_control: None,
-        }],
+        vec![text_block("second")],
         None,
         Some(StoredTokenUsage {
             prompt_tokens: None,

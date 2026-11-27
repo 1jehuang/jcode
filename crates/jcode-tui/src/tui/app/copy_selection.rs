@@ -531,6 +531,9 @@ impl App {
                 Self::line_width(pane, next).unwrap_or(0)
             };
             self.update_selection_with_point(point, true);
+            if self.input_selection().is_some() {
+                self.mirror_input_copy_selection(MouseEventKind::Drag(MouseButton::Left));
+            }
             return true;
         }
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
@@ -552,7 +555,10 @@ impl App {
     }
 
     pub(super) fn handle_copy_selection_mouse(&mut self, mouse: MouseEvent) -> Option<bool> {
-        self.handle_copy_selection_mouse_with(mouse, super::helpers::copy_to_clipboard)
+        let handled =
+            self.handle_copy_selection_mouse_with(mouse, super::helpers::copy_to_clipboard);
+        self.mirror_input_copy_selection(mouse.kind);
+        handled
     }
 
     pub(super) fn handle_copy_selection_mouse_with<F>(
@@ -689,7 +695,9 @@ impl App {
                 if self.copy_selection_mode {
                     return Some(false);
                 }
-                if !self.copy_current_selection_preserving_highlight(copy_text) {
+                let copied = self.copy_current_selection_preserving_highlight(copy_text);
+                self.mirror_input_copy_selection(mouse.kind);
+                if !copied {
                     self.exit_copy_selection_mode();
                 }
                 Some(false)

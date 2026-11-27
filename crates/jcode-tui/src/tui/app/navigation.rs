@@ -1553,9 +1553,8 @@ impl App {
         } else {
             None
         };
-        if let Some(cursor_pos) = clicked_input_cursor {
-            self.cursor_pos = cursor_pos.min(self.input.len());
-            self.reset_tab_completion();
+        if self.handle_input_mouse_press(mouse, clicked_input_cursor) {
+            finish_mouse_event!(false, "input_multi_click_select");
         }
 
         if let Some(scroll_only) = self.handle_copy_selection_mouse(mouse) {

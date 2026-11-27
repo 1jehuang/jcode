@@ -121,6 +121,16 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
         app.cloud_recovery_context = None;
         app.cloud_recovery_auto_pending = false;
     }
+    app.last_submitted_draft = app
+        .last_submitted_draft
+        .take()
+        .filter(|(id, draft)| {
+            *id == app.current_message_id
+                && !is_system
+                && draft.expanded == content
+                && draft.images == images
+        })
+        .map(|(_, draft)| (Some(msg_id), draft));
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
@@ -172,8 +182,33 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
         prepared.images.len()
     ));
     app.input = prepared.raw_input;
-    app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.input_image_markers = prepared.image_markers;
+    app.pasted_contents = prepared.pasted_contents;
+    app.ensure_input_image_markers();
+    app.cursor_pos = app.input.len();
+}
+
+pub(in crate::tui::app) fn restore_undelivered_prepared_input(
+    app: &mut App,
+    prepared: input::PreparedInput,
+) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        restore_prepared_remote_input(app, prepared);
+    } else {
+        app.restore_failover_payload(super::super::FallbackResendPayload {
+            content: prepared.expanded,
+            images: prepared.images,
+            raw_input: Some(input::expand_paste_placeholders_with(
+                &prepared.pasted_contents,
+                &prepared.raw_input,
+            )),
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+        });
+    }
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -251,8 +286,10 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         return Ok(());
     }
 
-    if let Some(command) = input::extract_input_shell_command(&prepared.expanded) {
-        submit_remote_input_shell(app, remote, prepared.raw_input, command.to_string()).await?;
+    if let Some(command) =
+        input::extract_input_shell_command(prepared.routing_input()).map(str::to_owned)
+    {
+        submit_remote_input_shell(app, remote, prepared.raw_input, command).await?;
         return Ok(());
     }
 
@@ -273,7 +310,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
     // Keyboard dispatch propagates Err to the TUI event loop. A failed write
     // is recoverable: keep the consumed composer (including attachments) and
     // report it here rather than exiting the client or claiming delivery.
-    if let Err(error) = app
+    let request_id = match app
         .begin_remote_send(
             remote,
             prepared.expanded.clone(),
@@ -282,30 +319,26 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         )
         .await
     {
-        crate::logging::info(&format!(
-            "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
-            app.remote_session_id,
-            app.current_message_id,
-            prepared.expanded.len(),
-            prepared.images.len(),
-            app.queued_messages.len()
-        ));
-        app.remove_display_message(echo_index);
-        app.restore_failover_payload(super::super::FallbackResendPayload {
-            content: prepared.expanded,
-            images: prepared.images,
-            raw_input: Some(prepared.raw_input),
-            is_system: false,
-            system_reminder: None,
-            auto_retry: false,
-            retry_attempts: 0,
-        });
-        app.push_display_message(DisplayMessage::error(format!(
-            "Failed to send message: {error}"
-        )));
-        app.set_status_notice("Message not sent; draft restored");
-        return Ok(());
-    }
+        Ok(id) => id,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "RECOVERY_SUBMISSION_RESTORED session_id={:?} request_id={:?} content_bytes={} images={} queued={}",
+                app.remote_session_id,
+                app.current_message_id,
+                prepared.expanded.len(),
+                prepared.images.len(),
+                app.queued_messages.len()
+            ));
+            app.remove_display_message(echo_index);
+            restore_undelivered_prepared_input(app, prepared);
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to send message: {error}"
+            )));
+            app.set_status_notice("Message not sent; draft restored");
+            return Ok(());
+        }
+    };
+    app.last_submitted_draft = Some((Some(request_id), prepared));
     Ok(())
 }
 
@@ -320,7 +353,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     remote: &mut RemoteConnection,
     prepared: input::PreparedInput,
 ) -> Result<()> {
-    let raw_input = prepared.raw_input.clone();
+    let raw_input = prepared.routing_input().to_string();
 
     if crate::tui::is_ssh_remote() {
         // Box the shared dispatcher because its non-SSH fallback can call
@@ -352,16 +385,14 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     }
 
     let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
+        restore_prepared_remote_input(app, prepared);
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     };
 
     let Some(trailing_prompt) = invocation.prompt else {
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
+        restore_prepared_remote_input(app, prepared);
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     };
 
@@ -374,9 +405,8 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     if skill.is_none() {
         // Preserve the existing unknown-skill and built-in slash-command
         // handling, including the helpful endorsed-skill installation hint.
-        app.input = raw_input;
-        app.cursor_pos = app.input.len();
-        app.submit_input();
+        restore_prepared_remote_input(app, prepared);
+        app.submit_input_with_routing(raw_input);
         return Ok(());
     }
 
@@ -389,16 +419,17 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
-    let expanded_prompt = app
-        .current_skills_snapshot()
-        .resolve_invocation(&prepared.expanded)
-        .and_then(|invocation| invocation.prompt)
+    let expanded_prompt = invocation
+        .prompt_from_input(&prepared.expanded)
         .unwrap_or(trailing_prompt)
         .to_string();
     submit_prepared_remote_input(
         app,
         remote,
         input::PreparedInput {
+            image_markers: prepared.image_markers,
+            routing_input: prepared.routing_input,
+            pasted_contents: prepared.pasted_contents,
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
@@ -431,6 +462,9 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 .pending_split_prompt
                 .take()
                 .map(|prompt| input::PreparedInput {
+                    image_markers: prepared.image_markers,
+                    routing_input: prepared.routing_input,
+                    pasted_contents: prepared.pasted_contents,
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
@@ -453,6 +487,9 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
             .pending_split_prompt
             .take()
             .map(|prompt| input::PreparedInput {
+                image_markers: prepared.image_markers,
+                routing_input: prepared.routing_input,
+                pasted_contents: prepared.pasted_contents,
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
@@ -503,6 +540,7 @@ pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
 }
 
 fn set_transcript_input(app: &mut App, text: String) {
+    app.clear_input_selection();
     app.input_typing_undo = None;
     app.input = text;
     app.cursor_pos = app.input.len();
@@ -638,6 +676,7 @@ pub(super) async fn submit_remote_input_shell(
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.rate_limit_pending_message = None;
+    app.last_submitted_draft = None;
     remote.reset_call_output_tokens_seen();
     app.set_status_notice(format!(
         "Running remote shell: {}",
@@ -662,9 +701,9 @@ pub(in crate::tui::app) fn apply_transcript_event(
             app.set_status_notice("Transcript inserted");
         }
         TranscriptMode::Append => {
-            let mut combined = app.input.clone();
-            combined.push_str(&text);
-            set_transcript_input(app, combined);
+            app.clear_input_selection();
+            app.cursor_pos = app.input.len();
+            input::insert_input_text(app, &text);
             app.set_status_notice("Transcript appended");
         }
         TranscriptMode::Replace => {
@@ -688,7 +727,8 @@ struct StashedDraft {
     cursor_pos: usize,
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
-    undo: Vec<(String, usize)>,
+    image_markers: super::super::input_images::InputImageMarkers,
+    undo: Vec<super::super::input_images::InputUndoSnapshot>,
 }
 
 fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
@@ -697,6 +737,7 @@ fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
         cursor_pos: std::mem::take(&mut app.cursor_pos),
         pasted_contents: std::mem::take(&mut app.pasted_contents),
         pending_images: std::mem::take(&mut app.pending_images),
+        image_markers: std::mem::take(&mut app.input_image_markers),
         undo: std::mem::take(&mut app.input_undo_stack),
     };
     app.input = jcode_session_types::wrap_transcription(transcript);
@@ -714,6 +755,8 @@ fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
     app.cursor_pos = stash.cursor_pos.min(app.input.len());
     app.pasted_contents = stash.pasted_contents;
     app.pending_images = stash.pending_images;
+    app.input_image_markers = stash.image_markers;
+    app.ensure_input_image_markers();
     app.input_undo_stack = stash.undo;
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
@@ -834,6 +877,9 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        image_markers: Default::default(),
+                        routing_input: None,
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -863,6 +909,9 @@ mod ssh_slash_tests {
                 &mut app,
                 &mut remote,
                 input::PreparedInput {
+                    image_markers: Default::default(),
+                    routing_input: None,
+                    pasted_contents: Vec::new(),
                     raw_input: "/local".to_string(),
                     expanded: "/local".to_string(),
                     images: images.clone(),
@@ -870,7 +919,7 @@ mod ssh_slash_tests {
             )
             .await
             .unwrap();
-            assert_eq!(app.input, "/local");
+            assert_eq!(app.input, "/local [image 1]");
             assert_eq!(app.pending_images, images);
             assert_eq!(remote.next_request_id_for_test(), next_id);
         });
@@ -956,6 +1005,9 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        image_markers: Default::default(),
+                        routing_input: None,
+                        pasted_contents: Vec::new(),
                         raw_input: input.into(),
                         expanded: input.into(),
                         images: Vec::new(),
@@ -1004,6 +1056,9 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        image_markers: Default::default(),
+                        routing_input: None,
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),
@@ -1032,6 +1087,9 @@ mod ssh_slash_tests {
                     &mut app,
                     &mut remote,
                     input::PreparedInput {
+                        image_markers: Default::default(),
+                        routing_input: None,
+                        pasted_contents: Vec::new(),
                         raw_input: command.to_string(),
                         expanded: command.to_string(),
                         images: Vec::new(),

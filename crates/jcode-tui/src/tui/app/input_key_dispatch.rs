@@ -43,6 +43,10 @@ impl App {
             return Ok(());
         }
 
+        if crate::tui::app::input_selection::handle_input_selection_key(self, code, modifiers) {
+            return Ok(());
+        }
+
         // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
         // show "you just pressed X → does Y". Placed after the modal/overlay
         // handlers so overlay-local keys stay silent. Unknown chords are
