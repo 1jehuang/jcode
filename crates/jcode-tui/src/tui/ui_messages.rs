@@ -1,3 +1,8 @@
+#[path = "ui_messages/todo_payload_cache.rs"]
+mod todo_payload_cache;
+use todo_payload_cache::cached_todo_payload;
+pub(crate) use todo_payload_cache::todo_payload_counts;
+
 #[path = "ui_messages/gmail_drafts.rs"]
 mod gmail_drafts;
 use gmail_drafts::*;
@@ -7,9 +12,6 @@ pub(crate) use tool_rendering::render_tool_message;
 
 #[path = "ui_messages/todo_completion.rs"]
 mod todo_completion;
-#[cfg(test)]
-#[path = "ui_messages/todo_payload_cache_tests.rs"]
-mod todo_payload_cache_tests;
 #[path = "ui_todo_stages.rs"]
 mod todo_stages;
 pub(crate) use todo_stages::TodoCardAgent;
@@ -891,41 +893,11 @@ fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
 
-// Cache data only: time-sensitive blocker policy and width/style rendering
-// remain live on every draw. One bounded entry retains no transcript history.
-const MAX_CACHED_TODO_PAYLOAD_BYTES: usize = 256 * 1024;
-
-#[derive(Default)]
-struct TodoPayloadCache {
-    entry: Option<(String, Option<std::sync::Arc<TodoCardPayload>>)>,
-}
-
-impl TodoPayloadCache {
-    fn get(&mut self, content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-        if let Some((source, parsed)) = &self.entry
-            && source == content
-        {
-            return parsed.clone();
-        }
-        let parsed = serde_json::from_str::<TodoCardPayload>(content)
-            .ok()
-            .map(std::sync::Arc::new);
-        self.entry = (content.len() <= MAX_CACHED_TODO_PAYLOAD_BYTES)
-            .then(|| (content.to_owned(), parsed.clone()));
-        parsed
-    }
-}
-
-thread_local! {
-    static TODO_PAYLOAD_CACHE: std::cell::RefCell<TodoPayloadCache> =
-        std::cell::RefCell::new(TodoPayloadCache::default());
-}
-
-fn cached_todo_payload(content: &str) -> Option<std::sync::Arc<TodoCardPayload>> {
-    TODO_PAYLOAD_CACHE.with_borrow_mut(|cache| cache.get(content))
-}
-
 impl TodoCardPayload {
+    fn parse(content: &str) -> Option<Self> {
+        serde_json::from_str(content).ok()
+    }
+
     fn todos(&self) -> &[crate::todo::TodoItem] {
         match self {
             Self::Current { todos, .. } | Self::Legacy(todos) => todos,
@@ -1088,7 +1060,31 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    render_todos_message_with_cap(msg, width, diff_mode, true, false)
+    if width < 10 {
+        return render_todos_message_with_cap(msg, width, diff_mode, true, false)
+            .into_iter()
+            .map(|line| super::truncate_line_with_ellipsis_to_width(&line, usize::from(width)))
+            .collect();
+    }
+    let Some((done, total)) = todo_payload_counts(&msg.content) else {
+        return render_system_message(msg, width, diff_mode);
+    };
+    let body = render_todos_message_with_cap(msg, width.saturating_sub(4), diff_mode, true, false);
+    let mut lines = render_rounded_box(
+        &format!("Todos {done}/{total}"),
+        body,
+        usize::from(width),
+        Style::default().fg(todo_border_color()),
+    );
+    if markdown::center_code_blocks() {
+        left_pad_lines_for_centered_mode(&mut lines, width);
+    }
+    lines
+}
+
+/// Shared border color for inline cards and the pinned band.
+pub(crate) fn todo_border_color() -> Color {
+    rgb(130, 115, 175)
 }
 
 /// Dedicated composer chrome, one non-wrapping row per todo awaiting the
@@ -1220,10 +1216,8 @@ fn render_todos_message_with_cap(
     };
     let (todos, plan, goals, agents, background_tasks) = payload.into_parts();
 
-    // Pinned todos are viewport chrome, not a centered transcript card. Using
-    // the code-block preference here makes short plans float in the middle of
-    // wide terminals, detached from the conversation's left edge.
-    let centered = cap_width && markdown::center_code_blocks();
+    // The enclosing card handles centering; its body stays left-aligned.
+    let centered = false;
     let meta_style = Style::default().fg(todo_meta_color());
     let card_width = match (centered, cap_width) {
         (true, true) => (width.saturating_sub(4) as usize).min(120),
@@ -1260,7 +1254,14 @@ fn render_todos_message_with_cap(
             .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
             .collect();
     }
-    push_todo_plan_details(&mut lines, &plan, &goals, base_indent, inner_width, compact_details);
+    push_todo_plan_details(
+        &mut lines,
+        &plan,
+        &goals,
+        base_indent,
+        inner_width,
+        compact_details,
+    );
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1758,65 +1759,7 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-/// Plan-level assessment lines shown once above the todo groups.
-fn push_todo_plan_details(
-    lines: &mut Vec<Line<'static>>,
-    plan: &crate::todo::TodoPlan,
-    goals: &[crate::todo::TodoGoal],
-    base_indent: &str,
-    inner_width: usize,
-    compact_details: bool,
-) {
-    let intention = plan
-        .user_intention
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(state) = plan.understands_user_intent {
-        let state_color = match state {
-            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
-            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
-            crate::todo::IntentUnderstanding::Clear => todo_score_color(),
-        };
-        let mut spans = vec![
-            Span::styled("Intent ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            Span::styled(": ", Style::default().fg(todo_label_color())),
-        ];
-        if let Some(intention) = intention {
-            spans.push(Span::styled(
-                intention.to_string(),
-                Style::default().fg(todo_meta_color()),
-            ));
-        }
-        lines.push(todo_card_line(spans, base_indent, inner_width));
-    } else if let Some(intention) = intention {
-        push_todo_detail(
-            lines,
-            "Intent",
-            intention,
-            base_indent,
-            inner_width,
-            compact_details,
-        );
-    }
-    if let Some(state) = goals.iter().filter_map(|goal| goal.delivery_state).min() {
-        let state_color = match state {
-            crate::todo::DeliveryState::ChangeMade => todo_meta_color(),
-            crate::todo::DeliveryState::Integrated => todo_warning_color(),
-            crate::todo::DeliveryState::WorkflowValidated
-            | crate::todo::DeliveryState::OutcomeDelivered => todo_score_color(),
-        };
-        lines.push(todo_card_line(
-            vec![
-                Span::styled("Delivery ", Style::default().fg(todo_label_color())),
-                Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            ],
-            base_indent,
-            inner_width,
-        ));
-    }
-}
+include!("ui_messages/todo_plan_details.rs");
 
 fn push_todo_detail(
     lines: &mut Vec<Line<'static>>,

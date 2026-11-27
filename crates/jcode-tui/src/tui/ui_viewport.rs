@@ -1,8 +1,9 @@
 use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
 mod todo_margins;
-pub(crate) use todo_margins::compute_visible_margins;
+#[cfg(test)]
 pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
+pub(crate) use todo_margins::{compute_visible_margins, pinned_todo_band_lines};
 
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
@@ -361,16 +362,14 @@ pub(super) fn draw_messages(
         width: text_render_area.width,
         height: pinned_todo_band_rows,
     }));
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
-        Rect {
-            x: text_render_area.x,
-            y: render_area
-                .y
-                .saturating_add(prompt_preview_lines)
-                .saturating_add(line as u16),
-            width: text_render_area.width,
-            height: 1,
-        }
+    set_pinned_todo_more_area(pinned_todo_more_line.map(|row| {
+        todo_margins::pinned_todo_more_rect(
+            app,
+            text_render_area,
+            render_area,
+            prompt_preview_lines,
+            row,
+        )
     }));
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
@@ -1293,46 +1292,6 @@ mod viewport_margins;
 pub(super) use viewport_margins::{INFO_WIDGET_LOOKAHEAD_ROWS, windowed_min};
 
 /// Worker activity and progress live in the pinned todo lanes.
-pub(crate) fn pinned_todo_band_lines(
-    app: &dyn TuiState,
-    width: u16,
-    viewport_height: u16,
-) -> (Vec<Line<'static>>, Option<usize>) {
-    let (mut lines, more) = pinned_todo_band_lines_for_payload(
-        app.pinned_todos_payload(),
-        app.pinned_todos_expanded(),
-        app.diff_mode(),
-        width,
-        viewport_height,
-    );
-    if width > 0
-        && viewport_height >= 3
-        && let Some(status) = app.justrust_status()
-    {
-        let color = match status.tone {
-            crate::tui::justrust_status::Tone::Active => ratatui::style::Color::Cyan,
-            crate::tui::justrust_status::Tone::Success => ratatui::style::Color::Green,
-            crate::tui::justrust_status::Tone::Failure => ratatui::style::Color::Red,
-        };
-        let label_color = if status.own_session {
-            ratatui::style::Color::Cyan
-        } else {
-            ratatui::style::Color::Magenta
-        };
-        let (label, rest) = status.text.split_once(' ').unwrap_or((&status.text, ""));
-        let line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(label.to_owned(), Style::default().fg(label_color)),
-            Span::styled(format!(" {rest}"), Style::default().fg(color)),
-        ]);
-        lines.push(super::truncate_line_with_ellipsis_to_width(
-            &line,
-            width as usize,
-        ));
-    }
-    (lines, more)
-}
-
 static PINNED_TODO_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static PINNED_TODO_MAX_SCROLL: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);

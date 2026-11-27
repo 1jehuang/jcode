@@ -3594,13 +3594,7 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     };
 
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
+    if rest.starts_with(|c: char| !c.is_whitespace()) {
         return false;
     }
 

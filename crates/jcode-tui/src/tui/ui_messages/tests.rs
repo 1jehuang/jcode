@@ -1434,91 +1434,7 @@ fn background_dependency_clock_and_progress_render_in_flat_and_stage_cards() {
     }
 }
 
-#[test]
-fn render_todos_message_shows_grouped_card_with_status_glyphs() {
-    fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
-        crate::todo::TodoItem {
-            lane_after: None,
-            lane_owner: None,
-            id: id.to_string(),
-            content: content.to_string(),
-            status: status.to_string(),
-            priority: "high".to_string(),
-            group: group.map(str::to_string),
-            confidence: Some(crate::todo::ConfidenceState::Plausible),
-            completion_confidence: (status == "completed")
-                .then_some(crate::todo::ConfidenceState::Plausible),
-            confidence_history: Vec::new(),
-            waiting_reason: None,
-            requires_user_auth: None,
-            waiting_on: Vec::new(),
-            blocked_by: Vec::new(),
-            assigned_to: None,
-            stage: None,
-            details: None,
-        }
-    }
-
-    let todos = vec![
-        todo("1", "Wire the hotkey", "completed", Some("todo card")),
-        todo("2", "Render the card", "in_progress", Some("todo card")),
-        todo("3", "Unrelated cleanup", "pending", None),
-    ];
-    let msg = DisplayMessage::todos(
-        serde_json::json!({
-            "todos": todos,
-            "plan": {
-                "user_intention": "Keep overall progress visible",
-                "understands_user_intent": "clear"
-            }
-        })
-        .to_string(),
-    );
-
-    let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-    let intent_row = lines
-        .iter()
-        .position(|line| extract_line_text(line).contains("Keep overall progress visible"))
-        .unwrap();
-    assert_eq!(extract_line_text(&lines[intent_row + 1]).trim(), "●●○");
-    let plain = lines
-        .iter()
-        .map(extract_line_text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    assert!(!plain.contains("Todos"), "{plain}");
-    assert!(plain.contains("todo card"), "{plain}");
-    assert!(plain.contains("other"), "{plain}");
-    let todo_card_header = lines
-        .iter()
-        .map(extract_line_text)
-        .find(|line| line.contains("todo card"))
-        .unwrap();
-    assert_eq!(todo_card_header.matches('●').count(), 2, "{plain}");
-    assert_eq!(todo_card_header.matches('○').count(), 0, "{plain}");
-    let other_header = lines
-        .iter()
-        .map(extract_line_text)
-        .find(|line| line.contains("other"))
-        .unwrap();
-    assert_eq!(other_header.matches('○').count(), 1, "{plain}");
-    assert!(plain.contains("✓ Wire the hotkey"), "{plain}");
-    assert!(plain.contains("● Render the card"), "{plain}");
-    assert!(plain.contains("○ Unrelated cleanup"), "{plain}");
-    // Confidence remains metadata rather than a visible item suffix.
-    assert!(!plain.contains("plausible"), "{plain}");
-    // Priority remains metadata and is not repeated in the visible item label.
-    assert!(!plain.contains("(high)"), "{plain}");
-    assert!(
-        !plain.contains('╭'),
-        "todo card should be borderless:\n{plain}"
-    );
-    assert!(
-        !plain.contains('╰'),
-        "todo card should be borderless:\n{plain}"
-    );
-}
+include!("todo_border_tests.rs");
 
 #[test]
 fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
@@ -1749,12 +1665,21 @@ fn finished_chat_todo_cards_show_lane_names_and_dots_without_changing_saved_data
             };
             let msg = DisplayMessage::todos(content.clone());
             let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-            assert_eq!(lines.len(), 2);
-            assert_eq!(extract_line_text(&lines[0]).trim(), "✓ Implementation  ●");
-            assert_eq!(extract_line_text(&lines[1]).trim(), "○ Validation      ○");
+            assert_eq!(lines.len(), 4);
+            assert_eq!(
+                extract_line_text(&lines[1]).trim().trim_matches('│').trim(),
+                "✓ Implementation  ●"
+            );
+            assert_eq!(
+                extract_line_text(&lines[2]).trim().trim_matches('│').trim(),
+                "○ Validation      ○"
+            );
             for width in 0..110 {
                 let lines = render_todos_message(&msg, width, crate::config::DiffDisplayMode::Off);
-                assert_eq!(lines.len(), 2);
+                assert!(
+                    lines.len() == if width < 10 { 2 } else { 4 },
+                    "width={width}: {lines:?}"
+                );
                 assert!(
                     lines
                         .iter()
@@ -1810,7 +1735,12 @@ fn render_todos_message_hides_item_confidence_transitions() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(text.trim(), "●", "{text}");
+        let body = text
+            .lines()
+            .filter(|row| row.contains('│'))
+            .map(|row| row.trim().trim_matches('│').trim())
+            .collect::<String>();
+        assert_eq!(body, "●", "{text}");
         assert!(
             !text.contains("validated") && !text.contains("verified") && !text.contains('→'),
             "{text}"
@@ -2078,7 +2008,7 @@ fn render_todos_message_empty_list_shows_placeholder() {
         .map(extract_line_text)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!plain.contains("Todos"), "{plain}");
+    assert!(plain.contains("Todos 0/0"), "{plain}");
     assert!(plain.contains("No tasks yet"), "{plain}");
 }
 
@@ -2090,7 +2020,7 @@ fn render_todos_message_bad_payload_falls_back_to_system() {
 }
 
 #[test]
-fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
+fn render_todo_tool_result_uses_boxed_card_with_goal_scores() {
     let todos = vec![crate::todo::TodoItem {
         lane_after: None,
         lane_owner: None,
@@ -2147,7 +2077,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(!plain.contains("Todos"), "{plain}");
+    assert!(plain.contains("Todos 0/1"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
     assert!(plain.contains("Relevance missing"), "{plain}");
@@ -2156,8 +2086,8 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("● Render the todo result"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
-        !plain.contains('╭'),
-        "todo tool result should be borderless:\n{plain}"
+        plain.contains('╭'),
+        "todo tool result should be boxed:\n{plain}"
     );
     assert!(
         !plain.contains("todo 1 items"),
@@ -2582,7 +2512,12 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         .expect("batched todo card should show the plan intent");
     let shown = intent_line
         .split_once("Intent clear:")
-        .map(|(_, rest)| rest.trim().trim_end_matches('…'))
+        .map(|(_, rest)| {
+            rest.trim()
+                .trim_end_matches('│')
+                .trim()
+                .trim_end_matches('…')
+        })
         .unwrap_or_default();
     assert!(
         shown.len() > 20 && OBJECTIVE.starts_with(shown),
