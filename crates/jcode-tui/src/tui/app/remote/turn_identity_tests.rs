@@ -471,3 +471,154 @@ fn unscoped_terminal_cannot_idle_scoped_observer() {
     handle_server_event(&mut app, ServerEvent::Done { id: 1 }, &mut remote);
     assert!(app.is_processing);
 }
+
+#[test]
+fn attached_prompt_validation_error_preserves_running_turn_without_queuing_retry() {
+    use crate::tui::app::{input, input_images};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    for text in ["rejected attached prompt", "!echo [image 1]", "/help"] {
+        for newer_draft in [false, true] {
+            let mut app = create_test_app();
+            app.is_remote = true;
+            app.auto_poke_incomplete_todos = false;
+            let mut remote = RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            start(&mut app, &mut remote, "runtime", 1);
+            let images = vec![("image/png".to_string(), "aGk=".to_string())];
+            runtime
+                .block_on(crate::tui::app::remote::begin_remote_send(
+                    &mut app,
+                    &mut remote,
+                    text.into(),
+                    images.clone(),
+                    false,
+                    None,
+                    false,
+                    0,
+                ))
+                .unwrap();
+            app.last_submitted_input = Some(text.into());
+            if newer_draft {
+                input::handle_text_paste(&mut app, "new\ndraft\nwith\nfive\nlines".into());
+                input_images::attach_image(
+                    &mut app,
+                    "image/jpeg".into(),
+                    "newer attachment".into(),
+                );
+            }
+            let newer = app.input_draft_snapshot();
+            let id = app.current_message_id.unwrap();
+            handle_server_event(
+                &mut app,
+                ServerEvent::Error {
+                    id,
+                    message: "Invalid request".into(),
+                    retry_after_secs: None,
+                },
+                &mut remote,
+            );
+            assert!(
+                app.queued_messages.is_empty(),
+                "validation errors must not become retries"
+            );
+            assert!(app.queued_images.is_empty());
+            assert!(
+                app.is_processing,
+                "the existing identity-owned turn stays active"
+            );
+            if newer_draft {
+                assert_eq!(
+                    app.input_draft_snapshot(),
+                    newer,
+                    "the full newer draft stays intact"
+                );
+                app.undo_input_change();
+            }
+            assert_eq!(app.pending_images, images);
+            let prepared = input::take_prepared_input(&mut app);
+            assert_eq!(prepared.expanded, text);
+            assert_eq!(prepared.images, images);
+            assert!(input::extract_input_shell_command(prepared.routing_input()).is_none());
+            assert!(!prepared.routing_input().trim_start().starts_with('/'));
+        }
+    }
+}
+
+#[test]
+fn review_image_recovery_accepted_terminal_errors_restore_the_complete_prompt() {
+    use crate::tui::app::{input, input_images};
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let _guard = runtime.enter();
+    for message in ["Invalid request", "model_not_found", "401 unauthorized"] {
+        for text in ["", "!echo [image 1]", "/help"] {
+            for newer_draft in [false, true] {
+                let mut app = create_test_app();
+                app.is_remote = true;
+                app.auto_poke_incomplete_todos = false;
+                let mut remote = RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let images = vec![("image/png".into(), "aGk=".into())];
+                runtime
+                    .block_on(crate::tui::app::remote::begin_remote_send(
+                        &mut app,
+                        &mut remote,
+                        text.into(),
+                        images.clone(),
+                        false,
+                        None,
+                        false,
+                        0,
+                    ))
+                    .unwrap();
+                app.last_submitted_input = Some(text.into());
+                let id = app.current_message_id.unwrap();
+                start(&mut app, &mut remote, "accepted", 1);
+                if newer_draft {
+                    input::handle_text_paste(&mut app, "new\ndraft\nwith\nfive\nlines".into());
+                    input_images::attach_image(&mut app, "image/jpeg".into(), "newer image".into());
+                }
+                let newer = app.input_draft_snapshot();
+                handle_server_event(
+                    &mut app,
+                    scoped(
+                        "accepted",
+                        1,
+                        ServerEvent::Error {
+                            id,
+                            message: message.into(),
+                            retry_after_secs: None,
+                        },
+                    ),
+                    &mut remote,
+                );
+                assert!(
+                    !app.is_processing,
+                    "ordinary accepted turn settles: {message}"
+                );
+                assert!(app.rate_limit_pending_message.is_none());
+                assert!(app.queued_messages.is_empty());
+                assert!(app.queued_images.is_empty());
+                if newer_draft {
+                    assert_eq!(
+                        app.input_draft_snapshot(),
+                        newer,
+                        "newer complete draft stays intact: {message}"
+                    );
+                    assert!(
+                        app.display_messages()
+                            .iter()
+                            .any(|m| m.content.contains("Ctrl+Z to restore")),
+                        "recovery remains visible after terminal notices: {message}"
+                    );
+                    app.undo_input_change();
+                }
+                let prepared = input::take_prepared_input(&mut app);
+                assert_eq!(prepared.expanded, text, "{message}");
+                assert_eq!(prepared.images, images, "{message}");
+                assert!(input::extract_input_shell_command(prepared.routing_input()).is_none());
+                assert!(!prepared.routing_input().trim_start().starts_with('/'));
+            }
+        }
+    }
+}

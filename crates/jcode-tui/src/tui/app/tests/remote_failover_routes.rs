@@ -831,7 +831,7 @@ fn test_cancel_image_only_failover_restores_attachments() {
         assert_eq!(app.input, "[image 1]");
         // Recovered image-only prompts need a composer marker, otherwise the
         // next input synchronization would silently discard the attachment.
-        app.sync_input_image_attachments();
+        app.ensure_input_image_markers();
         assert_eq!(
             app.pending_images,
             vec![("image/png".into(), "image-data".into())]

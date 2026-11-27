@@ -259,24 +259,26 @@ impl App {
 /// is re-sent once the turn is proven idle after reconnect, which is the
 /// queue's contract.
 pub(super) fn recover_undelivered_queued_continuation(app: &mut App, reason: &str) -> bool {
-    recover_queued_continuation(app, reason, false)
+    recover_queued_continuation(app, reason, false, false)
 }
 
-/// A busy rejection proves the send was not accepted, including automatic
-/// reminders. Unlike a disconnect, it is safe to queue these without risking
-/// replaying a continuation that the server is already running.
-pub(super) fn recover_rejected_queued_continuation(app: &mut App) -> bool {
-    recover_queued_continuation(app, "server busy rejection", true)
+/// Explicit rejection permits queued continuations to retry. Attached user
+/// prompts require a busy rejection; other failures restore them for editing.
+/// Ambiguous disconnects retain the narrower continuation-only rule.
+pub(super) fn recover_rejected_queued_continuation(app: &mut App, busy: bool) -> bool {
+    recover_queued_continuation(app, "server request rejection", true, busy)
 }
 
-fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> bool {
+fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool, busy: bool) -> bool {
     let is_recoverable = app
         .rate_limit_pending_message
         .as_ref()
         .is_some_and(|pending| {
-            pending.is_system
+            (pending.is_system || (busy && !pending.images.is_empty()))
                 && (rejected || !pending.auto_retry)
-                && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
+                && (!pending.content.trim().is_empty()
+                    || !pending.images.is_empty()
+                    || pending.system_reminder.is_some())
         });
     if !is_recoverable {
         return false;
@@ -298,7 +300,7 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     if let Some(reminder) = pending.system_reminder {
         app.hidden_queued_system_messages.insert(0, reminder);
     }
-    if !pending.content.trim().is_empty() {
+    if !pending.content.trim().is_empty() || !pending.images.is_empty() {
         prepend_queued_payload(app, pending.content, pending.images);
     }
     true
@@ -308,7 +310,7 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
     let Some(interleave) = app.interleave_message.take() else {
         return false;
     };
-    if interleave.trim().is_empty() {
+    if interleave.trim().is_empty() && app.interleave_images.is_empty() {
         return false;
     }
 
@@ -325,10 +327,11 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
     true
 }
 
-fn prepend_queued_payload(app: &mut App, text: String, mut images: Vec<(String, String)>) {
-    for queued in &mut app.queued_messages {
-        input::offset_image_markers(queued, app.queued_images.len(), images.len());
-    }
+pub(super) fn prepend_queued_payload(
+    app: &mut App,
+    text: String,
+    mut images: Vec<(String, String)>,
+) {
     app.queued_messages.insert(0, text);
     images.append(&mut app.queued_images);
     app.queued_images = images;

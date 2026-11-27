@@ -9,33 +9,7 @@ use crate::tui::ui::tools_ui;
 use crate::tui::{TuiState, backend};
 use count_format::*;
 
-pub(super) struct RestoredReloadInput {
-    pub input: String,
-    pub cursor: usize,
-    pub pending_images: Vec<(String, String)>,
-    pub submit_on_restore: bool,
-    pub queued_messages: Vec<String>,
-    pub queued_images: Vec<(String, String)>,
-    pub queued_commands: Vec<String>,
-    pub hidden_queued_system_messages: Vec<String>,
-    pub startup_status_notice: Option<String>,
-    pub startup_display_message: Option<(String, String)>,
-    pub interleave_message: Option<String>,
-    pub pending_soft_interrupts: Vec<String>,
-    pub pending_soft_interrupt_resend: Option<Vec<String>>,
-    pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
-    pub rate_limit_reset: Option<Instant>,
-    pub observe_mode_enabled: bool,
-    pub observe_page_markdown: String,
-    pub observe_page_updated_at_ms: u64,
-    pub split_view_enabled: bool,
-    pub todos_view_enabled: bool,
-    pub todo_confidence_spike_challenged: bool,
-    pub last_todo_ownership_fingerprint: Option<String>,
-    pub final_response_todo_fingerprint: Option<String>,
-    pub last_auto_poke_fingerprint: Option<String>,
-    pub auto_poke_attempts: u8,
-}
+pub(super) use super::tui_lifecycle::reload_input::RestoredReloadInput;
 
 impl App {
     /// Publish attachments immediately, without waiting for a history refresh.
@@ -452,8 +426,7 @@ impl App {
             let interleave_message = value
                 .get("interleave_message")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty());
+                .map(|s| s.to_string());
             let pending_soft_interrupts = value
                 .get("pending_soft_interrupts")
                 .and_then(|v| v.as_array())
@@ -521,6 +494,12 @@ impl App {
                         .unwrap_or(0) as u8,
                     retry_at: None,
                 });
+            let last_submitted_draft = RestoredReloadInput::submitted_draft_from_saved(
+                &value,
+                rate_limit_pending_message.as_ref(),
+                &input,
+                &pending_images,
+            );
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")
                 .and_then(|v| v.as_u64())
@@ -557,23 +536,26 @@ impl App {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let cursor = cursor.min(input.len());
+            let pasted_contents = match value.get("pasted_contents") {
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(contents) => contents,
+                    Err(error) => {
+                        crate::logging::warn(&format!("Invalid saved paste data: {error}"));
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
             return Some(RestoredReloadInput {
+                pasted_contents,
+                image_markers: super::input_images::InputImageMarkers::from_saved(&value),
                 input,
                 cursor,
                 pending_images,
                 submit_on_restore,
                 queued_messages,
-                queued_images: match value.get("queued_images") {
-                    None => Vec::new(),
-                    Some(images) => {
-                        serde_json::from_value(images.clone()).unwrap_or_else(|error| {
-                            crate::logging::warn(&format!(
-                                "Cannot restore queued image list: {error}"
-                            ));
-                            Vec::new()
-                        })
-                    }
-                },
+                queued_images: reload_input::restored_images(&value, "queued_images"),
+                interleave_images: reload_input::restored_images(&value, "interleave_images"),
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
@@ -582,6 +564,7 @@ impl App {
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
+                last_submitted_draft,
                 rate_limit_reset,
                 observe_mode_enabled,
                 observe_page_markdown,
@@ -613,6 +596,8 @@ impl App {
         let cursor = cursor_str.parse::<usize>().unwrap_or(0);
         let cursor = cursor.min(input.len());
         Some(RestoredReloadInput {
+            pasted_contents: Vec::new(),
+            image_markers: Default::default(),
             input: input.to_string(),
             cursor,
             pending_images: Vec::new(),
@@ -624,9 +609,11 @@ impl App {
             startup_status_notice: None,
             startup_display_message: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
+            last_submitted_draft: None,
             rate_limit_reset: None,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),

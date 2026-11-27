@@ -208,12 +208,12 @@ impl App {
         let input_undo_stack_bytes: usize = self
             .input_undo_stack
             .iter()
-            .map(|(text, _)| text.capacity())
+            .map(|draft| draft.0.capacity())
             .sum();
         let stashed_input_bytes = self
             .stashed_input
             .as_ref()
-            .map(|(text, _)| text.capacity())
+            .map(|draft| draft.0.capacity())
             .unwrap_or(0);
         let pending_soft_interrupts_bytes: usize = self
             .pending_soft_interrupts

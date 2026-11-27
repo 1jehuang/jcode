@@ -178,6 +178,9 @@ pub(in super::super) async fn process_remote_followups(
     }
 
     if app.submit_input_on_startup && !app.is_processing {
+        if !app.restore_remote_replay_skill() {
+            return;
+        }
         app.submit_input_on_startup = false;
         app.startup_submit_deferred_reason = None;
         if !app.input.is_empty() || !app.pending_images.is_empty() {
@@ -187,6 +190,18 @@ pub(in super::super) async fn process_remote_followups(
                 app.pending_images.len(),
             ));
             let prepared = input::take_prepared_input(app);
+            let prepared = app
+                .last_submitted_draft
+                .take()
+                .filter(|(id, draft)| {
+                    *id == app.current_message_id
+                        && draft.raw_input == prepared.raw_input
+                        && draft.images == prepared.images
+                        && draft.image_markers == prepared.image_markers
+                        && draft.pasted_contents == prepared.pasted_contents
+                })
+                .map(|(_, draft)| draft)
+                .unwrap_or(prepared);
             if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
                 crate::logging::warn(&format!("Startup auto-submit failed: {error}"));
                 app.push_display_message(DisplayMessage::error(format!(
@@ -292,7 +307,7 @@ pub(in super::super) async fn process_remote_followups(
         // passing `vec![]`, which silently dropped every image on an interleaved
         // send while still compiling, so the comment marks why the take matters.
         let interleave_images = std::mem::take(&mut app.interleave_images);
-        if !interleave_msg.trim().is_empty() {
+        if !interleave_msg.trim().is_empty() || !interleave_images.is_empty() {
             app.automatic_failover_targets.clear();
             app.automatic_failover_stopped = false;
             app.push_display_message(DisplayMessage {
@@ -306,8 +321,8 @@ pub(in super::super) async fn process_remote_followups(
             if let Err(e) = begin_remote_send(
                 app,
                 remote,
-                interleave_msg,
-                interleave_images,
+                interleave_msg.clone(),
+                interleave_images.clone(),
                 false,
                 None,
                 false,
@@ -315,6 +330,11 @@ pub(in super::super) async fn process_remote_followups(
             )
             .await
             {
+                super::queue_recovery::prepend_queued_payload(
+                    app,
+                    interleave_msg,
+                    interleave_images,
+                );
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to send message: {}",
                     e
@@ -327,6 +347,10 @@ pub(in super::super) async fn process_remote_followups(
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        let mut images = std::mem::take(&mut app.queued_images);
+        if messages.is_empty() {
+            images.clear();
+        }
         if messages.is_empty() && reminder.is_none() {
             return;
         }
@@ -353,7 +377,6 @@ pub(in super::super) async fn process_remote_followups(
                 app.visible_turn_started = Some(Instant::now());
             }
         }
-        let images = std::mem::take(&mut app.queued_images);
         if begin_remote_send(
             app,
             remote,
@@ -375,9 +398,8 @@ pub(in super::super) async fn process_remote_followups(
             if let Some(reminder) = reminder {
                 app.hidden_queued_system_messages.insert(0, reminder);
             }
-            if !combined.is_empty() {
-                app.queued_messages.insert(0, combined);
-                app.queued_images = images;
+            if !combined.is_empty() || !images.is_empty() {
+                super::queue_recovery::prepend_queued_payload(app, combined, images);
             }
         }
     } else if !app.hidden_queued_system_messages.is_empty() || app.has_pending_cloud_recovery() {

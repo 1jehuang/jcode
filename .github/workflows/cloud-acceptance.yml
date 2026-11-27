@@ -72,6 +72,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # These prerequisites use Ubuntu packages, not the runner's Microsoft feed.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang mold tmux openssh-server bubblewrap util-linux python3 ripgrep
           # The fixture runs its own unprivileged loopback-only sshd, not the service.

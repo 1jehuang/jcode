@@ -1041,6 +1041,9 @@ fn test_remote_prompt_defers_while_model_switch_is_in_flight() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "hello after model switch".to_string(),
             expanded: "hello after model switch".to_string(),
             images: vec![("image/png".to_string(), "abc123".to_string())],
@@ -1079,6 +1082,9 @@ fn test_remote_prompt_defers_while_post_login_model_setup_is_pending() {
         &mut app,
         &mut remote,
         crate::tui::app::input::PreparedInput {
+            image_markers: Default::default(),
+            routing_input: None,
+            pasted_contents: Vec::new(),
             raw_input: "review my project".to_string(),
             expanded: "review my project".to_string(),
             images: Vec::new(),
@@ -1114,6 +1120,9 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
     app.is_remote = true;
     app.remote_model_switch_in_flight = true;
     app.pending_prompt_after_model_switch = Some(crate::tui::app::input::PreparedInput {
+        image_markers: Default::default(),
+        routing_input: None,
+        pasted_contents: Vec::new(),
         raw_input: "please use the selected model".to_string(),
         expanded: "please use the selected model".to_string(),
         images: vec![("image/jpeg".to_string(), "def456".to_string())],
@@ -1136,7 +1145,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
 
     assert!(!app.remote_model_switch_in_flight);
     assert!(app.pending_prompt_after_model_switch.is_none());
-    assert_eq!(app.input, "please use the selected model");
+    assert_eq!(app.input, "please use the selected model [image 1]");
     assert_eq!(app.cursor_pos, app.input.len());
     assert_eq!(app.pending_images.len(), 1);
     assert_eq!(app.status_notice(), Some("Model switch failed".to_string()));

@@ -16,10 +16,6 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
 const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
 const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
 const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
@@ -144,7 +140,7 @@ fn should_defer_history_for_runtime_identity(
     should_defer_history_for_runtime_identity_with_allow(
         server_has_update,
         client_detected_stale,
-        allow_runtime_identity_mismatch(),
+        std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some(),
     )
 }
 
@@ -937,7 +933,7 @@ fn handle_server_event_inner(
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             app.processing_started = None;
-            app.current_message_id = None;
+            app.hold_current_remote_request();
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
             let auto_poked = app.schedule_turn_end_followups();
@@ -1072,6 +1068,7 @@ fn handle_server_event_inner(
                 // Turn completed successfully; drop the saved prompt so a later
                 // unrelated failure cannot restore stale text into the input box.
                 app.last_submitted_input = None;
+                app.last_submitted_draft = None;
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -1157,7 +1154,7 @@ fn handle_server_event_inner(
             // queue and re-adopt the running-turn state so the queue
             // dispatches once the real turn completes.
             if message == "Already processing a message"
-                && recover_rejected_queued_continuation(app)
+                && recover_rejected_queued_continuation(app, true)
             {
                 remote.clear_pending();
                 app.current_message_id = None;
@@ -1240,7 +1237,7 @@ fn handle_server_event_inner(
                 app.stream_message_ended = false;
                 app.processing_started = None;
                 app.clear_visible_turn_started();
-                app.current_message_id = None;
+                app.hold_current_remote_request();
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 return false;
@@ -1299,15 +1296,15 @@ fn handle_server_event_inner(
                     failed_fallback_payload.clone(),
                 )
             {
-                app.clear_pending_remote_retry();
-                crate::tui::app::commands::disable_auto_poke(app);
-                app.overnight_auto_poke = None;
                 if app.pending_provider_failover.is_none()
                     && app.pending_automatic_failover_route.is_none()
                     && app.pending_automatic_failover_request_id.is_none()
                 {
                     app.restore_failed_input_to_box();
                 }
+                app.clear_pending_remote_retry();
+                crate::tui::app::commands::disable_auto_poke(app);
+                app.overnight_auto_poke = None;
                 return false;
             }
             if crate::provider::parse_failover_prompt_message(&message).is_some() {
@@ -1402,6 +1399,7 @@ fn handle_server_event_inner(
             // request. Fail fast with an actionable hint instead of burning the
             // auto-retry budget on guaranteed 4xx responses (#387).
             if crate::tui::app::commands::is_fatal_model_endpoint_error(&message) {
+                app.restore_failed_input_to_box();
                 app.clear_pending_remote_retry();
                 if app.auto_poke_incomplete_todos {
                     crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
@@ -1412,7 +1410,6 @@ fn handle_server_event_inner(
                     "🛑 Not retrying: the model is not valid for the configured endpoint (e.g. an Ark coding-plan endpoint rejecting a model without the coding plan feature, or a model-not-found). Check the model name and base URL (the coding endpoint `/api/coding/v3` only accepts coding-plan models; use `/api/v3` otherwise), then send again.".to_string(),
                 ));
                 app.set_status_notice("Stopped: model/endpoint mismatch");
-                app.restore_failed_input_to_box();
                 // Switching models is exactly the right fix for a
                 // model/endpoint mismatch: offer the next best route.
                 app.offer_fallback_after_error_with_payload(
@@ -1449,10 +1446,9 @@ fn handle_server_event_inner(
             }
             if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
             {
-                app.clear_pending_remote_retry();
-                // No automatic retry will resend this turn, so restore the prompt the
-                // user typed back into the input box instead of dropping it.
+                // Recover the complete prompt before clearing the retry payload.
                 app.restore_failed_input_to_box();
+                app.clear_pending_remote_retry();
                 // Offer a one-keypress switch to the next best model/auth-method
                 // and resend (e.g. expired OpenAI OAuth session -> a provider
                 // that is known to work), instead of leaving the user to run
@@ -1803,6 +1799,7 @@ fn handle_server_event_inner(
             if session_changed {
                 if !preserve_startup_send {
                     app.rate_limit_pending_message = None;
+                    app.last_submitted_draft = None;
                 }
                 app.rate_limit_reset = None;
                 app.connection_type = None;
