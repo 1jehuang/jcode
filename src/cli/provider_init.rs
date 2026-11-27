@@ -116,6 +116,8 @@ pub enum ProviderChoice {
     Celeris,
     #[value(alias = "venice-ai", alias = "veniceai", alias = "venice.ai")]
     Venice,
+    #[value(alias = "gmi", alias = "gmicloud", alias = "gmicloud.ai")]
+    GmiCloud,
     YoloAuto,
     #[value(alias = "lm-studio")]
     Lmstudio,
@@ -196,6 +198,7 @@ impl ProviderChoice {
             Self::MuseSubscription => "muse-subscription",
             Self::Celeris => "celeris",
             Self::Venice => "venice",
+            Self::GmiCloud => "gmi-cloud",
             Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -381,6 +384,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Venice,
         crate::provider_catalog::VENICE_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::GmiCloud,
+        crate::provider_catalog::GMI_CLOUD_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::YoloAuto,
@@ -1690,6 +1697,7 @@ async fn init_provider_with_model_policy(
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
         | ProviderChoice::Venice
+        | ProviderChoice::GmiCloud
         | ProviderChoice::YoloAuto
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
