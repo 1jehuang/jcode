@@ -135,6 +135,10 @@ pub struct PersistedSwarmMember {
     /// conservative migration fallback so reports are not discarded eagerly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_since_unix_ms: Option<u64>,
+    /// Hook identity of a spawned worker, so a daemon reload keeps enriching
+    /// its hooks. The in-memory registry alone would lose it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_identity: Option<crate::hooks::SwarmIdentity>,
 }
 
 fn now_unix_ms() -> u64 {
@@ -324,6 +328,7 @@ fn to_persisted_member(member: &SwarmMember, snapshot_unix_ms: u64) -> Persisted
     PersistedSwarmMember {
         record: member.durable_record(),
         terminal_since_unix_ms,
+        hook_identity: crate::hooks::swarm_identity(&member.session_id),
     }
 }
 
@@ -594,6 +599,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 member_session_id.clone(),
                 (state.updated_at_unix_ms, member_swarm_id.clone()),
             );
+            let hook_identity = member.hook_identity.clone();
             let Some(member) = from_persisted_member(
                 member,
                 state.updated_at_unix_ms,
@@ -611,6 +617,11 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 .entry(member_swarm_id.clone())
                 .or_default()
                 .insert(member_session_id.clone());
+            // Restore the worker's hook identity without firing any event, so
+            // a resumed worker keeps its swarm fields and a later end hook.
+            if let Some(identity) = hook_identity {
+                crate::hooks::register_swarm_identity(&member_session_id, identity);
+            }
             members.insert(member_session_id, member);
         }
     }

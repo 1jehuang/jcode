@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "name_policy.rs"]
 mod name_policy;
-pub(crate) use name_policy::tool_name_is_allowed;
+pub(crate) use name_policy::{intersect_allowed, tool_name_is_allowed};
 /// The unified schema may be exposed for a restricted MCP allowlist. That
 /// must not grant management privileges or bypass a disabled legacy surface.
 fn ensure_mcp_action_allowed(session_id: &str, surface: &str) -> Result<()> {
