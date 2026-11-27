@@ -438,7 +438,8 @@ jobs:
   # Linux aarch64 is cross-compiled inside an ubuntu:22.04 container (glibc
   # 2.35) with gcc-aarch64-linux-gnu instead of the hosted build's glibc 2.39
   # ARM sysroot. Emulated TLS (-Z tls-model=emulated + -Z build-std) is kept so
-  # the binary also runs on Termux/Android kernels.
+  # the binary also runs on Termux/Android kernels, and OpenSSL is statically
+  # vendored (linux-compat-vendored-openssl) so the archive is self-contained.
   build-linux-aarch64:
     name: Build (aarch64-unknown-linux-gnu, glibc 2.35 compat)
     runs-on: ubuntu-latest
@@ -465,7 +466,7 @@ jobs:
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main universe
           EOF
           apt-get update -qq
-          apt-get install -y -qq curl ca-certificates git python3 cmake make gcc g++ gcc-aarch64-linux-gnu libssl-dev:arm64 pkg-config
+          apt-get install -y -qq curl ca-certificates git python3 perl cmake make gcc g++ gcc-aarch64-linux-gnu libssl-dev:arm64 pkg-config
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git --version
 
@@ -504,9 +505,11 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-Ztls-model=emulated"
-          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
-          OPENSSL_LIB_DIR: /usr/lib/aarch64-linux-gnu
-          OPENSSL_INCLUDE_DIR: /usr/include/openssl
+          # Cross-compile the vendored OpenSSL for the aarch64 target.
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+          RANLIB_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ranlib
           JCODE_RELEASE_BUILD: "1"
           JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ env.RELEASE_TAG }}
@@ -517,7 +520,7 @@ jobs:
           export JCODE_BUILD_GIT_TAG="$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
           export JCODE_BUILD_CHANGELOG_RAW="$(git log -700 --format='%h|%ct|%D|%s')"
           echo "git metadata: ${JCODE_BUILD_GIT_HASH} / ${JCODE_BUILD_GIT_DATE}"
-          cargo +nightly build --locked --release -Z build-std=std,panic_abort --target aarch64-unknown-linux-gnu
+          cargo +nightly build --locked --release -Z build-std=std,panic_abort --target aarch64-unknown-linux-gnu --features linux-compat-vendored-openssl
 
       - name: Verify release build preserved Cargo.lock
         shell: bash
