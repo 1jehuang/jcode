@@ -562,13 +562,34 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
 
     app.follow_chat_bottom_for_typing();
     app.remember_input_undo_state();
-    app.remove_input_range(placeholder_start, placeholder_start + placeholder.len());
-    app.input.insert_str(placeholder_start, text);
-    app.input_images_inserted(placeholder_start, text.len(), None);
-    app.cursor_pos = placeholder_start + text.len();
+    expand_paste_at(app, placeholder_start, text);
+    true
+}
+
+fn expand_paste_at(app: &mut App, start: usize, text: &str) {
+    app.remove_input_range(start, start + paste_placeholder(text).len());
+    app.input.insert_str(start, text);
+    app.input_images_inserted(start, text.len(), None);
+    app.cursor_pos = start + text.len();
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
-    true
+}
+
+/// Edit the saved text, rather than damage a label that another paste can match.
+/// The insertion caller has already recorded the original collapsed draft for undo.
+pub(super) fn expand_paste_for_edit(app: &mut App) {
+    let mut search_ends = std::collections::HashMap::new();
+    let paste = app.pasted_contents.iter().rev().find_map(|content| {
+        let label = paste_placeholder(content);
+        let search_end = search_ends.entry(label.clone()).or_insert(app.input.len());
+        let start = app.input[..*search_end].rfind(&label)?;
+        *search_end = start;
+        (start < app.cursor_pos && app.cursor_pos < start + label.len())
+            .then(|| (start, content.clone()))
+    });
+    if let Some((start, text)) = paste {
+        expand_paste_at(app, start, &text);
+    }
 }
 
 impl App {
@@ -783,6 +804,8 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     if !same_burst && !replaced_selection {
         app.remember_input_undo_state();
     }
+
+    expand_paste_for_edit(app);
 
     // After a picker command is fully typed (or completed without a trailing
     // space), the next printable character starts its filter. Insert the

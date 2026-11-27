@@ -48,6 +48,7 @@ pub(super) fn attach_image(app: &mut App, media_type: String, base64_data: Strin
     if !app.replace_input_selection_for_insert() {
         app.remember_input_undo_state();
     }
+    super::input::expand_paste_for_edit(app);
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
     let at = app.cursor_pos;
@@ -257,6 +258,7 @@ impl App {
         self.ensure_input_image_markers();
         self.cursor_pos = start;
         self.remove_input_range(start, end);
+        super::input::expand_paste_for_edit(self);
         let at = self.cursor_pos;
         self.input.insert_str(at, text);
         self.input_images_inserted(at, text.len(), None);
