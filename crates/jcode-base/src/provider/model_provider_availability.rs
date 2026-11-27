@@ -58,6 +58,37 @@ pub(super) fn record_provider_unavailable_for_key(key: String, reason: &str) {
     }
 }
 
+/// A billing refusal can be resolved by a top-up that jcode never observes, so
+/// it must not justify skipping the request that would discover the new
+/// balance. The needles are deliberately money-specific: a plan/quota message
+/// that merely mentions "billing details" (OpenAI's `insufficient_quota`) must
+/// keep skipping, or every quota-limited account starts retrying each turn.
+fn is_billing_failure(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    [
+        "credit",
+        "payment",
+        "insufficient balance",
+        "billing error",
+        "billing hard limit",
+        "billing_not_active",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+/// A cached provider cooldown only justifies skipping the request when it
+/// reports plan/quota exhaustion. Billing, auth and transport failures must
+/// reach the provider again: after a top-up or a fixed key there is no event
+/// that clears the marker, so the next turn has to be the probe.
+pub fn should_skip_provider_request(reason: &str) -> bool {
+    if is_billing_failure(reason) {
+        return false;
+    }
+    is_quota_failure(reason)
+        || jcode_provider_core::failover::is_definitive_usage_exhaustion(reason)
+}
+
 pub fn clear_provider_unavailable_for_account(provider: &str) {
     let key = current_provider_runtime_scope_key(provider);
     if key.trim().is_empty() {
@@ -277,6 +308,43 @@ mod quota_recovery_tests {
             "quota exhausted",
         ] {
             assert!(is_quota_failure(reason), "{reason}");
+        }
+    }
+
+    #[test]
+    fn billing_auth_and_transport_cooldowns_do_not_skip_the_request() {
+        for reason in [
+            // DeepSeek's 402 body, as it reaches the failover note.
+            "OpenAI-compatible chat request failed endpoint: https://api.deepseek.com/chat/completions \
+             status: 402 Payment Required response: {\"error\":{\"message\":\"Insufficient Balance\",\
+             \"type\":\"insufficient_balance_error\"}}",
+            // Balance exhaustion is restorable by a top-up, so it must retry
+            // even though the classifier treats it as definitive for the
+            // interactive countdown.
+            "Your credit balance is too low",
+            "insufficient credit",
+            "credits have run out",
+            "402 Payment Required",
+            "billing error",
+            "billing_not_active",
+            "billing hard limit reached",
+            "401 unauthorized",
+            "403 forbidden",
+            "connection reset by peer",
+        ] {
+            assert!(!should_skip_provider_request(reason), "{reason}");
+        }
+        for reason in [
+            "usage_limit_reached",
+            "insufficient_quota",
+            "quota exhausted",
+            "You have reached your weekly limit",
+            // Mentions "billing details" but is a plan/quota limit: must keep
+            // skipping instead of retrying every turn.
+            "You exceeded your current quota, please check your plan and billing details. \
+             {\"code\":\"insufficient_quota\"}",
+        ] {
+            assert!(should_skip_provider_request(reason), "{reason}");
         }
     }
 }
