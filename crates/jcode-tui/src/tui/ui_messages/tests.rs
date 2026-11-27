@@ -1569,7 +1569,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Only the plan-level assessment renders above the groups.
@@ -1861,6 +1861,60 @@ fn render_todos_message_color_codes_every_intent_state() {
 }
 
 #[test]
+fn render_todos_message_shows_delivery_state_under_intent() {
+    let msg = DisplayMessage::todos(
+        serde_json::json!({
+            "todos": [{
+                "id": "1",
+                "content": "Ship delivery state",
+                "status": "in_progress",
+                "priority": "high",
+                "group": "ui"
+            }],
+            "plan": {
+                "user_intention": "Show delivery state under intent",
+                "understands_user_intent": "clear",
+            },
+            "goals": [
+                {"group": "ui", "delivery_state": "outcome_delivered"},
+                {"group": "tests", "delivery_state": "integrated"}
+            ],
+        })
+        .to_string(),
+    );
+    let lines = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let text_lines: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    let intent_idx = text_lines
+        .iter()
+        .position(|line| line.contains("Intent clear: Show delivery state under intent"))
+        .expect("intent line should render");
+    assert!(
+        text_lines
+            .get(intent_idx + 1)
+            .is_some_and(|line| line.contains("Delivery integrated")),
+        "delivery state should render immediately under intent (using lowest goal state): {text_lines:?}"
+    );
+    for narrow in [16u16, 20, 28] {
+        let narrow_lines = render_todos_message(&msg, narrow, crate::config::DiffDisplayMode::Off);
+        for line in &narrow_lines {
+            assert!(
+                line.width() <= narrow as usize,
+                "row exceeded width {narrow}: {:?}",
+                line
+            );
+        }
+    }
+}
+
+#[test]
 fn render_todos_message_collapses_passing_quality_gates() {
     let todos = vec![crate::todo::TodoItem {
         lane_after: None,
@@ -1902,7 +1956,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         .join("\n");
 
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
     assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
     assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
     assert!(
@@ -1956,7 +2010,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
         "card exceeded its 38-column content budget: {plain}"
@@ -2098,7 +2152,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
     assert!(plain.contains("Relevance missing"), "{plain}");
     assert!(plain.contains("Coverage missing"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(plain.contains("● Render the todo result"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
@@ -2601,7 +2655,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(!plain.contains("Delivery "), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(!plain.contains("todo 1 items"), "{plain}");
 }
 

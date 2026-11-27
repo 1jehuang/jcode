@@ -1260,7 +1260,7 @@ fn render_todos_message_with_cap(
             .map(|line| super::truncate_line_with_ellipsis_to_width(line, width as usize))
             .collect();
     }
-    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
+    push_todo_plan_details(&mut lines, &plan, &goals, base_indent, inner_width, compact_details);
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1762,6 +1762,7 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
 fn push_todo_plan_details(
     lines: &mut Vec<Line<'static>>,
     plan: &crate::todo::TodoPlan,
+    goals: &[crate::todo::TodoGoal],
     base_indent: &str,
     inner_width: usize,
     compact_details: bool,
@@ -1798,6 +1799,22 @@ fn push_todo_plan_details(
             inner_width,
             compact_details,
         );
+    }
+    if let Some(state) = goals.iter().filter_map(|goal| goal.delivery_state).min() {
+        let state_color = match state {
+            crate::todo::DeliveryState::ChangeMade => todo_meta_color(),
+            crate::todo::DeliveryState::Integrated => todo_warning_color(),
+            crate::todo::DeliveryState::WorkflowValidated
+            | crate::todo::DeliveryState::OutcomeDelivered => todo_score_color(),
+        };
+        lines.push(todo_card_line(
+            vec![
+                Span::styled("Delivery ", Style::default().fg(todo_label_color())),
+                Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
+            ],
+            base_indent,
+            inner_width,
+        ));
     }
 }
 
