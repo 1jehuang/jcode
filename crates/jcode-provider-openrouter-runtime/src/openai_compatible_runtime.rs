@@ -68,6 +68,7 @@ impl OpenRouterProvider {
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
             builtin_azure: false,
+            named_profile_responses_api: false,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),

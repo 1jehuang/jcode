@@ -738,3 +738,45 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert!(body.get("reasoning_effort").is_none());
 }
+
+/// Issue #2215 follow-up: a named profile with `api = "responses"` keeps the
+/// swarm sentinel in session state, so the Responses body must resolve it to
+/// the configured root effort like the chat path does. Sending
+/// `reasoning.effort = "swarm"` to a strict server fails the request.
+#[test]
+fn named_profile_responses_wire_resolves_swarm_effort_to_root() {
+    let _lock = ENV_LOCK.lock();
+    let (api_base, captured) = spawn_single_response_chat_server();
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: api_base,
+        api: Some("responses".to_string()),
+        api_key: Some("test-key".into()),
+        default_model: Some("gpt-5.6-luna".into()),
+        ..Default::default()
+    };
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("issue2215-gateway", &profile).unwrap();
+    assert!(provider.named_profile_responses_api);
+    provider.set_reasoning_effort("swarm").unwrap();
+    let expected = jcode_base::prompt::swarm_root_reasoning_effort("swarm").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&[Message::user("hello")], &[], "test", None)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    });
+    let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(raw.starts_with("POST /v1/responses "), "{raw}");
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["reasoning"]["effort"], expected, "{body}");
+    assert_ne!(body["reasoning"]["effort"], "swarm", "{body}");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("swarm"));
+}

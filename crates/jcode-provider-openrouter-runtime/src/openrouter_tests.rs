@@ -1267,6 +1267,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         builtin_azure: false,
+        named_profile_responses_api: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1302,6 +1303,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_model_catalog: true,
         profile_id: None,
         builtin_azure: false,
+        named_profile_responses_api: false,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -3508,3 +3510,39 @@ mod catalog_auth;
 
 #[path = "openrouter_tests_additional_tests.rs"]
 mod additional_cache_breakpoint_preserves_shared_payload_when_already_marked;
+
+#[test]
+fn named_profile_api_responses_selects_responses_wire() {
+    let _lock = ENV_LOCK.lock();
+    let profile = |api: Option<&str>| jcode_base::config::NamedProviderConfig {
+        base_url: "https://issue2215.example.test/v1".to_string(),
+        api: api.map(ToString::to_string),
+        api_key: Some("test".to_string()),
+        ..Default::default()
+    };
+
+    // Issue #2215: `api = "responses"` used to be parsed but never read, so a
+    // named profile always spoke Chat Completions and gateways that only accept
+    // tool calls through /v1/responses rejected every request.
+    for api in ["responses", "Responses", "  RESPONSES  "] {
+        let provider = OpenRouterProvider::new_named_openai_compatible(
+            "issue2215-gateway",
+            &profile(Some(api)),
+        )
+        .expect("profile should construct");
+        assert!(
+            provider.named_profile_responses_api,
+            "api = {api:?} should select the Responses wire"
+        );
+    }
+
+    for api in [None, Some("chat"), Some("chat_completions")] {
+        let provider =
+            OpenRouterProvider::new_named_openai_compatible("issue2215-gateway", &profile(api))
+                .expect("profile should construct");
+        assert!(
+            !provider.named_profile_responses_api,
+            "api = {api:?} must keep Chat Completions"
+        );
+    }
+}

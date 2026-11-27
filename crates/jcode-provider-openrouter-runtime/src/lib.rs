@@ -800,6 +800,9 @@ pub struct OpenRouterProvider {
     profile_id: Option<String>,
     /// The built-in Azure route uses Responses; a named profile with the same ID does not.
     builtin_azure: bool,
+    /// Named-profile `api = "responses"`: route every model of this profile
+    /// through `/responses` instead of `/chat/completions` (issue #2215).
+    named_profile_responses_api: bool,
     /// Explicit `supports_reasoning_effort` override from named-profile config.
     /// `None` means auto-detect (deepseek profile id or DeepSeek-family model).
     reasoning_effort_support: Option<bool>,
@@ -1313,6 +1316,13 @@ impl OpenRouterProvider {
                 .unwrap_or(false)
     }
 
+    /// Named-profile `api = "responses"` selects the Responses wire. The match
+    /// is case-insensitive and ignores surrounding whitespace; any other value
+    /// (or no value) keeps Chat Completions, so existing configs are unaffected.
+    fn profile_api_is_responses(api: Option<&str>) -> bool {
+        api.is_some_and(|api| api.trim().eq_ignore_ascii_case("responses"))
+    }
+
     pub fn new_named_openai_compatible(
         profile_name: &str,
         profile: &jcode_base::config::NamedProviderConfig,
@@ -1436,6 +1446,7 @@ impl OpenRouterProvider {
                 ),
             profile_id: Some(profile_name.to_string()),
             builtin_azure: false,
+            named_profile_responses_api: Self::profile_api_is_responses(profile.api.as_deref()),
             reasoning_effort_support: profile.supports_reasoning_effort,
             disable_reasoning_heuristics: profile.disable_reasoning_heuristics,
             static_reasoning_config,
@@ -1685,6 +1696,9 @@ impl OpenRouterProvider {
             supports_model_catalog,
             profile_id,
             builtin_azure,
+            // `new()` resolves built-in catalog profiles, which carry no `api`
+            // field; only `new_named_openai_compatible` can opt into Responses.
+            named_profile_responses_api: false,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1742,6 +1756,7 @@ impl OpenRouterProvider {
             supports_model_catalog: true,
             profile_id: Some("grok-build".to_string()),
             builtin_azure: false,
+            named_profile_responses_api: false,
             reasoning_effort_support: Some(false),
             disable_reasoning_heuristics: true,
             static_reasoning_config: HashMap::new(),
@@ -1791,6 +1806,7 @@ impl OpenRouterProvider {
             supports_model_catalog: true,
             profile_id: None,
             builtin_azure: false,
+            named_profile_responses_api: false,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1998,6 +2014,7 @@ impl OpenRouterProvider {
                 supports_model_catalog: true,
                 profile_id: None,
                 builtin_azure: false,
+                named_profile_responses_api: false,
                 reasoning_effort_support: None,
                 disable_reasoning_heuristics: false,
                 static_reasoning_config: HashMap::new(),
