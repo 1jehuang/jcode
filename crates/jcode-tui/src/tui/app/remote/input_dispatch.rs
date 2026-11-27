@@ -67,6 +67,9 @@ pub(in crate::tui::app) async fn begin_remote_send_with_origin(
         (None, Some(recovery)) => Some(recovery.clone()),
         (reminder, None) => reminder,
     };
+    if is_system {
+        remote.mark_next_message_auto();
+    }
     // Classify the final wire reminder, including cloud recovery context. A
     // cloud-only continuation otherwise bypasses the execution-retry marker.
     let system_reminder = system_reminder.map(|reminder| {

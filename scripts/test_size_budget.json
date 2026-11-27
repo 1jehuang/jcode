@@ -1,10 +1,11 @@
 {
   "threshold_loc": 1200,
   "tracked_files": {
-    "crates/jcode-app-core/src/agent_tests.rs": 3204,
-    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1523,
+    "crates/jcode-app-core/src/agent_tests.rs": 3209,
+    "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 1531,
     "crates/jcode-app-core/src/server/comm_session_tests.rs": 1306,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1310,
+    "crates/jcode-app-core/src/server/tests.rs": 1237,
     "crates/jcode-app-core/src/tool/browser_fast_tests.rs": 1286,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1385,
     "crates/jcode-app-core/src/tool/tests.rs": 1936,
@@ -50,7 +51,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1278,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1476,
     "src/cli/args/tests.rs": 1239,
-    "src/cli/commands_tests.rs": 1737
+    "src/cli/commands_tests.rs": 1750
   },
   "version": 1
 }

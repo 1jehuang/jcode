@@ -112,6 +112,9 @@ pub(super) struct VersionReport {
     pub(super) build_time: String,
     pub(super) git_date: String,
     pub(super) release_build: bool,
+    /// Hook and agent features this build supports. Absent when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) hook_capabilities: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -443,6 +446,7 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
             .unwrap_or_else(|| "unknown".to_string()),
         git_date: jcode_build_meta::git_date().to_string(),
         release_build: jcode_build_meta::is_release_build(),
+        hook_capabilities: crate::hooks::hook_capabilities(),
     };
 
     if emit_json {
