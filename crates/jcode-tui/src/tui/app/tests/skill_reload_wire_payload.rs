@@ -702,3 +702,255 @@ fn paste_label_boundaries_literals_and_other_insertions_keep_payloads() {
         );
     }
 }
+
+fn paste_collision_payloads(variant: usize) -> (String, String) {
+    if variant == 0 {
+        (
+            "A1\nA2\nA3\nA4\n[pasted 6 lines]".into(),
+            "B1\nB2\nB3\nB4\nB5\nB6".into(),
+        )
+    } else {
+        (
+            "A1\nA2\nA3\nA4\nA5\n[pasted 5 lines]".into(),
+            "B1\nB2\nB3\nB4\nB5".into(),
+        )
+    }
+}
+
+async fn paste_collision_edit(mode: u8, variant: usize) {
+    let (a, b) = paste_collision_payloads(variant);
+    let mut app = tokio::task::block_in_place(create_test_app);
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    super::input::insert_input_text(&mut app, "前缀 ");
+    attachment_routing_attach_image(&mut app);
+    super::input::insert_input_text(&mut app, " ");
+    let before_a = app.cursor_pos;
+    super::input::handle_text_paste(&mut app, a.clone());
+    super::input::insert_input_text(&mut app, " ");
+    attachment_routing_attach_image(&mut app);
+    app.cursor_pos = before_a;
+    super::input::handle_text_paste(&mut app, b.clone());
+    super::input::insert_input_text(&mut app, " | ");
+    app.cursor_pos = app
+        .input
+        .rfind(&super::input::paste_placeholder(&a))
+        .unwrap()
+        + 2;
+    let collapsed = app.input_draft_snapshot();
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+    let expected = format!("前缀  {b} | {a} ");
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input_without_owned_image_markers()),
+        expected,
+        "literal-label collision variant {variant} in mode {mode} changed payload positions"
+    );
+    assert_eq!(app.cursor_pos, app.input.rfind(&a).unwrap() + a.len());
+    app.undo_input_change();
+    assert!(app.input.contains('x'));
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), collapsed);
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+    let expanded = app.input_draft_snapshot();
+    app.save_input_for_reload("paste-collision-edit");
+    let restored = App::restore_input_for_reload("paste-collision-edit").unwrap();
+    let mut next = tokio::task::block_in_place(create_test_app);
+    next.apply_restored_reload_input(restored);
+    assert_eq!(next.input_draft_snapshot(), expanded);
+    match mode {
+        0 => {
+            next.submit_input();
+            let message = next.session.messages.last().unwrap();
+            assert_eq!(
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, crate::message::ContentBlock::Image { .. }))
+                    .count(),
+                2
+            );
+            assert!(message.content.iter().any(|block| matches!(block, crate::message::ContentBlock::Text { text, .. } if text == &expected)));
+        }
+        1 => {
+            next.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                .await
+                .unwrap();
+            let wire = attachment_routing_read_request(&mut reader).await;
+            assert_eq!(wire["content"], expected);
+            assert_eq!(
+                wire["images"],
+                serde_json::json!([
+                    ["image/png", "fixture-image"],
+                    ["image/png", "fixture-image"]
+                ])
+            );
+        }
+        _ => {
+            let prepared = super::input::take_prepared_input(&mut next);
+            assert_eq!(prepared.expanded, expected);
+            assert_eq!(
+                prepared.images,
+                vec![("image/png".into(), "fixture-image".into()); 2]
+            );
+        }
+    }
+}
+
+fn paste_collision_run(mode: u8, variant: usize) {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(paste_collision_edit(mode, variant));
+    });
+}
+
+#[test]
+fn paste_collision_local_five_exposes_six_literal() {
+    paste_collision_run(0, 0);
+}
+#[test]
+fn paste_collision_local_six_exposes_five_literal() {
+    paste_collision_run(0, 1);
+}
+#[test]
+fn paste_collision_connected_five_exposes_six_literal() {
+    paste_collision_run(1, 0);
+}
+#[test]
+fn paste_collision_connected_six_exposes_five_literal() {
+    paste_collision_run(1, 1);
+}
+#[test]
+fn paste_collision_disconnected_five_exposes_six_literal() {
+    paste_collision_run(2, 0);
+}
+#[test]
+fn paste_collision_disconnected_six_exposes_five_literal() {
+    paste_collision_run(2, 1);
+}
+
+#[test]
+fn paste_collision_frozen_transport_and_repeat_keep_cyclic_literals() {
+    let a = "A1\nA2\nA3\nA4\n[pasted 6 lines]";
+    let b = "B1\nB2\nB3\nB4\nB5\n[pasted 5 lines]";
+    for before in [false, true] {
+        for repeat in [false, true] {
+            let mut app = create_test_app();
+            super::input::insert_input_text(&mut app, "界 ");
+            let start = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, a.into());
+            if before {
+                app.cursor_pos = start;
+            } else {
+                super::input::insert_input_text(&mut app, " | ");
+            }
+            super::input::handle_text_paste(&mut app, b.into());
+            if before {
+                super::input::insert_input_text(&mut app, " | ");
+            }
+            let collapsed = app.input_draft_snapshot();
+            if repeat {
+                super::input::handle_text_paste(&mut app, a.into());
+            }
+            let expected = if before {
+                format!("界 {b} | {a}")
+            } else {
+                format!("界 {a} | {b}")
+            };
+            if repeat {
+                assert_eq!(app.input, expected);
+                assert!(app.pasted_contents.is_empty());
+                assert_eq!(
+                    app.cursor_pos,
+                    if before {
+                        expected.len()
+                    } else {
+                        "界 ".len() + a.len()
+                    }
+                );
+                app.undo_input_change();
+                assert_eq!(app.input_draft_snapshot(), collapsed);
+                super::input::handle_text_paste(&mut app, a.into());
+            }
+            assert_eq!(
+                super::input::take_prepared_input(&mut app).expanded,
+                expected
+            );
+        }
+    }
+    let a = "A1\nA2\nA3\nA4\n[pasted 5 lines]";
+    let b = "B1\nB2\nB3\nB4\n[pasted 5 lines]";
+    let mut app = create_test_app();
+    super::input::handle_text_paste(&mut app, a.into());
+    super::input::insert_input_text(&mut app, " | ");
+    super::input::handle_text_paste(&mut app, b.into());
+    let collapsed = app.input_draft_snapshot();
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input),
+        format!("{a} | {b}")
+    );
+    super::input::handle_text_paste(&mut app, a.into());
+    assert_eq!(app.input, format!("{a} | {b}"));
+    assert!(app.pasted_contents.is_empty());
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), collapsed);
+}
+
+#[test]
+fn paste_collision_image_range_edits_and_subsequent_paste_keep_literals() {
+    let (a, b) = paste_collision_payloads(0);
+    let c = "C1\nC2\nC3\nC4\nC5\nC6";
+    for edit in 0..3 {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, a.clone());
+        app.cursor_pos = 0;
+        super::input::handle_text_paste(&mut app, b.clone());
+        super::input::insert_input_text(&mut app, " | ");
+        app.cursor_pos += 2;
+        match edit {
+            0 => attachment_routing_attach_image(&mut app),
+            1 => {
+                app.remember_input_undo_state();
+                app.replace_input_range(app.cursor_pos, app.cursor_pos, "x");
+            }
+            _ => {
+                app.remember_input_undo_state();
+                super::input::insert_input_text(&mut app, "x");
+            }
+        }
+        let expected = format!("{b} | {a}{}", if edit == 0 { "" } else { "x" });
+        assert_eq!(
+            super::input::expand_paste_placeholders(&app, &app.input_without_owned_image_markers()),
+            expected
+        );
+        // A later same-size paste before the exposed literal must keep its own payload.
+        app.cursor_pos = 0;
+        super::input::handle_text_paste(&mut app, c.into());
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(prepared.expanded, format!("{c}{expected}"));
+        assert_eq!(prepared.images.len(), usize::from(edit == 0));
+    }
+}
+
+#[test]
+fn paste_collision_new_label_before_literal_keeps_new_payload() {
+    let literal = "既存 [pasted 5 lines]";
+    let c = "C1\nC2\nC3\nC4\nC5";
+    let mut app = create_test_app();
+    super::input::insert_input_text(&mut app, literal);
+    app.cursor_pos = 0;
+    let before = app.input_draft_snapshot();
+    super::input::handle_text_paste(&mut app, c.into());
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input),
+        format!("{c}{literal}"),
+        "new collapsed paste must not bind to an existing literal"
+    );
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), before);
+}
