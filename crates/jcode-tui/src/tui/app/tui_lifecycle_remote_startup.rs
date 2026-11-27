@@ -30,13 +30,11 @@ impl App {
         let snapshot = self.current_skills_snapshot();
         let skill = snapshot
             .resolve_invocation(draft.routing_input())
-            .zip(snapshot.resolve_invocation(&expanded_raw))
-            .filter(|(routing, wire)| {
-                routing.name == wire.name
-                    && snapshot.get(routing.name).is_some()
-                    && wire.prompt.unwrap_or("") == draft.expanded
+            .filter(|routing| {
+                snapshot.get(routing.name).is_some()
+                    && routing.prompt_from_input(&expanded_raw) == Some(draft.expanded.as_str())
             })
-            .map(|(routing, _)| routing.name.to_string());
+            .map(|routing| routing.name.to_string());
         if let Some(skill) = skill {
             self.active_skill = Some(skill);
             return true;

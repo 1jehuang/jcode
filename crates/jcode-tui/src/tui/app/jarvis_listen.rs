@@ -958,6 +958,7 @@ impl App {
                         .as_ref()
                         .is_some_and(ContinuousRecording::suppress_if_quiet)
             };
+            const QUIET_MIC_GRACE: Duration = Duration::from_secs(3);
             if let Some((text, at)) = listener
                 .playback
                 .speech
@@ -974,12 +975,35 @@ impl App {
                         changed = true;
                     }
                 }
-            } else if self
-                .jarvis_speech
-                .as_ref()
-                .is_some_and(|p| p.authorize_ready(claim))
+            } else if let Some(player) = self.jarvis_speech.as_ref()
+                && let Some(waited) = player.awaiting_quiet_elapsed()
             {
-                listener.playback_trace().mark("quiet_authorized", 0);
+                let ambient_fallback = !disabled && waited >= QUIET_MIC_GRACE;
+                let mut used_ambient = false;
+                if player.authorize_ready(|| {
+                    if claim() {
+                        true
+                    } else if ambient_fallback
+                        && listener
+                            .recording
+                            .as_ref()
+                            .is_some_and(ContinuousRecording::suppress_for_playback)
+                    {
+                        used_ambient = true;
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    listener.playback_trace().mark(
+                        if used_ambient {
+                            "ambient_authorized"
+                        } else {
+                            "quiet_authorized"
+                        },
+                        waited.as_millis(),
+                    );
+                }
             } else if listener.playback.ding
                 && self.jarvis_speech.as_ref().is_none_or(|p| p.is_idle())
                 && claim()

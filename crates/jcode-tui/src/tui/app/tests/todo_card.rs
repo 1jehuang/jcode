@@ -244,7 +244,7 @@ fn refresh_todo_card_updates_content_when_todos_change() {
         status: status.to_string(),
         priority: "high".to_string(),
         group: None,
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(70)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         completion_confidence: None,
         confidence_history: Vec::new(),
         waiting_reason: None,
@@ -295,7 +295,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         status: "in_progress".to_string(),
         priority: "high".to_string(),
         group: None,
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         completion_confidence: None,
         confidence_history: Vec::new(),
         waiting_reason: None,
@@ -306,22 +306,22 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         stage: None,
         details: None,
     }];
-    let goal = |score| crate::todo::TodoGoal {
+    let goal = |state| crate::todo::TodoGoal {
         group: None,
-        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(score)),
+        closed_feedback_loop: Some(state),
         feedback_loop: Some("inspect the frame".to_string()),
-        delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(90)),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
         ..Default::default()
     };
 
     let plan = crate::todo::TodoPlan {
         user_intention: Some("keep the plan state visible".to_string()),
-        understands_user_intent: Some(crate::todo::IntentUnderstanding::from_legacy_score(95)),
+        understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         ..Default::default()
     };
 
     crate::todo::save_todos(&session_id, &todos).unwrap();
-    crate::todo::save_goals(&session_id, &[goal(70)]).unwrap();
+    crate::todo::save_goals(&session_id, &[goal(crate::todo::FeedbackLoopState::Usable)]).unwrap();
     crate::todo::save_plan(&session_id, &plan).unwrap();
     app.toggle_todo_card();
     let card = app
@@ -335,7 +335,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
             .contains("\"understands_user_intent\":\"partial\"")
     );
 
-    crate::todo::save_goals(&session_id, &[goal(95)]).unwrap();
+    crate::todo::save_goals(&session_id, &[goal(crate::todo::FeedbackLoopState::Strong)]).unwrap();
     assert!(app.refresh_todo_card_if_needed());
     let card = app
         .display_messages
@@ -359,7 +359,7 @@ fn pinned_band_todo(id: &str, content: &str, status: &str) -> crate::todo::TodoI
         status: status.to_string(),
         priority: "high".to_string(),
         group: None,
-        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+        confidence: Some(crate::todo::ConfidenceState::Plausible),
         completion_confidence: None,
         confidence_history: Vec::new(),
         waiting_reason: None,

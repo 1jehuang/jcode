@@ -419,10 +419,8 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
-    let expanded_prompt = app
-        .current_skills_snapshot()
-        .resolve_invocation(&prepared.expanded)
-        .map(|invocation| invocation.prompt.unwrap_or(""))
+    let expanded_prompt = invocation
+        .prompt_from_input(&prepared.expanded)
         .unwrap_or(trailing_prompt)
         .to_string();
     submit_prepared_remote_input(
