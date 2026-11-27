@@ -16,10 +16,6 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
 const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
 const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
 const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
@@ -144,7 +140,7 @@ fn should_defer_history_for_runtime_identity(
     should_defer_history_for_runtime_identity_with_allow(
         server_has_update,
         client_detected_stale,
-        allow_runtime_identity_mismatch(),
+        std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some(),
     )
 }
 
@@ -937,7 +933,7 @@ fn handle_server_event_inner(
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
             app.processing_started = None;
-            app.current_message_id = None;
+            app.hold_current_remote_request();
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
             let auto_poked = app.schedule_turn_end_followups();
@@ -1072,6 +1068,7 @@ fn handle_server_event_inner(
                 // Turn completed successfully; drop the saved prompt so a later
                 // unrelated failure cannot restore stale text into the input box.
                 app.last_submitted_input = None;
+                app.last_submitted_draft = None;
                 app.processing_started = None;
                 app.replay_processing_started_ms = None;
                 app.replay_elapsed_override = None;
@@ -1240,7 +1237,7 @@ fn handle_server_event_inner(
                 app.stream_message_ended = false;
                 app.processing_started = None;
                 app.clear_visible_turn_started();
-                app.current_message_id = None;
+                app.hold_current_remote_request();
                 remote.clear_pending();
                 remote.reset_call_output_tokens_seen();
                 return false;
@@ -1803,6 +1800,7 @@ fn handle_server_event_inner(
             if session_changed {
                 if !preserve_startup_send {
                     app.rate_limit_pending_message = None;
+                    app.last_submitted_draft = None;
                 }
                 app.rate_limit_reset = None;
                 app.connection_type = None;

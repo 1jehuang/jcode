@@ -514,7 +514,8 @@ impl ConfidenceSummary {
                 weight += w;
             }
         }
-        let average = (weight > 0).then(|| ConfidenceState::from_level(((sum + weight / 2) / weight) as u8));
+        let average =
+            (weight > 0).then(|| ConfidenceState::from_level(((sum + weight / 2) / weight) as u8));
         let needs_validation = !completed.is_empty()
             && completed.iter().any(|todo| {
                 todo.completion_confidence.is_none()

@@ -1,0 +1,956 @@
+const SKILL_RELOAD_PASTE: &str = "one\ntwo\nthree\nfour\nfive\nsix";
+
+fn skill_reload_write_skill(project: &std::path::Path, name: &str) {
+    let directory = project.join(".jcode/skills").join(name);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Reload wire fixture\n---\nUse this skill.\n"),
+    )
+    .unwrap();
+}
+
+fn skill_reload_app(project: &std::path::Path) -> App {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = super::AppRuntimeMode::RemoteClient;
+    app.auto_poke_incomplete_todos = false;
+    app.session.working_dir = Some(project.to_string_lossy().into());
+    app.refresh_skills_snapshot();
+    app
+}
+
+fn skill_reload_assert_wire(original: &serde_json::Value, replay: &serde_json::Value) {
+    assert_eq!(replay["type"], "message");
+    for field in [
+        "content",
+        "images",
+        "active_skill",
+        "system_reminder",
+        "jarvis_voice",
+    ] {
+        assert_eq!(
+            replay[field], original[field],
+            "reload changed wire field {field}"
+        );
+    }
+}
+
+async fn skill_reload_submit(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    name: &str,
+    text: &str,
+) -> super::input_images::InputUndoSnapshot {
+    super::input::insert_input_text(app, &format!("/{name} "));
+    super::input::handle_text_paste(app, text.into());
+    attachment_routing_attach_image(app);
+    let draft = app.input_draft_snapshot();
+    let prepared = super::input::take_prepared_input(app);
+    super::remote::input_dispatch::submit_remote_slash_input(app, remote, prepared)
+        .await
+        .unwrap();
+    draft
+}
+
+#[test]
+fn skill_reload_wire_startup_replays_skill_payload_and_activation() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for name in ["my-skill", "my skill"] {
+                skill_reload_write_skill(project.path(), name);
+                for text in [
+                    "",
+                    "literal [image 1] and [Paste #99: 6 lines]",
+                    "!echo literal shell intent",
+                    SKILL_RELOAD_PASTE,
+                ] {
+                    let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                    remote.mark_history_loaded();
+                    let peer = remote.take_dummy_peer().unwrap();
+                    let (reader, _writer) = peer.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    let draft = skill_reload_submit(&mut app, &mut remote, name, text).await;
+                    let original = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(original["content"], text);
+                    assert_eq!(original["active_skill"], name);
+                    app.save_input_for_reload("skill-wire-startup");
+                    let restored = App::restore_input_for_reload("skill-wire-startup").unwrap();
+                    let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                    next.apply_restored_reload_input(restored);
+                    assert_eq!(next.input_draft_snapshot(), draft);
+                    assert!(next.submit_input_on_startup);
+                    assert!(next.active_skill.is_none());
+                    super::remote::process_remote_followups(&mut next, &mut remote).await;
+                    let replay = attachment_routing_read_request(&mut reader).await;
+                    skill_reload_assert_wire(&original, &replay);
+                    assert_eq!(next.active_skill.as_deref(), Some(name));
+                    next.restore_terminal_remote_retry_input();
+                    assert_eq!(next.input_draft_snapshot(), draft);
+                    next.cursor_pos = next.input.len();
+                    next.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+                        .unwrap();
+                    assert!(next.pending_images.is_empty());
+                    next.undo_input_change();
+                    assert_eq!(next.input_draft_snapshot(), draft);
+                }
+            }
+        });
+    });
+}
+
+#[test]
+fn skill_reload_wire_held_retry_preserves_activation_and_newer_composer() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        skill_reload_write_skill(project.path(), "my skill");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let original_draft =
+                skill_reload_submit(&mut app, &mut remote, "my skill", SKILL_RELOAD_PASTE).await;
+            let original = attachment_routing_read_request(&mut reader).await;
+            retry_draft_rate_error(&mut app, &mut remote);
+            app.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+            super::input::insert_input_text(&mut app, "newer literal [image 1] ");
+            super::input::handle_text_paste(&mut app, SKILL_RELOAD_PASTE.into());
+            attachment_routing_attach_image(&mut app);
+            let newer = app.input_draft_snapshot();
+            app.save_input_for_reload("skill-wire-held");
+            let restored = App::restore_input_for_reload("skill-wire-held").unwrap();
+            let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+            next.apply_restored_reload_input(restored);
+            assert!(!next.submit_input_on_startup);
+            assert_eq!(next.input_draft_snapshot(), newer);
+            for _ in 0..2 {
+                retry_draft_dispatch(&mut next, &mut remote).await;
+                let replay = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &replay);
+                assert_eq!(next.input_draft_snapshot(), newer);
+                assert_eq!(
+                    next.last_submitted_draft.as_ref().unwrap().1.raw_input,
+                    original_draft.0
+                );
+                retry_draft_rate_error(&mut next, &mut remote);
+            }
+        });
+    });
+}
+
+#[test]
+fn skill_reload_wire_missing_or_changed_catalog_pauses_for_review() {
+    with_temp_jcode_home(|| {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for held in [false, true] {
+                for changed in [false, true] {
+                    let project = tempfile::tempdir().unwrap();
+                    skill_reload_write_skill(project.path(), "my");
+                    let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                    remote.mark_history_loaded();
+                    let peer = remote.take_dummy_peer().unwrap();
+                    let (reader, _writer) = peer.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    let draft =
+                        skill_reload_submit(&mut app, &mut remote, "my", "skill payload").await;
+                    attachment_routing_read_request(&mut reader).await;
+                    if held {
+                        retry_draft_rate_error(&mut app, &mut remote);
+                        app.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+                    }
+                    app.save_input_for_reload("skill-wire-catalog");
+                    if changed {
+                        skill_reload_write_skill(project.path(), "my skill");
+                    } else {
+                        std::fs::remove_dir_all(project.path().join(".jcode/skills/my")).unwrap();
+                    }
+                    let restored = App::restore_input_for_reload("skill-wire-catalog").unwrap();
+                    let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                    next.apply_restored_reload_input(restored);
+                    if held {
+                        retry_draft_dispatch(&mut next, &mut remote).await;
+                    } else {
+                        super::remote::process_remote_followups(&mut next, &mut remote).await;
+                    }
+                    assert!(
+                        !next.is_processing,
+                        "a changed skill must not replay under different semantics"
+                    );
+                    assert!(!next.submit_input_on_startup);
+                    assert!(next.rate_limit_pending_message.is_none());
+                    assert!(next.rate_limit_reset.is_none());
+                    assert_eq!(next.input_draft_snapshot(), draft);
+                    assert!(
+                        next.status_notice
+                            .as_ref()
+                            .unwrap()
+                            .0
+                            .contains("needs review")
+                    );
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(50),
+                            attachment_routing_read_request(&mut reader)
+                        )
+                        .await
+                        .is_err()
+                    );
+                }
+            }
+        });
+    });
+}
+
+#[test]
+fn skill_reload_wire_ordinary_slash_and_owned_prefix_never_become_new_skills() {
+    with_temp_jcode_home(|| {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for owned_prefix in [false, true] {
+                let project = tempfile::tempdir().unwrap();
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                if owned_prefix {
+                    attachment_routing_attach_image(&mut app);
+                }
+                super::input::insert_input_text(&mut app, "/later-skill !echo literal [image 1] ");
+                super::input::handle_text_paste(&mut app, SKILL_RELOAD_PASTE.into());
+                if !owned_prefix {
+                    attachment_routing_attach_image(&mut app);
+                }
+                let draft = app.input_draft_snapshot();
+                let prepared = super::input::take_prepared_input(&mut app);
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let peer = remote.take_dummy_peer().unwrap();
+                let (reader, _writer) = peer.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                super::remote::input_dispatch::submit_prepared_remote_input(
+                    &mut app,
+                    &mut remote,
+                    prepared,
+                )
+                .await
+                .unwrap();
+                let original = attachment_routing_read_request(&mut reader).await;
+                assert!(original["active_skill"].is_null());
+                app.save_input_for_reload("skill-wire-ordinary");
+                skill_reload_write_skill(project.path(), "later-skill");
+                let restored = App::restore_input_for_reload("skill-wire-ordinary").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                super::remote::process_remote_followups(&mut next, &mut remote).await;
+                let replay = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &replay);
+                assert!(next.active_skill.is_none());
+                next.restore_terminal_remote_retry_input();
+                assert_eq!(next.input_draft_snapshot(), draft);
+            }
+        });
+    });
+}
+
+#[test]
+fn skill_reload_wire_failed_write_retains_full_draft_and_new_intent_never_uses_old_payload() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        skill_reload_write_skill(project.path(), "my-skill");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for replace in [false, true] {
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let original =
+                    skill_reload_submit(&mut app, &mut remote, "my-skill", SKILL_RELOAD_PASTE)
+                        .await;
+                app.save_input_for_reload("skill-wire-write");
+                let restored = App::restore_input_for_reload("skill-wire-write").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                let mut connection = crate::tui::backend::RemoteConnection::dummy();
+                connection.mark_history_loaded();
+                if replace {
+                    super::input::clear_input_for_escape(&mut next);
+                    super::input::insert_input_text(&mut next, "new ordinary intent");
+                    let peer = connection.take_dummy_peer().unwrap();
+                    let (reader, _writer) = peer.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    super::remote::process_remote_followups(&mut next, &mut connection).await;
+                    let sent = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(sent["content"], "new ordinary intent");
+                    assert!(sent["active_skill"].is_null());
+                    assert!(sent["images"].as_array().is_none_or(Vec::is_empty));
+                } else {
+                    drop(connection.take_dummy_peer());
+                    super::remote::process_remote_followups(&mut next, &mut connection).await;
+                    assert_eq!(next.input_draft_snapshot(), original);
+                    assert!(!next.is_processing);
+                }
+            }
+        });
+    });
+}
+
+#[test]
+fn skill_reload_wire_catalog_pause_preserves_newer_composer() {
+    with_temp_jcode_home(|| {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for submit_newer in [false, true] {
+                let project = tempfile::tempdir().unwrap();
+                skill_reload_write_skill(project.path(), "my-skill");
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let peer = remote.take_dummy_peer().unwrap();
+                let (reader, _writer) = peer.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                let stopped =
+                    skill_reload_submit(&mut app, &mut remote, "my-skill", SKILL_RELOAD_PASTE)
+                        .await;
+                attachment_routing_read_request(&mut reader).await;
+                retry_draft_rate_error(&mut app, &mut remote);
+                app.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+                super::input::insert_input_text(&mut app, "newer literal [image 1] ");
+                super::input::handle_text_paste(
+                    &mut app,
+                    "new1\nnew2\nnew3\nnew4\nnew5\nnew6".into(),
+                );
+                super::input_images::attach_image(
+                    &mut app,
+                    "image/png".into(),
+                    "catalog-newer-image".into(),
+                );
+                app.cursor_pos = 5;
+                let newer = app.input_draft_snapshot();
+                app.save_input_for_reload("skill-wire-newer-catalog");
+                std::fs::remove_dir_all(project.path().join(".jcode/skills/my-skill")).unwrap();
+                let restored = App::restore_input_for_reload("skill-wire-newer-catalog").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                retry_draft_dispatch(&mut next, &mut remote).await;
+                assert!(!next.is_processing);
+                assert!(next.rate_limit_pending_message.is_none());
+                assert_eq!(next.input_draft_snapshot(), newer);
+                assert!(
+                    next.display_messages()
+                        .iter()
+                        .any(|message| message.content.contains("Ctrl+Z"))
+                );
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_millis(50),
+                        attachment_routing_read_request(&mut reader)
+                    )
+                    .await
+                    .is_err()
+                );
+                if submit_newer {
+                    let prepared = super::input::take_prepared_input(&mut next);
+                    let expected_content = prepared.expanded.clone();
+                    super::remote::input_dispatch::submit_prepared_remote_input(
+                        &mut next,
+                        &mut remote,
+                        prepared,
+                    )
+                    .await
+                    .unwrap();
+                    let request = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(request["content"], expected_content);
+                    assert_eq!(
+                        request["images"],
+                        serde_json::json!([["image/png", "catalog-newer-image"]])
+                    );
+                } else {
+                    next.undo_input_change();
+                    assert_eq!(next.input_draft_snapshot(), stopped);
+                }
+            }
+        });
+    });
+}
+
+const SELECTED_SKILL_CASES: &[(&str, &str, &str, &str)] = &[
+    ("/my ", "skill question", "skill question", "my"),
+    ("/my skill ", "question", "question", "my skill"),
+    (" \t/my\t", "skill\t界 question", "skill\t界 question", "my"),
+    ("/my 技能 ", "问题", "问题", "my 技能"),
+    ("/my ", "", "", "my"),
+    ("/my ", "'skill question'", "skill question", "my"),
+    (
+        "/my ",
+        "skill\none\ntwo\nthree\nfour\nfive",
+        "skill\none\ntwo\nthree\nfour\nfive",
+        "my",
+    ),
+];
+
+#[test]
+fn selected_skill_local_payload_keeps_routing_choice() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        for name in ["my", "my skill", "my 技能"] {
+            skill_reload_write_skill(project.path(), name);
+        }
+        for &(prefix, text, expected, selected) in SELECTED_SKILL_CASES {
+            let mut app = create_test_app();
+            app.session.working_dir = Some(project.path().to_string_lossy().into());
+            app.refresh_skills_snapshot();
+            super::input::insert_input_text(&mut app, prefix);
+            attachment_routing_attach_image(&mut app);
+            super::input::handle_text_paste(&mut app, text.into());
+            assert_eq!(
+                app.current_skills_snapshot()
+                    .resolve_invocation(&app.input)
+                    .unwrap()
+                    .name,
+                selected
+            );
+            app.submit_input();
+            assert_eq!(app.active_skill.as_deref(), Some(selected));
+            let message = app.session.messages.last().unwrap();
+            let actual: String = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "selected skill {selected}: {prefix}{text}"
+            );
+            assert_eq!(
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { media_type, data } =>
+                            Some((media_type.as_str(), data.as_str())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![("image/png", "fixture-image")]
+            );
+        }
+    });
+}
+
+#[test]
+fn selected_skill_remote_wire_reload_and_retry_keep_routing_choice() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        for name in ["my", "my skill", "my 技能"] {
+            skill_reload_write_skill(project.path(), name);
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for &(prefix, text, expected, selected) in SELECTED_SKILL_CASES {
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let peer = remote.take_dummy_peer().unwrap();
+                let (reader, _writer) = peer.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                super::input::insert_input_text(&mut app, prefix);
+                attachment_routing_attach_image(&mut app);
+                super::input::handle_text_paste(&mut app, text.into());
+                let draft = app.input_draft_snapshot();
+                let prepared = super::input::take_prepared_input(&mut app);
+                assert_eq!(
+                    app.current_skills_snapshot()
+                        .resolve_invocation(prepared.routing_input())
+                        .unwrap()
+                        .name,
+                    selected
+                );
+                if text.contains('\n') {
+                    assert_eq!(prepared.pasted_contents, vec![text]);
+                }
+                super::remote::input_dispatch::submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    prepared,
+                )
+                .await
+                .unwrap();
+                let original = attachment_routing_read_request(&mut reader).await;
+                assert_eq!(
+                    original["content"], expected,
+                    "selected skill {selected}: {prefix}{text}"
+                );
+                assert_eq!(original["active_skill"], selected);
+                assert_eq!(
+                    original["images"],
+                    serde_json::json!([["image/png", "fixture-image"]])
+                );
+                let retained = &app.last_submitted_draft.as_ref().unwrap().1;
+                assert_eq!(retained.raw_input, draft.0);
+                assert_eq!(retained.expanded, expected);
+                assert_eq!(
+                    retained.images,
+                    vec![("image/png".into(), "fixture-image".into())]
+                );
+                app.save_input_for_reload("selected-skill-overlap");
+                let restored = App::restore_input_for_reload("selected-skill-overlap").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                assert_eq!(next.input_draft_snapshot(), draft);
+                super::remote::process_remote_followups(&mut next, &mut remote).await;
+                let replay = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &replay);
+                assert_eq!(next.active_skill.as_deref(), Some(selected));
+                retry_draft_rate_error(&mut next, &mut remote);
+                next.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+                super::input::insert_input_text(&mut next, "newer draft");
+                let newer = next.input_draft_snapshot();
+                retry_draft_dispatch(&mut next, &mut remote).await;
+                let retry = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &retry);
+                assert_eq!(next.input_draft_snapshot(), newer);
+                assert_eq!(
+                    next.last_submitted_draft.as_ref().unwrap().1.raw_input,
+                    draft.0
+                );
+            }
+        });
+    });
+}
+
+async fn paste_label_edit_key(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    mode: u8,
+    key: KeyCode,
+) {
+    match mode {
+        0 => app.handle_key(key, KeyModifiers::NONE).unwrap(),
+        1 => app
+            .handle_remote_key(key, KeyModifiers::NONE, remote)
+            .await
+            .unwrap(),
+        _ => super::remote::handle_disconnected_key(app, key, KeyModifiers::NONE).unwrap(),
+    }
+}
+
+async fn paste_label_edit_and_repair(mode: u8) {
+    let a = "A1\nA2\nA3\nA4\nA5";
+    for b in ["B1\nB2\nB3\nB4\nB5", "界1\n界2\n界3\n界4\n界5\n界6"] {
+        for target in [1, 0] {
+            let mut app = tokio::task::block_in_place(create_test_app);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            super::input::insert_input_text(&mut app, "前缀 ");
+            let first = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, a.into());
+            super::input::insert_input_text(&mut app, " | ");
+            let second = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, b.into());
+            app.cursor_pos = [first, second][target] + 2;
+            let collapsed = app.input_draft_snapshot();
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+            let expected = format!("前缀 {a} | {b}");
+            assert_eq!(
+                super::input::expand_paste_placeholders(&app, &app.input),
+                expected,
+                "editing label {target} in mode {mode} must keep both saved pastes"
+            );
+            app.undo_input_change();
+            assert!(app.input.contains('x'));
+            app.undo_input_change();
+            assert_eq!(app.input_draft_snapshot(), collapsed);
+            // Repeating the edit after undo must keep the same ownership.
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+            let repaired = app.take_input_draft();
+            app.restore_input_draft(repaired.clone());
+            assert_eq!(app.input_draft_snapshot(), repaired);
+            app.save_input_for_reload("paste-label-edit");
+            let restored = App::restore_input_for_reload("paste-label-edit").unwrap();
+            let mut next = tokio::task::block_in_place(create_test_app);
+            next.apply_restored_reload_input(restored);
+            assert_eq!(next.input_draft_snapshot(), repaired);
+            assert_eq!(
+                super::input::expand_paste_placeholders(&next, &next.input),
+                expected
+            );
+            match mode {
+                0 => {
+                    next.submit_input();
+                    let message = next.session.messages.last().unwrap();
+                    assert!(message.content.iter().any(|block| matches!(block,
+                        crate::message::ContentBlock::Text { text, .. } if text == &expected
+                    )));
+                }
+                1 => {
+                    next.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                        .await
+                        .unwrap();
+                    let wire = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(wire["content"], expected);
+                }
+                _ => assert_eq!(
+                    super::input::take_prepared_input(&mut next).expanded,
+                    expected
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn paste_label_local_edit_repair_keeps_both_payloads() {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(paste_label_edit_and_repair(0));
+    });
+}
+
+#[test]
+fn paste_label_remote_edit_repair_keeps_both_payloads() {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            paste_label_edit_and_repair(1).await;
+            paste_label_edit_and_repair(2).await;
+        });
+    });
+}
+
+#[test]
+fn paste_label_boundaries_literals_and_other_insertions_keep_payloads() {
+    let a = "A1\nA2\nA3\nA4\nA5";
+    let b = "B1\nB2\nB3\nB4\nB5";
+    let c = "C1\nC2\nC3\nC4\nC5";
+    let label = super::input::paste_placeholder(a);
+    for at_end in [false, true] {
+        let mut app = create_test_app();
+        super::input::insert_input_text(&mut app, &format!("literal {label} 前缀 "));
+        let start = app.cursor_pos;
+        super::input::handle_text_paste(&mut app, a.into());
+        super::input::insert_input_text(&mut app, " | ");
+        super::input::handle_text_paste(&mut app, b.into());
+        let original = app.input.clone();
+        app.cursor_pos = start + if at_end { label.len() } else { 0 };
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE)
+            .unwrap();
+        app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(app.input, original);
+        assert_eq!(app.pasted_contents, [a, b]);
+        app.cursor_pos = app.input.len();
+        super::input::handle_text_paste(&mut app, c.into());
+        assert_eq!(
+            super::input::take_prepared_input(&mut app).expanded,
+            format!("literal {label} 前缀 {a} | {b}{c}")
+        );
+    }
+    // Marker-shaped text with no saved payload stays editable literal text.
+    let mut app = create_test_app();
+    super::input::insert_input_text(&mut app, &label);
+    app.cursor_pos = 2;
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(app.input, format!("{}x{}", &label[..2], &label[2..]));
+    app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(super::input::take_prepared_input(&mut app).expanded, label);
+
+    for insertion in 0..3 {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, a.into());
+        super::input::insert_input_text(&mut app, " | ");
+        let start = app.cursor_pos;
+        super::input::handle_text_paste(&mut app, b.into());
+        app.cursor_pos = start + 2;
+        let collapsed = app.input_draft_snapshot();
+        match insertion {
+            0 => super::input::handle_text_paste(&mut app, c.into()),
+            1 => attachment_routing_attach_image(&mut app),
+            _ => {
+                app.remember_input_undo_state();
+                app.replace_input_range(app.cursor_pos, app.cursor_pos, "x");
+            }
+        }
+        let snapshot = app.input_draft_snapshot();
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(
+            prepared.expanded,
+            format!("{a} | {b}{}", [c, "", "x"][insertion])
+        );
+        assert_eq!(prepared.images.len(), usize::from(insertion == 1));
+        app.restore_input_draft(snapshot);
+        // Submission clears undo; explicitly restore the captured original.
+        app.restore_input_draft(collapsed);
+        assert_eq!(
+            super::input::take_prepared_input(&mut app).expanded,
+            format!("{a} | {b}")
+        );
+    }
+}
+
+fn paste_collision_payloads(variant: usize) -> (String, String) {
+    if variant == 0 {
+        (
+            "A1\nA2\nA3\nA4\n[pasted 6 lines]".into(),
+            "B1\nB2\nB3\nB4\nB5\nB6".into(),
+        )
+    } else {
+        (
+            "A1\nA2\nA3\nA4\nA5\n[pasted 5 lines]".into(),
+            "B1\nB2\nB3\nB4\nB5".into(),
+        )
+    }
+}
+
+async fn paste_collision_edit(mode: u8, variant: usize) {
+    let (a, b) = paste_collision_payloads(variant);
+    let mut app = tokio::task::block_in_place(create_test_app);
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    let peer = remote.take_dummy_peer().unwrap();
+    let (reader, _writer) = peer.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    super::input::insert_input_text(&mut app, "前缀 ");
+    attachment_routing_attach_image(&mut app);
+    super::input::insert_input_text(&mut app, " ");
+    let before_a = app.cursor_pos;
+    super::input::handle_text_paste(&mut app, a.clone());
+    super::input::insert_input_text(&mut app, " ");
+    attachment_routing_attach_image(&mut app);
+    app.cursor_pos = before_a;
+    super::input::handle_text_paste(&mut app, b.clone());
+    super::input::insert_input_text(&mut app, " | ");
+    app.cursor_pos = app
+        .input
+        .rfind(&super::input::paste_placeholder(&a))
+        .unwrap()
+        + 2;
+    let collapsed = app.input_draft_snapshot();
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+    let expected = format!("前缀  {b} | {a} ");
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input_without_owned_image_markers()),
+        expected,
+        "literal-label collision variant {variant} in mode {mode} changed payload positions"
+    );
+    assert_eq!(app.cursor_pos, app.input.rfind(&a).unwrap() + a.len());
+    app.undo_input_change();
+    assert!(app.input.contains('x'));
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), collapsed);
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+    paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+    let expanded = app.input_draft_snapshot();
+    app.save_input_for_reload("paste-collision-edit");
+    let restored = App::restore_input_for_reload("paste-collision-edit").unwrap();
+    let mut next = tokio::task::block_in_place(create_test_app);
+    next.apply_restored_reload_input(restored);
+    assert_eq!(next.input_draft_snapshot(), expanded);
+    match mode {
+        0 => {
+            next.submit_input();
+            let message = next.session.messages.last().unwrap();
+            assert_eq!(
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, crate::message::ContentBlock::Image { .. }))
+                    .count(),
+                2
+            );
+            assert!(message.content.iter().any(|block| matches!(block, crate::message::ContentBlock::Text { text, .. } if text == &expected)));
+        }
+        1 => {
+            next.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                .await
+                .unwrap();
+            let wire = attachment_routing_read_request(&mut reader).await;
+            assert_eq!(wire["content"], expected);
+            assert_eq!(
+                wire["images"],
+                serde_json::json!([
+                    ["image/png", "fixture-image"],
+                    ["image/png", "fixture-image"]
+                ])
+            );
+        }
+        _ => {
+            let prepared = super::input::take_prepared_input(&mut next);
+            assert_eq!(prepared.expanded, expected);
+            assert_eq!(
+                prepared.images,
+                vec![("image/png".into(), "fixture-image".into()); 2]
+            );
+        }
+    }
+}
+
+fn paste_collision_run(mode: u8, variant: usize) {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(paste_collision_edit(mode, variant));
+    });
+}
+
+#[test]
+fn paste_collision_local_five_exposes_six_literal() {
+    paste_collision_run(0, 0);
+}
+#[test]
+fn paste_collision_local_six_exposes_five_literal() {
+    paste_collision_run(0, 1);
+}
+#[test]
+fn paste_collision_connected_five_exposes_six_literal() {
+    paste_collision_run(1, 0);
+}
+#[test]
+fn paste_collision_connected_six_exposes_five_literal() {
+    paste_collision_run(1, 1);
+}
+#[test]
+fn paste_collision_disconnected_five_exposes_six_literal() {
+    paste_collision_run(2, 0);
+}
+#[test]
+fn paste_collision_disconnected_six_exposes_five_literal() {
+    paste_collision_run(2, 1);
+}
+
+#[test]
+fn paste_collision_frozen_transport_and_repeat_keep_cyclic_literals() {
+    let a = "A1\nA2\nA3\nA4\n[pasted 6 lines]";
+    let b = "B1\nB2\nB3\nB4\nB5\n[pasted 5 lines]";
+    for before in [false, true] {
+        for repeat in [false, true] {
+            let mut app = create_test_app();
+            super::input::insert_input_text(&mut app, "界 ");
+            let start = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, a.into());
+            if before {
+                app.cursor_pos = start;
+            } else {
+                super::input::insert_input_text(&mut app, " | ");
+            }
+            super::input::handle_text_paste(&mut app, b.into());
+            if before {
+                super::input::insert_input_text(&mut app, " | ");
+            }
+            let collapsed = app.input_draft_snapshot();
+            if repeat {
+                super::input::handle_text_paste(&mut app, a.into());
+            }
+            let expected = if before {
+                format!("界 {b} | {a}")
+            } else {
+                format!("界 {a} | {b}")
+            };
+            if repeat {
+                assert_eq!(app.input, expected);
+                assert!(app.pasted_contents.is_empty());
+                assert_eq!(
+                    app.cursor_pos,
+                    if before {
+                        expected.len()
+                    } else {
+                        "界 ".len() + a.len()
+                    }
+                );
+                app.undo_input_change();
+                assert_eq!(app.input_draft_snapshot(), collapsed);
+                super::input::handle_text_paste(&mut app, a.into());
+            }
+            assert_eq!(
+                super::input::take_prepared_input(&mut app).expanded,
+                expected
+            );
+        }
+    }
+    let a = "A1\nA2\nA3\nA4\n[pasted 5 lines]";
+    let b = "B1\nB2\nB3\nB4\n[pasted 5 lines]";
+    let mut app = create_test_app();
+    super::input::handle_text_paste(&mut app, a.into());
+    super::input::insert_input_text(&mut app, " | ");
+    super::input::handle_text_paste(&mut app, b.into());
+    let collapsed = app.input_draft_snapshot();
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input),
+        format!("{a} | {b}")
+    );
+    super::input::handle_text_paste(&mut app, a.into());
+    assert_eq!(app.input, format!("{a} | {b}"));
+    assert!(app.pasted_contents.is_empty());
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), collapsed);
+}
+
+#[test]
+fn paste_collision_image_range_edits_and_subsequent_paste_keep_literals() {
+    let (a, b) = paste_collision_payloads(0);
+    let c = "C1\nC2\nC3\nC4\nC5\nC6";
+    for edit in 0..3 {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, a.clone());
+        app.cursor_pos = 0;
+        super::input::handle_text_paste(&mut app, b.clone());
+        super::input::insert_input_text(&mut app, " | ");
+        app.cursor_pos += 2;
+        match edit {
+            0 => attachment_routing_attach_image(&mut app),
+            1 => {
+                app.remember_input_undo_state();
+                app.replace_input_range(app.cursor_pos, app.cursor_pos, "x");
+            }
+            _ => {
+                app.remember_input_undo_state();
+                super::input::insert_input_text(&mut app, "x");
+            }
+        }
+        let expected = format!("{b} | {a}{}", if edit == 0 { "" } else { "x" });
+        assert_eq!(
+            super::input::expand_paste_placeholders(&app, &app.input_without_owned_image_markers()),
+            expected
+        );
+        // A later same-size paste before the exposed literal must keep its own payload.
+        app.cursor_pos = 0;
+        super::input::handle_text_paste(&mut app, c.into());
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(prepared.expanded, format!("{c}{expected}"));
+        assert_eq!(prepared.images.len(), usize::from(edit == 0));
+    }
+}
+
+#[test]
+fn paste_collision_new_label_before_literal_keeps_new_payload() {
+    let literal = "既存 [pasted 5 lines]";
+    let c = "C1\nC2\nC3\nC4\nC5";
+    let mut app = create_test_app();
+    super::input::insert_input_text(&mut app, literal);
+    app.cursor_pos = 0;
+    let before = app.input_draft_snapshot();
+    super::input::handle_text_paste(&mut app, c.into());
+    assert_eq!(
+        super::input::expand_paste_placeholders(&app, &app.input),
+        format!("{c}{literal}"),
+        "new collapsed paste must not bind to an existing literal"
+    );
+    app.undo_input_change();
+    assert_eq!(app.input_draft_snapshot(), before);
+}

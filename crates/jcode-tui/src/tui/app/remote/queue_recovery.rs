@@ -326,9 +326,6 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
 }
 
 fn prepend_queued_payload(app: &mut App, text: String, mut images: Vec<(String, String)>) {
-    for queued in &mut app.queued_messages {
-        input::offset_image_markers(queued, app.queued_images.len(), images.len());
-    }
     app.queued_messages.insert(0, text);
     images.append(&mut app.queued_images);
     app.queued_images = images;
