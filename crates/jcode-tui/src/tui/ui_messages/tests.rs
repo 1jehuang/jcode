@@ -1904,7 +1904,11 @@ fn render_todos_message_shows_delivery_state_under_intent() {
     );
     assert!(!text_lines.iter().any(|line| line.contains("Verification")));
     let pinned = render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
-    let pinned = pinned.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
+    let pinned = pinned
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(pinned.contains("Delivery partially_delivered"), "{pinned}");
     assert!(!pinned.contains("Verification"), "{pinned}");
     for narrow in [16u16, 20, 28] {
@@ -1988,8 +1992,13 @@ fn pinned_completed_todos_color_delivery_independently_of_verification() {
             "goals": [{"delivery_state": delivery, "verification_state": "checked_end_to_end"}],
         }).to_string());
         let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-        let color = |value: &str| lines.iter().flat_map(|l| &l.spans)
-            .find(|s| s.content.as_ref() == value).and_then(|s| s.style.fg);
+        let color = |value: &str| {
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .find(|s| s.content.as_ref() == value)
+                .and_then(|s| s.style.fg)
+        };
         assert_eq!(color(delivery), Some(expected));
         assert_eq!(color("checked_end_to_end"), None);
     }
