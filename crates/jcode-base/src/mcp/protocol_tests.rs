@@ -1,5 +1,12 @@
 use super::*;
 
+fn trust_project_config(project: &std::path::Path) {
+    let review = crate::mcp::project_mcp_review(project)
+        .expect("review project MCP config")
+        .expect("project MCP servers");
+    crate::mcp::trust_project_mcp(&review).expect("trust project MCP config");
+}
+
 #[test]
 fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
     let _guard = crate::storage::lock_test_env();
@@ -20,6 +27,8 @@ fn issue_790_load_uses_process_cwd_while_unbound_load_for_dir_does_not() {
         r#"{"mcpServers":{"other-cwd-only":{"command":"other-cwd-server"}}}"#,
     )
     .expect("write other project MCP config");
+    trust_project_config(project.path());
+    trust_project_config(other_project.path());
 
     let result = std::panic::catch_unwind(|| {
         let unbound = McpConfig::load_for_dir(None);
@@ -356,6 +365,7 @@ fn load_for_dir_expands_the_winning_merged_definition() {
         r#"{"mcpServers":{"same-name":{"command":"project-bin","args":["${JCODE_MCP_EXPANSION_TEST_VALUE}"]}}}"#,
     )
     .unwrap();
+    trust_project_config(project.path());
 
     let result = std::panic::catch_unwind(|| {
         let config = McpConfig::load_for_dir(Some(project.path()));
@@ -944,6 +954,7 @@ fn disabling_claude_mcp_skips_both_live_sources_but_preserves_jcode_sources() {
         r#"{"mcpServers":{"jcode-project":{"command":"jcode-project"}}}"#,
     )
     .expect("write jcode project config");
+    trust_project_config(project.path());
 
     let external = home.path().join("external");
     std::fs::create_dir_all(external.join(".claude")).expect("create Claude config dirs");
