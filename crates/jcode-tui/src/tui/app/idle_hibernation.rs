@@ -446,7 +446,13 @@ mod tests {
         assert_eq!(app.pasted_contents, ["expanded paste"]);
         app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(app.hibernation_frame().is_none());
-        assert_eq!(app.input, "draft");
+        assert_eq!(app.input, "draft [image 1]");
+        assert_eq!(app.input_without_owned_image_markers(), "draft");
+        assert_eq!(
+            app.pending_images,
+            [("image/png".into(), "attachment".into())]
+        );
+        assert_eq!(app.pasted_contents, ["expanded paste"]);
         assert_eq!(app.cursor_pos, 3);
         assert_eq!(app.scroll_offset, 17);
         assert!(app.hibernation_notice().is_none());

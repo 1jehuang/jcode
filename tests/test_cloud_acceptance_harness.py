@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -29,6 +30,50 @@ class Reports(unittest.TestCase):
         for package in ("ripgrep", "tmux", "openssh-server", "bubblewrap",
                         "util-linux", "python3"):
             self.assertIn(package, packages, f"runner must install {package}")
+
+    def test_prerequisite_setup_removes_only_unused_feed_and_preserves_failures(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cloud-acceptance.yml").read_text()
+        setup = workflow.split("      - name: Install build and acceptance prerequisites", 1)[1]
+        setup = setup.split("        run: |\n", 1)[1].split("          # The fixture", 1)[0]
+        fake_sudo = r'''
+            sudo() {
+              case "$*" in
+                'rm -f /etc/apt/sources.list.d/microsoft-prod.list')
+                  rm -f "$FAKE_APT_SOURCES/microsoft-prod.list" ;;
+                'apt-get update -qq')
+                  if [[ -e "$FAKE_APT_SOURCES/microsoft-prod.list" ]]; then
+                    echo 'Microsoft feed returned HTTP 403' >&2
+                    return 100
+                  fi
+                  if [[ "$FAKE_APT_FAILURE" == update ]]; then
+                    echo 'Required Ubuntu repository failed' >&2
+                    return 100
+                  fi ;;
+                'apt-get install -y -qq clang mold tmux openssh-server bubblewrap util-linux python3 ripgrep')
+                  if [[ "$FAKE_APT_FAILURE" == install ]]; then
+                    echo 'Required package installation failed' >&2
+                    return 100
+                  fi
+                  touch "$FAKE_APT_SOURCES/installed" ;;
+                *) echo "Unexpected setup command: $*" >&2; return 99 ;;
+              esac
+            }
+        '''
+        for failure in ("", "update", "install"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / "microsoft-prod.list").write_text("unavailable Microsoft repository")
+                ubuntu = root / "ubuntu.sources"
+                ubuntu.write_text("Ubuntu archive and security repositories")
+                result = subprocess.run(
+                    ["bash", "-euo", "pipefail", "-c", textwrap.dedent(fake_sudo) + textwrap.dedent(setup)],
+                    env=dict(os.environ, FAKE_APT_SOURCES=temp, FAKE_APT_FAILURE=failure),
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 100 if failure else 0, result.stderr)
+                self.assertEqual((root / "installed").exists(), not failure)
+                self.assertFalse((root / "microsoft-prod.list").exists())
+                self.assertEqual(ubuntu.read_text(), "Ubuntu archive and security repositories")
 
     def test_failure_is_present_in_json_and_junit(self):
         with tempfile.TemporaryDirectory() as temp:

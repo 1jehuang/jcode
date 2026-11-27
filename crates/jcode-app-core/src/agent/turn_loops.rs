@@ -693,9 +693,7 @@ impl Agent {
                         cache_read_input_tokens,
                         cache_creation_input_tokens,
                     } => {
-                        if let Some(input) = input_tokens {
-                            usage_input = Some(input);
-                        }
+                        usage_input = input_tokens.or(usage_input);
                         if let Some(output) = output_tokens {
                             usage_output = Some(output);
                         }

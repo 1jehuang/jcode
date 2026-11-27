@@ -49,7 +49,7 @@ fn consume_backslash_continuation(app: &mut App) -> bool {
         return false;
     }
     app.remember_input_undo_state();
-    app.input.pop();
+    app.remove_input_range(app.input.len() - 1, app.input.len());
     app.cursor_pos = app.input.len();
     hint_terminal_setup_once(app);
     insert_input_text(app, "\n");

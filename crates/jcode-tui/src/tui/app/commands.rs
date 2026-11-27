@@ -1241,8 +1241,7 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 /// as the first message of the forked session. Shared by `/btw <question>`,
 /// `/fork [prompt]`, and `/split`.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
-    // Images attached to the input belong to the prompt being forked off, so
-    // they travel with it instead of lingering on the parent's next message.
+    // Attached images travel with the forked prompt.
     let images = if prompt.is_some() {
         app.take_pending_image_payloads()
     } else {
@@ -1252,6 +1251,7 @@ pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>
     if let Err(error) = launch_forked_session_local(app, staged) {
         if !images.is_empty() {
             app.pending_images = images;
+            app.ensure_input_image_markers();
         }
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to fork session: {}",
@@ -3594,13 +3594,7 @@ pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     };
 
-    if !rest.is_empty()
-        && !rest
-            .chars()
-            .next()
-            .map(|c| c.is_whitespace())
-            .unwrap_or(false)
-    {
+    if rest.starts_with(|c: char| !c.is_whitespace()) {
         return false;
     }
 

@@ -18,11 +18,28 @@ pub fn save_startup_submission_for_session(
     if input.trim().is_empty() && pending_images.is_empty() {
         return;
     }
+    // This boundary receives prompt text, not an executable composer command.
+    // Only these newly inserted labels own image bytes; existing text stays literal.
+    let mut marked_input = String::new();
+    let mut spans = Vec::new();
+    if input.trim_start().starts_with('!') || input.trim_start().starts_with('/') {
+        for number in 1..=pending_images.len() {
+            let start = marked_input.len();
+            if number > 1 {
+                marked_input.push(' ');
+            }
+            marked_input.push_str(&format!("[image {number}]"));
+            spans.push((start, marked_input.len(), number));
+        }
+    }
+    marked_input.push_str(&input);
+    let input = marked_input;
     if let Ok(jcode_dir) = crate::storage::jcode_dir() {
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         let data = serde_json::json!({
             "cursor": input.len(),
             "input": input,
+            "image_markers": { "text": input, "spans": spans },
             "pending_images": pending_images.iter().map(|(media_type, data)| serde_json::json!({
                 "media_type": media_type,
                 "data": data,

@@ -550,7 +550,7 @@ pub(super) async fn handle_remote_key_internal(
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice("Interrupting...");
                 } else {
-                    app.handle_quit_request();
+                    input::clear_draft_or_request_quit(app);
                 }
                 return Ok(());
             }
@@ -733,8 +733,7 @@ pub(super) async fn handle_remote_key_internal(
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.remove_input_range(prev, app.cursor_pos);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -743,7 +742,7 @@ pub(super) async fn handle_remote_key_internal(
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.remove_input_range(app.cursor_pos, next);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }

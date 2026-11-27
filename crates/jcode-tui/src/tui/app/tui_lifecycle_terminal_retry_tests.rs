@@ -8,9 +8,14 @@ fn recovered_images_keep_stable_markers_with_existing_attachments() {
     let newer = ("image/png".to_string(), "newer-image".to_string());
     for has_newer_draft in [true, false] {
         let mut app = super::super::tests::create_test_app();
-        app.pending_images = vec![newer.clone(), old.clone()];
         if has_newer_draft {
-            app.input = "New draft [image 1]".to_string();
+            app.input = "New draft ".to_string();
+            app.cursor_pos = app.input.len();
+            super::super::input_images::attach_image(&mut app, newer.0.clone(), newer.1.clone());
+            super::super::input::insert_input_text(&mut app, " ");
+            super::super::input_images::attach_image(&mut app, old.0.clone(), old.1.clone());
+        } else {
+            app.pending_images = vec![newer.clone(), old.clone()];
         }
         let payload = super::super::FallbackResendPayload {
             content: "Old [image 1] and [image 2]".to_string(),
@@ -26,7 +31,7 @@ fn recovered_images_keep_stable_markers_with_existing_attachments() {
         let expected = if has_newer_draft {
             "New draft [image 1] [image 2]"
         } else {
-            "Old [image 2] and [image 1]"
+            "Old [image 1] and [image 2] [image 1] [image 2]"
         };
         assert_eq!(app.input, expected);
         assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
@@ -34,6 +39,24 @@ fn recovered_images_keep_stable_markers_with_existing_attachments() {
         app.sync_model_picker_preview_from_input();
         assert_eq!(app.input, expected, "repeated restoration is idempotent");
         assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+        if has_newer_draft {
+            let start = app.input.find("[image 1]").unwrap();
+            app.remove_input_range(start, start + "[image 1]".len());
+            assert_eq!(app.pending_images, vec![old.clone()]);
+        } else {
+            // The retry payload has no ownership metadata: its labels stay literal.
+            assert_eq!(
+                app.input_without_owned_image_markers(),
+                "Old [image 1] and [image 2]"
+            );
+            let start = app.input.find("[image 1]").unwrap();
+            app.remove_input_range(start, start + "[image 1]".len());
+            assert_eq!(app.pending_images, vec![newer.clone(), old.clone()]);
+            assert_eq!(
+                app.input_without_owned_image_markers(),
+                "Old  and [image 2]"
+            );
+        }
     }
 }
 
@@ -75,9 +98,10 @@ fn terminal_remote_retry_preserves_draft_and_deduplicates_images() {
     let _guard = rt.enter();
     let mut app = super::super::tests::create_test_app();
     let image = ("image/png".to_string(), "original-image".to_string());
-    app.input = "Keep my new draft [image 1]".to_string();
+    app.input = "Keep my new draft ".to_string();
+    app.cursor_pos = app.input.len();
+    super::super::input_images::attach_image(&mut app, image.0.clone(), image.1.clone());
     app.last_submitted_input = Some("Failed prompt".to_string());
-    app.pending_images.push(image.clone());
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
         jarvis_voice: false,
         content: "Expanded failed prompt".to_string(),

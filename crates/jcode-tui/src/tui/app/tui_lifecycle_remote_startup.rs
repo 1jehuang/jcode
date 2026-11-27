@@ -3,6 +3,64 @@
 use super::*;
 
 impl App {
+    /// Replaying a proven skill must retain its original payload and activation.
+    pub(in super::super) fn restore_remote_replay_skill(&mut self) -> bool {
+        let Some((id, draft)) = self.last_submitted_draft.as_ref() else {
+            return true;
+        };
+        let matches_payload = if let Some(pending) = self.rate_limit_pending_message.as_ref() {
+            !pending.is_system
+                && draft.expanded == pending.content
+                && draft.images == pending.images
+        } else {
+            self.submit_input_on_startup
+                && draft.raw_input == self.input
+                && draft.images == self.pending_images
+                && draft.image_markers == self.input_image_markers
+                && draft.pasted_contents == self.pasted_contents
+        };
+        if *id != self.current_message_id || !matches_payload {
+            return true;
+        }
+        let expanded_raw = draft.expanded_raw_input();
+        if expanded_raw == draft.expanded {
+            // Ordinary slash text stays ordinary even if a skill was added.
+            return true;
+        }
+        let snapshot = self.current_skills_snapshot();
+        let skill = snapshot
+            .resolve_invocation(draft.routing_input())
+            .filter(|routing| {
+                snapshot.get(routing.name).is_some()
+                    && routing.prompt_from_input(&expanded_raw) == Some(draft.expanded.as_str())
+            })
+            .map(|routing| routing.name.to_string());
+        if let Some(skill) = skill {
+            self.active_skill = Some(skill);
+            return true;
+        }
+        if self.rate_limit_pending_message.is_some()
+            && let Some((_, draft)) = self.last_submitted_draft.take()
+        {
+            let newer = self.take_input_draft();
+            super::remote::input_dispatch::restore_prepared_remote_input(self, draft);
+            if !newer.0.is_empty() || !newer.2.is_empty() {
+                self.remember_input_undo_state();
+                self.restore_input_draft(newer);
+                self.push_display_message(DisplayMessage::system(
+                    "Stopped skill prompt saved · Ctrl+Z to restore",
+                ));
+            }
+            self.reset_tab_completion();
+            self.sync_model_picker_preview_from_input();
+        }
+        self.clear_pending_remote_retry();
+        self.last_submitted_input = None;
+        self.submit_input_on_startup = false;
+        self.set_status_notice("Restored skill prompt needs review; its original skill or payload no longer matches the available skills");
+        false
+    }
+
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
         let new_start = Instant::now();
         let mut lap = Instant::now();
@@ -175,6 +233,26 @@ impl App {
 }
 
 impl App {
+    /// Release a known request while retaining only its own pending draft.
+    pub(in super::super) fn hold_current_remote_request(&mut self) {
+        self.last_submitted_draft = self
+            .last_submitted_draft
+            .take()
+            .filter(|(id, draft)| {
+                *id == self.current_message_id
+                    && self
+                        .rate_limit_pending_message
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            !pending.is_system
+                                && draft.expanded == pending.content
+                                && draft.images == pending.images
+                        })
+            })
+            .map(|(_, draft)| (None, draft));
+        self.current_message_id = None;
+    }
+
     pub(in super::super) fn schedule_pending_remote_retry_with_limit(
         &mut self,
         reason: &str,
@@ -274,5 +352,28 @@ impl App {
                 true
             }
         }
+    }
+
+    /// Create an App instance for remote mode (connecting to server)
+    pub fn new_for_remote(resume_session: Option<String>) -> Self {
+        Self::new_for_remote_with_options(resume_session, false)
+    }
+
+    /// Mark that a server was just spawned - run_remote will retry initial connection
+    /// instead of failing fatally, allowing the TUI to show while the server starts.
+    pub fn set_server_spawning(&mut self) {
+        self.server_spawning = true;
+        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
+        self.remote_startup_phase_started = Some(Instant::now());
+    }
+
+    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
+    /// after connecting to an already-running shared server.
+    pub fn set_initial_model_spec(&mut self, model_spec: String) {
+        self.pending_initial_model_spec = Some(model_spec);
+    }
+
+    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
+        self.pending_initial_model_spec.take()
     }
 }

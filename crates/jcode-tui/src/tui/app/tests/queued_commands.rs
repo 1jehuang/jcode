@@ -215,3 +215,131 @@ fn test_remote_queued_commands_run_before_queued_prompts() {
     assert!(app.help_scroll.is_some());
     assert_eq!(app.queued_messages(), &["then do this"], "prompt waits its turn");
 }
+
+fn queued_image_command_draft(app: &mut App, command: &str) {
+    type_text(app, &format!("{command} literal [image 1] "));
+    super::input::handle_text_paste(app, "one\ntwo\nthree\nfour\nfive\nsix".into());
+    super::input::insert_input_text(app, " ");
+    super::input_images::attach_image(app, "image/png".into(), "queue-fixture-image".into());
+}
+
+#[test]
+fn queued_command_image_refusal_local_preserves_complete_draft() {
+    for command in ["/help", "!echo fixture"] {
+        let mut app = create_test_app();
+        app.is_processing = true;
+        app.queued_commands.push("/compact".into());
+        queued_image_command_draft(&mut app, command);
+        app.cursor_pos = 2;
+        let original = app.input_draft_snapshot();
+        let undo = app.input_undo_stack.clone();
+        let typing_undo = app.input_typing_undo;
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::CONTROL)
+            .unwrap();
+
+        assert_eq!(
+            app.input_draft_snapshot(),
+            original,
+            "refusal must retain the whole draft"
+        );
+        assert_eq!(app.input_undo_stack, undo);
+        assert_eq!(app.input_typing_undo, typing_undo);
+        assert_eq!(app.queued_commands, ["/compact"]);
+        assert!(app.queued_messages.is_empty());
+        assert!(app.interleave_message.is_none());
+        assert!(app.status_notice().unwrap().contains("Press Enter"));
+
+        // Undo still removes the attachment, and its paste payload remains available.
+        app.undo_input_change();
+        assert!(app.pending_images.is_empty());
+        assert_eq!(app.pasted_contents, ["one\ntwo\nthree\nfour\nfive\nsix"]);
+        app.restore_input_draft(original.clone());
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(prepared.raw_input, original.0);
+        assert_eq!(
+            prepared.expanded,
+            format!("{command} literal [image 1] one\ntwo\nthree\nfour\nfive\nsix ")
+        );
+        assert_eq!(
+            prepared.images,
+            [("image/png".into(), "queue-fixture-image".into())]
+        );
+        assert!(prepared.routing_input().starts_with(command));
+
+        type_text(&mut app, "newer composer");
+        let newer = super::input::take_prepared_input(&mut app);
+        assert_eq!(newer.expanded, "newer composer");
+        assert!(
+            newer.images.is_empty(),
+            "the next draft must not inherit an image"
+        );
+        assert!(newer.pasted_contents.is_empty());
+    }
+}
+
+#[test]
+fn queued_command_image_refusal_remote_keeps_normal_enter_payload_and_newer_composer() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(7);
+    queued_image_command_draft(&mut app, "/help");
+    let original = app.input_draft_snapshot();
+    let undo = app.input_undo_stack.clone();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+
+    assert_eq!(
+        app.input_draft_snapshot(),
+        original,
+        "refusal must retain the whole draft"
+    );
+    assert_eq!(app.input_undo_stack, undo);
+    assert!(app.queued_commands.is_empty());
+    assert!(app.queued_messages.is_empty());
+    assert!(app.interleave_message.is_none());
+    assert!(
+        app.rate_limit_pending_message.is_none(),
+        "refused shortcut cannot fall through to a send"
+    );
+    assert_eq!(app.current_message_id, Some(7));
+    assert!(app.status_notice().unwrap().contains("Press Enter"));
+
+    // The user explicitly turns the preserved slash draft into a prompt, then sends it.
+    app.is_processing = false;
+    app.cursor_pos = 0;
+    super::input::insert_input_text(&mut app, "Explain ");
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote))
+        .unwrap();
+    let sent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("normal Enter sends");
+    assert_eq!(
+        sent.content,
+        "Explain /help literal [image 1] one\ntwo\nthree\nfour\nfive\nsix "
+    );
+    assert_eq!(
+        sent.images,
+        [("image/png".into(), "queue-fixture-image".into())]
+    );
+    assert!(app.input.is_empty());
+    assert!(app.pending_images.is_empty());
+    assert!(app.pasted_contents.is_empty());
+
+    type_text(&mut app, "newer composer");
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert_eq!(app.queued_messages, ["newer composer"]);
+    assert!(
+        app.queued_images.is_empty(),
+        "later queued prompt cannot inherit the old image"
+    );
+    assert!(app.queued_commands.is_empty());
+}

@@ -88,6 +88,7 @@ mod idle_hibernation;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod input_images;
 mod jarvis;
 mod jarvis_listen;
 mod jarvis_status;
@@ -1248,9 +1249,7 @@ pub struct App {
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
     pending_images: Vec<(String, String)>,
-    // Payloads of images whose `[image N]` marker left the composer, keyed by
-    // slot index, so restoring the marker (Ctrl+Z after Esc) reattaches them.
-    detached_images: std::collections::HashMap<usize, (String, String)>,
+    input_image_markers: input_images::InputImageMarkers,
     // Expanded prompt history (Alt+E) backfill: (transcript rows when the last
     // older-history load was requested, loads requested since the toggle).
     prompt_history_backfill: (Option<usize>, u8),
@@ -1744,13 +1743,13 @@ pub struct App {
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
+    stashed_input: Option<input_images::InputUndoSnapshot>,
     // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    input_undo_stack: Vec<input_images::InputUndoSnapshot>,
     input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    history_draft: Option<input_images::InputUndoSnapshot>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1865,6 +1864,7 @@ pub struct App {
     // input box if the turn fails (e.g. "token refresh needed") so the user does not
     // lose what they typed and can resend after recovering.
     last_submitted_input: Option<String>,
+    last_submitted_draft: Option<(Option<u64>, input::PreparedInput)>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing
@@ -2077,37 +2077,6 @@ impl App {
             baseline,
             cache_generation: self.kv_cache.cache_generation,
         });
-    }
-
-    /// Session id the next KV-cache baseline should be tagged with.
-    ///
-    /// A single `App` can stream several sessions over its lifetime (remote
-    /// session switches, local handoffs). The baseline must only be compared
-    /// against requests from the same session, so we capture the active id here.
-    fn kv_cache_session_id(&self) -> Option<String> {
-        if self.is_remote {
-            self.remote_session_id.clone()
-        } else {
-            Some(self.session.id.clone())
-        }
-    }
-
-    /// Return the stored baseline only when it belongs to the active session.
-    ///
-    /// Diffing a request against a baseline captured for a different (often
-    /// larger) session makes the new history look like a broken prefix and
-    /// emits a spurious `harness:_prefix_changed` miss. Treat a foreign baseline
-    /// as absent (warmup) instead.
-    fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
-        let baseline = self.kv_cache.kv_cache_baseline.clone()?;
-        let current = self.kv_cache_session_id();
-        if baseline.session_id == current
-            && baseline.cache_generation == self.kv_cache.cache_generation
-        {
-            Some(baseline)
-        } else {
-            None
-        }
     }
 
     fn maybe_push_cold_cache_warning(
