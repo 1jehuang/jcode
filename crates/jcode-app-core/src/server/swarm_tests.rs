@@ -1117,6 +1117,66 @@ async fn departing_sole_owner_keeps_its_workers_owned() {
     assert!(swarm_coordinators.read().await.get("swarm-1").is_none());
 }
 
+#[tokio::test]
+async fn departing_parent_and_coordinator_update_worker_hook_identity() {
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        "hook-swarm-1".to_string(),
+        HashSet::from([
+            "hk-coord".to_string(),
+            "hk-peer".to_string(),
+            "hk-worker".to_string(),
+        ]),
+    )])));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        "hook-swarm-1".to_string(),
+        "hk-coord".to_string(),
+    )])));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let (coord, _coord_rx) = swarm_member("hk-coord", "coordinator", false);
+    let (peer, _peer_rx) = swarm_member("hk-peer", "agent", false);
+    let (mut worker, _worker_rx) = swarm_member("hk-worker", "agent", true);
+    worker.report_back_to_session_id = Some("hk-coord".to_string());
+    {
+        let mut members = swarm_members.write().await;
+        members.insert("hk-coord".to_string(), coord);
+        members.insert("hk-peer".to_string(), peer);
+        members.insert("hk-worker".to_string(), worker);
+    }
+    crate::hooks::register_swarm_identity(
+        "hk-worker",
+        crate::hooks::SwarmIdentity {
+            swarm_id: "hook-swarm-1".into(),
+            coordinator_session_id: "hk-coord".into(),
+            parent_session_id: "hk-coord".into(),
+            label: None,
+            agent_type: None,
+        },
+    );
+
+    remove_session_from_swarm(
+        "hk-coord",
+        "hook-swarm-1",
+        &swarm_members,
+        &swarms_by_id,
+        &swarm_coordinators,
+        &swarm_plans,
+    )
+    .await;
+
+    let new_parent = swarm_members
+        .read()
+        .await
+        .get("hk-worker")
+        .and_then(|member| member.report_back_to_session_id.clone());
+    let new_coordinator = swarm_coordinators.read().await.get("hook-swarm-1").cloned();
+    let identity = crate::hooks::swarm_identity("hk-worker").expect("identity");
+    crate::hooks::forget_swarm_identity("hk-worker");
+    assert_eq!(new_coordinator.as_deref(), Some("hk-peer"));
+    assert_eq!(identity.coordinator_session_id, "hk-peer");
+    assert_eq!(Some(identity.parent_session_id), new_parent);
+}
+
 #[path = "swarm_owner_tests.rs"]
 mod owner_notifications;
 

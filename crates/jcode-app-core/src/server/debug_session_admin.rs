@@ -89,6 +89,7 @@ pub(super) async fn maybe_handle_session_admin_command(
             mcp_pool,
             None,
             super::headless::HeadlessMemoryScope::IsolatedTest,
+            None,
         )
         .await?;
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&created)
@@ -134,6 +135,8 @@ pub(super) async fn maybe_handle_session_admin_command(
                 );
             }
         }
+
+        crate::hooks::forget_swarm_identity(target_id);
 
         if removed_agent.is_none() {
             return Err(anyhow::anyhow!("Unknown session_id '{}'", target_id));

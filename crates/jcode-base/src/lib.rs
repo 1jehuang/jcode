@@ -19,6 +19,7 @@
 )]
 
 pub mod account_login;
+pub mod agent_def;
 pub mod applets;
 pub mod auth;
 pub mod background;
