@@ -117,6 +117,9 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
 #[path = "openrouter_tests/catalog_shape_tests.rs"]
 mod catalog_shape_tests;
 
+#[path = "openrouter_tests/obscurify_ai_catalog_tests.rs"]
+mod obscurify_ai_catalog_tests;
+
 #[test]
 fn direct_openai_compatible_provider_advertises_image_input_support() {
     let _lock = ENV_LOCK.lock();
