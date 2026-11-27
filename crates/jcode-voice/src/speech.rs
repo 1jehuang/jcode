@@ -53,7 +53,7 @@ struct State {
     active: Option<(Child, Instant)>,
     generation: u64,
     synthesizing: bool,
-    awaiting_quiet: bool,
+    awaiting_quiet_since: Option<Instant>,
     authorized: bool,
     last_error: Option<&'static str>,
     stopped: bool,
@@ -98,7 +98,7 @@ fn await_quiet<'a>(
         return (state, ok);
     }
     let deadline = Instant::now() + Duration::from_secs(30);
-    state.awaiting_quiet = true;
+    state.awaiting_quiet_since = Some(Instant::now());
     while !state.stopped && state.generation == generation && !state.authorized {
         let now = Instant::now();
         if now >= deadline {
@@ -111,7 +111,7 @@ fn await_quiet<'a>(
             .0;
     }
     let ok = !state.stopped && state.generation == generation && state.authorized;
-    state.awaiting_quiet = false;
+    state.awaiting_quiet_since = None;
     state.authorized = false;
     (state, ok)
 }
@@ -222,12 +222,18 @@ impl SpeechPlayer {
         state.active.is_some() || state.authorized
     }
 
+    /// How long the prepared utterance has been waiting for a quiet microphone.
+    pub fn awaiting_quiet_elapsed(&self) -> Option<Duration> {
+        let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.awaiting_quiet_since.map(|at| at.elapsed())
+    }
+
     /// Claim the mic only when audio is ready. The worker starts no child
     /// until this succeeds. Its spawn is serialized with cancel on this mutex.
     pub fn authorize_ready(&self, claim: impl FnOnce() -> bool) -> bool {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if state.awaiting_quiet && !state.authorized && !state.stopped && claim() {
+        if state.awaiting_quiet_since.is_some() && !state.authorized && !state.stopped && claim() {
             state.authorized = true;
             wake.notify_all();
             return true;
@@ -250,7 +256,7 @@ impl SpeechPlayer {
         let (lock, wake) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         state.generation = state.generation.wrapping_add(1);
-        state.awaiting_quiet = false;
+        state.awaiting_quiet_since = None;
         state.authorized = false;
         state.queue.clear();
         state.stop_child();
@@ -437,5 +443,27 @@ mod tests {
     #[test]
     fn missing_executable_is_unavailable() {
         assert!(!probe("jcode-deliberately-missing-speech-command-71293"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn awaiting_quiet_elapsed_tracks_gated_wait_until_authorized() {
+        let player =
+            SpeechPlayer::with_backend(Arc::new(|_| Command::new("true").spawn())).unwrap();
+        assert!(player.awaiting_quiet_elapsed().is_none());
+        player
+            .enqueue_gated(
+                "hello",
+                PlaybackTrace {
+                    session: "test".into(),
+                    utterance: 1,
+                },
+            )
+            .unwrap();
+        wait_until(|| player.awaiting_quiet_elapsed().is_some());
+        assert!(!player.authorize_ready(|| false));
+        assert!(player.awaiting_quiet_elapsed().is_some());
+        assert!(player.authorize_ready(|| true));
+        wait_until(|| player.is_idle());
+        assert!(player.awaiting_quiet_elapsed().is_none());
     }
 }

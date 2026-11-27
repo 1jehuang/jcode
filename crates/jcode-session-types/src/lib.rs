@@ -318,6 +318,11 @@ pub struct StoredTokenUsage {
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
+    /// Wall-clock time for the provider request that produced this usage,
+    /// in milliseconds. Raw input for throughput calculations; absent for
+    /// older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_elapsed_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

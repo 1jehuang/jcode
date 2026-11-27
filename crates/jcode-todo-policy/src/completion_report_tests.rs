@@ -46,10 +46,10 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
     let plan = TodoPlan {
         title: None,
         user_intention: Some("Deliver outcome".into()),
-        understands_user_intent: Some(IntentUnderstanding::Complete),
+        understands_user_intent: Some(IntentUnderstanding::Clear),
         understands_user_intent_history: vec![
             IntentUnderstanding::Uncertain,
-            IntentUnderstanding::Complete,
+            IntentUnderstanding::Clear,
         ],
     };
     let goal = TodoGoal {
