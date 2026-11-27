@@ -4,6 +4,20 @@ use anyhow::anyhow;
 use tempfile::tempdir;
 use tokio::time::{Duration, sleep};
 
+#[test]
+fn background_outputs_follow_the_configured_home() {
+    let _guard = crate::storage::lock_test_env();
+    let home = tempdir().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let output_dir = BackgroundTaskManager::new().output_dir;
+    match previous_home {
+        Some(path) => crate::env::set_var("JCODE_HOME", path),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    assert_eq!(output_dir, home.path().join("jcode-bg-tasks"));
+}
+
 #[tokio::test]
 async fn silent_background_task_still_publishes_started_activity() {
     let mut events = Bus::global().subscribe();

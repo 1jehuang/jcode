@@ -10,7 +10,7 @@ use crate::bus::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
@@ -101,7 +101,16 @@ impl BackgroundTaskManager {
     }
 
     pub fn status_path_for(&self, task_id: &str) -> PathBuf {
-        self.output_dir.join(format!("{task_id}.status.json"))
+        Self::status_path_in(&self.output_dir, task_id)
+    }
+
+    /// Locate persisted status without starting the process-wide task manager.
+    pub fn configured_status_path_for(task_id: &str) -> PathBuf {
+        Self::status_path_in(&task_dir(), task_id)
+    }
+
+    fn status_path_in(output_dir: &Path, task_id: &str) -> PathBuf {
+        output_dir.join(format!("{task_id}.status.json"))
     }
 
     fn publish_task_started_activity(
@@ -1508,10 +1517,7 @@ impl BackgroundTaskManager {
     /// This is primarily used during self-dev reload recovery, where the new
     /// process needs to remind the agent that a previous `bash` command was
     /// persisted into the background instead of being interrupted.
-    pub fn persisted_detached_running_tasks_for_session(
-        &self,
-        session_id: &str,
-    ) -> Vec<TaskStatusFile> {
+    pub fn persisted_detached_running_tasks_for_session(session_id: &str) -> Vec<TaskStatusFile> {
         // The task directory accumulates thousands of status files and every
         // History bootstrap asks this question, so a reconnect storm re-read,
         // re-parsed, and re-stat'ed all of them per client. Keep one index of
@@ -1519,6 +1525,7 @@ impl BackgroundTaskManager {
         // (its mtime moves when a status file is created, renamed, or removed;
         // status files are replaced atomically) or after a short TTL.
         struct Index {
+            output_dir: PathBuf,
             dir_mtime: Option<std::time::SystemTime>,
             built_at: Instant,
             running: Vec<TaskStatusFile>,
@@ -1531,7 +1538,8 @@ impl BackgroundTaskManager {
         // prewarmed at server start covers a whole reconnect storm.
         const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
-        let dir_mtime = std::fs::metadata(&self.output_dir)
+        let output_dir = task_dir();
+        let dir_mtime = std::fs::metadata(&output_dir)
             .and_then(|meta| meta.modified())
             .ok();
         let mut guard = INDEX
@@ -1539,12 +1547,13 @@ impl BackgroundTaskManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fresh = guard.as_ref().is_some_and(|index| {
             index.dir_mtime.is_some()
+                && index.output_dir == output_dir
                 && index.dir_mtime == dir_mtime
                 && index.built_at.elapsed() < TTL
         });
         if !fresh {
             let mut running = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&self.output_dir) {
+            if let Ok(entries) = std::fs::read_dir(&output_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -1562,6 +1571,7 @@ impl BackgroundTaskManager {
                 }
             }
             *guard = Some(Index {
+                output_dir,
                 dir_mtime,
                 built_at: Instant::now(),
                 running,
