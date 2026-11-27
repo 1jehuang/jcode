@@ -726,6 +726,10 @@ mod tests {
             r#"{"mcpServers":{"project-only":{"command":"project-server"}}}"#,
         )
         .expect("write project config");
+        let review = crate::mcp::project_mcp_review(project.path())
+            .expect("review project config")
+            .expect("project MCP servers");
+        crate::mcp::trust_project_mcp(&review).expect("trust project config");
 
         std::env::set_current_dir(project.path()).expect("set project cwd");
         let manager = McpManager::new();
