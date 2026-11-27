@@ -194,14 +194,13 @@ fn default_pending_status() -> String {
     "pending".to_string()
 }
 
-/// Declare a semantic assessment enum that serializes as a snake_case string
-/// but still deserializes legacy 0-100 numeric scores (and numeric strings)
-/// from sessions recorded before the semantic-state migration.
+/// Declare a semantic assessment enum that serializes and deserializes as a
+/// snake_case string.
 macro_rules! semantic_state {
     (
         $(#[$meta:meta])*
         $name:ident {
-            $( $variant:ident = $label:literal, legacy: $lo:literal ..= $hi:literal, score: $score:literal ),+ $(,)?
+            $( $variant:ident = $label:literal, score: $score:literal ),+ $(,)?
         }
     ) => {
         $(#[$meta])*
@@ -225,19 +224,8 @@ macro_rules! semantic_state {
                 }
             }
 
-            /// Map a legacy 0-100 numeric score onto the closest state.
-            pub fn from_legacy_score(score: u8) -> Self {
-                match score.min(100) {
-                    $( $lo..=$hi => Self::$variant, )+
-                    // Unreachable: the ranges cover 0..=100 and the input is
-                    // clamped, but match exhaustiveness cannot see that.
-                    _ => Self::from_legacy_score(100),
-                }
-            }
-
-            /// Representative 0-100 score for consumers (telemetry) that still
-            /// aggregate numerically.
-            pub fn legacy_score(&self) -> u8 {
+            /// Representative 0-100 score for telemetry aggregation.
+            pub fn telemetry_score(&self) -> u8 {
                 match self {
                     $( Self::$variant => $score, )+
                 }
@@ -255,42 +243,13 @@ macro_rules! semantic_state {
                 D: serde::Deserializer<'de>,
             {
                 use serde::de::Error;
-                let value = serde_json::Value::deserialize(deserializer)?;
-                match value {
-                    serde_json::Value::String(raw) => {
-                        let trimmed = raw.trim();
-                        if let Some(parsed) = Self::parse(trimmed) {
-                            return Ok(parsed);
-                        }
-                        // Legacy numeric score sent as a string.
-                        if let Ok(score) = trimmed.parse::<f64>() {
-                            if (0.0..=100.0).contains(&score) {
-                                return Ok(Self::from_legacy_score(score as u8));
-                            }
-                        }
-                        Err(D::Error::custom(format!(
-                            concat!("invalid ", stringify!($name), " state: {}"),
-                            raw
-                        )))
-                    }
-                    serde_json::Value::Number(num) => {
-                        let score = num
-                            .as_f64()
-                            .filter(|score| (0.0..=100.0).contains(score))
-                            .ok_or_else(|| {
-                                D::Error::custom(concat!(
-                                    "legacy ",
-                                    stringify!($name),
-                                    " score out of 0-100 range"
-                                ))
-                            })?;
-                        Ok(Self::from_legacy_score(score as u8))
-                    }
-                    other => Err(D::Error::custom(format!(
-                        concat!(stringify!($name), " must be a state string, got {}"),
-                        other
-                    ))),
-                }
+                let raw = String::deserialize(deserializer)?;
+                Self::parse(&raw).ok_or_else(|| {
+                    D::Error::custom(format!(
+                        concat!("invalid ", stringify!($name), " state: {}"),
+                        raw
+                    ))
+                })
             }
         }
     };
@@ -299,10 +258,9 @@ macro_rules! semantic_state {
 semantic_state! {
     /// How well the agent understands what the user actually wants.
     IntentUnderstanding {
-        Uncertain = "uncertain", legacy: 0..=59, score: 40,
-        Partial = "partial", legacy: 60..=95, score: 80,
-        Clear = "clear", legacy: 96..=99, score: 96,
-        Complete = "complete", legacy: 100..=100, score: 100,
+        Uncertain = "uncertain", score: 40,
+        Partial = "partial", score: 80,
+        Clear = "clear", score: 100,
     }
 }
 
@@ -311,21 +269,20 @@ semantic_state! {
     /// feedback-loop quality, this records how far that loop has actually been
     /// exercised rather than whether progress can be measured in principle.
     IterationMaturity {
-        NotStarted = "not_started", legacy: 0..=12, score: 6,
-        Exploring = "exploring", legacy: 13..=29, score: 21,
-        Improving = "improving", legacy: 30..=49, score: 40,
-        PlateauUnproven = "plateau_unproven", legacy: 50..=69, score: 60,
-        OutcomeReached = "outcome_reached", legacy: 70..=79, score: 74,
-        ConstraintsExhausted = "constraints_exhausted", legacy: 80..=87, score: 84,
-        PlateauConfirmed = "plateau_confirmed", legacy: 88..=95, score: 92,
-        BudgetExhausted = "budget_exhausted", legacy: 96..=100, score: 98,
+        NotStarted = "not_started", score: 6,
+        Exploring = "exploring", score: 21,
+        Improving = "improving", score: 40,
+        PlateauUnproven = "plateau_unproven", score: 60,
+        OutcomeReached = "outcome_reached", score: 74,
+        ConstraintsExhausted = "constraints_exhausted", score: 84,
+        PlateauConfirmed = "plateau_confirmed", score: 92,
+        BudgetExhausted = "budget_exhausted", score: 98,
     }
 }
 
 impl IterationMaturity {
     /// Terminal bases that can justify completing a goal. `BudgetExhausted` is
-    /// deliberately terminal but not "better" than a confirmed plateau; the
-    /// ordering exists only for legacy numeric compatibility.
+    /// deliberately terminal but not "better" than a confirmed plateau.
     pub fn permits_completion(self) -> bool {
         matches!(
             self,
@@ -341,11 +298,11 @@ semantic_state! {
     /// How much of a goal's correctness its feedback loop can report on its
     /// own, without the agent's or the user's judgment.
     FeedbackLoopState {
-        Absent = "absent", legacy: 0..=19, score: 10,
-        Weak = "weak", legacy: 20..=49, score: 35,
-        Usable = "usable", legacy: 50..=79, score: 65,
-        Strong = "strong", legacy: 80..=95, score: 88,
-        Closed = "closed", legacy: 96..=100, score: 98,
+        Absent = "absent", score: 10,
+        Weak = "weak", score: 35,
+        Usable = "usable", score: 65,
+        Strong = "strong", score: 88,
+        Closed = "closed", score: 98,
     }
 }
 
@@ -353,11 +310,11 @@ semantic_state! {
     /// How directly a goal's feedback loop represents the behavior or outcome
     /// the user will actually accept.
     FeedbackLoopRelevance {
-        Indirect = "indirect", legacy: 0..=24, score: 12,
-        Synthetic = "synthetic", legacy: 25..=49, score: 37,
-        Representative = "representative", legacy: 50..=79, score: 75,
-        AcceptanceBlocked = "acceptance_blocked", legacy: 80..=95, score: 88,
-        AcceptanceAligned = "acceptance_aligned", legacy: 96..=100, score: 98,
+        Indirect = "indirect", score: 12,
+        Synthetic = "synthetic", score: 37,
+        Representative = "representative", score: 75,
+        AcceptanceBlocked = "acceptance_blocked", score: 88,
+        AcceptanceAligned = "acceptance_aligned", score: 98,
     }
 }
 
@@ -365,9 +322,9 @@ semantic_state! {
     /// How broadly a goal's feedback loop exercises the paths on which the
     /// result can succeed or fail.
     FeedbackLoopCoverage {
-        Narrow = "narrow", legacy: 0..=49, score: 25,
-        MainPaths = "main_paths", legacy: 50..=95, score: 75,
-        EdgeAndIntegrationPaths = "edge_and_integration_paths", legacy: 96..=100, score: 98,
+        Narrow = "narrow", score: 25,
+        MainPaths = "main_paths", score: 75,
+        EdgeAndIntegrationPaths = "edge_and_integration_paths", score: 98,
     }
 }
 
@@ -375,9 +332,9 @@ semantic_state! {
     /// How completely a goal's explicit requirements and changed public outputs
     /// are connected to concrete checks and observed results.
     FeedbackLoopTraceability {
-        Unmapped = "unmapped", legacy: 0..=49, score: 25,
-        Partial = "partial", legacy: 50..=95, score: 75,
-        Complete = "complete", legacy: 96..=100, score: 98,
+        Unmapped = "unmapped", score: 25,
+        Partial = "partial", score: 75,
+        Complete = "complete", score: 98,
     }
 }
 
@@ -385,10 +342,21 @@ semantic_state! {
     /// Evidence state behind a todo: from an unexamined guess to a result
     /// verified end to end.
     ConfidenceState {
-        Speculative = "speculative", legacy: 0..=59, score: 40,
-        Plausible = "plausible", legacy: 60..=95, score: 80,
-        Validated = "validated", legacy: 96..=99, score: 96,
-        Verified = "verified", legacy: 100..=100, score: 100,
+        Speculative = "speculative", score: 40,
+        Plausible = "plausible", score: 80,
+        Validated = "validated", score: 96,
+        Verified = "verified", score: 100,
+    }
+}
+
+impl ConfidenceState {
+    pub fn from_level(level: u8) -> Self {
+        match level {
+            0 => Self::Speculative,
+            1 => Self::Plausible,
+            2 => Self::Validated,
+            _ => Self::Verified,
+        }
     }
 }
 
@@ -396,14 +364,14 @@ semantic_state! {
     /// Intrinsic difficulty of a goal. Descriptive, never gated: it only
     /// calibrates how much delivery follow-through a completion review expects.
     Difficulty {
-        Trivial = "trivial", legacy: 0..=12, score: 6,
-        Routine = "routine", legacy: 13..=25, score: 19,
-        Involved = "involved", legacy: 26..=38, score: 32,
-        Complex = "complex", legacy: 39..=51, score: 45,
-        Hard = "hard", legacy: 52..=64, score: 58,
-        Expert = "expert", legacy: 65..=77, score: 71,
-        Research = "research", legacy: 78..=90, score: 84,
-        OpenEnded = "open_ended", legacy: 91..=100, score: 95,
+        Trivial = "trivial", score: 6,
+        Routine = "routine", score: 19,
+        Involved = "involved", score: 32,
+        Complex = "complex", score: 45,
+        Hard = "hard", score: 58,
+        Expert = "expert", score: 71,
+        Research = "research", score: 84,
+        OpenEnded = "open_ended", score: 95,
     }
 }
 
@@ -411,21 +379,20 @@ semantic_state! {
     /// How far beyond the literal request the agent's work extended.
     /// Descriptive, never gated.
     Autonomy {
-        RequestedOnly = "requested_only", legacy: 0..=25, score: 12,
-        NecessaryFollowthrough = "necessary_followthrough", legacy: 26..=50, score: 38,
-        Proactive = "proactive", legacy: 51..=75, score: 62,
-        Stewardship = "stewardship", legacy: 76..=100, score: 88,
+        RequestedOnly = "requested_only", score: 12,
+        NecessaryFollowthrough = "necessary_followthrough", score: 38,
+        Proactive = "proactive", score: 62,
+        Stewardship = "stewardship", score: 88,
     }
 }
 
 semantic_state! {
     /// How far a goal's result actually traveled toward the user's outcome.
-    /// Legacy scores come from the old `end_to_end_ownership` field.
     DeliveryState {
-        ChangeMade = "change_made", legacy: 0..=49, score: 25,
-        Integrated = "integrated", legacy: 50..=79, score: 65,
-        WorkflowValidated = "workflow_validated", legacy: 80..=95, score: 88,
-        OutcomeDelivered = "outcome_delivered", legacy: 96..=100, score: 98,
+        ChangeMade = "change_made", score: 25,
+        Integrated = "integrated", score: 65,
+        WorkflowValidated = "workflow_validated", score: 88,
+        OutcomeDelivered = "outcome_delivered", score: 98,
     }
 }
 
@@ -910,42 +877,18 @@ mod semantic_state_tests {
     }
 
     #[test]
-    fn legacy_numeric_scores_deserialize_onto_states() {
-        assert_eq!(
-            serde_json::from_str::<IntentUnderstanding>("97").unwrap(),
-            IntentUnderstanding::Clear
-        );
-        assert_eq!(
-            serde_json::from_str::<IntentUnderstanding>("59").unwrap(),
-            IntentUnderstanding::Uncertain
-        );
-        assert_eq!(
-            serde_json::from_str::<ConfidenceState>("\"85\"").unwrap(),
-            ConfidenceState::Plausible
-        );
-        assert_eq!(
-            serde_json::from_str::<DeliveryState>("96").unwrap(),
-            DeliveryState::OutcomeDelivered
-        );
-        assert_eq!(
-            serde_json::from_str::<FeedbackLoopState>("84.0").unwrap(),
-            FeedbackLoopState::Strong
-        );
+    fn states_reject_invalid_and_numeric_values() {
         assert!(serde_json::from_str::<ConfidenceState>("\"bogus\"").is_err());
-        assert!(serde_json::from_str::<ConfidenceState>("101").is_err());
+        assert!(serde_json::from_str::<ConfidenceState>("85").is_err());
+        assert!(serde_json::from_str::<ConfidenceState>("\"85\"").is_err());
+        assert!(serde_json::from_str::<IntentUnderstanding>("\"complete\"").is_err());
+        assert!(serde_json::from_str::<IntentUnderstanding>("97").is_err());
     }
 
     #[test]
-    fn every_legacy_score_maps_and_ordering_matches_scores() {
-        for score in 0..=100u8 {
-            let _ = IntentUnderstanding::from_legacy_score(score);
-            let _ = FeedbackLoopState::from_legacy_score(score);
-            let _ = FeedbackLoopRelevance::from_legacy_score(score);
-            let _ = ConfidenceState::from_legacy_score(score);
-            let _ = Difficulty::from_legacy_score(score);
-            let _ = Autonomy::from_legacy_score(score);
-            let _ = DeliveryState::from_legacy_score(score);
-        }
+    fn state_ordering_and_levels_match() {
+        assert!(IntentUnderstanding::Uncertain < IntentUnderstanding::Partial);
+        assert!(IntentUnderstanding::Partial < IntentUnderstanding::Clear);
         assert!(ConfidenceState::Speculative < ConfidenceState::Verified);
         assert!(DeliveryState::ChangeMade < DeliveryState::WorkflowValidated);
         assert!(FeedbackLoopRelevance::Indirect < FeedbackLoopRelevance::Synthetic);
@@ -954,66 +897,14 @@ mod semantic_state_tests {
         assert!(
             FeedbackLoopRelevance::AcceptanceBlocked < FeedbackLoopRelevance::AcceptanceAligned
         );
-        // Representative scores map back onto their own state.
         for state in [
             ConfidenceState::Speculative,
             ConfidenceState::Plausible,
             ConfidenceState::Validated,
             ConfidenceState::Verified,
         ] {
-            assert_eq!(
-                ConfidenceState::from_legacy_score(state.legacy_score()),
-                state
-            );
+            assert_eq!(ConfidenceState::from_level(state.level()), state);
         }
-    }
-
-    #[test]
-    fn legacy_numeric_todo_payloads_still_load() {
-        let item: TodoItem = serde_json::from_str(
-            r#"{"content":"a","status":"completed","priority":"high","id":"1",
-                "confidence":85,"completion_confidence":97,"confidence_history":[60,85,97]}"#,
-        )
-        .expect("legacy numeric todo item should load");
-        assert_eq!(item.confidence, Some(ConfidenceState::Plausible));
-        assert_eq!(item.completion_confidence, Some(ConfidenceState::Validated));
-        assert_eq!(
-            item.confidence_history,
-            vec![
-                ConfidenceState::Plausible,
-                ConfidenceState::Plausible,
-                ConfidenceState::Validated
-            ]
-        );
-
-        let plan: TodoPlan =
-            serde_json::from_str(r#"{"user_intention":"x","understands_user_intent":97}"#)
-                .expect("legacy plan should load");
-        assert_eq!(
-            plan.understands_user_intent,
-            Some(IntentUnderstanding::Clear)
-        );
-
-        let goal: TodoGoal = serde_json::from_str(
-            r#"{"group":"g","hill_climbability":96,"end_to_end_ownership":96,
-                "end_to_end_ownership_history":[80,96]}"#,
-        )
-        .expect("legacy goal should load");
-        assert_eq!(goal.closed_feedback_loop, Some(FeedbackLoopState::Closed));
-        assert_eq!(goal.delivery_state, Some(DeliveryState::OutcomeDelivered));
-        assert_eq!(
-            goal.delivery_state_history,
-            vec![
-                DeliveryState::WorkflowValidated,
-                DeliveryState::OutcomeDelivered
-            ]
-        );
-        assert_eq!(goal.difficulty, None);
-        assert_eq!(goal.autonomy, None);
-        assert_eq!(goal.feedback_loop_relevance, None);
-        assert!(goal.feedback_loop_relevance_history.is_empty());
-        assert_eq!(goal.feedback_loop_coverage, None);
-        assert!(goal.feedback_loop_coverage_history.is_empty());
     }
 
     #[test]

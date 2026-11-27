@@ -1172,7 +1172,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
+                confidence: Some(crate::todo::ConfidenceState::Plausible),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
                 waiting_reason: None,

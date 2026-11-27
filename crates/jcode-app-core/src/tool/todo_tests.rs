@@ -173,7 +173,7 @@ fn hierarchy_open_items_validate_fields_and_types() {
     }
     // Legacy storage fields and the bare waiting ID list remain accepted.
     let legacy = json!({"id":"legacy","content":"Legacy","details":"Brief",
-        "status":"pending","priority":"high","confidence":80,
+        "status":"pending","priority":"high","confidence":"plausible",
         "confidence_history":[],"blocked_by":[],"assigned_to":"@self",
         "waiting_on":["background_1"],"waiting_reason":"Building"});
     assert!(parse_todo_input(wrap(legacy)).is_ok());
@@ -631,7 +631,7 @@ fn parse(input: Value) -> Result<TodoInput> {
 #[test]
 fn accepts_stringified_todos_array() {
     let input = json!({
-        "todos": "[{\"content\":\"a\",\"status\":\"pending\",\"priority\":\"high\",\"id\":\"1\",\"confidence\":90}]"
+        "todos": "[{\"content\":\"a\",\"status\":\"pending\",\"priority\":\"high\",\"id\":\"1\",\"confidence\":\"plausible\"}]"
     });
     let parsed = parse(input).expect("stringified todos array should parse");
     let todos = parsed.todos.expect("todos present");
@@ -647,8 +647,8 @@ fn accepts_stringified_todos_array() {
 fn accepts_stringified_todo_items_and_string_confidence() {
     let input = json!({
         "todos": [
-            "{\"content\":\"b\",\"status\":\"completed\",\"priority\":\"low\",\"id\":\"2\",\"confidence\":\"85\",\"completion_confidence\":\"95\"}",
-            {"content": "c", "status": "pending", "priority": "high", "id": "3", "confidence": "70"}
+            "{\"content\":\"b\",\"status\":\"completed\",\"priority\":\"low\",\"id\":\"2\",\"confidence\":\"plausible\",\"completion_confidence\":\"plausible\"}",
+            {"content": "c", "status": "pending", "priority": "high", "id": "3", "confidence": "plausible"}
         ]
     });
     let parsed = parse(input).expect("string-coerced items should parse");
@@ -702,13 +702,13 @@ fn rejects_unknown_todo_statuses_with_valid_vocabulary() {
 }
 
 #[test]
-fn accepts_float_confidence_and_empty_string_as_none() {
+fn accepts_empty_string_completion_confidence_as_none() {
     let input = json!({
         "todos": [
-            {"content": "d", "status": "pending", "priority": "high", "id": "4", "confidence": 90.0, "completion_confidence": ""}
+            {"content": "d", "status": "pending", "priority": "high", "id": "4", "confidence": "plausible", "completion_confidence": ""}
         ]
     });
-    let parsed = parse(input).expect("float confidence should parse");
+    let parsed = parse(input).expect("empty string completion_confidence should parse");
     let todos = parsed.todos.expect("todos present");
     assert_eq!(
         todos[0].confidence,
@@ -727,7 +727,7 @@ fn empty_string_todos_means_read() {
 fn native_input_still_parses() {
     let input = json!({
         "todos": [
-            {"content": "e", "status": "pending", "priority": "high", "id": "5", "confidence": 80}
+            {"content": "e", "status": "pending", "priority": "high", "id": "5", "confidence": "plausible"}
         ]
     });
     let parsed = parse(input).expect("native input should parse");
@@ -740,10 +740,10 @@ fn native_input_still_parses() {
 #[test]
 fn accepts_goals_and_plan_including_string_coercion() {
     let input = json!({
-        "plan": {"user_intention": "make repository search feel instant", "understands_user_intent": "97"},
+        "plan": {"user_intention": "make repository search feel instant", "understands_user_intent": "clear"},
         "goals": [
-            {"group": "optimize grep", "closed_feedback_loop": "95", "feedback_loop": "run the grep benchmark and compare p50"},
-            {"closed_feedback_loop": 20}
+            {"group": "optimize grep", "closed_feedback_loop": "strong", "feedback_loop": "run the grep benchmark and compare p50"},
+            {"closed_feedback_loop": "weak"}
         ]
     });
     let parsed = parse(input).expect("goals and plan should parse");
@@ -774,7 +774,7 @@ fn accepts_goals_and_plan_including_string_coercion() {
 #[test]
 fn stringified_plan_object_is_accepted() {
     let parsed = parse(json!({
-        "plan": "{\"user_intention\":\"ship it\",\"understands_user_intent\":\"96\"}"
+        "plan": "{\"user_intention\":\"ship it\",\"understands_user_intent\":\"clear\"}"
     }))
     .expect("stringified plan should parse");
     let plan = parsed.plan.expect("plan present");
@@ -788,7 +788,7 @@ fn stringified_plan_object_is_accepted() {
 #[test]
 fn accepts_legacy_plan_alignment_key_but_serializes_the_new_name() {
     let parsed = parse(json!({
-        "plan": {"user_intention_alignment": "97"}
+        "plan": {"user_intention_alignment": "clear"}
     }))
     .expect("legacy alignment key should remain readable");
     let plan = parsed.plan.expect("plan present");
@@ -827,8 +827,8 @@ fn aligned_plan() -> TodoPlan {
     TodoPlan {
         title: None,
         user_intention: Some("understood".to_string()),
-        understands_user_intent: Some(crate::todo::IntentUnderstanding::Complete),
-        understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Complete],
+        understands_user_intent: Some(crate::todo::IntentUnderstanding::Clear),
+        understands_user_intent_history: vec![crate::todo::IntentUnderstanding::Clear],
     }
 }
 

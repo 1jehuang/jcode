@@ -50,6 +50,7 @@ fn stored_metadata_all_options_exact_bytes_and_snapshot_sizes() {
                             output_tokens: 0,
                             cache_read_input_tokens: (mask & 2 != 0).then_some(0),
                             cache_creation_input_tokens: (mask & 4 != 0).then_some(u64::MAX),
+                            request_elapsed_ms: Some(7_890),
                         });
                         assert_eq!(
                             serde_json::to_vec(&metadata(&message)).unwrap(),
@@ -91,6 +92,7 @@ fn stored_metadata_component_benchmark() {
                 output_tokens: 123,
                 cache_read_input_tokens: Some(5_432),
                 cache_creation_input_tokens: Some(321),
+                request_elapsed_ms: Some(7_890),
             });
         }
         json_bytes(&message);

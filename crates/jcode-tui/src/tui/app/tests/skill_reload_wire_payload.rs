@@ -378,3 +378,151 @@ fn skill_reload_wire_catalog_pause_preserves_newer_composer() {
         });
     });
 }
+
+const SELECTED_SKILL_CASES: &[(&str, &str, &str, &str)] = &[
+    ("/my ", "skill question", "skill question", "my"),
+    ("/my skill ", "question", "question", "my skill"),
+    (" \t/my\t", "skill\t界 question", "skill\t界 question", "my"),
+    ("/my 技能 ", "问题", "问题", "my 技能"),
+    ("/my ", "", "", "my"),
+    ("/my ", "'skill question'", "skill question", "my"),
+    (
+        "/my ",
+        "skill\none\ntwo\nthree\nfour\nfive",
+        "skill\none\ntwo\nthree\nfour\nfive",
+        "my",
+    ),
+];
+
+#[test]
+fn selected_skill_local_payload_keeps_routing_choice() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        for name in ["my", "my skill", "my 技能"] {
+            skill_reload_write_skill(project.path(), name);
+        }
+        for &(prefix, text, expected, selected) in SELECTED_SKILL_CASES {
+            let mut app = create_test_app();
+            app.session.working_dir = Some(project.path().to_string_lossy().into());
+            app.refresh_skills_snapshot();
+            super::input::insert_input_text(&mut app, prefix);
+            attachment_routing_attach_image(&mut app);
+            super::input::handle_text_paste(&mut app, text.into());
+            assert_eq!(
+                app.current_skills_snapshot()
+                    .resolve_invocation(&app.input)
+                    .unwrap()
+                    .name,
+                selected
+            );
+            app.submit_input();
+            assert_eq!(app.active_skill.as_deref(), Some(selected));
+            let message = app.session.messages.last().unwrap();
+            let actual: String = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "selected skill {selected}: {prefix}{text}"
+            );
+            assert_eq!(
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { media_type, data } =>
+                            Some((media_type.as_str(), data.as_str())),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                vec![("image/png", "fixture-image")]
+            );
+        }
+    });
+}
+
+#[test]
+fn selected_skill_remote_wire_reload_and_retry_keep_routing_choice() {
+    with_temp_jcode_home(|| {
+        let project = tempfile::tempdir().unwrap();
+        for name in ["my", "my skill", "my 技能"] {
+            skill_reload_write_skill(project.path(), name);
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            for &(prefix, text, expected, selected) in SELECTED_SKILL_CASES {
+                let mut app = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.mark_history_loaded();
+                let peer = remote.take_dummy_peer().unwrap();
+                let (reader, _writer) = peer.into_split();
+                let mut reader = tokio::io::BufReader::new(reader);
+                super::input::insert_input_text(&mut app, prefix);
+                attachment_routing_attach_image(&mut app);
+                super::input::handle_text_paste(&mut app, text.into());
+                let draft = app.input_draft_snapshot();
+                let prepared = super::input::take_prepared_input(&mut app);
+                assert_eq!(
+                    app.current_skills_snapshot()
+                        .resolve_invocation(prepared.routing_input())
+                        .unwrap()
+                        .name,
+                    selected
+                );
+                if text.contains('\n') {
+                    assert_eq!(prepared.pasted_contents, vec![text]);
+                }
+                super::remote::input_dispatch::submit_remote_slash_input(
+                    &mut app,
+                    &mut remote,
+                    prepared,
+                )
+                .await
+                .unwrap();
+                let original = attachment_routing_read_request(&mut reader).await;
+                assert_eq!(
+                    original["content"], expected,
+                    "selected skill {selected}: {prefix}{text}"
+                );
+                assert_eq!(original["active_skill"], selected);
+                assert_eq!(
+                    original["images"],
+                    serde_json::json!([["image/png", "fixture-image"]])
+                );
+                let retained = &app.last_submitted_draft.as_ref().unwrap().1;
+                assert_eq!(retained.raw_input, draft.0);
+                assert_eq!(retained.expanded, expected);
+                assert_eq!(
+                    retained.images,
+                    vec![("image/png".into(), "fixture-image".into())]
+                );
+                app.save_input_for_reload("selected-skill-overlap");
+                let restored = App::restore_input_for_reload("selected-skill-overlap").unwrap();
+                let mut next = tokio::task::block_in_place(|| skill_reload_app(project.path()));
+                next.apply_restored_reload_input(restored);
+                assert_eq!(next.input_draft_snapshot(), draft);
+                super::remote::process_remote_followups(&mut next, &mut remote).await;
+                let replay = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &replay);
+                assert_eq!(next.active_skill.as_deref(), Some(selected));
+                retry_draft_rate_error(&mut next, &mut remote);
+                next.rate_limit_pending_message.as_mut().unwrap().auto_retry = true;
+                super::input::insert_input_text(&mut next, "newer draft");
+                let newer = next.input_draft_snapshot();
+                retry_draft_dispatch(&mut next, &mut remote).await;
+                let retry = attachment_routing_read_request(&mut reader).await;
+                skill_reload_assert_wire(&original, &retry);
+                assert_eq!(next.input_draft_snapshot(), newer);
+                assert_eq!(
+                    next.last_submitted_draft.as_ref().unwrap().1.raw_input,
+                    draft.0
+                );
+            }
+        });
+    });
+}
