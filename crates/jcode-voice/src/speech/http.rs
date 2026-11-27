@@ -217,7 +217,7 @@ mod tests {
             finish.send(()).unwrap();
             server.join().unwrap();
             let deadline = Instant::now() + Duration::from_secs(3);
-            while !player.shared.0.lock().unwrap().awaiting_quiet {
+            while player.awaiting_quiet_elapsed().is_none() {
                 assert!(Instant::now() < deadline);
                 thread::sleep(POLL);
             }

@@ -9,9 +9,9 @@ fn render_todos_message_shows_grouped_card_with_status_glyphs() {
             status: status.to_string(),
             priority: "high".to_string(),
             group: group.map(str::to_string),
-            confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+            confidence: Some(crate::todo::ConfidenceState::Plausible),
             completion_confidence: (status == "completed")
-                .then_some(crate::todo::ConfidenceState::from_legacy_score(95)),
+                .then_some(crate::todo::ConfidenceState::Plausible),
             confidence_history: Vec::new(),
             waiting_reason: None,
             requires_user_auth: None,

@@ -111,6 +111,7 @@ mod tests {
             output_tokens: 2,
             cache_read_input_tokens: Some(3),
             cache_creation_input_tokens: Some(4),
+            request_elapsed_ms: None,
         })
     }
     fn row(index: usize) -> RenderedMessage {

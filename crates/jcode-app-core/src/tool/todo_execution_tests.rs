@@ -451,10 +451,10 @@ async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
         json!({
             "todos": [{
                 "content": "flat task one", "status": "in_progress",
-                "priority": "high", "id": "t1", "confidence": 70,
+                "priority": "high", "id": "t1", "confidence": "plausible",
             }],
-            "plan": {"user_intention": "do task one", "understands_user_intent": 97},
-            "goals": [{"closed_feedback_loop": 97, "feedback_loop": "ran the checks"}],
+            "plan": {"user_intention": "do task one", "understands_user_intent": "clear"},
+            "goals": [{"closed_feedback_loop": "closed", "feedback_loop": "ran the checks"}],
         }),
         test_ctx(session),
     )
@@ -472,9 +472,9 @@ async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
         json!({
             "todos": [{
                 "content": "task two", "status": "in_progress", "priority": "high",
-                "id": "t2", "group": "second task", "confidence": 70,
+                "id": "t2", "group": "second task", "confidence": "plausible",
             }],
-            "goals": [{"group": "second task", "closed_feedback_loop": 80,
+            "goals": [{"group": "second task", "closed_feedback_loop": "strong",
                        "feedback_loop": "run the new checks"}],
         }),
         test_ctx(session),
@@ -519,14 +519,14 @@ async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
                 "priority": "high",
                 "id": "t1",
                 "group": "first task",
-                "confidence": 90,
-                "completion_confidence": 97,
+                "confidence": "plausible",
+                "completion_confidence": "validated",
             }],
-            "plan": {"user_intention": "do task one", "understands_user_intent": 97},
+            "plan": {"user_intention": "do task one", "understands_user_intent": "clear"},
             "goals": [{
                 "group": "first task",
-                "closed_feedback_loop": 97,
-                "end_to_end_ownership": 97,
+                "closed_feedback_loop": "closed",
+                "end_to_end_ownership": "outcome_delivered",
                 "feedback_loop": "ran the checks",
             }],
         }),
@@ -545,11 +545,11 @@ async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
                 "priority": "high",
                 "id": "t2",
                 "group": "second task",
-                "confidence": 70,
+                "confidence": "plausible",
             }],
             "goals": [{
                 "group": "second task",
-                "closed_feedback_loop": 80,
+                "closed_feedback_loop": "strong",
                 "feedback_loop": "run the new checks",
             }],
         }),
@@ -598,15 +598,15 @@ async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
                     "priority": "high",
                     "id": "opt",
                     "group": "speed",
-                    "confidence": 70,
+                    "confidence": "plausible",
                 }],
                 "plan": {
                     "user_intention": "beat the baseline",
-                    "understands_user_intent": 82,
+                    "understands_user_intent": "partial",
                 },
                 "goals": [{
                     "group": "speed",
-                    "closed_feedback_loop": 80,
+                    "closed_feedback_loop": "strong",
                     "feedback_loop": "run ./grade and read the score",
                     "feedback_loop_relevance": "indirect",
                     "feedback_loop_coverage": "narrow",
@@ -676,7 +676,7 @@ async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
     // digest now has the trajectory available.
     let output = TodoTool::new()
         .execute(
-            json!({"plan": {"understands_user_intent": 97}}),
+            json!({"plan": {"understands_user_intent": "clear"}}),
             test_ctx(session),
         )
         .await
@@ -729,16 +729,16 @@ async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
                     "priority": "high",
                     "id": "ship",
                     "group": "release",
-                    "confidence": 100,
-                    "completion_confidence": 100,
+                    "confidence": "verified",
+                    "completion_confidence": "verified",
                 }],
                 "goals": [{
                     "group": "release",
-                    "closed_feedback_loop": 100,
+                    "closed_feedback_loop": "closed",
                     "feedback_loop": "run the end-to-end release check",
                     "feedback_loop_relevance": "indirect",
                     "feedback_loop_coverage": "narrow",
-                    "end_to_end_ownership": 95,
+                    "end_to_end_ownership": "workflow_validated",
                 }],
             }),
             test_ctx(session),

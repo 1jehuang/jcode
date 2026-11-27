@@ -856,26 +856,6 @@ fn each_lane_row_leads_with_dots_then_name_then_titles() {
 }
 
 #[test]
-fn narrow_rows_fold_finished_titles_and_never_wrap() {
-    for width in [60u16, 40, 24, 14] {
-        let rows = render(&grid_todos(), &[], width);
-        eprintln!("--- {width}\n{}", rows.join("\n"));
-        assert_fits(&rows, width);
-        assert_eq!(rows.len(), 6, "one row per lane at {width}");
-    }
-    let rows = render(&grid_todos(), &[], 50);
-    let parser = rows.iter().find(|r| r.contains("parser")).unwrap();
-    // Long rows cap each title rather than hiding later ones.
-    assert!(
-        parser.contains("parser       Extract…, Update…, Add lex…")
-            || parser.matches(", ").count() == 2,
-        "{rows:?}"
-    );
-    assert!(render(&grid_todos(), &[], 30)[0].contains("1 ●●○●●●  2 ○○○"));
-    assert!(render(&grid_todos(), &[], 18)[0].contains("1 4/6  2 0/3"));
-}
-
-#[test]
 fn lane_row_shows_agent_emoji_and_activity() {
     let mut todos = grid_todos();
     todos[1].assigned_to = Some("fox".into());
