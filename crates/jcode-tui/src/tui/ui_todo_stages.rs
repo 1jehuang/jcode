@@ -386,9 +386,10 @@ pub(crate) fn animate_lane_spinners(lines: &mut [Line<'static>]) {
 
 /// Header pips labelled per phase: `phase 1 ●●●  phase 2 ●○  phase 3 ○○`.
 ///
-/// Narrower widths fall back to `1 ●●●  2 ●○`, then per-phase counts
-/// (`1 ✓  2 1/2`), then plain proportional pips. A list without stages
-/// produces the same pips as before.
+/// Narrower widths fall back to `1 ●●●  2 ●○`, then proportionally compressed
+/// per-phase pips that preserve each phase's status ratio, and finally plain
+/// proportional pips if even one pip per phase cannot fit. A list without
+/// stages produces the same pips as before.
 pub(crate) fn push_stage_pips(
     spans: &mut Vec<Span<'static>>,
     todos: &[&crate::todo::TodoItem],
@@ -401,7 +402,7 @@ pub(crate) fn push_stage_pips(
     let stages = ordered_layout(todos);
     let current = current_stage(&stages, todos);
     let label_style = |index: usize| phase_style(index, current);
-    let variant = |prefix: &str, counts: bool| -> Vec<Span<'static>> {
+    let exact_variant = |prefix: &str| -> Vec<Span<'static>> {
         let mut out = Vec::new();
         for (index, stage) in stages.iter().enumerate() {
             if index > 0 {
@@ -414,45 +415,91 @@ pub(crate) fn push_stage_pips(
             if !label.is_empty() {
                 out.push(Span::styled(label, label_style(index)));
             }
-            if counts {
-                if stage
-                    .item_indices()
-                    .any(|i| crate::todo::todo_requires_user_auth(todos[i]))
-                {
-                    out.push(status_pip_span("requires_user_auth"));
-                    continue;
-                }
-                let total = stage.len();
-                let done = stage.item_indices().filter(|&i| is_done(todos[i])).count();
-                if done == total {
-                    out.push(Span::styled("✓", Style::default().fg(rgb(100, 180, 100))));
-                } else {
-                    let color = if Some(index) == current {
-                        asap_color()
-                    } else {
-                        rgb(120, 120, 135)
-                    };
-                    out.push(Span::styled(
-                        format!("{done}/{total}"),
-                        Style::default().fg(color),
-                    ));
-                }
-            } else {
-                out.extend(stage.item_indices().map(|i| pip_span(todos[i])));
-            }
+            out.extend(stage.item_indices().map(|i| pip_span(todos[i])));
         }
         out
     };
-    for candidate in [
-        variant("phase ", false),
-        variant("", false),
-        variant("", true),
-    ] {
+    for candidate in [exact_variant("phase "), exact_variant("")] {
         if width_of(&candidate) <= max_width {
             spans.extend(candidate);
             return;
         }
     }
+
+    // Proportionally compress pips per stage so each stage keeps its status
+    // ratio in dots instead of collapsing to done/total numbers.
+    let labels: Vec<String> = stages
+        .iter()
+        .map(|stage| match stage.number {
+            Some(n) => format!("{n} "),
+            None => String::new(),
+        })
+        .collect();
+    let fixed_width: usize = labels.iter().map(|l| l.width()).sum::<usize>()
+        + stages.len().saturating_sub(1) * 2;
+    let pip_budget = max_width.saturating_sub(fixed_width);
+    let non_empty = stages.iter().filter(|s| !s.is_empty()).count();
+    if non_empty > 0 && pip_budget >= non_empty {
+        let total_items: usize = stages.iter().map(|s| s.len()).sum();
+        let target = pip_budget.min(total_items);
+        let mut alloc: Vec<usize> = stages
+            .iter()
+            .map(|stage| {
+                if stage.is_empty() {
+                    0
+                } else {
+                    (((stage.len() as f64 / total_items as f64) * target as f64).round() as usize)
+                        .clamp(1, stage.len())
+                }
+            })
+            .collect();
+        let mut sum: usize = alloc.iter().sum();
+        while sum > target {
+            if let Some((idx, _)) = alloc
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| **a > 1)
+                .max_by_key(|(_, a)| **a)
+            {
+                alloc[idx] -= 1;
+                sum -= 1;
+            } else {
+                break;
+            }
+        }
+        while sum < target {
+            if let Some((idx, _)) = stages
+                .iter()
+                .enumerate()
+                .filter(|(i, s)| alloc[*i] < s.len())
+                .max_by_key(|(i, s)| s.len() - alloc[*i])
+            {
+                alloc[idx] += 1;
+                sum += 1;
+            } else {
+                break;
+            }
+        }
+        let mut out = Vec::new();
+        for (index, stage) in stages.iter().enumerate() {
+            if index > 0 {
+                out.push(Span::raw("  "));
+            }
+            if !labels[index].is_empty() {
+                out.push(Span::styled(labels[index].clone(), label_style(index)));
+            }
+            push_todo_status_pips(
+                &mut out,
+                stage.item_indices().map(|i| todos[i]),
+                alloc[index],
+            );
+        }
+        if width_of(&out) <= max_width {
+            spans.extend(out);
+            return;
+        }
+    }
+
     push_todo_status_pips(spans, todos.iter().copied(), max_width);
 }
 
