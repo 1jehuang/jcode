@@ -526,3 +526,179 @@ fn selected_skill_remote_wire_reload_and_retry_keep_routing_choice() {
         });
     });
 }
+
+async fn paste_label_edit_key(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    mode: u8,
+    key: KeyCode,
+) {
+    match mode {
+        0 => app.handle_key(key, KeyModifiers::NONE).unwrap(),
+        1 => app
+            .handle_remote_key(key, KeyModifiers::NONE, remote)
+            .await
+            .unwrap(),
+        _ => super::remote::handle_disconnected_key(app, key, KeyModifiers::NONE).unwrap(),
+    }
+}
+
+async fn paste_label_edit_and_repair(mode: u8) {
+    let a = "A1\nA2\nA3\nA4\nA5";
+    for b in ["B1\nB2\nB3\nB4\nB5", "界1\n界2\n界3\n界4\n界5\n界6"] {
+        for target in [1, 0] {
+            let mut app = tokio::task::block_in_place(create_test_app);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            let peer = remote.take_dummy_peer().unwrap();
+            let (reader, _writer) = peer.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            super::input::insert_input_text(&mut app, "前缀 ");
+            let first = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, a.into());
+            super::input::insert_input_text(&mut app, " | ");
+            let second = app.cursor_pos;
+            super::input::handle_text_paste(&mut app, b.into());
+            app.cursor_pos = [first, second][target] + 2;
+            let collapsed = app.input_draft_snapshot();
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+            let expected = format!("前缀 {a} | {b}");
+            assert_eq!(
+                super::input::expand_paste_placeholders(&app, &app.input),
+                expected,
+                "editing label {target} in mode {mode} must keep both saved pastes"
+            );
+            app.undo_input_change();
+            assert!(app.input.contains('x'));
+            app.undo_input_change();
+            assert_eq!(app.input_draft_snapshot(), collapsed);
+            // Repeating the edit after undo must keep the same ownership.
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Char('x')).await;
+            paste_label_edit_key(&mut app, &mut remote, mode, KeyCode::Backspace).await;
+            let repaired = app.take_input_draft();
+            app.restore_input_draft(repaired.clone());
+            assert_eq!(app.input_draft_snapshot(), repaired);
+            app.save_input_for_reload("paste-label-edit");
+            let restored = App::restore_input_for_reload("paste-label-edit").unwrap();
+            let mut next = tokio::task::block_in_place(create_test_app);
+            next.apply_restored_reload_input(restored);
+            assert_eq!(next.input_draft_snapshot(), repaired);
+            assert_eq!(
+                super::input::expand_paste_placeholders(&next, &next.input),
+                expected
+            );
+            match mode {
+                0 => {
+                    next.submit_input();
+                    let message = next.session.messages.last().unwrap();
+                    assert!(message.content.iter().any(|block| matches!(block,
+                        crate::message::ContentBlock::Text { text, .. } if text == &expected
+                    )));
+                }
+                1 => {
+                    next.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                        .await
+                        .unwrap();
+                    let wire = attachment_routing_read_request(&mut reader).await;
+                    assert_eq!(wire["content"], expected);
+                }
+                _ => assert_eq!(
+                    super::input::take_prepared_input(&mut next).expanded,
+                    expected
+                ),
+            }
+        }
+    }
+}
+
+#[test]
+fn paste_label_local_edit_repair_keeps_both_payloads() {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(paste_label_edit_and_repair(0));
+    });
+}
+
+#[test]
+fn paste_label_remote_edit_repair_keeps_both_payloads() {
+    with_temp_jcode_home(|| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            paste_label_edit_and_repair(1).await;
+            paste_label_edit_and_repair(2).await;
+        });
+    });
+}
+
+#[test]
+fn paste_label_boundaries_literals_and_other_insertions_keep_payloads() {
+    let a = "A1\nA2\nA3\nA4\nA5";
+    let b = "B1\nB2\nB3\nB4\nB5";
+    let c = "C1\nC2\nC3\nC4\nC5";
+    let label = super::input::paste_placeholder(a);
+    for at_end in [false, true] {
+        let mut app = create_test_app();
+        super::input::insert_input_text(&mut app, &format!("literal {label} 前缀 "));
+        let start = app.cursor_pos;
+        super::input::handle_text_paste(&mut app, a.into());
+        super::input::insert_input_text(&mut app, " | ");
+        super::input::handle_text_paste(&mut app, b.into());
+        let original = app.input.clone();
+        app.cursor_pos = start + if at_end { label.len() } else { 0 };
+        app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE)
+            .unwrap();
+        app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(app.input, original);
+        assert_eq!(app.pasted_contents, [a, b]);
+        app.cursor_pos = app.input.len();
+        super::input::handle_text_paste(&mut app, c.into());
+        assert_eq!(
+            super::input::take_prepared_input(&mut app).expanded,
+            format!("literal {label} 前缀 {a} | {b}{c}")
+        );
+    }
+    // Marker-shaped text with no saved payload stays editable literal text.
+    let mut app = create_test_app();
+    super::input::insert_input_text(&mut app, &label);
+    app.cursor_pos = 2;
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(app.input, format!("{}x{}", &label[..2], &label[2..]));
+    app.handle_key(KeyCode::Backspace, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(super::input::take_prepared_input(&mut app).expanded, label);
+
+    for insertion in 0..3 {
+        let mut app = create_test_app();
+        super::input::handle_text_paste(&mut app, a.into());
+        super::input::insert_input_text(&mut app, " | ");
+        let start = app.cursor_pos;
+        super::input::handle_text_paste(&mut app, b.into());
+        app.cursor_pos = start + 2;
+        let collapsed = app.input_draft_snapshot();
+        match insertion {
+            0 => super::input::handle_text_paste(&mut app, c.into()),
+            1 => attachment_routing_attach_image(&mut app),
+            _ => {
+                app.remember_input_undo_state();
+                app.replace_input_range(app.cursor_pos, app.cursor_pos, "x");
+            }
+        }
+        let snapshot = app.input_draft_snapshot();
+        let prepared = super::input::take_prepared_input(&mut app);
+        assert_eq!(
+            prepared.expanded,
+            format!("{a} | {b}{}", [c, "", "x"][insertion])
+        );
+        assert_eq!(prepared.images.len(), usize::from(insertion == 1));
+        app.restore_input_draft(snapshot);
+        // Submission clears undo; explicitly restore the captured original.
+        app.restore_input_draft(collapsed);
+        assert_eq!(
+            super::input::take_prepared_input(&mut app).expanded,
+            format!("{a} | {b}")
+        );
+    }
+}
