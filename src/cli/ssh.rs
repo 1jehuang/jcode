@@ -101,7 +101,7 @@ pub(crate) async fn run(args: Args) -> Result<()> {
 }
 
 #[cfg(unix)]
-async fn run_unix(args: Args) -> Result<()> {
+async fn run_unix(mut args: Args) -> Result<()> {
     let host = args
         .ssh
         .as_deref()
@@ -195,10 +195,10 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut term = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut quit = signal(SignalKind::quit())?;
+    args.fresh_spawn = true;
+    args.remote_working_dir = Some(working_dir.clone());
     let result = tokio::select! {
-        result = super::tui_launch::run_tui_client(
-            args.resume.clone(), None, false, true, Some(working_dir.clone()), false, false, None,
-        ) => result,
+        result = super::tui_launch::run_tui_client(&args, None, false, None) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),
         _ = interrupt.recv() => Ok(()),

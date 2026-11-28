@@ -10,6 +10,7 @@ use crate::process_title::{compact_process_title, session_name, set_title};
 
 pub(crate) fn initial_title(args: &Args) -> String {
     match &args.command {
+        Some(Command::Plugin(_)) => "jcode plugin".to_string(),
         Some(Command::Serve { .. }) => "jcode:server".to_string(),
         Some(Command::Acp) => "jcode acp".to_string(),
         Some(Command::Server { .. }) => "jcode server".to_string(),

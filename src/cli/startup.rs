@@ -32,10 +32,16 @@ pub async fn run() -> Result<()> {
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }) | Command::Mcp { .. })
+            Some(
+                Command::Auth(super::args::AuthCommand::Import { .. })
+                    | Command::Mcp { .. }
+                    | Command::Plugin(_)
+            )
         )
     {
-        if let Some(cwd) = &args.cwd {
+        if let Some(cwd) = &args.cwd
+            && !matches!(args.command, Some(Command::Plugin(_)))
+        {
             std::env::set_current_dir(cwd)?;
         }
         return dispatch::run_main(args).await;
