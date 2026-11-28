@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// A live quota probe that confirmed headroom for one account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccountUsageRecovery {
+    pub provider: String,
+    pub account_label: String,
+    pub checked_at_unix_ms: i64,
+}
+
 /// A provider-reported account limit beyond the two legacy quota slots.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageWindow {
@@ -70,6 +78,7 @@ mod account_usage_tests {
             id: 71,
             anthropic: vec![snapshot.clone()],
             openai: Vec::new(),
+            recoveries: Vec::new(),
         };
         let decoded: ServerEvent =
             serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
@@ -77,6 +86,7 @@ mod account_usage_tests {
             id,
             anthropic,
             openai,
+            ..
         } = decoded
         else {
             panic!("wrong response")
@@ -84,6 +94,13 @@ mod account_usage_tests {
         assert_eq!(id, 71);
         assert_eq!(anthropic, vec![snapshot.clone()]);
         assert!(openai.is_empty());
+        let legacy: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type": "account_usage", "id": 71, "anthropic": [], "openai": []
+        }))
+        .unwrap();
+        assert!(
+            matches!(legacy, ServerEvent::AccountUsage { recoveries, .. } if recoveries.is_empty())
+        );
         let mut legacy = serde_json::to_value(&snapshot).unwrap();
         legacy.as_object_mut().unwrap().remove("additional_windows");
         let legacy: AccountUsageSnapshot = serde_json::from_value(legacy).unwrap();
@@ -139,6 +156,8 @@ pub enum ServerEvent {
         id: u64,
         anthropic: Vec<AccountUsageSnapshot>,
         openai: Vec<AccountUsageSnapshot>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recoveries: Vec<AccountUsageRecovery>,
     },
     #[serde(rename = "runtime_command_result")]
     RuntimeCommandResult {

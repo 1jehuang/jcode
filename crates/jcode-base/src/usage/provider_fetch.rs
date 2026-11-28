@@ -334,11 +334,7 @@ pub(super) async fn fetch_openai_usage_for_account(
             limit.usage_percent.is_finite() && (0.0..99.0).contains(&limit.usage_percent)
         })
     {
-        crate::provider::models::clear_quota_unavailability_after_probe(
-            "openai",
-            label,
-            probe_started,
-        );
+        super::recovery::record_available("openai", label, probe_started);
     }
 
     // Read-only detail lookup. Failure must not hide otherwise valid usage.

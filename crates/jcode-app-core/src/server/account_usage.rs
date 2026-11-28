@@ -73,6 +73,7 @@ fn request_with_refresh(id: u64, tx: mpsc::UnboundedSender<ServerEvent>, force: 
             id,
             anthropic: snapshot.anthropic,
             openai: snapshot.openai,
+            recoveries: crate::usage::confirmed_available_accounts(),
         });
     });
 }

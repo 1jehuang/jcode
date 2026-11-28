@@ -401,7 +401,10 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::{AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent, TurnIdentity};
+pub use wire::{
+    AccountUsageRecovery, AccountUsageSnapshot, AccountUsageWindow, Request, ServerEvent,
+    TurnIdentity,
+};
 pub use wire::{SessionToolConfig, SessionToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -132,6 +132,7 @@ pub(super) struct ResetState<P = Pending> {
     cancelled: bool,
     redeem_account: Option<String>,
     pub(super) refresh_usage: bool,
+    pub(super) limit_wait: Option<(std::time::Instant, i64)>,
     /// A request rejection outranks a usage endpoint still reporting headroom.
     pub(super) openai_quota_rejected: bool,
     quota_refresh: Option<oneshot::Receiver<()>>,
@@ -150,6 +151,7 @@ impl<P> Default for ResetState<P> {
             cancelled: false,
             redeem_account: None,
             refresh_usage: false,
+            limit_wait: None,
             openai_quota_rejected: false,
             quota_refresh: None,
             invalidate_account: None,
@@ -247,6 +249,44 @@ async fn redeem(pending: &Pending) -> anyhow::Result<String> {
 }
 
 impl App {
+    pub(super) fn resume_after_usage_recovery(
+        &mut self,
+        recovery: &crate::protocol::AccountUsageRecovery,
+    ) -> bool {
+        let Some((reset, since)) = self.usage_reset.limit_wait else {
+            return false;
+        };
+        if self.rate_limit_reset != Some(reset)
+            || recovery.checked_at_unix_ms <= since
+            || self.is_processing
+            || self.rate_limit_pending_message.is_none()
+            || matches!(
+                self.status,
+                super::ProcessingStatus::WaitingForNetwork { .. }
+            )
+            || self.remote_resolved_credential
+                != Some(jcode_provider_core::ResolvedCredential::Oauth)
+            || self.remote_provider_oauth_account_label.as_deref()
+                != Some(recovery.account_label.as_str())
+            || self
+                .remote_provider_name
+                .as_deref()
+                .and_then(jcode_provider_core::parse_provider_hint)
+                != jcode_provider_core::parse_provider_hint(&recovery.provider)
+        {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        if let Some(pending) = self.rate_limit_pending_message.as_mut() {
+            pending.retry_at = Some(now);
+        }
+        self.rate_limit_reset = Some(now);
+        self.usage_reset.limit_wait = None;
+        self.usage_reset.openai_quota_rejected = false;
+        self.set_status_notice("Usage available; resuming");
+        true
+    }
+
     pub(super) fn refresh_openai_usage_after_quota_error(&mut self, error: &str) {
         if !is_hard_openai_quota_error(error)
             || self.info_widget_data().auth_method
@@ -466,6 +506,79 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_recovery_resumes_only_fresh_matching_subscription_holds() {
+        use crate::protocol::{AccountUsageRecovery, ServerEvent};
+        use std::time::{Duration, Instant};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _guard = runtime.enter();
+        for provider in ["openai", "claude"] {
+            let mut app = crate::tui::app::tests::create_test_app();
+            app.is_remote = true;
+            app.remote_provider_name = Some(provider.into());
+            app.remote_provider_oauth_account_label = Some("held-account".into());
+            app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+            app.is_processing = true;
+            app.current_message_id = Some(12);
+            app.input = "keep my draft".into();
+            app.rate_limit_pending_message = Some(super::super::PendingRemoteMessage {
+                jarvis_voice: false,
+                content: "finish my task".into(),
+                images: vec![],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.handle_server_event(
+                ServerEvent::Error {
+                    id: 12,
+                    message: "usage_limit_reached; resets in 1h".into(),
+                    retry_after_secs: Some(3600),
+                },
+                &mut remote,
+            );
+            let reset = app.rate_limit_reset.expect("subscription quota stays held");
+            assert!(reset > Instant::now() + Duration::from_secs(3500));
+            let since = app
+                .usage_reset
+                .limit_wait
+                .expect("watch for early resets")
+                .1;
+            let event = |label: &str, at| ServerEvent::AccountUsage {
+                id: 0,
+                anthropic: vec![],
+                openai: vec![],
+                recoveries: vec![AccountUsageRecovery {
+                    provider: provider.into(),
+                    account_label: label.into(),
+                    checked_at_unix_ms: at,
+                }],
+            };
+            app.handle_server_event(event("other-account", since + 1), &mut remote);
+            app.handle_server_event(event("held-account", since), &mut remote);
+            assert_eq!(app.rate_limit_reset, Some(reset));
+            app.handle_server_event(event("held-account", since + 1), &mut remote);
+            assert!(app.rate_limit_reset.unwrap() <= Instant::now());
+            let pending = app.rate_limit_pending_message.as_ref().unwrap();
+            assert!(pending.retry_at.unwrap() <= Instant::now());
+            assert_eq!(
+                pending.retry_attempts, 1,
+                "usage probes do not spend retries"
+            );
+            assert_eq!(pending.content, "finish my task");
+            assert_eq!(app.input, "keep my draft");
+            app.clear_pending_remote_retry();
+            app.handle_server_event(event("held-account", since + 2), &mut remote);
+            assert!(
+                app.rate_limit_reset.is_none(),
+                "late probes cannot revive a cancelled turn"
+            );
+        }
+    }
 
     #[test]
     fn usage_reset_parser_claims_malformed_commands() {

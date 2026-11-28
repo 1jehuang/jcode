@@ -131,6 +131,7 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
+        self.usage_reset.limit_wait = None;
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
     }
