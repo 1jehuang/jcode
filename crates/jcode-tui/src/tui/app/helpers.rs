@@ -320,24 +320,9 @@ pub(super) fn debug_response_path() -> PathBuf {
 mod rate_limit_parse;
 pub(super) use rate_limit_parse::{MAX_TURN_HOLD_SECS, parse_rate_limit_error};
 
-pub(super) fn is_context_limit_error(error: &str) -> bool {
-    if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error) {
-        return true;
-    }
-    let lower = error.to_lowercase();
-    lower.contains("context length")
-        || lower.contains("context window")
-        || lower.contains("maximum context")
-        || lower.contains("max context")
-        || lower.contains("token limit")
-        || lower.contains("too many tokens")
-        || lower.contains("prompt is too long")
-        || lower.contains("input is too long")
-        || lower.contains("request too large")
-        || lower.contains("length limit")
-        || lower.contains("maximum tokens")
-        || (lower.contains("exceeded") && lower.contains("tokens"))
-}
+#[path = "context_limit.rs"]
+mod context_limit;
+pub(super) use context_limit::is_context_limit_error;
 
 /// Whether `error` is a provider HTTP 413 "request too large" / payload-size
 /// rejection. This is distinct from a token-context overflow: it is driven by
