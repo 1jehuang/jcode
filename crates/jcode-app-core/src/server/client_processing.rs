@@ -1,5 +1,42 @@
 use super::*;
 
+pub(super) struct ProcessingMessage {
+    /// Keeps nonblocking AgentTask admission atomic through the lease claim.
+    pub(super) prepared_agent: Option<tokio::sync::OwnedMutexGuard<Agent>>,
+    pub(super) jarvis_voice: bool,
+    pub(super) id: u64,
+    pub(super) content: String,
+    pub(super) images: Vec<(String, String)>,
+    pub(super) system_reminder: Option<String>,
+    pub(super) active_skill: Option<String>,
+    /// Retry on the next pool account after a usage limit (API clients).
+    pub(super) server_failover: bool,
+}
+
+// A client request ID is not a turn identity: clients can reuse it after cancel.
+pub(super) type ProcessingCompletion = (
+    u64,
+    Result<()>,
+    Option<String>,
+    tokio::task::Id,
+    Option<crate::agent::TurnPublicationPin>,
+);
+
+pub(super) struct ProcessingState<'a> {
+    pub(super) client_is_processing: &'a mut bool,
+    pub(super) message_id: &'a mut Option<u64>,
+    pub(super) session_id: &'a mut Option<String>,
+    pub(super) task: &'a mut Option<tokio::task::JoinHandle<()>>,
+}
+
+pub(super) struct SwarmStatusRefs<'a> {
+    pub(super) members: &'a Arc<RwLock<HashMap<String, SwarmMember>>>,
+    pub(super) swarms_by_id: &'a Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    pub(super) event_history: &'a Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
+    pub(super) event_counter: &'a Arc<std::sync::atomic::AtomicU64>,
+    pub(super) event_tx: &'a broadcast::Sender<SwarmEvent>,
+}
+
 /// Retire finished turns before interpreting a request against client-local state.
 /// The task publishes completion before its terminal event, and never waits on
 /// this actor. Joining it also closes the cross-thread gap between those sends:
@@ -183,6 +220,54 @@ mod delivered_replay_tests {
     }
 }
 
+/// Admit AgentTask without waiting on another turn, then use normal turn tracking.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn start_agent_task(
+    id: u64,
+    task: String,
+    client_session_id: &str,
+    state: &mut ProcessingState<'_>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    processing_done_tx: &mpsc::UnboundedSender<ProcessingCompletion>,
+    client_terminal_env: Vec<(String, String)>,
+    swarm: &SwarmStatusRefs<'_>,
+) -> bool {
+    let was_processing = *state.client_is_processing;
+    let prepared_agent = if was_processing {
+        None
+    } else {
+        match Arc::clone(agent).try_lock_owned() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                send_agent_busy_error(id, "agent_task", client_session_id, false, client_event_tx);
+                return false;
+            }
+        }
+    };
+    start_processing_message(
+        ProcessingMessage {
+            prepared_agent,
+            jarvis_voice: false,
+            id,
+            content: task,
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+            server_failover: false,
+        },
+        client_session_id,
+        state,
+        agent,
+        client_event_tx,
+        processing_done_tx,
+        client_terminal_env,
+        swarm,
+    )
+    .await;
+    !was_processing && *state.client_is_processing
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
@@ -195,6 +280,7 @@ pub(super) async fn start_processing_message(
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
+        prepared_agent,
         jarvis_voice,
         id,
         content,
@@ -223,7 +309,10 @@ pub(super) async fn start_processing_message(
 
     // Serialize recovery acceptance with the agent lock across connections.
     // A stale History frame may submit the same reminder after its first turn.
-    let mut agent_guard = agent.lock().await;
+    let mut agent_guard = match prepared_agent {
+        Some(guard) => guard,
+        None => Arc::clone(agent).lock_owned().await,
+    };
     let turn_lease = match agent_guard.claim_server_turn() {
         Ok(lease) => lease,
         Err(error) => {

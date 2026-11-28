@@ -452,6 +452,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
 
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 42,
                 content: "do not start during reload".to_string(),
@@ -555,6 +556,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
 
     start_processing_message(
         ProcessingMessage {
+            prepared_agent: None,
             jarvis_voice: false,
             id: 479,
             content: "stream to every attachment".to_string(),
@@ -781,6 +783,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     let other_connection = agent.lock().await.claim_server_turn().unwrap();
     start_processing_message(
         ProcessingMessage {
+            prepared_agent: None,
             jarvis_voice: false,
             id: 1,
             content: "must not enter transcript".into(),
@@ -809,6 +812,7 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     for (id, content) in [(1, "first turn"), (2, "acceptance back on laptop")] {
         request_tx
             .send(ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id,
                 content: content.into(),
@@ -929,118 +933,6 @@ async fn terminal_done_then_immediate_message_reconciles_finished_turn() {
     }
 }
 
-#[tokio::test]
-async fn terminal_reconciliation_waits_for_terminal_enqueue_for_done_and_error() {
-    let _guard = crate::storage::lock_test_env();
-    let _env = IsolatedReloadRecoveryEnv::new();
-    for failed in [false, true] {
-        let (done_tx, mut done_rx) = mpsc::unbounded_channel();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let mut task = Some(tokio::spawn(async move {
-            let result = if failed {
-                Err(anyhow::anyhow!("terminal test error"))
-            } else {
-                Ok(())
-            };
-            done_tx
-                .send((7, result, None, tokio::task::id(), None))
-                .unwrap();
-            // Deterministically simulate preemption between the two sends.
-            release_rx.await.unwrap();
-            let terminal = if failed {
-                ServerEvent::Error {
-                    id: 7,
-                    message: "terminal test error".into(),
-                    retry_after_secs: Some(3),
-                }
-            } else {
-                ServerEvent::Done { id: 7 }
-            };
-            event_tx.send(terminal).unwrap();
-        }));
-        let completion = done_rx.recv().await.unwrap();
-        let mut processing = true;
-        let mut message_id = Some(7);
-        let mut session_id = Some("session_terminal_enqueue_gap".to_string());
-        let mut state = ProcessingState {
-            client_is_processing: &mut processing,
-            message_id: &mut message_id,
-            session_id: &mut session_id,
-            task: &mut task,
-        };
-        let (disconnect_tx, _) = mpsc::unbounded_channel();
-        let connections = Arc::new(RwLock::new(HashMap::from([(
-            "connection".into(),
-            ClientConnectionInfo {
-                client_id: "connection".into(),
-                session_id: "session_terminal_enqueue_gap".into(),
-                client_instance_id: None,
-                debug_client_id: None,
-                connected_at: Instant::now(),
-                last_seen: Instant::now(),
-                is_processing: true,
-                current_tool_name: Some("old tool".into()),
-                terminal_env: Vec::new(),
-                disconnect_tx,
-            },
-        )])));
-        let members = Arc::new(RwLock::new(HashMap::new()));
-        let swarms = Arc::new(RwLock::new(HashMap::new()));
-        let history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
-        let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let (swarm_tx, _) = broadcast::channel(8);
-        let swarm = SwarmStatusRefs {
-            members: &members,
-            swarms_by_id: &swarms,
-            event_history: &history,
-            event_counter: &counter,
-            event_tx: &swarm_tx,
-        };
-        {
-            let reconcile = reconcile_processing_completions(
-                Some(completion),
-                &mut done_rx,
-                &mut state,
-                "connection",
-                &connections,
-                &swarm,
-            );
-            tokio::pin!(reconcile);
-            assert!(
-                futures::poll!(&mut reconcile).is_pending(),
-                "must not retire before terminal enqueue"
-            );
-            assert!(event_rx.try_recv().is_err());
-            release_tx.send(()).unwrap();
-            reconcile.await;
-        }
-        assert!(!*state.client_is_processing);
-        assert!(state.message_id.is_none());
-        assert!(state.session_id.is_none());
-        assert!(state.task.is_none());
-        let connections = connections.read().await;
-        assert!(!connections["connection"].is_processing);
-        assert!(connections["connection"].current_tool_name.is_none());
-        let terminal = event_rx
-            .try_recv()
-            .expect("terminal is queued before new turn can start");
-        if failed {
-            assert!(matches!(
-                terminal,
-                ServerEvent::Error {
-                    id: 7,
-                    retry_after_secs: Some(3),
-                    ..
-                }
-            ));
-        } else {
-            assert!(matches!(terminal, ServerEvent::Done { id: 7 }));
-        }
-        assert!(event_rx.try_recv().is_err(), "one terminal event only");
-    }
-}
-
 #[test]
 fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Result<()> {
     let _lock = crate::storage::lock_test_env();
@@ -1087,6 +979,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 77,
                 content: "continue after reload".to_string(),
@@ -1149,6 +1042,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
         // delivered_replay_is_reminder_only), so it is not a no-op.
         start_processing_message(
             ProcessingMessage {
+                prepared_agent: None,
                 jarvis_voice: false,
                 id: 78,
                 content: String::new(),
@@ -1214,6 +1108,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             }
             start_processing_message(
                 ProcessingMessage {
+                    prepared_agent: None,
                     jarvis_voice: false,
                     id,
                     content: continuation.to_string(),
@@ -1309,6 +1204,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
 
             start_processing_message(
                 ProcessingMessage {
+                    prepared_agent: None,
                     jarvis_voice: false,
                     id: message_id,
                     content: format!("do not start {session_id} during reload"),
@@ -1513,6 +1409,8 @@ fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
 #[path = "client_lifecycle_socket_tests.rs"]
 mod socket_workflows;
 
+#[path = "client_lifecycle_tests/agent_task.rs"]
+mod agent_task;
 #[path = "client_lifecycle_tests/system_prompt.rs"]
 mod system_prompt;
 
