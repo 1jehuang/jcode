@@ -1241,25 +1241,23 @@ impl RemoteConnection {
     /// `SoftInterruptsCancelled`, splitting the ids into still-queued (now
     /// removed) and not-queued (already injected or started as a turn).
     pub async fn cancel_soft_interrupts_by_id(&mut self, client_ids: Vec<String>) -> Result<u64> {
+        self.cancel_soft_interrupts_request(Some(client_ids)).await
+    }
+
+    pub async fn cancel_soft_interrupts(&mut self) -> Result<u64> {
+        self.cancel_soft_interrupts_request(None).await
+    }
+
+    async fn cancel_soft_interrupts_request(
+        &mut self,
+        client_ids: Option<Vec<String>>,
+    ) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::CancelSoftInterrupts {
-            id,
-            client_ids: Some(client_ids),
-        };
+        let request = Request::CancelSoftInterrupts { id, client_ids };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
             .await?;
         Ok(id)
-    }
-
-    pub async fn cancel_soft_interrupts(&mut self) -> Result<()> {
-        let request = Request::CancelSoftInterrupts {
-            id: self.next_request_id,
-            client_ids: None,
-        };
-        self.next_request_id += 1;
-        self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))
-            .await
     }
 
     /// Split the current session - ask server to clone conversation into a new session

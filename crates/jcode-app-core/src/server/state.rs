@@ -836,7 +836,8 @@ impl SessionControlHandle {
             .unwrap_or(0)
     }
 
-    /// Remove the queued interrupts whose caller id is in `client_ids`.
+    /// Remove live and persisted interrupts whose caller id is in `client_ids`.
+    /// Storage or queue failures return an error without a cancellation verdict.
     ///
     /// Injection drains the queue under the same lock, so each requested id is
     /// reported exactly once: in `cancelled` if it was still queued, otherwise
@@ -845,33 +846,27 @@ impl SessionControlHandle {
     pub fn cancel_soft_interrupts_by_id(
         &self,
         client_ids: &[String],
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         let mut requested: Vec<String> = Vec::new();
         for id in client_ids {
             if !requested.contains(id) {
                 requested.push(id.clone());
             }
         }
-        let removed: Vec<String> = match self.soft_interrupt_queue.lock() {
-            Ok(mut queue) => {
-                let mut removed = Vec::new();
-                queue.retain(|message| match &message.client_id {
-                    Some(id) if requested.contains(id) => {
-                        removed.push(id.clone());
-                        false
-                    }
-                    _ => true,
-                });
-                removed
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Soft interrupt queue is unavailable"))?;
+        // A snapshot may hold the same input as the live queue.
+        let mut removed =
+            crate::soft_interrupt_store::remove_by_client_ids(&self.session_id, &requested)?;
+        queue.retain(|message| match &message.client_id {
+            Some(id) if requested.contains(id) => {
+                removed.push(id.clone());
+                false
             }
-            Err(_) => {
-                crate::logging::warn(&format!(
-                    "SOFT_INTERRUPT_QUEUE_CANCEL_BY_ID_FAILED session={} reason=queue_lock_poisoned",
-                    self.session_id
-                ));
-                Vec::new()
-            }
-        };
+            _ => true,
+        });
         let (cancelled, not_queued): (Vec<String>, Vec<String>) =
             requested.into_iter().partition(|id| removed.contains(id));
         crate::logging::info(&format!(
@@ -880,23 +875,22 @@ impl SessionControlHandle {
             cancelled.len(),
             not_queued.len()
         ));
-        (cancelled, not_queued)
+        Ok((cancelled, not_queued))
     }
 
-    pub fn clear_soft_interrupts(&self) {
-        if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
-            let cleared = queue.len();
-            queue.clear();
-            crate::logging::info(&format!(
-                "SOFT_INTERRUPT_QUEUE_CLEAR session={} cleared={}",
-                self.session_id, cleared
-            ));
-        } else {
-            crate::logging::warn(&format!(
-                "SOFT_INTERRUPT_QUEUE_CLEAR_FAILED session={} reason=queue_lock_poisoned",
-                self.session_id
-            ));
-        }
+    pub fn clear_soft_interrupts(&self) -> anyhow::Result<()> {
+        let mut queue = self
+            .soft_interrupt_queue
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Soft interrupt queue is unavailable"))?;
+        crate::soft_interrupt_store::clear(&self.session_id)?;
+        let cleared = queue.len();
+        queue.clear();
+        crate::logging::info(&format!(
+            "SOFT_INTERRUPT_QUEUE_CLEAR session={} cleared={}",
+            self.session_id, cleared
+        ));
+        Ok(())
     }
 
     /// Fire the stop-current-turn signal. Returns the signal's fire epoch so

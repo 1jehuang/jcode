@@ -33,7 +33,7 @@ fn test_reload_soft_interrupt_recovery_preserves_order_across_verdict_groups() {
         app.queued_messages.push("later queued request".into());
 
         rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
-        let (cancel_id, _) = app.soft_interrupt_recovery.unwrap();
+        let cancel_id = app.soft_interrupt_recovery.unwrap().request_id().unwrap();
         app.handle_server_event(
             ServerEvent::SoftInterruptsCancelled {
                 id: cancel_id,

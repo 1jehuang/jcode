@@ -34,6 +34,11 @@ pub(in crate::tui::app) fn handle_server_event(
         super::super::fail_pending_automatic_failover(app, message);
         return true;
     }
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.fail_soft_interrupt_recovery(*id, message)
+    {
+        return true;
+    }
     let (event, identity) = match event {
         ServerEvent::TurnState {
             session_id,

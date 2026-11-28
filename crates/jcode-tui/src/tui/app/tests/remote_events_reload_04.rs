@@ -32,8 +32,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
     app.status = ProcessingStatus::Streaming;
     app.current_message_id = Some(10);
     app.interleave_message = Some("unsent interleave".to_string());
-    app.pending_soft_interrupts = vec!["acked interleave".to_string()];
-    app.pending_soft_interrupt_requests = vec![(88, "acked interleave".to_string())];
+    app.track_pending_soft_interrupt(88, "acked interleave".into());
     app.queued_messages.push("queued later".to_string());
 
     app.handle_server_event(
@@ -57,7 +56,7 @@ fn test_remote_error_without_retry_recovers_pending_followups() {
         vec![(88, "acked interleave".to_string())]
     );
 
-    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    rt.block_on(process_followups_with_clear_ack(&mut app, &mut remote));
 
     assert!(app.pending_soft_interrupts.is_empty());
     assert!(app.pending_soft_interrupt_requests.is_empty());
