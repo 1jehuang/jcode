@@ -200,6 +200,7 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
 mod model_ranking;
 #[cfg(test)]
 use model_ranking::openai_compatible_model_quality_tier;
+pub use model_ranking::openai_compatible_profile_model_supports_chat;
 use model_ranking::rank_newest_released_model;
 fn apply_profile_key_based_endpoint_overrides(
     profile: OpenAiCompatibleProfile,
@@ -640,10 +641,6 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
     models
 }
 
-pub fn openai_compatible_profile_model_supports_chat(_profile_id: &str, _model: &str) -> bool {
-    true
-}
-
 pub fn openai_compatible_profile_static_context_limits(
     profile: OpenAiCompatibleProfile,
 ) -> HashMap<String, usize> {
@@ -988,6 +985,7 @@ pub fn apply_named_provider_profile_env_from_config(
     let static_models = profile
         .models
         .iter()
+        .filter(|model| crate::provider::named_provider_model_supports_chat(model))
         .map(|model| model.id.trim())
         .filter(|id| !id.is_empty())
         .collect::<Vec<_>>();

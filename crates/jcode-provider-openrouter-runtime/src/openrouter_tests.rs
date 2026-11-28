@@ -1273,6 +1273,7 @@ fn make_provider() -> OpenRouterProvider {
         max_tokens: None,
         extra_body: None,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
@@ -1308,6 +1309,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         max_tokens: None,
         extra_body: None,
         static_models: Vec::new(),
+        static_model_config: HashMap::new(),
         static_context_limits: HashMap::new(),
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
@@ -1349,7 +1351,7 @@ fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Rec
     (format!("http://{addr}/v1"), request_rx)
 }
 
-fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
+pub(super) fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
     let addr = listener.local_addr().expect("fake provider addr");
     let (request_tx, request_rx) = mpsc::channel();
@@ -2195,9 +2197,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "custom-long-context".to_string(),
             context_window: Some(512_000),
-            reasoning: None,
-            reasoning_effort: None,
-            input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };
@@ -2224,9 +2224,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "qwen3.6-35b-a2000-128k".to_string(),
             context_window: Some(131_072),
-            reasoning: None,
-            reasoning_effort: None,
-            input: Vec::new(),
+            ..Default::default()
         }],
         ..Default::default()
     };

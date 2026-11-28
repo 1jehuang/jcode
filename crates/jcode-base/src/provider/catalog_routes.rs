@@ -673,6 +673,11 @@ fn append_openai_compatible_profile_routes(
     added_any
 }
 
+pub fn named_provider_model_supports_chat(model: &crate::config::NamedProviderModelConfig) -> bool {
+    model.supports_chat != Some(false)
+        && (model.input.is_empty() || model.input.iter().any(|input| input == "text"))
+}
+
 /// Picker routes for one user-defined named provider profile from config.
 ///
 /// Text-capable static models plus the profile's `default_model` are offered;
@@ -684,10 +689,7 @@ fn named_provider_profile_routes(
     let mut models: Vec<String> = profile_config
         .models
         .iter()
-        .filter(|model| {
-            // `input` empty means unspecified (assume text-capable).
-            model.input.is_empty() || model.input.iter().any(|input| input == "text")
-        })
+        .filter(|model| named_provider_model_supports_chat(model))
         .map(|model| model.id.trim().to_string())
         .filter(|id| !id.is_empty())
         .collect();
@@ -697,6 +699,13 @@ fn named_provider_profile_routes(
             .as_deref()
             .map(str::trim)
             .filter(|model| !model.is_empty())
+            .filter(|model| {
+                profile_config
+                    .models
+                    .iter()
+                    .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+                    .is_none_or(named_provider_model_supports_chat)
+            })
     {
         models.push(default_model.to_string());
     }

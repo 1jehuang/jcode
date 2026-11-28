@@ -1,5 +1,24 @@
 use super::*;
 
+pub fn openai_compatible_profile_model_supports_chat(profile_id: &str, model: &str) -> bool {
+    let config = crate::config::config();
+    let profile = config.providers.get(profile_id).or_else(|| {
+        config
+            .providers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(profile_id))
+            .map(|(_, profile)| profile)
+    });
+    profile
+        .and_then(|profile| {
+            profile
+                .models
+                .iter()
+                .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))
+        })
+        .is_none_or(crate::provider::named_provider_model_supports_chat)
+}
+
 pub(super) fn rank_newest_released_model(
     profile_id: &str,
     resolved: &ResolvedOpenAiCompatibleProfile,

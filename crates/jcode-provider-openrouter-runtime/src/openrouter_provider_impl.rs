@@ -56,6 +56,12 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        let model = self.model.read().await.clone();
+        anyhow::ensure!(
+            self.model_supports_chat(&model),
+            "Model '{}' is not configured as chat-capable",
+            model
+        );
         if self.profile_id.as_deref() == Some("muse-subscription") {
             jcode_base::auth::muse::ensure_enabled()?;
             let client = jcode_base::auth::muse::http_client()?;
@@ -64,7 +70,6 @@ impl Provider for OpenRouterProvider {
         if self.builtin_azure {
             return self.complete_azure_responses(messages, tools, system).await;
         }
-        let model = self.model.read().await.clone();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
         let reasoning_effort = self.reasoning_effort();
@@ -265,6 +270,13 @@ impl Provider for OpenRouterProvider {
             }
         }
 
+        let wire_model = request["model"].as_str().unwrap_or(&model);
+        anyhow::ensure!(
+            self.model_supports_chat(wire_model),
+            "Model '{}' is not configured as chat-capable",
+            wire_model
+        );
+
         let (message_items, system_value, tools_value, tool_count) =
             canonical_input_parts(&request);
         jcode_provider_core::fingerprint::log_provider_canonical_input(
@@ -428,11 +440,7 @@ impl Provider for OpenRouterProvider {
             // preserve the caller's model string exactly for custom endpoints.
             (trimmed.to_string(), None)
         };
-        if let Some(profile_id) = self.profile_id.as_deref()
-            && !jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                profile_id, &model_id,
-            )
-        {
+        if self.profile_id.is_some() && !self.model_supports_chat(&model_id) {
             anyhow::bail!(
                 "Model '{}' is listed by the provider catalog but is not currently usable for chat completions through this direct provider. Choose another model from `/model`.",
                 model_id
@@ -851,6 +859,7 @@ impl Provider for OpenRouterProvider {
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),
+            static_model_config: self.static_model_config.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
@@ -920,6 +929,13 @@ impl OpenRouterProvider {
                 request_obj.insert(key.clone(), value.clone());
             }
         }
+
+        let wire_model = request["model"].as_str().unwrap_or(&model);
+        anyhow::ensure!(
+            self.model_supports_chat(wire_model),
+            "Model '{}' is not configured as chat-capable",
+            wire_model
+        );
 
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "azure-openai",

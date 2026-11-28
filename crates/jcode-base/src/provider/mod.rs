@@ -52,13 +52,12 @@ use std::time::Instant;
 
 pub use account_failover::{has_alternate_account_in_pool, has_eligible_alternate_account};
 pub use catalog_routes::{
-    append_simplified_anthropic_model_routes, remote_current_openai_compatible_route_for_model,
-    remote_model_is_server_copilot_only, remote_model_routes_fallback,
-    remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
-    remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
+    append_simplified_anthropic_model_routes, named_provider_model_supports_chat,
+    remote_current_openai_compatible_route_for_model, remote_model_is_server_copilot_only,
+    remote_model_routes_fallback, remote_model_routes_lightweight_fallback,
+    remote_model_should_offer_copilot_route, remote_openai_compatible_route_for_model,
+    simplified_model_routes_for_picker,
 };
-pub use jcode_provider_core::attempt_tracker;
-pub use jcode_provider_core::cli_provider_arg_for_session_key;
 pub use jcode_provider_core::{
     ALL_CLAUDE_MODELS, ALL_OPENAI_MODELS, CHATGPT_WEB_MODEL, CHEAPNESS_REFERENCE_INPUT_TOKENS,
     CHEAPNESS_REFERENCE_OUTPUT_TOKENS, CredentialMode, DEFAULT_CONTEXT_LIMIT, EventStream,
@@ -77,6 +76,7 @@ pub use jcode_provider_core::{
     pick_next_fallback_route_with_options,
 };
 pub use jcode_provider_core::{ProviderFailoverPrompt, parse_failover_prompt_message};
+pub use jcode_provider_core::{attempt_tracker, cli_provider_arg_for_session_key};
 pub use route_builders::{
     build_anthropic_oauth_route, build_chatgpt_web_route, build_copilot_route,
     build_openai_api_key_route, build_openai_oauth_route, build_openrouter_auto_route,

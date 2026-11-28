@@ -813,6 +813,7 @@ pub struct OpenRouterProvider {
     /// `JCODE_OPENAI_EXTRA_BODY` env/env-file value.
     extra_body: Option<serde_json::Map<String, Value>>,
     static_models: Vec<String>,
+    static_model_config: HashMap<String, jcode_base::config::NamedProviderModelConfig>,
     static_context_limits: HashMap<String, usize>,
     /// Explicit per-model image-input capability from named-provider `models[].input`.
     /// Missing entries mean unspecified and preserve the provider-level fallback.
@@ -1449,6 +1450,12 @@ impl OpenRouterProvider {
                     .unwrap_or(DEFAULT_ENV_FILE),
             ),
             static_models,
+            static_model_config: profile
+                .models
+                .iter()
+                .filter(|model| !model.id.trim().is_empty())
+                .map(|model| (model.id.trim().to_ascii_lowercase(), model.clone()))
+                .collect(),
             static_context_limits,
             static_image_input_support,
             send_openrouter_headers: false,
@@ -1691,6 +1698,7 @@ impl OpenRouterProvider {
             max_tokens,
             extra_body,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
@@ -1748,6 +1756,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: None,
             static_models,
+            static_model_config: HashMap::new(),
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
@@ -1797,6 +1806,7 @@ impl OpenRouterProvider {
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
             static_models: Vec::new(),
+            static_model_config: HashMap::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
@@ -1831,21 +1841,6 @@ impl OpenRouterProvider {
             .last_attempt_unix
             .map(|last| now.saturating_sub(last) >= MODEL_CATALOG_REFRESH_RETRY_SECS)
             .unwrap_or(true)
-    }
-
-    pub(crate) fn filter_profile_chat_supported_models(&self, models: Vec<String>) -> Vec<String> {
-        let Some(profile_id) = self.profile_id.as_deref() else {
-            return models;
-        };
-
-        models
-            .into_iter()
-            .filter(|model| {
-                jcode_base::provider_catalog::openai_compatible_profile_model_supports_chat(
-                    profile_id, model,
-                )
-            })
-            .collect()
     }
 
     fn model_disk_cache_source_matches(
@@ -2004,6 +1999,7 @@ impl OpenRouterProvider {
                 max_tokens: None,
                 extra_body: None,
                 static_models: Vec::new(),
+                static_model_config: HashMap::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
@@ -2860,3 +2856,7 @@ mod muse_native_tests;
 #[cfg(test)]
 #[path = "placeholder_default_tests.rs"]
 mod placeholder_default_tests;
+
+#[cfg(test)]
+#[path = "named_chat_tests.rs"]
+mod named_chat_tests;
