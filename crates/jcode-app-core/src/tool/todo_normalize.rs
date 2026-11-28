@@ -80,6 +80,7 @@ pub(super) fn normalize_todo_input(mut input: Value) -> Value {
                     "hill_climbability",
                     "end_to_end_ownership",
                     "delivery_state",
+                    "verification_state",
                     "feedback_loop_relevance",
                     "feedback_loop_coverage",
                     "feedback_loop_traceability",

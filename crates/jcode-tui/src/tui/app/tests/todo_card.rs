@@ -310,7 +310,7 @@ fn refresh_todo_card_updates_content_when_goal_scores_change() {
         group: None,
         closed_feedback_loop: Some(state),
         feedback_loop: Some("inspect the frame".to_string()),
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     };
 

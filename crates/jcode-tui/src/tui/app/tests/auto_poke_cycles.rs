@@ -26,7 +26,7 @@ fn default_auto_poke_rechecks_undelivered_goal_but_not_completed_confidence() {
             crate::todo::save_goals(
                 &app.session.id,
                 &[crate::todo::TodoGoal {
-                    delivery_state: Some(crate::todo::DeliveryState::ChangeMade),
+                    delivery_state: Some(crate::todo::DeliveryState::Undelivered),
                     ..Default::default()
                 }],
             )
@@ -67,7 +67,7 @@ fn paused_login_does_not_hide_an_independent_undelivered_goal() {
             &app.session.id,
             &[crate::todo::TodoGoal {
                 group: Some("offline".into()),
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
                 ..Default::default()
             }],
         )
@@ -210,7 +210,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -318,7 +318,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),

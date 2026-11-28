@@ -307,7 +307,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         crate::todo::save_goals(
             &reloaded_app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -364,7 +364,7 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -431,7 +431,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
             &app.session.id,
             &[crate::todo::TodoGoal {
                 group: Some("release".to_string()),
-                delivery_state: Some(crate::todo::DeliveryState::Integrated),
+                delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
                 feedback_loop: Some("run the end-to-end release check".to_string()),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -486,7 +486,7 @@ fn remote_ownership_gate_is_not_evaluated_by_client() {
             &remote_session_id,
             &[crate::todo::TodoGoal {
                 group: Some("release".to_string()),
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -525,7 +525,7 @@ fn save_unfinished_ownership_fixture(session_id: &str) {
         session_id,
         &[crate::todo::TodoGoal {
             difficulty: Some(crate::todo::Difficulty::Involved),
-            delivery_state: Some(crate::todo::DeliveryState::Integrated),
+            delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
             autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
             iteration_maturity: Some(crate::todo::IterationMaturity::Improving),
             stopping_evidence: None,
@@ -603,9 +603,9 @@ fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
             // Alternate a delivery gap with an iteration gap, not just wording.
             let delivery_gap = attempt % 2 == 0;
             goals[0].delivery_state = Some(if delivery_gap {
-                crate::todo::DeliveryState::Integrated
+                crate::todo::DeliveryState::PartiallyDelivered
             } else {
-                crate::todo::DeliveryState::OutcomeDelivered
+                crate::todo::DeliveryState::Delivered
             });
             goals[0].iteration_maturity = Some(if delivery_gap {
                 crate::todo::IterationMaturity::OutcomeReached
@@ -663,7 +663,7 @@ fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results
                 // Documented stops may retain delivery and check limitations.
                 // Requested-only success needs no additional ownership work.
                 if maturity == crate::todo::IterationMaturity::OutcomeReached {
-                    goals[0].delivery_state = Some(crate::todo::DeliveryState::OutcomeDelivered);
+                    goals[0].delivery_state = Some(crate::todo::DeliveryState::Delivered);
                     goals[0].stopping_evidence = None;
                 }
                 goals[0].difficulty = Some(crate::todo::Difficulty::Complex);
@@ -968,7 +968,7 @@ fn test_gate_digest_is_disabled_at_turn_end() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),

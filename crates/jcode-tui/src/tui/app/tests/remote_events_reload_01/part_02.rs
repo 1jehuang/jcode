@@ -171,7 +171,7 @@ fn test_remote_done_leaves_confidence_spike_challenge_to_daemon() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -229,7 +229,7 @@ fn test_remote_done_leaves_completion_confidence_gate_to_daemon() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),

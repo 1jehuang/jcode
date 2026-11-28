@@ -223,7 +223,7 @@ A todo has no "blocked" state. An unfinished todo keeps receiving automatic cont
     {"name": "Deploy to production", "requires_user_auth": {"reason": "Log in to the deploy dashboard"}}
   ],
   "goals": [
-    {"group": "migration", "delivery_state": "not_started", "cannot_complete": "Source data was deleted upstream", "closed_feedback_loop": "absent", "feedback_loop": "None possible", "feedback_loop_relevance": "indirect", "feedback_loop_coverage": "narrow", "feedback_loop_traceability": "unmapped"}
+    {"group": "migration", "delivery_state": "undelivered", "verification_state": "unchecked", "cannot_complete": "Source data was deleted upstream", "closed_feedback_loop": "absent", "feedback_loop": "None possible", "feedback_loop_relevance": "indirect", "feedback_loop_coverage": "narrow", "feedback_loop_traceability": "unmapped"}
   ]
 }
 ```

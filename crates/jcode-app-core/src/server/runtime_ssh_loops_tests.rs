@@ -386,7 +386,8 @@ async fn undelivered_goal_continues_once_after_last_attempt_finishes() {
     todo::save_goals(
         &session,
         &[todo::TodoGoal {
-            delivery_state: Some(todo::DeliveryState::WorkflowValidated),
+            delivery_state: Some(todo::DeliveryState::Undelivered),
+            verification_state: Some(todo::VerificationState::CheckedEndToEnd),
             ..Default::default()
         }],
     )

@@ -361,7 +361,7 @@ fn omitted_goal_fields_inherit_the_stored_assessment() {
             feedback_loop: Some("cargo bench".to_string()),
             feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
             feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-            delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+            delivery_state: Some(crate::todo::DeliveryState::Delivered),
             ..Default::default()
         }]),
     );
@@ -387,7 +387,7 @@ fn omitted_goal_fields_inherit_the_stored_assessment() {
     );
     assert_eq!(
         merged[0].delivery_state,
-        Some(crate::todo::DeliveryState::OutcomeDelivered)
+        Some(crate::todo::DeliveryState::Delivered)
     );
 }
 

@@ -754,7 +754,11 @@ async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
     let saved_goal = &saved_goals[0];
     assert_eq!(
         saved_goal.delivery_state,
-        Some(crate::todo::DeliveryState::WorkflowValidated)
+        Some(crate::todo::DeliveryState::Undelivered)
+    );
+    assert_eq!(
+        saved_goal.verification_state,
+        Some(crate::todo::VerificationState::CheckedEndToEnd)
     );
     assert_eq!(
         saved_goal.feedback_loop_relevance,

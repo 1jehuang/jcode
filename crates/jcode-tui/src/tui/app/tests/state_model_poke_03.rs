@@ -2764,7 +2764,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
@@ -2945,7 +2945,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+                delivery_state: Some(crate::todo::DeliveryState::Delivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),

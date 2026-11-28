@@ -1335,6 +1335,9 @@ fn render_todos_message_with_cap(
                     base_indent,
                     inner_width,
                 ));
+                if goals.len() > 1 && let Some(goal) = goal {
+                    push_todo_outcome_states(&mut lines, std::slice::from_ref(goal), base_indent, inner_width);
+                }
                 push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
                 push_todo_item_lines(
                     &mut lines,
@@ -1758,6 +1761,22 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+fn delivery_color(state: crate::todo::DeliveryState) -> Color {
+    match state {
+        crate::todo::DeliveryState::Undelivered => todo_failure_color(),
+        crate::todo::DeliveryState::PartiallyDelivered => todo_warning_color(),
+        crate::todo::DeliveryState::Delivered => todo_score_color(),
+    }
+}
+
+fn verification_color(state: crate::todo::VerificationState) -> Color {
+    match state {
+        crate::todo::VerificationState::Unchecked => todo_meta_color(),
+        crate::todo::VerificationState::CheckedInIsolation => todo_warning_color(),
+        crate::todo::VerificationState::CheckedEndToEnd => todo_score_color(),
+    }
+}
+
 /// Plan-level assessment lines shown once above the todo groups.
 fn push_todo_plan_details(
     lines: &mut Vec<Line<'static>>,
@@ -1800,19 +1819,32 @@ fn push_todo_plan_details(
             compact_details,
         );
     }
+    push_todo_outcome_states(lines, goals, base_indent, inner_width);
+}
+
+fn push_todo_outcome_states(
+    lines: &mut Vec<Line<'static>>,
+    goals: &[crate::todo::TodoGoal],
+    base_indent: &str,
+    inner_width: usize,
+) {
     if let Some(state) = goals.iter().filter_map(|goal| goal.delivery_state).min() {
-        let state_color = match state {
-            crate::todo::DeliveryState::NotStarted | crate::todo::DeliveryState::ChangeMade => {
-                todo_meta_color()
-            }
-            crate::todo::DeliveryState::Integrated => todo_warning_color(),
-            crate::todo::DeliveryState::WorkflowValidated
-            | crate::todo::DeliveryState::OutcomeDelivered => todo_score_color(),
-        };
+        let state_color = delivery_color(state);
         lines.push(todo_card_line(
             vec![
                 Span::styled("Delivery ", Style::default().fg(todo_label_color())),
                 Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
+            ],
+            base_indent,
+            inner_width,
+        ));
+    }
+    if let Some(state) = goals.iter().filter_map(|goal| goal.verification_state).min() {
+        let color = verification_color(state);
+        lines.push(todo_card_line(
+            vec![
+                Span::styled("Verification ", Style::default().fg(todo_label_color())),
+                Span::styled(state.as_str().to_string(), Style::default().fg(color)),
             ],
             base_indent,
             inner_width,
@@ -2118,8 +2150,9 @@ fn render_todo_goal_updates(
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::DeliveryState => push_todo_score_update(
+                crate::todo::TodoGoalField::DeliveryState => push_colored_todo_score_update(
                     &mut lines,
+                    update.after.as_ref().and_then(|goal| goal.delivery_state).map(delivery_color).unwrap_or_else(todo_meta_color),
                     "Delivery",
                     update
                         .before
@@ -2131,6 +2164,15 @@ fn render_todo_goal_updates(
                         .as_ref()
                         .and_then(|goal| goal.delivery_state)
                         .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::VerificationState => push_colored_todo_score_update(
+                    &mut lines,
+                    update.after.as_ref().and_then(|goal| goal.verification_state).map(verification_color).unwrap_or_else(todo_meta_color),
+                    "Verification",
+                    update.before.as_ref().and_then(|g| g.verification_state).map(|s| s.as_str().to_string()),
+                    update.after.as_ref().and_then(|g| g.verification_state).map(|s| s.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
@@ -2196,6 +2238,18 @@ fn push_todo_score_update(
     base_indent: &str,
     inner_width: usize,
 ) {
+    push_colored_todo_score_update(lines, todo_score_color(), label, before, after, base_indent, inner_width);
+}
+
+fn push_colored_todo_score_update(
+    lines: &mut Vec<Line<'static>>,
+    after_color: Color,
+    label: &str,
+    before: Option<String>,
+    after: Option<String>,
+    base_indent: &str,
+    inner_width: usize,
+) {
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
@@ -2207,10 +2261,10 @@ fn push_todo_score_update(
         (Some(before), Some(after)) => {
             spans.push(Span::styled(before, Style::default().fg(todo_meta_color())));
             spans.push(Span::styled(" → ", Style::default().fg(todo_label_color())));
-            spans.push(Span::styled(after, Style::default().fg(todo_score_color())));
+            spans.push(Span::styled(after, Style::default().fg(after_color)));
         }
         (None, Some(after)) => {
-            spans.push(Span::styled(after, Style::default().fg(todo_score_color())))
+            spans.push(Span::styled(after, Style::default().fg(after_color)))
         }
         (_, None) => spans.push(Span::styled(
             "cleared",

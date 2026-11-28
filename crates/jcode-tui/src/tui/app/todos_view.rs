@@ -715,7 +715,7 @@ fn build_todos_view_markdown(
     _session_id: Option<&str>,
     todos: &[TodoItem],
     _plan: &crate::todo::TodoPlan,
-    _goals: &[crate::todo::TodoGoal],
+    goals: &[crate::todo::TodoGoal],
 ) -> String {
     if todos.is_empty() {
         return "# Todos\n\nNo todos saved yet for this session.\n".to_string();
@@ -754,6 +754,20 @@ fn build_todos_view_markdown(
             String::new()
         },
     );
+
+    for goal in goals {
+        let mut states = Vec::new();
+        if let Some(state) = goal.delivery_state {
+            states.push(format!("Delivery {}", state.as_str()));
+        }
+        if let Some(state) = goal.verification_state {
+            states.push(format!("Verification {}", state.as_str()));
+        }
+        if !states.is_empty() {
+            let group = goal.group.as_deref().unwrap_or("Goal");
+            markdown.push_str(&format!("\n{group}: {}\n", states.join(" · ")));
+        }
+    }
 
     let sections = [
         ("in_progress", "In progress"),
@@ -888,6 +902,7 @@ fn hash_todos_payload(
         goal.feedback_loop_coverage.hash(&mut hasher);
         goal.feedback_loop_traceability.hash(&mut hasher);
         goal.delivery_state.hash(&mut hasher);
+        goal.verification_state.hash(&mut hasher);
         goal.difficulty.hash(&mut hasher);
         goal.autonomy.hash(&mut hasher);
         goal.cannot_complete.hash(&mut hasher);
@@ -1132,12 +1147,14 @@ mod tests {
                 ),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
                 feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
+                verification_state: Some(crate::todo::VerificationState::CheckedEndToEnd),
                 ..Default::default()
             }],
         );
 
         assert!(markdown.contains("_(optimize rendering)_"), "{markdown}");
+        assert!(markdown.contains("Delivery partially_delivered · Verification checked_end_to_end"), "{markdown}");
         assert!(!markdown.contains("Feedback loop:"), "{markdown}");
         assert!(markdown.contains("_… and 4 more._"), "{markdown}");
         assert_eq!(markdown.matches("- [").count(), 8, "{markdown}");
@@ -1162,6 +1179,20 @@ mod tests {
         }];
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn todos_view_hash_changes_when_only_verification_changes() {
+        let mut goal = crate::todo::TodoGoal {
+            delivery_state: Some(crate::todo::DeliveryState::Delivered),
+            ..Default::default()
+        };
+        let hash = |goal: &crate::todo::TodoGoal| {
+            hash_todos_payload(None, &[], &plan(), std::slice::from_ref(goal))
+        };
+        let before = hash(&goal);
+        goal.verification_state = Some(crate::todo::VerificationState::CheckedInIsolation);
+        assert_ne!(before, hash(&goal));
     }
 
     #[test]

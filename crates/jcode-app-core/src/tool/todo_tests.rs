@@ -325,7 +325,7 @@ fn model_facing_descriptions_stay_compact() {
     // Item-field guidance is written once, on add. Other routes are open.
     assert!(bytes < 2_600, "todo descriptions grew to {bytes} bytes");
     assert!(
-        schema.to_string().len() < 6_500,
+        schema.to_string().len() < 6_680,
         "todo schema grew to {} bytes",
         schema.to_string().len()
     );
@@ -492,7 +492,7 @@ fn schema_advertises_intent_and_todos() {
     assert!(!goal_props.contains_key("alignment_score"));
     assert!(!goal_props.contains_key("objective"));
     assert!(goal_props.contains_key("cannot_complete"));
-    assert_eq!(goal_props.len(), 12);
+    assert_eq!(goal_props.len(), 13);
     assert_eq!(
         goal_props["feedback_loop_relevance"]["enum"],
         json!([
@@ -530,7 +530,7 @@ fn schema_advertises_intent_and_todos() {
         goal_props["delivery_state"]["enum"]
             .as_array()
             .unwrap()
-            .contains(&json!("not_started"))
+            .contains(&json!("undelivered"))
     );
     assert!(
         goal_required
@@ -584,7 +584,19 @@ fn schema_advertises_intent_and_todos() {
             "feedback gate message omitted {required_concept}"
         );
     }
-    assert!(goal_props["delivery_state"].get("description").is_none());
+    assert_eq!(
+        goal_props["delivery_state"]["enum"],
+        json!(["undelivered", "partially_delivered", "delivered"])
+    );
+    assert_eq!(
+        goal_props["verification_state"]["enum"],
+        json!(["unchecked", "checked_in_isolation", "checked_end_to_end"])
+    );
+    assert!(
+        !goal_required
+            .iter()
+            .any(|value| value == "verification_state")
+    );
 
     let loop_description = goal_props["closed_feedback_loop"]
         .get("description")
@@ -903,7 +915,7 @@ fn todo_telemetry_derives_lifecycle_groups_and_score_summaries() {
             closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
             feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
             feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-            delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+            delivery_state: Some(crate::todo::DeliveryState::Delivered),
             ..Default::default()
         },
         TodoGoal {
@@ -913,7 +925,7 @@ fn todo_telemetry_derives_lifecycle_groups_and_score_summaries() {
             feedback_loop_coverage: Some(
                 crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
             ),
-            delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+            delivery_state: Some(crate::todo::DeliveryState::Delivered),
             ..Default::default()
         },
     ];
@@ -1004,6 +1016,49 @@ fn prune_orphaned_goals_keeps_everything_when_todo_list_is_empty() {
         goal(None, crate::todo::FeedbackLoopState::Weak),
     ];
     assert_eq!(prune_orphaned_goals(goals, &[]).len(), 2);
+}
+
+#[test]
+fn verification_updates_are_independent_and_histories_are_tool_owned() {
+    use crate::todo::{DeliveryState as D, VerificationState as V};
+    let update = |stored: &[TodoGoal], goal: Value| {
+        merge_goals(stored, parse(json!({"goals": [goal]})).unwrap().goals)
+    };
+    let first = update(
+        &[],
+        json!({"delivery_state":"undelivered", "verification_state":"checked_in_isolation", "verification_state_history":["checked_end_to_end"]}),
+    );
+    assert_eq!(first[0].verification_state_history, [V::CheckedInIsolation]);
+    let second = update(&first, json!({"delivery_state":"partially_delivered"}));
+    assert_eq!(second[0].verification_state, Some(V::CheckedInIsolation));
+    assert_eq!(
+        second[0].verification_state_history,
+        first[0].verification_state_history
+    );
+    assert_eq!(
+        changed_goal_fields(first.first(), second.first()),
+        [TodoGoalField::DeliveryState]
+    );
+    let third = update(
+        &second,
+        json!({"delivery_state":"partially_delivered", "verification_state":"checked_end_to_end"}),
+    );
+    assert_eq!(
+        third[0].verification_state_history,
+        [V::CheckedInIsolation, V::CheckedEndToEnd]
+    );
+    assert_eq!(
+        third[0].delivery_state_history,
+        [D::Undelivered, D::PartiallyDelivered]
+    );
+    assert_eq!(
+        changed_goal_fields(second.first(), third.first()),
+        [TodoGoalField::VerificationState]
+    );
+    assert!(
+        parse(json!({"goals":[{"delivery_state":"delivered", "verification_state":"delivered"}]}))
+            .is_err()
+    );
 }
 
 #[test]

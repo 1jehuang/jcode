@@ -11,11 +11,23 @@ todo_gate_digest = true
 
 Set `todo_gate_digest = false` to disable automatic quality reviews again. Auto-poke must also be enabled for a model follow-up to run (`features.auto_poke`, or `/poke on`). `/poke off` does not hide completion reports. Incomplete-work and delivery pokes are independent of the quality-review toggle.
 
-Checking off the last task does not deliver the goal. If auto-poke is on, a goal explicitly assessed as `not_started`, `change_made`, `integrated`, or `workflow_validated` can prompt a concrete next action within the user's request. This also applies to a goal with no tasks yet. A missing legacy assessment does not trigger a delivery poke. A goal with only cancelled tasks, a `cannot_complete` reason, or a documented stop is exempt. Auto-poke does not repeat the same unchanged delivery gap or treat it as success.
+Checking off the last task does not deliver the goal. If auto-poke is on, a goal explicitly assessed as `undelivered` or `partially_delivered` can prompt a concrete next action within the user's request. This also applies to a goal with no tasks yet. A missing legacy assessment does not trigger a delivery poke. A goal with only cancelled tasks, a `cannot_complete` reason, or a documented stop is exempt. Auto-poke does not repeat the same unchanged delivery gap or treat it as success.
+
+## Delivery and verification
+
+Each submitted goal must report `delivery_state`. Assess the **user’s requested outcome**, not the amount of work performed:
+
+| Delivery | Meaning | TUI indicator |
+| --- | --- | --- |
+| `undelivered` | No requested deliverable has been supplied yet. Supporting work may be complete. | Red, with a text label |
+| `partially_delivered` | The user has received a usable, separable part of what they requested. | Amber, with a text label |
+| `delivered` | The user has received the requested outcome. | Green, with a text label |
+
+`verification_state` separately records how the work was checked: `unchecked`, `checked_in_isolation`, or `checked_end_to_end`. Passing tests does not promote delivery. For example, if the request was a proof, checking a supporting lemma is `undelivered` with `checked_in_isolation`, not a partial delivery of the proof. Conversely, an artifact can be delivered without having been checked end to end. Task-only updates need not resubmit goals.
+
+Legacy `not_started`, `change_made`, `integrated`, and `workflow_validated` are not evidence of delivery. Only `outcome_delivered` maps to `delivered`. A missing historical assessment is not the same as an explicit `undelivered` assessment.
 
 ## Daemon ownership
-
-Every entry submitted in the todo tool's `goals` array must explicitly report `delivery_state`. Use `not_started` when no change toward delivery has been made, even if investigation has begun. Reporting a state does not itself mean the goal is complete. Reads and task-only updates do not require resubmitting goals, and older saved assessments remain readable.
 
 For daemon-backed sessions, the daemon owns the follow-up policy for every client, including local TUI, SSH/cloud, mobile and SDK connections. Clients display progress and send `/poke` controls, not their own continuation messages. A stopped model response is an internal turn boundary, not yet a completed harness request. The daemon checks continuation before publishing `Done`, ready status or a finished mobile push. Continuation runs under the same execution lease and terminal identity as the original request.
 

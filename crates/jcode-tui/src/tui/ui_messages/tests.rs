@@ -1550,7 +1550,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         feedback_loop: Some("Inspect a debug frame".to_string()),
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
@@ -1569,7 +1569,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(plain.contains("Delivery partially_delivered"), "{plain}");
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Only the plan-level assessment renders above the groups.
@@ -1876,8 +1876,8 @@ fn render_todos_message_shows_delivery_state_under_intent() {
                 "understands_user_intent": "clear",
             },
             "goals": [
-                {"group": "ui", "delivery_state": "outcome_delivered"},
-                {"group": "tests", "delivery_state": "integrated"}
+                {"group": "ui", "delivery_state": "delivered", "verification_state": "checked_in_isolation"},
+                {"group": "tests", "delivery_state": "partially_delivered", "verification_state": "checked_end_to_end"}
             ],
         })
         .to_string(),
@@ -1899,9 +1899,14 @@ fn render_todos_message_shows_delivery_state_under_intent() {
     assert!(
         text_lines
             .get(intent_idx + 1)
-            .is_some_and(|line| line.contains("Delivery integrated")),
+            .is_some_and(|line| line.contains("Delivery partially_delivered")),
         "delivery state should render immediately under intent (using lowest goal state): {text_lines:?}"
     );
+    assert!(text_lines[intent_idx + 2].contains("Verification checked_in_isolation"));
+    let pinned = render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let pinned = pinned.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
+    assert!(pinned.contains("Delivery partially_delivered"), "{pinned}");
+    assert!(pinned.contains("Verification checked_in_isolation"), "{pinned}");
     for narrow in [16u16, 20, 28] {
         let narrow_lines = render_todos_message(&msg, narrow, crate::config::DiffDisplayMode::Off);
         for line in &narrow_lines {
@@ -1941,7 +1946,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::AcceptanceAligned),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths),
         feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-        delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+        delivery_state: Some(crate::todo::DeliveryState::Delivered),
         ..Default::default()
     }];
     let msg =
@@ -1956,7 +1961,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         .join("\n");
 
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
+    assert!(plain.contains("Delivery delivered"), "{plain}");
     assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
     assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
     assert!(
@@ -1969,6 +1974,25 @@ fn render_todos_message_collapses_passing_quality_gates() {
         .find(|span| span.content.as_ref() == "✓ All quality gates passing")
         .and_then(|span| span.style.fg);
     assert_eq!(passing, Some(todo_score_color()));
+}
+
+#[test]
+fn pinned_completed_todos_color_delivery_independently_of_verification() {
+    for (delivery, expected) in [
+        ("undelivered", todo_failure_color()),
+        ("partially_delivered", todo_warning_color()),
+        ("delivered", todo_score_color()),
+    ] {
+        let msg = DisplayMessage::todos(serde_json::json!({
+            "todos": [{"id": "1", "content": "Finish task", "status": "completed", "priority": "high"}],
+            "goals": [{"delivery_state": delivery, "verification_state": "checked_end_to_end"}],
+        }).to_string());
+        let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+        let color = |value: &str| lines.iter().flat_map(|l| &l.spans)
+            .find(|s| s.content.as_ref() == value).and_then(|s| s.style.fg);
+        assert_eq!(color(delivery), Some(expected));
+        assert_eq!(color("checked_end_to_end"), Some(todo_score_color()));
+    }
 }
 
 #[test]
@@ -1996,7 +2020,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         group: Some("todo rendering".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
         feedback_loop: None,
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }];
     let msg =
@@ -2010,7 +2034,7 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
         .join("\n");
 
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(plain.contains("Delivery partially_delivered"), "{plain}");
     assert!(
         lines.iter().all(|line| line.width() <= 38),
         "card exceeded its 38-column content budget: {plain}"
@@ -2043,7 +2067,7 @@ fn render_todos_message_packs_multiple_goal_gates_per_row() {
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }];
     let msg =
@@ -2117,7 +2141,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         group: Some("todo rendering".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
         feedback_loop: Some("Inspect the rendered frame".to_string()),
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }];
     let content = format!(
@@ -2152,7 +2176,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
     assert!(plain.contains("Closed feedback loop strong"), "{plain}");
     assert!(plain.contains("Relevance missing"), "{plain}");
     assert!(plain.contains("Coverage missing"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(plain.contains("Delivery partially_delivered"), "{plain}");
     assert!(plain.contains("● Render the todo result"), "{plain}");
     assert!(!plain.contains("(high)"), "{plain}");
     assert!(
@@ -2264,7 +2288,7 @@ fn render_goal_update_size_is_bounded_when_narrative_evidence_is_long() {
     let goal = crate::todo::TodoGoal {
         group: Some("compact assessment".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
-        delivery_state: Some(crate::todo::DeliveryState::Integrated),
+        delivery_state: Some(crate::todo::DeliveryState::Undelivered),
         autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
         iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
         feedback_loop: Some(long_text.clone()),
@@ -2622,7 +2646,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
         feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
-        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }];
     let content = format!(
@@ -2655,7 +2679,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
     assert!(plain.contains("✓ All quality gates passing"), "{plain}");
-    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
+    assert!(plain.contains("Delivery partially_delivered"), "{plain}");
     assert!(!plain.contains("todo 1 items"), "{plain}");
 }
 
