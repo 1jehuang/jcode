@@ -15,6 +15,16 @@ pub(super) fn destructive_command_refusal(
     justification: Option<&str>,
     working_dir: Option<std::path::PathBuf>,
 ) -> Option<String> {
+    // Check if the risk gate is enabled via config or env override.
+    // Env takes precedence: JCODE_RISK_GATE_ENABLED=<falsy> disables the gate.
+    if let Some(raw) = jcode_base::config::risk_gate::env_override_raw() {
+        if !jcode_base::config::risk_gate::env_allows_gate(&raw) {
+            return None;
+        }
+    } else if !crate::config::config().provider.risk_gate_enabled {
+        return None;
+    }
+
     let mut risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir);
     // Assess the same scratch path that the child shell actually receives.
     #[cfg(not(windows))]
@@ -92,12 +102,45 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
     })
 }
 
+/// Test-only env guard: pins `JCODE_RISK_GATE_ENABLED` for the duration of a
+/// test and restores the previous value on drop. The env-semantics tests flip
+/// the variable and must not leak it into concurrently running tests, and the
+/// gate-on integration tests must not see a falsy value another test set;
+/// pair every use with `storage::lock_test_env()`, which serializes
+/// env-mutating tests process-wide.
+#[cfg(all(test, not(windows)))]
+pub(super) struct RiskGateEnvGuard {
+    prev: Option<String>,
+}
+
+#[cfg(all(test, not(windows)))]
+impl RiskGateEnvGuard {
+    pub(super) fn set(raw: &str) -> Self {
+        let prev = std::env::var("JCODE_RISK_GATE_ENABLED").ok();
+        unsafe { std::env::set_var("JCODE_RISK_GATE_ENABLED", raw) };
+        Self { prev }
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+impl Drop for RiskGateEnvGuard {
+    fn drop(&mut self) {
+        match self.prev.as_deref() {
+            Some(v) => unsafe { std::env::set_var("JCODE_RISK_GATE_ENABLED", v) },
+            None => unsafe { std::env::remove_var("JCODE_RISK_GATE_ENABLED") },
+        }
+    }
+}
+
 #[cfg(all(test, not(windows)))]
 mod tests {
+    use super::RiskGateEnvGuard;
     use super::destructive_command_refusal;
 
     #[test]
     fn scratch_log_and_backup_commands_do_not_require_justification() {
+        let _lock = crate::storage::lock_test_env();
+        let _gate = RiskGateEnvGuard::set("1");
         let cwd = std::env::current_dir().ok();
         for command in [
             "cargo test --lib > \"$JCODE_SCRATCH_DIR/tests.log\" 2>&1",
@@ -116,6 +159,8 @@ mod tests {
 
     #[test]
     fn protected_writes_and_unknown_variables_remain_blocked() {
+        let _lock = crate::storage::lock_test_env();
+        let _gate = RiskGateEnvGuard::set("1");
         for command in [
             "rm -rf /etc",
             "echo bad > /etc/passwd",
@@ -127,5 +172,35 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_falsy_env_disables_the_gate_for_catastrophic_commands() {
+        let _lock = crate::storage::lock_test_env();
+        let _guard = RiskGateEnvGuard::set("0");
+        assert!(
+            destructive_command_refusal("rm -rf /etc", None, std::env::current_dir().ok())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recognized_truthy_env_keeps_the_gate_on() {
+        let _lock = crate::storage::lock_test_env();
+        let _guard = RiskGateEnvGuard::set("true");
+        assert!(
+            destructive_command_refusal("rm -rf /etc", None, std::env::current_dir().ok())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn unrecognized_env_value_keeps_the_gate_on() {
+        let _lock = crate::storage::lock_test_env();
+        let _guard = RiskGateEnvGuard::set("garbage");
+        assert!(
+            destructive_command_refusal("rm -rf /etc", None, std::env::current_dir().ok())
+                .is_some()
+        );
     }
 }

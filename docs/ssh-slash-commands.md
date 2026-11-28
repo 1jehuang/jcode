@@ -79,6 +79,7 @@ A blocked command must not silently execute against the laptop.
 | `/git` | Wire | `/git` and `/git status` run fixed `git status --short --branch` through daemon input-shell, using daemon CWD. Other arguments are rejected. |
 | `/colors`, `/color`, `/alignment`, `/latex`, `/thinking-display`, `/thinking`, `/reasoning`, `/compact-notifications`, `/show-agentgrep-output`, `/tool-call-details` | UI | Client presentation preferences intentionally belong to the displaying terminal. Saved settings affect the laptop UI, never VM session storage. |
 | `/hotkeys`, `/keys`, `/keybindings` | UI | Inspect the displaying terminal's keys and personal hotkey usage, not VM keyboard state. |
+| `/settings` | UI | Show client risk-gate state, saved default and `JCODE_RISK_GATE_ENABLED` override. `/settings risk-gate on|off` writes the saved default in laptop config; the gate only controls this terminal's local pre-send confirmation, never VM session policy. |
 | `/terminal-setup` | UI | Configure the terminal displaying the client. This intentionally changes client terminal settings, not VM settings. |
 | `/commit`, `/merge`, `/commit-push`, `/commit-and-push` | Prompt | Agent executes git operations on the VM. These are not client-side git invocations. |
 | `/fast-release`, `/fast-macos-release`, `/merge-remote-release`, `/remote-release`, `/cut-release`, `/commit-push-release` | Prompt | Release instructions run through the VM agent. Host tools, credentials and platform builds must exist there. |
