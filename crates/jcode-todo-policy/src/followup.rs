@@ -349,6 +349,7 @@ impl FollowUpPolicy {
             // Stay armed: a todo-free turn must not disable poking for later
             // turns that do leave work open.
             self.final_response_requested = false;
+            self.gate_attempts = 0;
             self.last_ownership_fingerprint = None;
             self.gate_digest_delivered = false;
             return Decision::default();

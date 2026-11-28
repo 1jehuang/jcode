@@ -495,6 +495,19 @@ fn default_delivery_poke_respects_stops_cancellation_and_opt_out() {
 }
 
 #[test]
+fn delivered_goal_only_cycles_do_not_consume_future_retry_budgets() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut s = snapshot(vec![]);
+    s.goals.push(TodoGoal::default());
+    for _ in 0..=MAX_GATE_ATTEMPTS {
+        s.goals[0].delivery_state = Some(DeliveryState::ChangeMade);
+        assert_eq!(kind(&policy.decide(&s)), Some(FollowUpKind::Ownership));
+        s.goals[0].delivery_state = Some(DeliveryState::OutcomeDelivered);
+        assert!(policy.decide(&s).follow_up.is_none());
+    }
+}
+
+#[test]
 fn delivery_poke_targets_independent_goal_while_a_worker_is_running() {
     let mut active = todo("waiting", "in_progress");
     active.group = Some("worker goal".into());
