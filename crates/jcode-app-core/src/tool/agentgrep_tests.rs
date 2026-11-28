@@ -87,8 +87,17 @@ async fn foreground_budget_promotes_slow_search_without_cancelling_it() {
     );
     assert!(!output.output.contains("Use `bg"));
 
-    // The adopted handle must remain alive after the foreground call returns.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let task_id = metadata["task_id"].as_str().expect("task id");
+    let finished = crate::background::global()
+        .wait(task_id, std::time::Duration::from_secs(5), false)
+        .await
+        .expect("adopted search should complete");
+    assert!(finished.task.notify && finished.task.wake);
+    assert!(
+        output
+            .output
+            .contains(crate::tool::background_delivery_notice(true))
+    );
     let output_path = metadata["output_file"].as_str().expect("output path");
     let saved = tokio::fs::read_to_string(output_path)
         .await
@@ -139,12 +148,12 @@ async fn search_cancellation_foreground_future_stops_linked_search() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("input.rs"), "fn needle() {}\n").unwrap();
     let (handle, started, stopped) = repeating_search(root.path().to_path_buf());
-    let foreground = tokio::spawn(await_or_background_search(
+    let foreground = tokio::spawn(crate::tool::handoff::scope(await_or_background_search(
         handle,
         std::time::Duration::from_secs(60),
         "cancel foreground".into(),
         "agentgrep-cancel-foreground".into(),
-    ));
+    )));
     tokio::time::timeout(std::time::Duration::from_secs(5), started)
         .await
         .unwrap()
@@ -1151,3 +1160,6 @@ fn grep_defaults_to_a_bounded_match_count() {
         DEFAULT_GREP_MAX_REGIONS
     );
 }
+
+#[path = "agentgrep_handoff_tests.rs"]
+mod handoff;

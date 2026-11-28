@@ -70,15 +70,15 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "Run in background. Emit `JCODE_PROGRESS {json}` lines for progress reporting."
+                "description": "Run in background; you are notified on exit, so do not poll. `JCODE_PROGRESS {json}` reports progress."
             },
             "notify": {
                 "type": "boolean",
-                "description": "Notify on completion."
+                "description": "Default true. false disables completion delivery unless wake is true."
             },
             "wake": {
                 "type": "boolean",
-                "description": "Wake on completion."
+                "description": "Deliver completion to you (default: notify). true also enables notify; false leaves it in the task row."
             },
             "stall_wake_seconds": {
                 "type": "integer",

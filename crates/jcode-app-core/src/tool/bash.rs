@@ -803,8 +803,10 @@ struct BashInput {
         deserialize_with = "deserialize_bool_or_default::<_, true>"
     )]
     notify: bool,
-    #[serde(default, deserialize_with = "deserialize_bool_or_default::<_, false>")]
-    wake: bool,
+    /// Omitted or null: follows `notify`, so a backgrounded task reports its
+    /// completion to the model unless the caller opted out.
+    #[serde(default)]
+    wake: Option<bool>,
     /// For background runs: wake the agent after this many seconds with no
     /// new output and no progress events. Resets on activity.
     #[serde(default)]
@@ -816,6 +818,12 @@ struct BashInput {
 
 fn default_true() -> bool {
     true
+}
+
+impl BashInput {
+    fn wake(&self) -> bool {
+        self.wake.unwrap_or(self.notify)
+    }
 }
 
 // OpenAI strict schemas represent omitted optional arguments as explicit null.
@@ -902,39 +910,9 @@ impl Tool for BashTool {
     }
 }
 
-const FILE_EDIT_HINT: &str = "Note: this command edits files in place. Next time use `edit` \
-(exact replacements, all-or-nothing, pass `edits` for several) or `apply_patch` \
-(multi-file patches). They fail loudly on a missed match \
-instead of silently writing nothing, and show a reviewable diff.";
-
-/// Detect shell commands that rewrite source files in place, where a missed
-/// match silently does nothing. The command still runs, the agent is nudged.
-fn file_edit_hint(command: &str) -> Option<&'static str> {
-    let compact: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
-    let sed_in_place = compact.split(['|', ';', '&']).any(|segment| {
-        let mut words = segment.split_whitespace();
-        words.next() == Some("sed")
-            && words.any(|word| {
-                word == "--in-place"
-                    || word.starts_with("--in-place=")
-                    || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('i'))
-            })
-    });
-    let perl_in_place = compact
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair[0] == "perl" && pair[1].starts_with('-') && pair[1].contains('i'));
-    let script_rewrite = (compact.contains("python") || compact.contains("node "))
-        && (compact.contains(".replace(") || compact.contains("re.sub("))
-        && (compact.contains(",'w')")
-            || compact.contains(",\"w\")")
-            || compact.contains(", 'w')")
-            || compact.contains(", \"w\")")
-            || compact.contains("write_text(")
-            || compact.contains("writeFileSync("));
-    (sed_in_place || perl_in_place || script_rewrite).then_some(FILE_EDIT_HINT)
-}
+#[path = "bash_file_edit_hint.rs"]
+mod file_edit_hints;
+use file_edit_hints::file_edit_hint;
 
 #[cfg(test)]
 #[path = "bash_file_edit_hint_tests.rs"]
@@ -986,6 +964,10 @@ impl BashTool {
         let promoted_progress = std::sync::Arc::new(PromotedCommandProgress::default());
         let stdout_progress = std::sync::Arc::clone(&promoted_progress);
         let stderr_progress = std::sync::Arc::clone(&promoted_progress);
+        let outer_progress = std::sync::Arc::clone(&promoted_progress);
+        super::handoff::on_backgrounded(move |task_id| async move {
+            outer_progress.attach_task(&task_id).await;
+        });
 
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
@@ -1025,7 +1007,13 @@ impl BashTool {
                 Ok(ToolOutput::new(output).with_title(title_for_work))
             });
 
-        match tokio::time::timeout(timeout_duration, &mut work_handle).await {
+        // The outer executor keeps this future alive and owns its completion.
+        let result = if super::handoff::has_outer_owner() {
+            Ok((&mut work_handle).await)
+        } else {
+            tokio::time::timeout(timeout_duration, &mut work_handle).await
+        };
+        match result {
             Ok(join_result) => match join_result {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(e)) => Err(anyhow::anyhow!("Command failed: {}", e)),
@@ -1043,7 +1031,7 @@ impl BashTool {
                         Some(display_name.clone()),
                         &ctx.session_id,
                         params.notify,
-                        params.wake,
+                        params.wake(),
                         work_handle,
                     )
                     .await;
@@ -1058,6 +1046,7 @@ impl BashTool {
                      Name: {}\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
+                     {}\n\
                      {BACKGROUND_WAIT_GUIDANCE}\n\n\
                      The command is still running; do not rerun it unless you intentionally want a second copy.\n\
                      If you expected it to finish quickly and it did not, the `timeout` parameter is in MILLISECONDS; pass a larger value or omit it.",
@@ -1066,6 +1055,7 @@ impl BashTool {
                     display_name,
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
 
                 Ok(ToolOutput::new(output)
@@ -1123,6 +1113,10 @@ impl BashTool {
         let mut child = crate::platform::spawn_detached(&mut cmd)?;
         let pid = child.id();
         let shutdown_signal = ctx.graceful_shutdown_signal.clone();
+        let progress_output = info.output_file.clone();
+        super::handoff::on_backgrounded(move |task_id| async move {
+            spawn_detached_progress_follower(task_id, progress_output);
+        });
 
         loop {
             if let Some(status) = child.try_wait()? {
@@ -1141,7 +1135,7 @@ impl BashTool {
                 );
             }
 
-            if started.elapsed() >= timeout_duration {
+            if started.elapsed() >= timeout_duration && !super::handoff::has_outer_owner() {
                 let elapsed = started.elapsed();
                 manager
                     .register_detached_task(
@@ -1152,7 +1146,7 @@ impl BashTool {
                         pid,
                         &started_at,
                         params.notify,
-                        params.wake,
+                        params.wake(),
                     )
                     .await;
                 // Detached commands write straight to the output file, so no
@@ -1168,6 +1162,7 @@ impl BashTool {
                      Foreground time used: {:.1}s\n\
                      Output file: {}\n\
                      Status file: {}\n\n\
+                     {}\n\
                      {BACKGROUND_WAIT_GUIDANCE}\n\n\
                      The command is still running; do not rerun it unless you intentionally want a second copy.",
                     timeout_ms as f64 / 1000.0,
@@ -1176,6 +1171,7 @@ impl BashTool {
                     elapsed.as_secs_f64(),
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1210,15 +1206,16 @@ impl BashTool {
                         pid,
                         &started_at,
                         params.notify,
-                        params.wake,
+                        params.wake(),
                     )
                     .await;
                 spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
                 let output = format!(
-                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{BACKGROUND_WAIT_GUIDANCE}",
+                    "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\n{}\n{BACKGROUND_WAIT_GUIDANCE}",
                     info.task_id,
                     info.output_file.display(),
                     info.status_file.display(),
+                    super::background_delivery_notice(params.wake()),
                 );
                 return Ok(ToolOutput::new(output)
                     .with_title(
@@ -1255,7 +1252,7 @@ impl BashTool {
         let timeout_ms = background_timeout_ms(params.timeout);
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
-        let wake = params.wake;
+        let wake = params.wake();
         let notify = params.notify || wake;
         let info = crate::background::global()
             .spawn_with_notify(
@@ -1388,13 +1385,7 @@ impl BashTool {
             )
             .await;
 
-        let notify_msg = if wake {
-            "The agent will be woken when the task completes."
-        } else if notify {
-            "You will be notified when the task completes."
-        } else {
-            "Notifications disabled."
-        };
+        let notify_msg = super::background_delivery_notice(wake);
 
         let stall_msg = match params.stall_wake_seconds {
             Some(requested) => {

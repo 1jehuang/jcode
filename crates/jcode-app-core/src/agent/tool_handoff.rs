@@ -22,6 +22,21 @@ pub(super) fn handoff_display_name(input: &serde_json::Value) -> Option<String> 
     (!intent.is_empty()).then(|| crate::util::truncate_str(&intent, 28).to_string())
 }
 
+/// Only shell tools define notify/wake as this task's delivery flags.
+pub(super) fn handoff_delivery(
+    session: &str,
+    name: &str,
+    input: &serde_json::Value,
+) -> (bool, bool) {
+    let resolved = Registry::resolve_tool_name_for_session(session, name);
+    if crate::tool::sdk::custom(session, resolved) || !matches!(resolved, "bash" | "remote_exec") {
+        return (true, true);
+    }
+    let flag = |key: &str| input.get(key).and_then(serde_json::Value::as_bool);
+    let notify = flag("notify").unwrap_or(true);
+    (notify, flag("wake").unwrap_or(notify))
+}
+
 /// SDK callbacks and nonstreaming turns use the same policy as TUI turns.
 pub(in crate::agent) async fn execute_with_background(
     registry: Registry,
@@ -43,23 +58,41 @@ async fn execute_with_background_budget(
     let session_id = ctx.session_id.clone();
     let tool_name = name.clone();
     let display_name = handoff_display_name(&input);
-    let mut work = crate::runtime_activity::spawn_session(&session_id, async move {
+    let (notify, wake) = handoff_delivery(&session_id, &name, &input);
+    let (task_owner, call) = crate::tool::handoff::scope_with_task(async move {
         registry.execute(&tool_name, input, ctx).await
-    })
-    .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
+    });
+    let mut work = crate::runtime_activity::spawn_session(&session_id, call)
+        .ok_or_else(|| anyhow::anyhow!("Session transfer in progress; tool not accepted"))?;
     tokio::select! {
         biased;
         result = &mut work => result.map_err(|e| anyhow::anyhow!("Tool task panicked: {}", e))?,
         _ = tokio::time::sleep(budget), if auto_background && !budget.is_zero() => {
-            let info = crate::background::global()
-                .adopt_with_options(&name, display_name, &session_id, true, false, work)
-                .await;
+            let info = adopt_tool_with_progress(
+                &name, display_name, &session_id, (notify, wake), work, task_owner,
+            ).await;
             Ok(crate::tool::ToolOutput::new(format!(
-                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
-                name, automatic_handoff_reason(budget), info.task_id, crate::tool::BACKGROUND_WAIT_GUIDANCE
+                "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
+                name, automatic_handoff_reason(budget), info.task_id, crate::tool::background_delivery_notice(wake), crate::tool::BACKGROUND_WAIT_GUIDANCE
             )))
         }
     }
+}
+
+pub(super) async fn adopt_tool_with_progress(
+    name: &str,
+    display_name: Option<String>,
+    session_id: &str,
+    delivery: (bool, bool),
+    handle: tokio::task::JoinHandle<Result<crate::tool::ToolOutput>>,
+    task_owner: tokio::sync::watch::Sender<Option<String>>,
+) -> crate::background::BackgroundTaskInfo {
+    let (notify, wake) = delivery;
+    let info = crate::background::global()
+        .adopt_with_options(name, display_name, session_id, notify, wake, handle)
+        .await;
+    task_owner.send_replace(Some(info.task_id.clone()));
+    info
 }
 
 /// Returns true for an automatic handoff, false for a user/reload signal.

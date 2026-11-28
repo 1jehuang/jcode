@@ -323,6 +323,13 @@ async fn await_or_background_search(
         .0
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("agentgrep task owner is missing"))?;
+    // An outer executor applies the configured budget to the whole call.
+    // A nested promotion would finish that owner before the search finishes.
+    if super::handoff::has_outer_owner() {
+        return work_handle
+            .await
+            .map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?;
+    }
     match tokio::time::timeout(foreground_budget, work_handle).await {
         Ok(joined) => {
             joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
@@ -334,7 +341,7 @@ async fn await_or_background_search(
                     Some(display_name.clone()),
                     &session_id,
                     true,
-                    false,
+                    true,
                     // Transfer, do not cancel: the background manager becomes
                     // the sole owner, including while adoption is awaiting.
                     owner
@@ -347,9 +354,10 @@ async fn await_or_background_search(
                 "Search is still running after 5s and is continuing in background.\n\n\
                      Task ID: {}\n\
                      Name: {}\n\n\
-                     {}",
+                     {}\n{}",
                 info.task_id,
                 display_name,
+                super::background_delivery_notice(true),
                 super::BACKGROUND_WAIT_GUIDANCE,
             ))
             .with_title(display_name.clone())

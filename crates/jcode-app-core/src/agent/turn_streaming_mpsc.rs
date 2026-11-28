@@ -1826,21 +1826,18 @@ impl Agent {
                 let registry_clone = self.registry.clone();
                 let tool_name_for_spawn = tc.name.clone();
                 let tool_input_for_spawn = tc.input.clone();
-                let tool_handle =
-                    crate::runtime_activity::spawn_session(&self.session.id, async move {
-                        registry_clone
-                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                            .await
-                    })
+                let (task_owner, call) = crate::tool::handoff::scope_with_task(async move {
+                    registry_clone
+                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                        .await
+                });
+                let tool_handle = crate::runtime_activity::spawn_session(&self.session.id, call)
                     .ok_or_else(|| {
                         anyhow::anyhow!("Session transfer in progress; tool not accepted")
                     })?;
 
-                // Reset background signal before waiting
                 self.background_tool_signal.reset();
 
-                // All tools share the same default foreground budget, including
-                // tools without their own background execution support.
                 let bg_signal = self.background_tool_signal.clone();
                 let shutdown_signal = self.graceful_shutdown.clone();
                 let foreground_budget = tool_handoff::foreground_budget();
@@ -2003,23 +2000,23 @@ impl Agent {
                     self.session.save()?;
                     return Ok(());
                 } else {
-                    // Foreground budget expired or user pressed Alt+B.
                     logging::info(&format!(
                         "Tool '{}' moved to background after {:.1}s",
                         tc.name,
                         tool_elapsed.as_secs_f64()
                     ));
-
-                    let bg_info = crate::background::global()
-                        .adopt_with_options(
-                            &tc.name,
-                            tool_handoff::handoff_display_name(&tc.input),
-                            &self.session.id,
-                            true,
-                            false,
-                            tool_handle,
-                        )
-                        .await;
+                    let delivery =
+                        tool_handoff::handoff_delivery(&self.session.id, &tc.name, &tc.input);
+                    let (_, wake) = delivery;
+                    let bg_info = tool_handoff::adopt_tool_with_progress(
+                        &tc.name,
+                        tool_handoff::handoff_display_name(&tc.input),
+                        &self.session.id,
+                        delivery,
+                        tool_handle,
+                        task_owner,
+                    )
+                    .await;
 
                     let reason = if automatic_background {
                         tool_handoff::automatic_handoff_reason(foreground_budget)
@@ -2027,10 +2024,11 @@ impl Agent {
                         "by the user".to_string()
                     };
                     let bg_msg = format!(
-                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}",
+                        "Tool '{}' was moved to background {} (task_id: {}).\n\n{}\n{}",
                         tc.name,
                         reason,
                         bg_info.task_id,
+                        crate::tool::background_delivery_notice(wake),
                         crate::tool::BACKGROUND_WAIT_GUIDANCE
                     );
 

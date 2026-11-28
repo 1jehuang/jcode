@@ -52,7 +52,10 @@ fn bash_optional_nulls_use_omitted_defaults() {
     }))
     .unwrap();
     assert!(nulls.notify);
-    assert!(!nulls.wake);
+    assert!(nulls.wake(), "an omitted wake follows notify");
+    let silent: BashInput =
+        serde_json::from_value(json!({"command": "printf ok", "notify": false})).unwrap();
+    assert!(!silent.wake(), "notify=false opts out of model delivery");
     assert_eq!(nulls.notify, omitted.notify);
     assert_eq!(nulls.wake, omitted.wake);
     assert_eq!(nulls.run_in_background, omitted.run_in_background);
@@ -71,7 +74,7 @@ fn bash_optional_booleans_preserve_explicit_values() {
         }))
         .unwrap();
         assert_eq!(input.notify, value);
-        assert_eq!(input.wake, value);
+        assert_eq!(input.wake, Some(value));
         assert_eq!(input.run_in_background, Some(value));
     }
 }
@@ -248,7 +251,7 @@ fn cloud_environment_hydrates_commands_without_transcript_values() {
 async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tutorial() {
     let result = BashTool::new()
         .execute(
-            json!({"command": "printf done", "run_in_background": true, "wake": true}),
+            json!({"command": "printf done", "run_in_background": true}),
             make_ctx(None),
         )
         .await
@@ -260,15 +263,23 @@ async fn background_handoff_names_reason_task_and_productive_wait_without_bg_tut
     );
     assert!(result.output.contains(BACKGROUND_WAIT_GUIDANCE));
     assert!(
-        result
-            .output
-            .contains("The agent will be woken when the task completes.")
+        result.output.contains(
+            "You will be notified when it completes. Do not poll or sleep while waiting."
+        )
     );
     assert!(!result.output.contains("action=\"wait\""));
     assert!(!result.output.contains("To check progress"));
     let metadata = result.metadata.expect("background metadata");
     let id = metadata["task_id"].as_str().expect("task id");
     assert!(result.output.contains(&format!("Task ID: {id}")));
+    let status = crate::background::global()
+        .status(id)
+        .await
+        .expect("background status");
+    assert!(
+        status.notify && status.wake,
+        "default background delivery reaches the model"
+    );
     crate::background::global()
         .wait(id, Duration::from_secs(5), false)
         .await;
@@ -1176,11 +1187,5 @@ fn parse_progress_line_classifies_markers_checkpoints_and_heuristics() {
 #[path = "bash_promoted_tests.rs"]
 mod promoted;
 
-#[test]
-fn background_timeout_honors_values_above_the_foreground_cap() {
-    // Field report: run_in_background with timeout=1800000 (30 min) was
-    // recorded as "timed out after 600000ms" and killed at 10 minutes.
-    assert_eq!(background_timeout_ms(Some(1_800_000)), Some(1_800_000));
-    assert_eq!(background_timeout_ms(Some(100)), Some(100));
-    assert_eq!(background_timeout_ms(None), None);
-}
+#[path = "bash_background_delivery_tests.rs"]
+mod background_delivery;

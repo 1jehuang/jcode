@@ -1,5 +1,3 @@
-pub(crate) const BACKGROUND_WAIT_GUIDANCE: &str = "While this task runs, try to make progress on other useful work that does not depend on its result. If nothing independent remains, wait for completion rather than repeatedly polling. Do not duplicate the running task or change inputs it is still using.";
-
 mod agentgrep;
 pub mod ambient;
 mod apply_patch;
@@ -26,6 +24,8 @@ mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
 mod gmail;
+pub(crate) mod handoff;
+pub(crate) use handoff::{BACKGROUND_WAIT_GUIDANCE, background_delivery_notice};
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 pub mod applet;
 #[allow(dead_code)]

@@ -261,3 +261,431 @@ async fn manual_background_and_shutdown_do_not_wait_for_budget() {
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn handoff_preserves_shell_delivery_and_ignores_other_tools_flags() {
+    for (name, input, expected) in [
+        ("bash", serde_json::json!({}), (true, true)),
+        (
+            "functions.shell",
+            serde_json::json!({"wake": false}),
+            (true, false),
+        ),
+        (
+            "Bash",
+            serde_json::json!({"notify": false, "wake": null}),
+            (false, false),
+        ),
+        (
+            "remote_exec",
+            serde_json::json!({"notify": false}),
+            (false, false),
+        ),
+        (
+            "communicate",
+            serde_json::json!({"notify": false, "wake": false}),
+            (true, true),
+        ),
+    ] {
+        let registry = Registry::empty();
+        registry
+            .register(
+                Registry::resolve_tool_name(name).into(),
+                Arc::new(WaitProbe),
+            )
+            .await;
+        let ctx = ToolContext {
+            session_id: format!("handoff-delivery-{name}"),
+            message_id: "message".into(),
+            tool_call_id: "delivery-probe".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let result = execute_with_background_budget(
+            registry,
+            name.into(),
+            input,
+            ctx,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert!(
+            result
+                .output
+                .contains(crate::tool::background_delivery_notice(expected.1))
+        );
+        let task_id = result
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let status = crate::background::global().status(task_id).await.unwrap();
+        assert_eq!((status.notify, status.wake), expected, "{name}");
+        crate::background::global().cancel(task_id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn custom_sdk_shell_names_keep_default_completion_delivery() {
+    let _env = crate::storage::lock_test_env();
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::tool::sdk::remove_session(&self.0);
+        }
+    }
+    for (index, (custom, called)) in [
+        ("shell", "shell"),
+        ("Bash", "functions.Bash"),
+        ("bash", "shell"),
+        ("bash", "functions.bash"),
+        ("remote_exec", "remote_exec"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let session = format!("sdk-handoff-delivery-{index}");
+        let _cleanup = Cleanup(session.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        crate::tool::sdk::configure(
+            &session,
+            "handoff-owner",
+            crate::protocol::SessionToolConfig {
+                custom: vec![crate::protocol::SessionToolDefinition {
+                    name: custom.into(),
+                    description: "Custom SDK callback".into(),
+                    parameters: serde_json::json!({"type":"object"}),
+                }],
+                ..Default::default()
+            },
+            tx,
+        )
+        .unwrap();
+        let ctx = ToolContext {
+            session_id: session,
+            message_id: "message".into(),
+            tool_call_id: "sdk-delivery".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        };
+        let output = execute_with_background_budget(
+            Registry::empty(),
+            called.into(),
+            serde_json::json!({"notify":false,"wake":false}),
+            ctx,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+        assert!(rx.try_recv().is_ok(), "the custom callback must execute");
+        let id = output
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let status = crate::background::global().status(id).await.unwrap();
+        assert!(status.notify && status.wake, "{called} overrides {custom}");
+        crate::background::global().cancel(id).await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+mod bash_completion {
+    use super::*;
+
+    #[tokio::test]
+    async fn bash_outer_handoff_publishes_one_final_completion() {
+        check_bash_outer_completion(false).await;
+    }
+
+    #[tokio::test]
+    async fn reload_persistable_bash_outer_handoff_publishes_one_final_completion() {
+        check_bash_outer_completion(true).await;
+    }
+
+    async fn check_bash_outer_completion(reload_persistable: bool) {
+        for silent in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let release = directory.path().join("release");
+            let session = format!(
+                "bash-outer-{}-{silent}",
+                directory.path().file_name().unwrap().to_string_lossy()
+            );
+            let expected = "one final shell result";
+            let registry = Registry::new(Arc::new(NoRequestProvider)).await;
+            let ctx = ToolContext {
+                session_id: session.clone(),
+                message_id: "message".into(),
+                tool_call_id: "single-shell-completion".into(),
+                working_dir: None,
+                stdin_request_tx: None,
+                graceful_shutdown_signal: reload_persistable.then(InterruptSignal::new),
+                execution_mode: if reload_persistable {
+                    ToolExecutionMode::AgentTurn
+                } else {
+                    ToolExecutionMode::Direct
+                },
+            };
+            let mut input = serde_json::json!({
+                "command": format!(
+                    "while [ ! -f '{}' ]; do sleep 0.02; done; printf '{expected}'",
+                    release.display()
+                ),
+                "timeout": 80,
+            });
+            if silent {
+                input["notify"] = false.into();
+                input["wake"] = false.into();
+            }
+            let mut bus = crate::bus::Bus::global().subscribe();
+            let handoff = execute_with_background_budget(
+                registry,
+                "bash".into(),
+                input,
+                ctx,
+                Duration::from_millis(20),
+            )
+            .await
+            .unwrap();
+            let task_id = handoff
+                .output
+                .split("task_id: ")
+                .nth(1)
+                .unwrap()
+                .split(')')
+                .next()
+                .unwrap();
+            // Hold the subprocess past its own timeout after the outer handoff.
+            // It cannot finish early because only this test releases it.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::fs::write(&release, "ready").await.unwrap();
+            let completed = crate::background::global()
+                .wait(task_id, Duration::from_secs(10), false)
+                .await
+                .unwrap();
+            let mut completions = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let crate::bus::BusEvent::BackgroundTaskCompleted(event) =
+                        bus.recv().await.unwrap()
+                        && event.session_id == session
+                    {
+                        let final_result = event.output_preview.contains(expected);
+                        completions.push(event);
+                        if final_result {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the shell must publish its actual final result");
+            while let Ok(event) = bus.try_recv() {
+                if let crate::bus::BusEvent::BackgroundTaskCompleted(event) = event
+                    && event.session_id == session
+                {
+                    completions.push(event);
+                }
+            }
+            assert_eq!(
+                completions.len(),
+                1,
+                "duplicate shell completions: {completions:?}"
+            );
+            let event = &completions[0];
+            assert_eq!(event.task_id, task_id);
+            assert_eq!((event.notify, event.wake), (!silent, !silent));
+            assert_eq!(
+                completed.task.status,
+                crate::bus::BackgroundTaskStatus::Completed
+            );
+            let output = crate::background::global().output(task_id).await.unwrap();
+            assert!(
+                output.contains(expected),
+                "the outer task lost the shell result: {output}"
+            );
+            assert!(
+                !output.contains("continuing in background"),
+                "outer completion contains a nested handoff: {output}"
+            );
+            let tasks = crate::background::global().list().await;
+            assert_eq!(
+                tasks
+                    .iter()
+                    .filter(|task| task.session_id == session)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_owned_bash_reports_progress_before_completion() {
+        check_outer_owned_progress(false).await;
+    }
+
+    #[tokio::test]
+    async fn outer_owned_reload_persistable_bash_reports_progress_before_completion() {
+        check_outer_owned_progress(true).await;
+    }
+
+    async fn check_outer_owned_progress(reload_persistable: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = directory.path().join("checkpoint");
+        let finish = directory.path().join("finish");
+        let session = format!(
+            "bash-progress-{}",
+            directory.path().file_name().unwrap().to_string_lossy()
+        );
+        let registry = Registry::new(Arc::new(NoRequestProvider)).await;
+        let ctx = ToolContext {
+            session_id: session.clone(),
+            message_id: "message".into(),
+            tool_call_id: "progress".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: reload_persistable.then(InterruptSignal::new),
+            execution_mode: if reload_persistable {
+                ToolExecutionMode::AgentTurn
+            } else {
+                ToolExecutionMode::Direct
+            },
+        };
+        let input = serde_json::json!({
+            "command":format!(
+                "printf '%s\n' 'JCODE_PROGRESS {{\"percent\":25,\"message\":\"outer-progress\"}}'; while [ ! -f '{}' ]; do sleep 0.02; done; printf '%s\n' 'JCODE_CHECKPOINT {{\"message\":\"outer-checkpoint\"}}'; while [ ! -f '{}' ]; do sleep 0.02; done; printf final-result",
+                checkpoint.display(), finish.display()
+            ),
+            "timeout":80,
+        });
+        let mut bus = crate::bus::Bus::global().subscribe();
+        let handoff = execute_with_background_budget(
+            registry,
+            "bash".into(),
+            input,
+            ctx,
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        let task_id = handoff
+            .output
+            .split("task_id: ")
+            .nth(1)
+            .unwrap()
+            .split(')')
+            .next()
+            .unwrap();
+        let observation =
+            tokio::time::timeout(Duration::from_secs(4), async {
+                loop {
+                    let event = bus.recv().await.map_err(|error| error.to_string())?;
+                    match event {
+                        crate::bus::BusEvent::BackgroundTaskProgress(event)
+                            if event.session_id == session =>
+                        {
+                            if event.task_id != task_id {
+                                return Err("progress attached to a different task".to_string());
+                            }
+                            match event.progress.message.as_deref() {
+                                Some("outer-progress") => {
+                                    if event.progress.percent != Some(25.0) {
+                                        return Err("wrong progress percentage".into());
+                                    }
+                                    tokio::fs::write(&checkpoint, "ready")
+                                        .await
+                                        .map_err(|error| error.to_string())?;
+                                }
+                                Some("outer-checkpoint") => break,
+                                _ => {}
+                            }
+                        }
+                        crate::bus::BusEvent::BackgroundTaskCompleted(event)
+                            if event.session_id == session =>
+                        {
+                            return Err("task completed before live progress arrived".to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                let status = crate::background::global()
+                    .status(task_id)
+                    .await
+                    .ok_or("missing task status")?;
+                if status.status != crate::bus::BackgroundTaskStatus::Running {
+                    return Err("progress arrived after completion".into());
+                }
+                if !status.event_history.iter().any(|event| {
+                    event.kind == crate::background::BackgroundTaskEventKind::Checkpoint
+                }) {
+                    return Err("checkpoint was not persisted to the outer task".into());
+                }
+                Ok::<(), String>(())
+            })
+            .await;
+        // Release the real process even when the original code times out above.
+        tokio::fs::write(&checkpoint, "ready").await.unwrap();
+        tokio::fs::write(&finish, "ready").await.unwrap();
+        let completed = crate::background::global()
+            .wait(task_id, Duration::from_secs(10), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            completed.task.status,
+            crate::bus::BackgroundTaskStatus::Completed
+        );
+        assert!(
+            crate::background::global()
+                .output(task_id)
+                .await
+                .unwrap()
+                .contains("final-result")
+        );
+        let tasks = crate::background::global().list().await;
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.session_id == session)
+                .count(),
+            1
+        );
+        assert!(
+            matches!(observation, Ok(Ok(()))),
+            "outer task did not receive live progress and checkpoint: {observation:?}"
+        );
+    }
+
+    struct NoRequestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for NoRequestProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[crate::message::ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("shell handoff must not send a provider request")
+        }
+
+        fn name(&self) -> &str {
+            "shell-test"
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(Self)
+        }
+    }
+}
