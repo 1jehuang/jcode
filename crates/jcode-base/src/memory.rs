@@ -25,6 +25,7 @@ use std::time::Instant;
 #[path = "memory/activity.rs"]
 mod activity;
 mod cache;
+mod extraction;
 #[path = "memory/pending.rs"]
 mod pending;
 #[path = "memory_prompt.rs"]
@@ -55,9 +56,11 @@ pub use pending::{
 #[cfg(test)]
 use pending::{backdate_injected_memory_for_test, insert_pending_memory_for_test};
 use pending::{begin_memory_check, finish_memory_check};
-pub(crate) use prompt_support::format_context_for_extraction;
 pub use prompt_support::{
     focus_query_text, format_context_for_relevance, format_focused_query_for_relevance,
+};
+pub(crate) use prompt_support::{
+    format_context_for_extraction, format_full_context_for_extraction,
 };
 
 const LEGACY_NOTE_CATEGORY: &str = "note";
@@ -957,43 +960,6 @@ impl MemoryManager {
     }
 
     // === Sidecar Integration ===
-
-    /// Extract memories from a session transcript using the Haiku sidecar
-    pub async fn extract_from_transcript(
-        &self,
-        transcript: &str,
-        session_id: &str,
-    ) -> Result<Vec<String>> {
-        if !memory_llm_judge_available() {
-            crate::logging::info("Memory transcript extraction skipped: LLM judge unavailable");
-            return Ok(Vec::new());
-        }
-
-        let sidecar = crate::session::Session::load_startup_stub(session_id)
-            .map(|session| Sidecar::for_session(&session))
-            .unwrap_or_else(|_| Sidecar::new());
-        let extracted = sidecar.extract_memories(transcript).await?;
-
-        let mut ids = Vec::new();
-        for memory in extracted {
-            let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
-            let trust = match memory.trust.as_str() {
-                "high" => TrustLevel::High,
-                "medium" => TrustLevel::Medium,
-                _ => TrustLevel::Low,
-            };
-
-            let entry = MemoryEntry::new(category, memory.content)
-                .with_source(session_id)
-                .with_trust(trust);
-
-            // Store in project scope by default
-            let id = self.remember_project(entry)?;
-            ids.push(id);
-        }
-
-        Ok(ids)
-    }
 
     /// Recall directly through Jev. The legacy `max_candidates` argument now
     /// limits output, not the input pool: old memories must remain discoverable.

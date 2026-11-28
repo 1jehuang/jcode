@@ -492,3 +492,281 @@ async fn busy_without_successor_aborts_owner_and_marks_crashed() {
         SessionStatus::Crashed { .. }
     ));
 }
+
+fn run_extraction_child(name: &str) -> bool {
+    if std::env::var_os("JCODE_DISCONNECT_EXTRACTION_CHILD").is_some() {
+        return false;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("server::client_disconnect_cleanup::grace_tests::{name}"),
+            "--nocapture",
+        ])
+        .env("JCODE_DISCONNECT_EXTRACTION_CHILD", "1")
+        .env("HOME", home.path())
+        .env("JCODE_HOME", home.path().join("state"))
+        .env("JCODE_RUNTIME_DIR", home.path().join("runtime"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
+#[test]
+fn reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it() {
+    if run_extraction_child(
+        "reload_disconnect_skips_final_extraction_but_normal_disconnect_retains_it",
+    ) {
+        return;
+    }
+    let _lock = crate::storage::lock_test_env();
+    let _home = Home::new();
+    let log_dir = std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".jcode/logs");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut ids = Vec::new();
+        for reloading in ["before", "during", "normal", "ready"] {
+            let fixture = Fixture::new(true).await;
+            {
+                let mut agent = fixture.agent.lock().await;
+                agent.set_memory_enabled(true);
+                agent.add_message(
+                    crate::message::Role::User,
+                    vec![crate::message::ContentBlock::Text {
+                        text: "Keep this durable build instruction in memory. ".repeat(10),
+                        cache_control: None,
+                    }],
+                );
+            }
+            if matches!(reloading, "before" | "ready") {
+                crate::server::write_reload_state(
+                    "memory-reload-fixture",
+                    "fixture-hash",
+                    if reloading == "ready" {
+                        crate::server::ReloadPhase::SocketReady
+                    } else {
+                        crate::server::ReloadPhase::Starting
+                    },
+                    None,
+                );
+            } else {
+                crate::server::clear_reload_marker();
+            }
+            if reloading == "during" {
+                let agent = fixture.agent.lock().await;
+                let cleanup = fixture.cleanup(false, Duration::ZERO);
+                tokio::pin!(cleanup);
+                timeout(Duration::from_secs(2), async {
+                    loop {
+                        tokio::select! {
+                            result = &mut cleanup => panic!("cleanup must wait for held Agent: {result:?}"),
+                            _ = tokio::task::yield_now() => {
+                                if !fixture.sessions.read().await.contains_key(&fixture.id) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }).await.expect("cleanup reaches the removed-session Agent lock");
+                crate::server::write_reload_state(
+                    "memory-reload-late",
+                    "fixture-hash",
+                    crate::server::ReloadPhase::Starting,
+                    None,
+                );
+                drop(agent);
+                cleanup.await;
+            } else {
+                fixture.cleanup(false, Duration::ZERO).await;
+            }
+            assert!(fixture.sessions.read().await.is_empty());
+            ids.push(fixture.id);
+        }
+        let entries: Vec<serde_json::Value> = std::fs::read_dir(log_dir)
+            .unwrap()
+            .flat_map(|entry| {
+                std::fs::read_to_string(entry.unwrap().path())
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|entry| entry["event"] == "final_extraction_started")
+            .collect();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[0]),
+            "reload must not trigger final extraction"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[1]),
+            "reload starting while cleanup waits must not trigger extraction"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[2]),
+            "normal disconnect still triggers final extraction"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry["detail"]["target_session"] == ids[3]),
+            "ordinary disconnect after SocketReady still triggers final extraction"
+        );
+    });
+}
+
+#[derive(Clone, Default)]
+struct ExtractionCounter(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[async_trait]
+impl Provider for ExtractionCounter {
+    async fn complete(
+        &self,
+        messages: &[crate::message::Message],
+        _: &[crate::message::ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        let text = messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| {
+                if let crate::message::ContentBlock::Text { text, .. } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.0.lock().unwrap().push(text);
+        Ok(Box::pin(futures::stream::once(async {
+            Ok(crate::message::StreamEvent::TextDelta(String::new()))
+        })))
+    }
+    fn name(&self) -> &str {
+        "memory-checkpoint-fixture"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+async fn extraction_completed() {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if crate::memory::get_activity().is_some_and(|activity| {
+                activity.recent_events.iter().any(|event| {
+                    matches!(
+                        event.kind,
+                        crate::memory_types::MemoryEventKind::ExtractionComplete { .. }
+                    )
+                })
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("scheduled memory extraction settles");
+}
+
+#[test]
+fn periodic_then_disconnect_deduplicates_equivalent_input_but_keeps_full_history() {
+    if run_extraction_child(
+        "periodic_then_disconnect_deduplicates_equivalent_input_but_keeps_full_history",
+    ) {
+        return;
+    }
+    let _sandbox = jcode_base::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    crate::env::set_var("JCODE_MEMORY_JEV_PROVIDER", "disabled-for-test");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let provider = ExtractionCounter::default();
+        let mut expected_calls = 0;
+        for large in [false, true] {
+            let fixture = Fixture::new(true).await;
+            let (messages, working_dir) = {
+                let mut agent = fixture.agent.lock().await;
+                agent.set_memory_enabled(true);
+                let count = if large { 60 } else { 2 };
+                for index in 0..count {
+                    let text = if index == 0 {
+                        "EARLY_HISTORY_ONLY: ".to_string()
+                    } else {
+                        String::new()
+                    } + &format!("Remember fixture message {index}. ").repeat(8);
+                    agent.add_message(
+                        crate::message::Role::User,
+                        vec![crate::message::ContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        }],
+                    );
+                }
+                (agent.session_for_split().messages_for_provider_uncached(), agent.working_dir().map(str::to_owned))
+            };
+            crate::provider::set_active_provider(Arc::new(provider.clone()));
+            assert_eq!(crate::sidecar::Sidecar::new().backend_name(), "provider");
+            crate::memory::clear_activity();
+            let handle = crate::memory_agent::init().await.unwrap();
+            for _ in 0..12 {
+                handle
+                    .update_context(&fixture.id, messages.clone().into(), working_dir.clone())
+                    .await;
+            }
+            extraction_completed().await;
+            expected_calls += 1;
+            assert_eq!(provider.0.lock().unwrap().len(), expected_calls);
+            if large {
+                assert!(
+                    !provider
+                        .0
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .contains("EARLY_HISTORY_ONLY")
+                );
+            }
+            crate::memory::clear_activity();
+            fixture.cleanup(false, Duration::ZERO).await;
+            extraction_completed().await;
+            if large {
+                expected_calls += 1;
+                assert!(
+                    provider
+                        .0
+                        .lock()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .contains("EARLY_HISTORY_ONLY")
+                );
+            }
+            {
+                let inputs = provider.0.lock().unwrap();
+                assert_eq!(inputs.len(), expected_calls, "unchanged represented history must not call the sidecar twice; input byte lengths={:?}; first differing byte={:?}", inputs.iter().map(String::len).collect::<Vec<_>>(), inputs.first().zip(inputs.last()).and_then(|(first,last)| first.bytes().zip(last.bytes()).position(|(first,last)|first!=last)));
+            }
+        }
+    });
+}
