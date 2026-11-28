@@ -223,7 +223,10 @@ impl App {
     /// For Antigravity, uses the live remote catalog routes when available so
     /// newly discovered models expose their exact sibling effort tiers, falling
     /// back to static inference during the pre-catalog bootstrap window.
-    pub(super) fn remote_available_efforts(&self) -> Vec<&'static str> {
+    ///
+    /// Named custom providers may define a per-model reasoning-effort map in
+    /// config.toml; its enabled rungs win over the static family inference.
+    pub(super) fn remote_available_efforts(&self) -> Vec<String> {
         let (provider_name, provider_model) = self.remote_effort_identity();
         if provider_name
             .as_deref()
@@ -244,10 +247,30 @@ impl App {
                 return jcode_provider_core::antigravity_efforts_from_catalog(
                     model,
                     catalog_models,
-                );
+                )
+                .into_iter()
+                .map(ToString::to_string)
+                .collect();
             }
         }
+        if crate::tui::is_ssh_remote() {
+            // SSH clients must not trust the local config: the server may run
+            // on a different machine with a different config.toml.
+            return inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+                .into_iter()
+                .map(ToString::to_string)
+                .collect();
+        }
+        if let Some(efforts) = crate::provider::configured_reasoning_efforts(
+            provider_name.as_deref(),
+            provider_model.as_deref(),
+        ) {
+            return efforts;
+        }
         inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+            .into_iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     /// Best-known current reasoning effort for the remote session. Falls back
@@ -1508,7 +1531,7 @@ impl crate::tui::TuiState for App {
         } else {
             (
                 Some(self.provider.model()),
-                self.provider.reasoning_effort(),
+                self.provider.effective_reasoning_effort(),
                 self.provider.service_tier(),
                 self.provider.native_compaction_mode(),
                 self.provider.native_compaction_threshold_tokens(),

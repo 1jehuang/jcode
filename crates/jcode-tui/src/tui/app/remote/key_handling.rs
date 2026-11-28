@@ -654,15 +654,28 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 .unwrap_or("default");
             let efforts = app.remote_available_efforts();
             if efforts.is_empty() {
-                app.push_display_message(DisplayMessage::system(
-                    "Reasoning effort not available for this provider.".to_string(),
-                ));
+                // Switching is unavailable, but the server may still run
+                // a fixed effort (e.g. injected via OpenAI-compatible
+                // `extra_body`). Show it read-only instead of hiding it.
+                match app.remote_reasoning_effort_hint() {
+                    Some(effort) => {
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Reasoning effort not switchable for this provider.\nEffort: {} (fixed, from provider config)",
+                            app_mod::effort_display_label(&effort)
+                        )));
+                    }
+                    None => {
+                        app.push_display_message(DisplayMessage::system(
+                            "Reasoning effort not available for this provider.".to_string(),
+                        ));
+                    }
+                }
                 return Ok(());
             }
             let list: Vec<String> = efforts
                 .iter()
                 .map(|e| {
-                    if Some(*e) == current {
+                    if current == Some(e.as_str()) {
                         format!("{} <- current", app_mod::effort_display_label(e))
                     } else {
                         app_mod::effort_display_label(e).to_string()
@@ -685,7 +698,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_enter_input(
                 return Ok(());
             }
             let efforts = app.remote_available_efforts();
-            if efforts.contains(&level) {
+            if efforts.iter().any(|e| e == level) {
                 app.remote_reasoning_effort = Some(level.to_string());
                 app.invalidate_model_picker_cache();
                 app.set_status_notice(format!(

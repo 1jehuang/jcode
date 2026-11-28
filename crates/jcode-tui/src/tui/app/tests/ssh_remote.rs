@@ -354,7 +354,10 @@ fn antigravity_remote_effort_helpers_and_event_sync_sibling_model() {
 
         assert_eq!(
             app.remote_available_efforts(),
-            vec!["low", "medium", "high", "xhigh", "swarm"]
+            ["low", "medium", "high", "xhigh", "swarm"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
         );
         assert_eq!(app.remote_reasoning_effort_hint().as_deref(), Some("low"));
 
