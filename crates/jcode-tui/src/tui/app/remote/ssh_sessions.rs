@@ -9,6 +9,12 @@ pub(in crate::tui::app) struct State {
     ready_prompt: Option<String>,
 }
 
+impl State {
+    pub(in crate::tui::app) fn is_switch_pending(&self) -> bool {
+        self.navigation.is_some() || self.child.is_some()
+    }
+}
+
 struct Navigation {
     request_id: u64,
     target: String,
@@ -52,8 +58,10 @@ async fn navigate(
     returning: bool,
     prompt: Option<String>,
 ) -> Result<()> {
+    app.check_prompt_history_switch()?;
     let previous = remote.session_id().map(str::to_owned);
     let request_id = remote.resume_ssh_session(target).await?;
+    app.suspend_prompt_history_for_request(request_id);
     app.ssh_sessions.navigation = Some(Navigation {
         request_id,
         target: target.to_owned(),
@@ -77,7 +85,7 @@ pub(in crate::tui::app) async fn handle_command(
     let Some((command, args)) = token(input) else {
         return Ok(false);
     };
-    if app.ssh_sessions.navigation.is_some() || app.ssh_sessions.child.is_some() {
+    if app.wait_for_prompt_history_switch() {
         app.push_display_message(DisplayMessage::system(
             "A remote session switch is pending. Wait for its history or error response.",
         ));

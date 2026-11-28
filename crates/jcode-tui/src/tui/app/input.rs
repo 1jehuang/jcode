@@ -2911,17 +2911,14 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Esc => {
-            if app
-                .inline_interactive_state
-                .as_ref()
-                .map(|p| p.preview)
-                .unwrap_or(false)
-            {
+            if matches!(&app.inline_interactive_state, Some(p) if p.preview) {
                 app.inline_interactive_state = None;
                 app.inline_view_state = None;
                 clear_input_for_escape(app);
             } else if app.inline_view_state.is_some() {
                 app.inline_view_state = None;
+                clear_input_for_escape(app);
+            } else if !app.input.is_empty() {
                 clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit

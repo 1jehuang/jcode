@@ -307,9 +307,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing {
+    if !app.is_processing && app.prompt_history_scope.switch_request.is_none() {
         if let Some(request) = app.take_pending_catchup_resume() {
-            match remote.resume_session(&request.target_session_id).await {
+            match app.resume_session(remote, &request.target_session_id).await {
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&request.target_session_id)
                         .map(|name| name.to_string())
@@ -335,7 +335,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
 
         if let Some(target_session) = app.workspace_client.take_pending_resume_session() {
-            match remote.resume_session(&target_session).await {
+            match app.resume_session(remote, &target_session).await {
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&target_session)
                         .map(|name| name.to_string())
@@ -774,7 +774,7 @@ async fn apply_terminal_event<B: Backend>(
             input_attribution.scroll_delta = mouse_scroll_delta(&mouse);
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
                 needs_redraw |= dispatch_compacted_history_load(app, remote).await;
             }
@@ -1091,7 +1091,7 @@ where
         Some(Ok(Event::Mouse(mouse))) => {
             if !matches!(mouse.kind, MouseEventKind::Moved) {
                 app.note_client_interaction();
-                handle_mouse_event(app, mouse);
+                app.handle_mouse_event(mouse);
                 needs_redraw = true;
             }
         }
@@ -1591,7 +1591,7 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 /// plain Enter, so it behaves exactly as if the user typed it now. One per
 /// call: if it starts a turn, the rest wait for that turn to end.
 async fn run_next_queued_remote_command(app: &mut App, remote: &mut RemoteConnection) {
-    if app.queued_commands.is_empty() {
+    if app.queued_commands.is_empty() || app.wait_for_prompt_history_switch() {
         return;
     }
     let command = app.queued_commands.remove(0);
@@ -1765,10 +1765,6 @@ pub(super) async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteCo
             }
         }
     }
-}
-
-fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
-    app.handle_mouse_event(mouse);
 }
 
 async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConnection) -> String {

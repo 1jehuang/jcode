@@ -2906,7 +2906,7 @@ impl App {
                 name
             )));
         }
-        self.workspace_client.queue_resume_session(session_id);
+        self.queue_prompt_history_resume(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(format!("Switching → {}", name));
@@ -2945,7 +2945,7 @@ impl App {
         self.push_display_message(DisplayMessage::system(format!(
             "Claude Code exited and its transcript was prepared as {session_id}."
         )));
-        self.workspace_client.queue_resume_session(session_id);
+        self.queue_prompt_history_resume(session_id);
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(format!("Taking over Claude → {display_id}"));

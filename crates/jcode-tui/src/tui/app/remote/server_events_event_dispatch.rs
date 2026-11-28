@@ -9,6 +9,9 @@ pub(in crate::tui::app) fn handle_server_event(
 ) -> bool {
     // Local capability registration is control traffic, even when a turn is
     // active. Process its acknowledgment before the scoped-turn terminal fence.
+    if let ServerEvent::Error { id, .. } = &event {
+        app.fail_prompt_history_switch(*id);
+    }
     if let ServerEvent::Ack { id } = &event
         && remote.finish_local_tools_request(*id, true)
     {

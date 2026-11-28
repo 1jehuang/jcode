@@ -16,10 +16,6 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
 const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
 const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
 const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
@@ -144,7 +140,7 @@ fn should_defer_history_for_runtime_identity(
     should_defer_history_for_runtime_identity_with_allow(
         server_has_update,
         client_detected_stale,
-        allow_runtime_identity_mismatch(),
+        std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some(),
     )
 }
 
@@ -1463,17 +1459,7 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
-            app.jarvis_session_changed(&session_id);
-            if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
-                app.remote_available_service_tiers = None;
-            }
-            remote.set_session_id(session_id.clone());
-            app.cloud_environment_session_changed(&session_id);
-            app.remote_session_id = Some(session_id.clone());
-            crate::set_current_session(&session_id);
-            app.note_client_focus(true);
-            app.update_terminal_title();
-            false
+            super::server_event_handlers::handle_session_id(app, remote, session_id)
         }
         ServerEvent::SessionCloseRequested { reason } => {
             app.push_display_message(DisplayMessage::system(format!(
@@ -1767,7 +1753,7 @@ fn handle_server_event_inner(
             remote.set_session_id(session_id.clone());
             app.jarvis_session_changed(&session_id);
             app.cloud_environment_session_changed(&session_id);
-            app.remote_session_id = Some(session_id.clone());
+            app.set_remote_prompt_history_session(&session_id);
             history_laps.push(("pre_set_session", history_lap.elapsed().as_millis()));
             history_lap = Instant::now();
             crate::set_current_session(&session_id);

@@ -18,6 +18,10 @@ pub(super) async fn handle_workspace_navigation_key(
         return Ok(false);
     };
 
+    if app.wait_for_prompt_history_switch() {
+        return Ok(true);
+    }
+
     let target = match direction {
         WorkspaceNavigationDirection::Left => app.workspace_client.navigate_left(),
         WorkspaceNavigationDirection::Right => app.workspace_client.navigate_right(),
@@ -34,7 +38,7 @@ pub(super) async fn handle_workspace_navigation_key(
         app.set_status_notice("No workspace session in that direction");
         return Ok(true);
     };
-    remote.resume_session(&target_session_id).await?;
+    app.resume_session(remote, &target_session_id).await?;
     let label = crate::id::extract_session_name(&target_session_id)
         .map(|name| name.to_string())
         .unwrap_or(target_session_id);

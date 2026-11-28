@@ -128,3 +128,21 @@ pub(super) fn handle_resume_all_result(app: &mut App, resumed: usize, message: S
     }
     false
 }
+
+pub(super) fn handle_session_id(
+    app: &mut App,
+    remote: &mut impl RemoteEventState,
+    session_id: String,
+) -> bool {
+    app.jarvis_session_changed(&session_id);
+    if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
+        app.remote_available_service_tiers = None;
+    }
+    remote.set_session_id(session_id.clone());
+    app.cloud_environment_session_changed(&session_id);
+    app.set_remote_prompt_history_session(&session_id);
+    crate::set_current_session(&session_id);
+    app.note_client_focus(true);
+    app.update_terminal_title();
+    false
+}

@@ -34,7 +34,7 @@ async fn jarvis_session_switch_clears_old_tool_capability_before_resume() {
     let mut reader = BufReader::new(reader);
     remote.session_id = Some("old-jarvis-session".into());
     remote.jarvis_tools_configured = true;
-    remote.resume_session("next-session").await.unwrap();
+    let resume_id = remote.resume_ssh_session("next-session").await.unwrap();
     assert!(!remote.jarvis_tools_configured);
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
@@ -47,7 +47,7 @@ async fn jarvis_session_switch_clears_old_tool_capability_before_resume() {
     line.clear();
     reader.read_line(&mut line).await.unwrap();
     assert!(
-        matches!(serde_json::from_str::<Request>(&line).unwrap(), Request::ResumeSession { session_id, .. } if session_id == "next-session")
+        matches!(serde_json::from_str::<Request>(&line).unwrap(), Request::ResumeSession { id, session_id, .. } if id == resume_id && session_id == "next-session")
     );
 }
 

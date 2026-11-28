@@ -783,13 +783,10 @@ pub(super) async fn handle_remote_key_internal(
             app.scroll_down(dec);
         }
         KeyCode::Esc => {
-            if app
-                .inline_interactive_state
-                .as_ref()
-                .map(|p| p.preview)
-                .unwrap_or(false)
-            {
+            if matches!(&app.inline_interactive_state, Some(p) if p.preview) {
                 app.inline_interactive_state = None;
+                input::clear_input_for_escape(app);
+            } else if !app.input.is_empty() {
                 input::clear_input_for_escape(app);
             } else if app.is_processing && app.has_pending_user_followup() {
                 // The user typed a new prompt while this turn ran, then hit
