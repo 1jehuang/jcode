@@ -221,6 +221,66 @@ async fn late_mcp_tools_are_announced_once_in_the_transcript() {
     );
 }
 
+#[tokio::test]
+async fn truncated_late_mcp_announcement_does_not_repeat_after_restore() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    for i in 0..70 {
+        registry
+            .register(
+                format!("mcp__bulk__tool_{i:02}"),
+                Arc::new(FakeMcpTool {
+                    name: format!("tool_{i:02}"),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+
+    agent.announce_late_mcp_tools().await;
+    let first: Vec<String> = transcript_texts(&agent)
+        .into_iter()
+        .filter(|t| t.contains("New MCP tools are available."))
+        .collect();
+    assert_eq!(first.len(), 1);
+    assert!(first[0].contains("... and 6 more; use mcp action=search to find them."));
+
+    // Simulate a session reload/restore where the in-memory tracking set starts empty.
+    agent.announced_mcp_tools.clear();
+    agent.announced_mcp_scan_index = 0;
+
+    agent.announce_late_mcp_tools().await;
+    let after_restore = transcript_texts(&agent)
+        .into_iter()
+        .filter(|t| t.contains("New MCP tools are available."))
+        .count();
+    assert_eq!(
+        after_restore, 1,
+        "overflow MCP tools must not be re-announced after session restore"
+    );
+
+    // A genuinely new MCP server connecting later in the resumed session is still announced.
+    agent
+        .registry
+        .register(
+            "mcp__brandnew__ping".to_string(),
+            Arc::new(FakeMcpTool {
+                name: "ping".to_string(),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    agent.announce_late_mcp_tools().await;
+    let after_new: Vec<String> = transcript_texts(&agent)
+        .into_iter()
+        .filter(|t| t.contains("New MCP tools are available."))
+        .collect();
+    assert_eq!(after_new.len(), 2);
+    assert!(after_new[1].contains("mcp__brandnew__ping"));
+}
+
 /// Tools already described by an `mcp connect`/`mcp_search` result (tool
 /// references in the transcript) must not be announced again, and nothing
 /// is announced on the native deferred path or in eager mode.

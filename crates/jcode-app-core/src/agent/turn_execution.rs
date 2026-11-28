@@ -874,8 +874,8 @@ impl Agent {
         if self.mcp_tools_mode == crate::config::McpToolsMode::Eager || self.native_deferred_mcp() {
             return;
         }
-        self.seed_announced_mcp_tools_from_transcript();
         let current = self.build_filtered_tool_definitions_raw().await;
+        self.seed_announced_mcp_tools_from_transcript(&current);
         let fresh: Vec<ToolDefinition> = current
             .into_iter()
             .filter(|tool| {
@@ -1021,10 +1021,11 @@ impl Agent {
     /// loaded by a tool reference (`mcp connect` / `mcp search` results carry
     /// their schemas) and tools named in earlier announcements (which matters
     /// after a session restore, when the in-memory set starts empty).
-    fn seed_announced_mcp_tools_from_transcript(&mut self) {
+    fn seed_announced_mcp_tools_from_transcript(&mut self, current: &[ToolDefinition]) {
         let start = self
             .announced_mcp_scan_index
             .min(self.session.messages.len());
+        let mut saw_truncated_announcement = false;
         for message in &self.session.messages[start..] {
             for block in &message.content {
                 match block {
@@ -1041,10 +1042,24 @@ impl Agent {
                                 .filter(|name| name.starts_with("mcp__"))
                             {
                                 self.announced_mcp_tools.insert(name.to_string());
+                            } else if line.starts_with("... and ") {
+                                saw_truncated_announcement = true;
                             }
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+        // A prior truncated announcement ("... and N more; use mcp action=search")
+        // already covered all overflow MCP tools present when it was emitted.
+        // On session restore/reload, mark all currently registered MCP tools as
+        // announced so we do not re-announce the overflow 64 tools at a time on
+        // every resume, while still announcing genuinely new servers added later.
+        if saw_truncated_announcement {
+            for tool in current {
+                if tool.name.starts_with("mcp__") {
+                    self.announced_mcp_tools.insert(tool.name.clone());
                 }
             }
         }
