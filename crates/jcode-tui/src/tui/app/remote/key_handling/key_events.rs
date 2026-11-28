@@ -809,13 +809,14 @@ pub(super) async fn handle_remote_key_internal(
                         .queued_messages
                         .iter()
                         .any(|message| app_mod::commands::is_poke_message(message));
-                // Esc without a redirect stops daemon-owned continuation too.
-                // Send the control before cancellation reaches a turn boundary.
-                remote.runtime_command("poke", vec!["off".into()]).await?;
+                // Esc without a redirect pauses daemon-owned continuation until
+                // the user sends a new prompt. Send the control before
+                // cancellation reaches a turn boundary.
+                remote.runtime_command("poke", vec!["pause".into()]).await?;
                 remote.cancel_with_reason("keyboard_escape").await?;
                 if disabled_auto_poke {
                     app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Interrupting... Auto-poke OFF");
+                    app.set_status_notice("Interrupting... Auto-poke paused");
                 } else {
                     app.set_status_notice("Interrupting...");
                 }

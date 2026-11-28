@@ -19,11 +19,16 @@ struct Workflow {
     active: bool,
 }
 
+const INTERRUPT_PAUSE_REARM_SECS: u64 = 5 * 60;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 struct LoopState {
     version: u32,
     poke_enabled: bool,
+    rearm_on_user_turn: bool,
+    paused_at_unix_secs: Option<u64>,
+    paused_todo_fingerprint: Option<String>,
     workflow: Option<Workflow>,
     policy: todo::followup::FollowUpPolicy,
     turns: u64,
@@ -35,12 +40,36 @@ impl Default for LoopState {
         Self {
             version: 1,
             poke_enabled: false,
+            rearm_on_user_turn: false,
+            paused_at_unix_secs: None,
+            paused_todo_fingerprint: None,
             workflow: None,
             policy: todo::followup::FollowUpPolicy::new(false),
             turns: 0,
             last_notice: None,
         }
     }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn todo_fingerprint(session_id: &str) -> Option<String> {
+    let todos = todo::load_todos(session_id).ok()?;
+    serde_json::to_string(&todos).ok()
+}
+
+fn rearm_state(state: &mut LoopState) {
+    state.rearm_on_user_turn = false;
+    state.paused_at_unix_secs = None;
+    state.paused_todo_fingerprint = None;
+    state.poke_enabled = true;
+    state.policy = todo::followup::FollowUpPolicy::new(true);
+    state.last_notice = None;
 }
 
 fn state_lock() -> &'static Mutex<()> {
@@ -92,6 +121,53 @@ pub(super) fn initialize_remote_session(session_id: &str, enabled: bool) -> Resu
     Ok(())
 }
 
+/// Re-arm daemon auto-poke when the user sends a new prompt after an Escape
+/// interrupt paused it. Never overrides an explicit `/poke off`.
+pub(super) fn rearm_on_user_turn(session_id: &str) -> Result<bool> {
+    let _lock = state_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let path = state_path(session_id)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut state = read_state(&path)?;
+    if !state.rearm_on_user_turn {
+        return Ok(false);
+    }
+    rearm_state(&mut state);
+    crate::storage::write_json(&path, &state)?;
+    crate::logging::info(&format!(
+        "AUTO_POKE_DECISION owner=daemon session={session_id} action=rearm reason=user_turn_after_interrupt"
+    ));
+    Ok(true)
+}
+
+fn maybe_rearm_paused_state(
+    session_id: &str,
+    state: &mut LoopState,
+    now_secs: u64,
+    current_todo_fp: Option<&str>,
+) -> Option<&'static str> {
+    if !state.rearm_on_user_turn {
+        return None;
+    }
+    let elapsed_ready = state
+        .paused_at_unix_secs
+        .is_some_and(|paused_at| now_secs.saturating_sub(paused_at) >= INTERRUPT_PAUSE_REARM_SECS);
+    let todos_changed = state.paused_todo_fingerprint.as_deref() != current_todo_fp;
+    let reason = if todos_changed {
+        "todos_updated_after_interrupt"
+    } else if elapsed_ready {
+        "pause_timeout_elapsed"
+    } else {
+        return None;
+    };
+    rearm_state(state);
+    crate::logging::info(&format!(
+        "AUTO_POKE_DECISION owner=daemon session={session_id} action=rearm reason={reason}"
+    ));
+    Some(reason)
+}
+
 fn update_state<T>(
     session_id: &str,
     action: impl FnOnce(&mut LoopState) -> Result<T>,
@@ -141,6 +217,9 @@ pub(super) fn control(
     }
     if command == "poke" && action == "on" {
         return update_state(session_id, |state| {
+            state.rearm_on_user_turn = false;
+            state.paused_at_unix_secs = None;
+            state.paused_todo_fingerprint = None;
             if !state.poke_enabled {
                 state.poke_enabled = true;
                 state.policy = todo::followup::FollowUpPolicy::new(true);
@@ -154,12 +233,34 @@ pub(super) fn control(
             Ok(Some((data, message)))
         });
     }
+    if command == "poke" && action == "pause" {
+        return update_state(session_id, |state| {
+            if state.poke_enabled {
+                state.rearm_on_user_turn = true;
+                state.paused_at_unix_secs = Some(now_unix_secs());
+                state.paused_todo_fingerprint = todo_fingerprint(session_id);
+            }
+            state.poke_enabled = false;
+            if let Some(workflow) = state.workflow.as_mut() {
+                workflow.active = false;
+            }
+            state.policy.disable();
+            let message = "Paused /poke until your next message. The current turn is not cancelled."
+                .to_string();
+            state.last_notice = Some(message.clone());
+            let data = status_data(session_id, state)?;
+            Ok(Some((data, message)))
+        });
+    }
     if !matches!(action.as_str(), "off" | "stop") {
         return Ok(None);
     }
     update_state(session_id, |state| {
         if command == "poke" {
             state.poke_enabled = false;
+            state.rearm_on_user_turn = false;
+            state.paused_at_unix_secs = None;
+            state.paused_todo_fingerprint = None;
             if let Some(workflow) = state.workflow.as_mut() {
                 workflow.active = false;
             }
@@ -414,7 +515,10 @@ pub(super) async fn run_reserved_followups(
                 })
                 .map(|task| task.task_id),
         );
+        let current_todo_fp = todo_fingerprint(&session_id);
+        let now_secs = now_unix_secs();
         let decision = update_state(&session_id, |state| {
+            maybe_rearm_paused_state(&session_id, state, now_secs, current_todo_fp.as_deref());
             state
                 .policy
                 .set_gate_digest_enabled(crate::config::config().features.todo_gate_digest);

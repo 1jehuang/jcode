@@ -625,3 +625,81 @@ async fn remote_loop_runtime_executes_turns_persists_controls_and_recovers_actua
     assert_eq!(other_status["poke_enabled"], false);
     assert!(!state_path(other).unwrap().exists(), "status is read-only");
 }
+
+#[test]
+fn poke_pause_rearms_on_next_user_turn_while_explicit_off_stays_off() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let session_id = "session_escape_rearm_test";
+    initialize_remote_session(session_id, true).unwrap();
+    assert!(read_state(&state_path(session_id).unwrap()).unwrap().poke_enabled);
+
+    // Escape pauses auto-poke for the cancelled turn but marks it to re-arm.
+    let (paused, _) = control(session_id, "poke", &["pause".into()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused["poke_enabled"], false);
+    let state = read_state(&state_path(session_id).unwrap()).unwrap();
+    assert!(!state.poke_enabled);
+    assert!(state.rearm_on_user_turn);
+
+    // Next user turn re-arms auto-poke.
+    assert!(rearm_on_user_turn(session_id).unwrap());
+    let state = read_state(&state_path(session_id).unwrap()).unwrap();
+    assert!(state.poke_enabled);
+    assert!(!state.rearm_on_user_turn);
+
+    // Explicit /poke off stays off across subsequent user turns.
+    let (stopped, _) = control(session_id, "poke", &["off".into()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped["poke_enabled"], false);
+    assert!(!rearm_on_user_turn(session_id).unwrap());
+    let state = read_state(&state_path(session_id).unwrap()).unwrap();
+    assert!(!state.poke_enabled);
+    assert!(!state.rearm_on_user_turn);
+
+    // Pausing when already off does not arm re-enable on the next user turn.
+    control(session_id, "poke", &["pause".into()])
+        .unwrap()
+        .unwrap();
+    assert!(!rearm_on_user_turn(session_id).unwrap());
+    assert!(!read_state(&state_path(session_id).unwrap()).unwrap().poke_enabled);
+
+    // Re-arm also triggers when todos change or after the pause timeout elapses.
+    control(session_id, "poke", &["on".into()]).unwrap().unwrap();
+    todo::save_todos(session_id, &open_snapshot().todos).unwrap();
+    control(session_id, "poke", &["pause".into()])
+        .unwrap()
+        .unwrap();
+    let mut state = read_state(&state_path(session_id).unwrap()).unwrap();
+    let paused_at = state.paused_at_unix_secs.unwrap();
+    let initial_fp = state.paused_todo_fingerprint.clone();
+    assert!(
+        maybe_rearm_paused_state(session_id, &mut state, paused_at + 10, initial_fp.as_deref())
+            .is_none()
+    );
+    assert_eq!(
+        maybe_rearm_paused_state(
+            session_id,
+            &mut state,
+            paused_at + INTERRUPT_PAUSE_REARM_SECS,
+            initial_fp.as_deref()
+        ),
+        Some("pause_timeout_elapsed")
+    );
+    assert!(state.poke_enabled);
+
+    control(session_id, "poke", &["pause".into()])
+        .unwrap()
+        .unwrap();
+    let mut state = read_state(&state_path(session_id).unwrap()).unwrap();
+    assert_eq!(
+        maybe_rearm_paused_state(session_id, &mut state, paused_at + 1, Some("[{\"changed\":true}]")),
+        Some("todos_updated_after_interrupt")
+    );
+    assert!(state.poke_enabled);
+}

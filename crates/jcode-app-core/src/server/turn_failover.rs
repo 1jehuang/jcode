@@ -189,6 +189,9 @@ pub(super) async fn process_reserved_message_with_server_failover(
 ) -> anyhow::Result<()> {
     let reminder = system_reminder.clone();
     let mut guard = agent.lock().await;
+    if display_role.is_none() && !crate::todo::is_auto_poke_message(content) {
+        let _ = super::runtime_ssh_loops::rearm_on_user_turn(guard.session_id());
+    }
     let result = super::client_lifecycle::process_reserved_message_with_role(
         &mut guard,
         lease,
