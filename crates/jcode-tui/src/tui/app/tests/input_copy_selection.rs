@@ -615,3 +615,65 @@ fn test_input_composer_drag_then_release_copies_via_full_mouse_path() {
         app.status_notice()
     );
 }
+
+/// Exercise the real draw path, not a hand-installed viewport snapshot. A
+/// transcript is a usize-sized document even though the terminal uses u16 cells.
+#[test]
+fn test_long_transcript_u16_boundaries_keep_copy_geometry() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.input = "composer still copies".to_string();
+    app.cursor_pos = app.input.len();
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("test terminal");
+
+    // Measure the frame's header/spacer overhead once so these are actual
+    // wrapped-line boundaries, rather than approximately 65K source lines.
+    app.display_messages = vec![DisplayMessage::assistant(format!(
+        "```text\n{}```",
+        "copy boundary\n".repeat(8)
+    ))];
+    app.bump_display_messages_version();
+    render_and_snap(&app, &mut terminal);
+    let overhead = crate::tui::ui::copy_viewport_line_count().expect("chat snapshot") - 8;
+
+    for target in [65_534usize, 65_535, 65_536, 65_537] {
+        app.display_messages = vec![DisplayMessage::assistant(format!(
+            "```text\n{}```",
+            "copy boundary\n".repeat(target - overhead)
+        ))];
+        app.bump_display_messages_version();
+        // Both enabled hysteresis branches and the disabled-scrollbar path
+        // must finish drawing and publish copy geometry on consecutive frames.
+        for scrollbar in [false, true, true, false] {
+            app.chat_native_scrollbar = scrollbar;
+            render_and_snap(&app, &mut terminal);
+            assert_eq!(crate::tui::ui::copy_viewport_line_count(), Some(target));
+            assert_eq!(crate::tui::ui::last_chat_scrollbar_visible(), scrollbar);
+            assert!(
+                crate::tui::ui::copy_viewport_visible_range()
+                    .is_some_and(|(start, end)| start < end && end <= target)
+            );
+
+            // Mouse release must keep working after keyboard mode has cleared
+            // its selection, including composer geometry late in a long session.
+            let points = input_pane_screen_points(80, 24);
+            let start = points
+                .iter()
+                .find(|(_, _, p)| p.column == 0)
+                .expect("input start");
+            let end = points
+                .iter()
+                .max_by_key(|(_, _, p)| p.column)
+                .expect("input end");
+            assert_eq!(
+                drag_copy(&mut app, (start.0, start.1), (end.0, end.1)),
+                app.input
+            );
+            assert!(!app.copy_selection_dragging);
+            assert!(app.copy_selection_pending_anchor.is_none());
+        }
+    }
+}
