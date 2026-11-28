@@ -2816,6 +2816,7 @@ async fn run_single_message_command_plain_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut delivery_budget = todo_followup::RunDeliveryBudget::default();
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         agent.run_once(&next_message).await?;
@@ -2851,6 +2852,23 @@ async fn run_single_message_command_plain_with_auto_poke(
                 crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
             );
             break;
+        }
+        if let Some(delivery) = delivery_budget.follow_up(
+            &todos,
+            || run_goals(agent.session_id()),
+            run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        ) {
+            match delivery {
+                Ok(message) => {
+                    eprintln!("Continuing because a requested goal is still undelivered.");
+                    next_message = message;
+                    continue;
+                }
+                Err(reason) => {
+                    eprintln!("Stopped with an undelivered goal ({reason}).");
+                    break;
+                }
+            }
         }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),
@@ -2934,6 +2952,7 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut delivery_budget = todo_followup::RunDeliveryBudget::default();
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         outputs.push(agent.run_once_capture(&next_message).await?);
@@ -2969,6 +2988,23 @@ async fn run_single_message_command_capture_with_auto_poke(
                 crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS
             );
             break;
+        }
+        if let Some(delivery) = delivery_budget.follow_up(
+            &todos,
+            || run_goals(agent.session_id()),
+            run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        ) {
+            match delivery {
+                Ok(message) => {
+                    eprintln!("Continuing because a requested goal is still undelivered.");
+                    next_message = message;
+                    continue;
+                }
+                Err(reason) => {
+                    eprintln!("Stopped with an undelivered goal ({reason}).");
+                    break;
+                }
+            }
         }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),
@@ -3075,6 +3111,7 @@ async fn run_single_message_command_ndjson(
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
     let mut gate_digest_delivered = false;
+    let mut delivery_budget = todo_followup::RunDeliveryBudget::default();
     let mut incomplete_budget = crate::todo::IncompleteTodoBudget::default();
     loop {
         let turn_result = {
@@ -3166,6 +3203,33 @@ async fn run_single_message_command_ndjson(
                 })
             )?;
             break;
+        }
+        if let Some(delivery) = delivery_budget.follow_up(
+            &todos,
+            || run_goals(agent.session_id()),
+            run_command_auto_poke_limit_reached(turns_completed, max_turns),
+        ) {
+            match delivery {
+                Ok(message) => {
+                    write_json_line(
+                        &mut stdout,
+                        &serde_json::json!({
+                            "type": "auto_poke_goal_delivery", "session_id": session_id, "message": message,
+                        }),
+                    )?;
+                    next_message = message;
+                    continue;
+                }
+                Err(reason) => {
+                    write_json_line(
+                        &mut stdout,
+                        &serde_json::json!({
+                            "type": "auto_poke_stopped", "session_id": session_id, "reason": reason,
+                        }),
+                    )?;
+                    break;
+                }
+            }
         }
         let gate_digest = take_run_gate_digest_if_turn_ended(
             agent.session_id(),

@@ -11,6 +11,57 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+fn run_delivery_goal(group: &str) -> crate::todo::TodoGoal {
+    crate::todo::TodoGoal {
+        group: Some(group.into()),
+        delivery_state: Some(crate::todo::DeliveryState::Integrated),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn run_delivery_continues_empty_and_completed_snapshots_without_quality_review() {
+    let mut completed = test_todo("ship", "completed", "high", None, None);
+    completed.group = Some("ship".into());
+    for todos in [vec![], vec![completed]] {
+        let mut budget = todo_followup::RunDeliveryBudget::default();
+        let goals = || vec![run_delivery_goal("ship")];
+        let message = crate::todo::undelivered_goal_message(&todos, &goals()).unwrap();
+        assert_eq!(
+            budget.follow_up(&todos, goals, true),
+            Some(Err("turn_limit"))
+        );
+        assert_eq!(budget.follow_up(&todos, goals, false), Some(Ok(message)));
+        assert_eq!(
+            budget.follow_up(&todos, goals, false),
+            Some(Err("unchanged_delivery"))
+        );
+        let mut goal = run_delivery_goal("ship");
+        goal.delivery_state = Some(crate::todo::DeliveryState::OutcomeDelivered);
+        assert_eq!(budget.follow_up(&todos, || vec![goal], false), None);
+    }
+}
+
+#[test]
+fn run_delivery_defers_to_open_work_and_bounds_changing_messages() {
+    let mut budget = todo_followup::RunDeliveryBudget::default();
+    let open = dependency_todo("waiting", &["task"]);
+    assert_eq!(
+        budget.follow_up(&[open], || panic!("open work takes precedence"), false),
+        None
+    );
+    for i in 0..crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS {
+        assert!(matches!(
+            budget.follow_up(&[], || vec![run_delivery_goal(&i.to_string())], false),
+            Some(Ok(_))
+        ));
+    }
+    assert_eq!(
+        budget.follow_up(&[], || vec![run_delivery_goal("new")], false),
+        Some(Err("delivery_attempt_limit"))
+    );
+}
+
 #[test]
 fn run_auto_poke_default_skips_quality_reviews_but_keeps_unfinished_work() {
     let mut spiked = test_todo(
@@ -1318,6 +1369,15 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
 
 #[tokio::test]
 async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
+    check_followup_dispatch_all_modes(false).await;
+}
+
+#[tokio::test]
+async fn run_delivery_pokes_once_for_goal_without_items_in_all_output_modes() {
+    check_followup_dispatch_all_modes(true).await;
+}
+
+async fn check_followup_dispatch_all_modes(goal_only: bool) {
     let _guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&[
         "JCODE_HOME",
@@ -1334,11 +1394,15 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
             let provider: Arc<dyn Provider> = Arc::new(TestProvider);
             let registry = Registry::new(provider.clone()).await;
             let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-            crate::todo::save_todos(
-                agent.session_id(),
-                &[test_todo("open", "pending", "high", None, None)],
-            )
-            .unwrap();
+            if goal_only {
+                crate::todo::save_goals(agent.session_id(), &[run_delivery_goal("ship")]).unwrap();
+            } else {
+                crate::todo::save_todos(
+                    agent.session_id(),
+                    &[test_todo("open", "pending", "high", None, None)],
+                )
+                .unwrap();
+            }
             // Exercise the actual CLI output dispatcher, not only the local
             // loop helpers. Daemon-owned continuation must not accidentally
             // disable this standalone Agent's follow-ups in any output mode.
@@ -1367,8 +1431,12 @@ async fn incomplete_todo_followups_stop_after_three_in_all_output_modes() {
                 .count();
             assert_eq!(
                 followups,
-                if enabled { 3 } else { 0 },
-                "{mode}, enabled={enabled}"
+                match (enabled, goal_only) {
+                    (false, _) => 0,
+                    (true, true) => 1,
+                    (true, false) => 3,
+                },
+                "{mode}, enabled={enabled}, goal_only={goal_only}"
             );
         }
     }

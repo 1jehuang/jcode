@@ -20,6 +20,37 @@ pub(super) enum RunAutoPokeFollowUp {
     },
 }
 
+/// Keep a run-wide budget even when the agent alternates goal snapshots.
+#[derive(Default)]
+pub(super) struct RunDeliveryBudget {
+    sent: BTreeSet<String>,
+}
+
+impl RunDeliveryBudget {
+    pub(super) fn follow_up(
+        &mut self,
+        todos: &[crate::todo::TodoItem],
+        goals: impl FnOnce() -> Vec<crate::todo::TodoGoal>,
+        turn_limit_reached: bool,
+    ) -> Option<Result<String, &'static str>> {
+        // Existing incomplete-work and pause handling takes precedence.
+        if todos.iter().any(crate::todo::is_incomplete_todo) {
+            return None;
+        }
+        let message = crate::todo::undelivered_goal_message(todos, &goals())?;
+        Some(if turn_limit_reached {
+            Err("turn_limit")
+        } else if self.sent.contains(&message) {
+            Err("unchanged_delivery")
+        } else if self.sent.len() >= usize::from(crate::todo::INCOMPLETE_TODO_MAX_ATTEMPTS) {
+            Err("delivery_attempt_limit")
+        } else {
+            self.sent.insert(message.clone());
+            Ok(message)
+        })
+    }
+}
+
 pub(super) fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
     match crate::todo::load_todos(session_id) {
         Ok(todos) => todos,
