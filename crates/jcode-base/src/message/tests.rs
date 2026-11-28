@@ -925,13 +925,7 @@ fn push_reasoning_blocks_anthropic_signed_replay() {
 #[test]
 fn push_reasoning_blocks_claude_route_signed_replay() {
     let mut blocks = Vec::new();
-    push_reasoning_blocks(
-        &mut blocks,
-        "Claude",
-        "signed thought",
-        Some("sig"),
-        true,
-    );
+    push_reasoning_blocks(&mut blocks, "Claude", "signed thought", Some("sig"), true);
     assert_eq!(blocks.len(), 1);
     match &blocks[0] {
         ContentBlock::AnthropicThinking {
@@ -943,7 +937,9 @@ fn push_reasoning_blocks_claude_route_signed_replay() {
         }
         other => panic!("expected AnthropicThinking, got {other:?}"),
     }
-    assert!(crate::provider::stores_reasoning_content_for_context("Claude"));
+    assert!(crate::provider::stores_reasoning_content_for_context(
+        "Claude"
+    ));
 }
 
 #[test]
