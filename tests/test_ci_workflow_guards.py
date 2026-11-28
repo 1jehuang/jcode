@@ -90,7 +90,7 @@ class WorkflowGuardTests(unittest.TestCase):
 
     def test_ci_builds_and_tests_cannot_silently_refresh_the_lockfile(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
-        command = re.compile(r'(?:cargo|"\$CARGO_BIN"|"\$\(rustup which cargo\)") '
+        command = re.compile(r'(?:cargo|"\$CARGO_BIN"|"\$\(rustup which cargo\)"|scripts/justrust_ci_run\.sh) '
                              r'(?:build|check|test|clippy)\b')
         checked = 0
         for line in workflow.splitlines():
@@ -129,11 +129,11 @@ class WorkflowGuardTests(unittest.TestCase):
                 # The initial module-resolution check runs normally. Every
                 # independent check after it must run after earlier failures,
                 # stop on cancellation, and retain its failing exit status.
-                if name != 'Check module declarations resolve':
+                if name not in ('Install hosted justrust client', 'Check module declarations resolve'):
                     self.assertIn('if: ${{ !cancelled() }}', step)
                 self.assertNotRegex(step, r'\bcontinue-on-error:\s*true\b')
         self.assertNotIn('continue-on-error: true', quality)
-        self.assertIn('cargo clippy --locked --all-targets --all-features -- -D warnings', quality)
+        self.assertIn('justrust_ci_run.sh clippy --locked --all-targets --all-features -- -D warnings', quality)
         for script in ('check_code_size_budget.py', 'check_test_size_budget.py',
                        'check_panic_budget.py', 'check_swallowed_error_budget.py'):
             self.assertIn(f'run: python3 scripts/{script}\n', quality)

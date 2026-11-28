@@ -42,6 +42,10 @@ jobs:
           key: quality-ubuntu
           cache-all-crates: "true"
 
+      - name: Install hosted justrust client
+        if: ${{ secrets.JUSTRUST_API_KEY != '' }}
+        run: bash scripts/install_justrust_hosted_ci.sh
+
       - name: Check module declarations resolve
         # A `mod x;` with no file makes rustfmt fail with "Error writing files:
         # failed to resolve mod", which reads like a formatting problem and hides
@@ -57,11 +61,15 @@ jobs:
 
       - name: Check all targets and all features
         if: ${{ !cancelled() }}
-        run: cargo check --locked --all-targets --all-features
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/justrust_ci_run.sh check --locked --all-targets --all-features
 
       - name: Run clippy with warnings denied
         if: ${{ !cancelled() }}
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/justrust_ci_run.sh clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Enforce Cargo.lock is up to date
         if: ${{ !cancelled() }}
@@ -113,7 +121,9 @@ jobs:
       - name: Enforce Rust and TypeScript SDK surface parity
         if: ${{ !cancelled() }}
         shell: bash
-        run: cargo test --locked -p jcode-sdk parity -- --nocapture
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
+        run: bash scripts/justrust_ci_run.sh test --locked -p jcode-sdk parity -- --nocapture
 
       - name: Enforce wildcard re-export ratchet
         if: ${{ !cancelled() }}
@@ -142,6 +152,8 @@ jobs:
           python3 tests/test_ci_workflow_guards.py
           python3 tests/test_install_justrust_ci.py
           python3 tests/test_install_justrust_hosted_ci.py
+          python3 tests/test_justrust_ci_run.py
+          python3 tests/test_publish_linux_release_direct.py
           python3 tests/test_public_release_builds.py
           python3 tests/test_release_ci.py
           python3 scripts/test_safety_budgets.py
