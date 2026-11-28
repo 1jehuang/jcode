@@ -35,7 +35,10 @@ fn test_usage_card_reset_balances() {
         }]);
         let content = &app.display_messages().last().unwrap().content;
         assert!(
-            content.contains(&format!("Session resets\t{} available", u64::from(available))),
+            content.contains(&format!(
+                "Session resets\t{} available",
+                u64::from(available)
+            )),
             "{content}"
         );
         assert_eq!(content.contains("next in"), !available, "{content}");
@@ -73,6 +76,10 @@ fn test_usage_card_reset_balances() {
 #[test]
 fn test_usage_card_responsive_terminal_layout() {
     let mut app = create_test_app();
+    // Card layout vs terminal width, measured on pure transcript geometry:
+    // the pinned Overview HUD would reserve a column at 100 cols and shrink
+    // the card, breaking the wide-terminal comparison.
+    app.suppress_info_widget_overlays = true;
     app.handle_usage_report(vec![crate::usage::ProviderUsage {
         provider_name: "OpenAI (personal)".into(),
         limits: vec![crate::usage::UsageLimit {

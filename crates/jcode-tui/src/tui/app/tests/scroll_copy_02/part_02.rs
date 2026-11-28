@@ -1131,6 +1131,7 @@ fn test_click_on_inline_image_label_line_cycles_level() {
         visible_end,
         content_area,
         &vec![0u16; visible_end],
+        None,
     );
 
     assert_eq!(
@@ -1228,6 +1229,7 @@ fn test_kitty_jitter_click_on_image_label_still_cycles_level() {
         visible_end,
         content_area,
         &vec![0u16; visible_end],
+        None,
     );
 
     let (col, row) = (
@@ -1588,6 +1590,7 @@ fn test_click_on_inline_image_body_cycles_level() {
         visible_end,
         content_area,
         &vec![0u16; visible_end],
+        None,
     );
 
     assert_eq!(app.image_expand_level(IMAGE_ID), ImageExpandLevel::Fit);

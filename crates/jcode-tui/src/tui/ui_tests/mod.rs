@@ -1,5 +1,6 @@
 use super::*;
 
+mod band_copy_translation;
 mod cloud_directories;
 mod codemode_preview;
 mod compact_agent_dms;
@@ -541,6 +542,7 @@ fn reset_prompt_viewport_state_for_test() {
     });
 }
 
+mod pinned_overview_reserve;
 #[path = "pinned_todo_regressions.rs"]
 mod pinned_todo_regressions;
 mod todo_blocker_notes;

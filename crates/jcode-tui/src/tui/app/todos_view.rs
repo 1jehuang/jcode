@@ -114,6 +114,8 @@ impl App {
             return false;
         }
         self.remote_todos_payload = Some((session_id, payload));
+        // Reuse the decoded snapshot and keep JSON work out of redraws.
+        drop(self.current_todo_state());
         self.refresh_todo_card_if_needed();
         self.refresh_todos_view_now();
         self.refresh_pinned_todos_now();
@@ -922,67 +924,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn live_status_elapsed_and_tokens_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent {
-            live_status: Some(crate::protocol::SwarmLiveStatus {
-                phase: "running_tool".into(),
-                elapsed_ms: 12_000,
-                input_tokens: Some(123),
-                ..Default::default()
-            }),
-            activity_age_secs: Some(1),
-            ..Default::default()
-        };
-        let before = hash_todo_card_agents(&[agent.clone()]);
-        advance_todo_agent_elapsed(&mut agent, std::time::Duration::from_secs(5));
-        assert_eq!(agent.live_status.as_ref().unwrap().elapsed_ms, 17_000);
-        assert_eq!(agent.activity_age_secs, Some(6));
-        let later = hash_todo_card_agents(&[agent.clone()]);
-        assert_ne!(before, later);
-        agent.live_status.as_mut().unwrap().output_tokens = Some(456);
-        assert_ne!(later, hash_todo_card_agents(&[agent]));
-    }
-
-    #[test]
-    fn shortcut_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent {
-            shortcut: Some(1),
-            ..Default::default()
-        };
-        let before = hash_todo_card_agents(&[agent.clone()]);
-        agent.shortcut = Some(0);
-        assert_ne!(before, hash_todo_card_agents(&[agent]));
-    }
-
-    #[test]
-    fn worker_item_status_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent {
-            todo_statuses: vec!["pending".into(), "in_progress".into()],
-            ..Default::default()
-        };
-        let before = hash_todo_card_agents(&[agent.clone()]);
-        agent.todo_statuses.swap(0, 1);
-        assert_ne!(before, hash_todo_card_agents(&[agent]));
-    }
-
-    #[test]
-    fn wait_and_activity_changes_invalidate_pinned_payload() {
-        let mut agent = crate::tui::ui::TodoCardAgent::default();
-        let before = hash_todo_card_agents(&[agent.clone()]);
-        agent.wait_reason = Some("Waiting for build".into());
-        let waiting = hash_todo_card_agents(&[agent.clone()]);
-        assert_ne!(before, waiting);
-        agent.wait_age_secs = Some(120);
-        let aged = hash_todo_card_agents(&[agent.clone()]);
-        assert_ne!(waiting, aged);
-        agent.wait_age_secs = Some(125);
-        assert_eq!(aged, hash_todo_card_agents(&[agent.clone()]));
-        agent.activity_age_secs = Some(180);
-        assert_ne!(aged, hash_todo_card_agents(&[agent.clone()]));
-        agent.wait_reason = None;
-        assert_ne!(waiting, hash_todo_card_agents(&[agent]));
-    }
+    include!("todos_overview_tests.rs");
 
     /// Plan-level intent used by the view tests.
     fn plan() -> crate::todo::TodoPlan {
@@ -1117,9 +1059,23 @@ mod tests {
             Some(crate::todo::ConfidenceState::Plausible),
         );
         grouped_b.group = Some("optimize rendering".to_string());
-        let mut other = todo("o1", "Fix scrollback", "pending", "low", Some(crate::todo::ConfidenceState::Plausible), None);
+        let mut other = todo(
+            "o1",
+            "Fix scrollback",
+            "pending",
+            "low",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        );
         other.group = Some("scrollback".to_string());
-        let ungrouped = todo("u1", "Misc cleanup", "pending", "low", Some(crate::todo::ConfidenceState::Plausible), None);
+        let ungrouped = todo(
+            "u1",
+            "Misc cleanup",
+            "pending",
+            "low",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        );
 
         let mut todos = vec![grouped_a, grouped_b, other, ungrouped];
         for index in 0..8 {
@@ -1151,7 +1107,11 @@ mod tests {
         );
 
         assert!(markdown.contains("_(optimize rendering)_"), "{markdown}");
-        assert!(markdown.contains("Delivery partially_delivered") && !markdown.contains("checked_end_to_end"), "{markdown}");
+        assert!(
+            markdown.contains("Delivery partially_delivered")
+                && !markdown.contains("checked_end_to_end"),
+            "{markdown}"
+        );
         assert!(!markdown.contains("Feedback loop:"), "{markdown}");
         assert!(markdown.contains("_… and 4 more._"), "{markdown}");
         assert_eq!(markdown.matches("- [").count(), 8, "{markdown}");
@@ -1159,7 +1119,14 @@ mod tests {
 
     #[test]
     fn todos_view_hash_changes_when_group_changes() {
-        let mut todos = vec![todo("g", "Group hash", "pending", "high", Some(crate::todo::ConfidenceState::Plausible), None)];
+        let mut todos = vec![todo(
+            "g",
+            "Group hash",
+            "pending",
+            "high",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        )];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         todos[0].group = Some("rendering".to_string());
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
@@ -1168,7 +1135,14 @@ mod tests {
 
     #[test]
     fn todos_view_hash_changes_when_goals_change() {
-        let todos = vec![todo("g", "Goal hash", "pending", "high", Some(crate::todo::ConfidenceState::Plausible), None)];
+        let todos = vec![todo(
+            "g",
+            "Goal hash",
+            "pending",
+            "high",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        )];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
             closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Weak),
@@ -1194,7 +1168,14 @@ mod tests {
 
     #[test]
     fn todos_view_hash_changes_when_feedback_loop_changes() {
-        let todos = vec![todo("g", "Goal hash", "pending", "high", Some(crate::todo::ConfidenceState::Plausible), None)];
+        let todos = vec![todo(
+            "g",
+            "Goal hash",
+            "pending",
+            "high",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        )];
         let mut goals = vec![crate::todo::TodoGoal {
             feedback_loop: Some("run test A".to_string()),
             ..Default::default()
@@ -1207,7 +1188,14 @@ mod tests {
 
     #[test]
     fn todos_view_hash_changes_when_user_intention_changes() {
-        let todos = vec![todo("g", "Goal hash", "pending", "high", Some(crate::todo::ConfidenceState::Plausible), None)];
+        let todos = vec![todo(
+            "g",
+            "Goal hash",
+            "pending",
+            "high",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        )];
         let mut current = plan();
         let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         current.user_intention = Some("increase clarity".to_string());
@@ -1217,7 +1205,14 @@ mod tests {
 
     #[test]
     fn todos_view_hash_changes_when_intent_understanding_changes() {
-        let todos = vec![todo("g", "Goal hash", "pending", "high", Some(crate::todo::ConfidenceState::Plausible), None)];
+        let todos = vec![todo(
+            "g",
+            "Goal hash",
+            "pending",
+            "high",
+            Some(crate::todo::ConfidenceState::Plausible),
+            None,
+        )];
         let mut current = plan();
         let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         current.understands_user_intent = Some(crate::todo::IntentUnderstanding::Partial);

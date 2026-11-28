@@ -1764,6 +1764,28 @@ fn ping_keepalive_emits_streaming_phase_event() {
 }
 
 #[test]
+fn test_anthropic_minimal_effort_maps_to_low_for_sidecar_pins() {
+    // `agents.memory_effort` and other config ladders include `minimal`, but
+    // the Anthropic request surface only has low..max. The provider must accept
+    // the value and store it as `low` (same ladder as
+    // `resolved_effort_for_model`), not reject the pin: `Sidecar::for_session`
+    // drops rejected efforts with only a warn, so extraction would silently
+    // run at the model default instead of the configured floor.
+    assert_eq!(
+        AnthropicProvider::normalize_reasoning_effort("minimal").as_deref(),
+        Some("low"),
+    );
+
+    let provider = AnthropicProvider::new();
+    *provider
+        .model
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = "claude-sonnet-4-6".to_string();
+    provider.set_reasoning_effort("minimal").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+}
+
+#[test]
 fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
     // *defaults* to `low`, and an

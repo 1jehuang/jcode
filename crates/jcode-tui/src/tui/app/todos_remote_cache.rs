@@ -8,14 +8,20 @@ type TodoState = (
     Vec<crate::todo::TodoGoal>,
 );
 
+#[derive(Default)]
 pub(crate) struct RemoteTodoCache {
+    decoded: Option<DecodedTodos>,
+    pub(in crate::tui::app) summary: Option<crate::tui::info_widget::TodosSummary>,
+}
+
+struct DecodedTodos {
     raw: String,
     state: Arc<TodoState>,
 }
 
-pub(super) fn load(cache: &RefCell<Option<RemoteTodoCache>>, raw: Option<&str>) -> Arc<TodoState> {
+pub(super) fn load(cache: &RefCell<RemoteTodoCache>, raw: Option<&str>) -> Arc<TodoState> {
     if let Some(raw) = raw
-        && let Some(cached) = cache.borrow().as_ref()
+        && let Some(cached) = cache.borrow().decoded.as_ref()
         && cached.raw == raw
     {
         return Arc::clone(&cached.state);
@@ -49,13 +55,41 @@ pub(super) fn load(cache: &RefCell<Option<RemoteTodoCache>>, raw: Option<&str>) 
     ));
     // One snapshot per client, capped so an unusually large history does not
     // become a second retained transcript. Invalid JSON keeps existing logging.
-    *cache.borrow_mut() = raw
+    let decoded = raw
         .filter(|raw| valid && raw.len() <= 256 * 1024)
-        .map(|raw| RemoteTodoCache {
+        .map(|raw| DecodedTodos {
             raw: raw.to_owned(),
             state: Arc::clone(&state),
         });
+    *cache.borrow_mut() = RemoteTodoCache {
+        decoded,
+        summary: summarize_todos(&state.0),
+    };
     state
+}
+
+pub(super) fn summarize_todos(
+    todos: &[crate::todo::TodoItem],
+) -> Option<crate::tui::info_widget::TodosSummary> {
+    if todos.is_empty() {
+        return None;
+    }
+    Some(crate::tui::info_widget::TodosSummary {
+        total: todos.len(),
+        completed: todos
+            .iter()
+            .filter(|todo| todo.status == "completed")
+            .count(),
+        in_progress: todos
+            .iter()
+            .filter(|todo| todo.status == "in_progress")
+            .count(),
+        pending: todos.iter().filter(|todo| todo.status == "pending").count(),
+        blocked: todos
+            .iter()
+            .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
+            .count(),
+    })
 }
 
 #[cfg(test)]
@@ -69,7 +103,7 @@ mod tests {
 
     #[test]
     fn live_list_filters_cancelled_without_rewriting_source_snapshot() {
-        let cache = RefCell::new(None);
+        let cache = RefCell::default();
         let raw = json!({"todos":[
             {"id":"a","content":"Retired","status":"cancelled","priority":"low"},
             {"id":"b","content":"Finished","status":"completed","priority":"low"}
@@ -78,12 +112,12 @@ mod tests {
         let state = load(&cache, Some(&raw));
         assert_eq!(state.0.len(), 1);
         assert_eq!(state.0[0].id, "b");
-        assert_eq!(cache.borrow().as_ref().unwrap().raw, raw);
+        assert_eq!(cache.borrow().decoded.as_ref().unwrap().raw, raw);
     }
 
     #[test]
     fn unchanged_snapshots_share_decoding_and_equal_length_edits_invalidate() {
-        let cache = RefCell::new(None);
+        let cache = RefCell::default();
         let first = load(&cache, Some(&payload("first")));
         assert_eq!(first.0.len(), 1);
         assert_eq!(first.0[0].content, "keep task details");
@@ -95,12 +129,12 @@ mod tests {
         assert_eq!(first.1.user_intention.as_deref(), Some("first"));
         let missing = load(&cache, None);
         assert!(missing.0.is_empty());
-        assert!(cache.borrow().is_none());
+        assert!(cache.borrow().decoded.is_none());
     }
 
     #[test]
     fn malformed_fields_still_default_independently_and_cache_is_bounded() {
-        let cache = RefCell::new(None);
+        let cache = RefCell::default();
         let raw = json!({"todos":false, "goals":"bad", "plan":{"user_intention":"keep valid plan", "understands_user_intent":"clear"}}).to_string();
         let state = load(&cache, Some(&raw));
         assert!(state.0.is_empty());
@@ -108,9 +142,9 @@ mod tests {
         assert_eq!(state.1.user_intention.as_deref(), Some("keep valid plan"));
         let invalid = load(&cache, Some("{"));
         assert!(invalid.0.is_empty());
-        assert!(cache.borrow().is_none());
+        assert!(cache.borrow().decoded.is_none());
         let _ = load(&cache, Some(&payload(&"x".repeat(256 * 1024))));
-        assert!(cache.borrow().is_none());
+        assert!(cache.borrow().decoded.is_none());
     }
 
     #[test]
@@ -118,11 +152,11 @@ mod tests {
     fn benchmark_unchanged_remote_todo_decoding() {
         use std::{hint::black_box, time::Instant};
         let raw = payload(&"representative todo plan details ".repeat(1024));
-        let cache = RefCell::new(None);
+        let cache = RefCell::default();
         let _ = load(&cache, Some(&raw));
         let start = Instant::now();
         for _ in 0..100 {
-            black_box(load(&RefCell::new(None), black_box(Some(raw.as_str()))));
+            black_box(load(&RefCell::default(), black_box(Some(raw.as_str()))));
         }
         let uncached = start.elapsed();
         let start = Instant::now();

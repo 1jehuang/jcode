@@ -10,8 +10,8 @@ import unittest
 WORKFLOW = (Path(__file__).resolve().parents[1] / '.github/workflows/selfdev-linux.yml').read_text()
 ARCHIVE = 'jcode-linux-x86_64.tar.gz'
 VERIFY = 'Verify exact master commit'
-INSPECT = 'Skip completed releases, resume interrupted drafts'
-PUBLISH = 'Publish complete non-latest prerelease'
+INSPECT = 'Resolve semver tag, skip completed releases, resume interrupted drafts'
+PUBLISH = 'Publish Linux release'
 
 
 def script(name):
@@ -32,7 +32,8 @@ class LinuxSelfdevTests(unittest.TestCase):
         self.git('init', '-qb', 'master')
         self.git('commit', '-qm', 'master', '--allow-empty')
         self.sha = self.git('rev-parse', 'HEAD')
-        self.tag = 'selfdev-linux-' + self.sha
+        self.tag = 'v1.2.3'
+        self.git('tag', self.tag)
         self.env = {**os.environ, 'PATH': f'{self.root}:{os.environ["PATH"]}',
                     'GITHUB_OUTPUT': str(self.root / 'output'), 'GH_TOKEN': 'test',
                     'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_API_URL': 'https://invalid.example',
@@ -57,16 +58,13 @@ class LinuxSelfdevTests(unittest.TestCase):
         for invalid in [self.git('rev-parse', 'HEAD'), self.sha[:9], 'master', 'a' * 40, '--help']:
             self.assertNotEqual(self.step(VERIFY, SHA=invalid), 0)
         self.assertEqual(self.step(VERIFY), 0)
-        self.git('tag', self.tag)
-        self.assertNotEqual(self.step(VERIFY), 0)
 
     def test_inspection(self):
         self.mock('curl', 'echo "$STATUS"')
-        self.git('tag', self.tag)
         assets = [{'name': name, 'size': 10, 'state': 'uploaded'} for name in [ARCHIVE, 'SHA256SUMS']]
-        release = dict(tag_name=self.tag, target_commitish=self.sha, draft=False, prerelease=True, assets=assets)
+        release = dict(tag_name=self.tag, target_commitish=self.sha, draft=False, prerelease=False, assets=assets)
         for status, changes, build in [('404', {}, True), ('403', {}, None), ('200', {}, False),
-                                      ('200', {'assets': assets[:1]}, None), ('200', {'prerelease': False}, None),
+                                      ('200', {'assets': assets[:1]}, None), ('200', {'prerelease': True}, None),
                                       ('200', {'draft': True}, True), ('200', {'draft': True, 'target_commitish': 'master'}, None)]:
             with self.subTest(status=status, changes=changes):
                 (self.root / 'release.json').write_text(json.dumps({**release, **changes}))
@@ -75,7 +73,39 @@ class LinuxSelfdevTests(unittest.TestCase):
                 result = self.step(INSPECT, STATUS=status)
                 self.assertEqual(result == 0, build is not None)
                 if build is not None:
-                    self.assertEqual(output.read_text(), f'build={str(build).lower()}\n')
+                    self.assertEqual(output.read_text(), f'tag={self.tag}\nbuild={str(build).lower()}\n')
+
+    def test_inspection_without_existing_tag(self):
+        # A workflow run on an untagged commit must still resolve a tag: the
+        # draft-release lookup first, then version-based generation from
+        # Cargo.toml. setUp tags the commit, so this exercises the untagged
+        # path explicitly. The older patch tags live on a different commit so
+        # `git tag --points-at` finds nothing for the new SHA.
+        self.git('tag', '-d', self.tag)
+        (self.root / 'Cargo.toml').write_text('[package]\nversion = "1.1.0"\n')
+        self.git('add', 'Cargo.toml')
+        self.git('commit', '-qm', 'version', '--allow-empty')
+        self.git('tag', 'v1.1.0')
+        self.git('commit', '-qm', 'target', '--allow-empty')
+        sha = self.git('rev-parse', 'HEAD')
+        self.git('tag', 'v1.1.1', self.git('rev-parse', 'HEAD~1'))
+
+        # Draft-release lookup finds the draft for this commit.
+        self.mock('curl', '''echo "$STATUS"; case "$*" in *releases?per_page=100*) echo '[]' ;; esac''')
+        (self.root / 'release.json').write_text(json.dumps(dict(
+            tag_name='v1.1.2', target_commitish=sha, draft=True, prerelease=False, assets=[])))
+        output = self.root / 'output'
+        result = self.step(INSPECT, STATUS='404', SHA=sha)
+        self.assertEqual(result, 0)
+        self.assertEqual(output.read_text(), 'tag=v1.1.2\nbuild=true\n')
+
+        # Without any matching draft, the version-based generator picks the
+        # next patch: 1.1.x exists up to v1.1.1, so the release is v1.1.2.
+        output.unlink()
+        (self.root / 'release.json').write_text('{}')
+        result = self.step(INSPECT, STATUS='404', SHA=sha)
+        self.assertEqual(result, 0)
+        self.assertEqual(output.read_text(), 'tag=v1.1.2\nbuild=true\n')
 
     def test_draft_retry_and_non_latest_publication(self):
         dist = self.root / 'dist'
@@ -104,8 +134,8 @@ esac
             (self.root / 'body').write_text(saved if mode != 'legacy-draft' else 'Old description')
             calls = self.root / 'calls'
             calls.write_text('')
-            (self.root / 'status').write_text(json.dumps(dict(isDraft=mode != 'published', isPrerelease=True, targetCommitish=self.sha)))
-            result = self.step(PUBLISH, MODE=mode, GH_REPO='owner/repo', RELEASE_NOTES='Fresh highlights')
+            (self.root / 'status').write_text(json.dumps(dict(isDraft=mode != 'published', isPrerelease=False, targetCommitish=self.sha)))
+            result = self.step(PUBLISH, TAG=self.tag, MODE=mode, GH_REPO='owner/repo', RELEASE_NOTES='Fresh highlights')
             log = calls.read_text().splitlines()
             self.assertEqual(result == 0, mode != 'published')
             if mode == 'published':
@@ -120,7 +150,9 @@ esac
             if mode == 'new':
                 self.assertEqual(published, (self.root / 'create-notes').read_text())
             self.assertIn('release upload', log[-2])
-            self.assertIn('--draft=false --prerelease --latest=false', log[-1])
+            publish_flags = log[-1].split()
+            self.assertIn('--latest', publish_flags)
+            self.assertNotIn('--latest=false', publish_flags)
 
 
 if __name__ == '__main__':

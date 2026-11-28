@@ -435,8 +435,8 @@ pub(crate) fn push_stage_pips(
             None => String::new(),
         })
         .collect();
-    let fixed_width: usize = labels.iter().map(|l| l.width()).sum::<usize>()
-        + stages.len().saturating_sub(1) * 2;
+    let fixed_width: usize =
+        labels.iter().map(|l| l.width()).sum::<usize>() + stages.len().saturating_sub(1) * 2;
     let pip_budget = max_width.saturating_sub(fixed_width);
     let non_empty = stages.iter().filter(|s| !s.is_empty()).count();
     if non_empty > 0 && pip_budget >= non_empty {

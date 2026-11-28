@@ -47,8 +47,22 @@ pub(super) fn build_openai_request(
         "store": false,
     });
 
-    if let Some(effort) = reasoning_effort {
-        request["reasoning"] = serde_json::json!({ "effort": effort });
+    if let Some(raw) = reasoning_effort {
+        let effort = raw.trim().to_ascii_lowercase();
+        let effort = crate::prompt::swarm_root_reasoning_effort(&effort)
+            .unwrap_or(&effort)
+            .trim()
+            .to_ascii_lowercase();
+        if matches!(
+            effort.as_str(),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            request["reasoning"] = serde_json::json!({ "effort": effort });
+        } else {
+            crate::logging::warn(&format!(
+                "Ignoring unsupported OpenAI sidecar reasoning effort '{raw}'"
+            ));
+        }
     }
 
     request

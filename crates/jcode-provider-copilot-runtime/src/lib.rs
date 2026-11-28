@@ -936,6 +936,7 @@ impl CopilotApiProvider {
 
 #[path = "lib_provider_impl.rs"]
 mod provider_impl;
+
 #[cfg(test)]
 #[path = "copilot_tests.rs"]
 mod tests;

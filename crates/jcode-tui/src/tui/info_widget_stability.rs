@@ -539,6 +539,7 @@ pub fn simulate_scroll_mode(
             scroll_top: scroll,
             // Every simulated frame is mid-scroll.
             content_churning: true,
+            ..Default::default()
         };
         // Greedy mode forgets all anchors each frame, so every frame independently
         // maximizes coverage (the old "fill the biggest pocket now" philosophy).

@@ -37,6 +37,7 @@ fn test_ctrl_wheel_over_inline_image_zooms_without_wrapping() {
         visible_end,
         content_area,
         &vec![0u16; visible_end],
+        None,
     );
 
     let row = content_area.y + region.abs_line_idx as u16 + 1;

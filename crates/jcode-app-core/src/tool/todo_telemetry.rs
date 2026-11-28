@@ -133,18 +133,20 @@ pub(super) fn todo_telemetry_update(
                 .filter_map(|todo| todo.confidence.map(|state| state.telemetry_score())),
         ),
         completion_confidence: crate::telemetry::TelemetryScoreSummary::from_scores(
-            current_by_id
-                .values()
-                .filter_map(|todo| todo.completion_confidence.map(|state| state.telemetry_score())),
+            current_by_id.values().filter_map(|todo| {
+                todo.completion_confidence
+                    .map(|state| state.telemetry_score())
+            }),
         ),
         understands_user_intent: crate::telemetry::TelemetryScoreSummary::from_scores(
             plan.understands_user_intent
                 .map(|state| state.telemetry_score()),
         ),
         closed_feedback_loop: crate::telemetry::TelemetryScoreSummary::from_scores(
-            goals
-                .iter()
-                .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.telemetry_score())),
+            goals.iter().filter_map(|goal| {
+                goal.closed_feedback_loop
+                    .map(|state| state.telemetry_score())
+            }),
         ),
         feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals.iter().filter_map(|goal| {

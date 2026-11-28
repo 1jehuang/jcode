@@ -217,7 +217,7 @@ fn degenerate_sizes_with_full_contention_never_panic_or_escape() {
 }
 
 /// (b) When Overview is shown, its mergeable widgets (background,
-/// swarm, ...) must not also place standalone.
+/// swarm, commits, ...) must not also place standalone.
 #[test]
 fn overview_suppresses_mergeable_widgets_under_contention() {
     let data = contended_data();
@@ -533,4 +533,359 @@ fn covered_resident_rehomes_immediately_when_content_is_settled() {
             .any(|a| a.placement.kind == anchored.kind),
         "and keeps its anchor to return to"
     );
+}
+
+/// `display.single_overview = false` restores the classic layout: the
+/// consolidated Overview never places and each mergeable section
+/// (background, ...) docks as its own widget. The default (true) keeps the
+/// single consolidated panel.
+#[test]
+fn single_overview_false_places_separate_widgets_instead_of_overview() {
+    let area = Rect::new(0, 0, 80, 30);
+    let data = InfoWidgetData {
+        model: Some("gpt-test".to_string()),
+        background_info: Some(BackgroundInfo {
+            running_count: 1,
+            running_tasks: vec!["bash".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let margins = margins_for(40, 30, false);
+
+    // Default: the Overview consolidates the background section.
+    let consolidated = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("consolidated", area, &consolidated.visible);
+    assert!(
+        consolidated
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview),
+        "default layout should place the consolidated Overview"
+    );
+    assert!(
+        !consolidated
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::BackgroundTasks),
+        "with the Overview placed, the standalone Background widget stays suppressed"
+    );
+
+    // Opt out: classic separate widgets, no Overview anywhere.
+    let separate_data = InfoWidgetData {
+        overview_disabled: true,
+        ..data.clone()
+    };
+    let separate = calculate_placements_anchored(area, &margins, &separate_data, true, &[]);
+    assert_placements_sane("separate", area, &separate.visible);
+    assert!(
+        !separate
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview),
+        "single_overview=false must not place the consolidated Overview"
+    );
+    assert!(
+        separate
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::BackgroundTasks),
+        "single_overview=false must let the standalone Background widget place"
+    );
+
+    // An anchor recorded under the consolidated layout must not resurrect the
+    // Overview after the flip: the stale anchor dies because the Overview is
+    // no longer in `available`.
+    let flip =
+        calculate_placements_anchored(area, &margins, &separate_data, true, &consolidated.anchors);
+    assert_placements_sane("flip", area, &flip.visible);
+    assert!(
+        !flip.visible.iter().any(|p| p.kind == WidgetKind::Overview),
+        "a stale Overview anchor must not survive the single_overview flip"
+    );
+}
+
+/// Folded sections must not suppress their standalone widgets.
+///
+/// The Overview folds sections that do not fit its rect, but the placement
+/// pass used to suppress every mergeable widget whenever an Overview was
+/// placed, regardless of whether the rect actually showed that section. The
+/// result: a short Overview slot (borderline height after its content grew,
+/// or a covered resident that came back at a smaller height) folded the
+/// details AND kept their standalone widgets suppressed - the content was
+/// visible nowhere. `overview_shows_section` now consults the same fits
+/// flags the renderer folds by, so a folded section's standalone widget
+/// places again.
+#[test]
+fn overview_folded_sections_do_not_suppress_standalone_widgets() {
+    // Runtime (1 row) + usage (label + primary + secondary = 3 rows) +
+    // changes (5 dirty files, no overflow) = 9 inner rows of content.
+    let data = InfoWidgetData {
+        model: Some("claude-test-model".to_string()),
+        provider_name: Some("anthropic".to_string()),
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::Anthropic,
+            primary_limit_label: Some("5-hour".to_string()),
+            secondary_limit_label: Some("Weekly".to_string()),
+            available: true,
+            ..Default::default()
+        }),
+        git_info: Some(GitInfo {
+            branch: "master".to_string(),
+            modified: 5,
+            dirty_files: vec![
+                DirtyFile::new('M', "src/a.rs"),
+                DirtyFile::new('M', "src/b.rs"),
+                DirtyFile::new('M', "src/c.rs"),
+                DirtyFile::new('M', "src/d.rs"),
+                DirtyFile::new('M', "src/e.rs"),
+            ],
+            dirty_total: 5,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Both pockets are 10 rows (inner height 8): the Overview places on the
+    // right, capped at the pocket, so its 9-row content folds the tail
+    // (changes) away. Centered mode opens the left pocket for the standalone
+    // widgets (left margins only exist when centered).
+    let area = Rect::new(0, 0, 80, 10);
+    let margins = margins_for(36, 10, true);
+    let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    assert_placements_sane("folded overview", area, &outcome.visible);
+    let overview = outcome
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview places with model + usage + changes");
+    let vis = super::super::info_widget_overview::section_visibility(&data, overview.rect);
+    assert!(
+        vis.model_info && vis.usage,
+        "front sections must still fit: {:?} vis={vis:?}",
+        overview.rect
+    );
+    assert!(
+        !vis.changes,
+        "changes section must fold in a 10-row slot: {:?} vis={vis:?}",
+        overview.rect
+    );
+
+    // Folded-out section: its standalone widget must place (left pocket)
+    // instead of staying suppressed and hiding the dirty-file list.
+    assert!(
+        outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::GitStatus),
+        "folded-out changes section must keep its standalone GitStatus widget: {:?}",
+        outcome.visible.iter().map(|p| p.kind).collect::<Vec<_>>()
+    );
+    // Sections the Overview does show stay suppressed exactly as before.
+    assert!(
+        !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::UsageLimits),
+        "a section the Overview shows must keep its standalone widget suppressed"
+    );
+}
+
+/// Pinned Overview HUD (`display.overview_pinned`, default true): the Overview
+/// takes a fixed right-flush top rect, independent of the transcript margins,
+/// while every other right-side widget docks left of the reserved column.
+mod pinned_overview {
+    use super::*;
+
+    fn pinned_data() -> InfoWidgetData {
+        let mut data = contended_data();
+        data.overview_pinned = true;
+        data
+    }
+
+    /// The pin rect: right-flush at the viewport top, width from the
+    /// `pinned_overview_width` helper, height from the widget's content.
+    #[test]
+    fn pinned_overview_places_top_right_flush() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("pinned fresh", area, &outcome.visible);
+        let overview = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pinned Overview must place even in full-width margins");
+        let expected_width = pinned_overview_width(area).unwrap();
+        assert_eq!(
+            overview.rect.x + overview.rect.width,
+            area.x + area.width,
+            "pin must be right-flush"
+        );
+        assert_eq!(overview.rect.y, area.y, "pin must sit at the viewport top");
+        assert_eq!(
+            overview.rect.width, expected_width,
+            "pin width must come from the reserve helper so wrap and placement agree"
+        );
+        assert_eq!(
+            overview.rect.height,
+            crate::tui::info_widget::calculate_widget_height(
+                WidgetKind::Overview,
+                &data,
+                expected_width,
+                area.height
+            ),
+            "pin height must follow the widget content"
+        );
+    }
+
+    /// The pin ignores margins and scrolling: identical rect even when the
+    /// margin profile and scroll top churn frame-to-frame.
+    #[test]
+    fn pinned_overview_rect_is_constant_across_margin_and_scroll_churn() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 40);
+        let first =
+            calculate_placements_anchored(area, &margins_for(0, 40, false), &data, true, &[]);
+        let first_pin = first
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place against empty margins")
+            .rect;
+        let mut churned = margins_for(10, 40, false);
+        churned.scroll_top = 999;
+        churned.content_churning = true;
+        let second = calculate_placements_anchored(area, &churned, &data, true, &first.anchors);
+        let second_pin = second
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place against churned margins")
+            .rect;
+        assert_eq!(
+            first_pin, second_pin,
+            "pin rect must not move when margins or scroll churn"
+        );
+    }
+
+    /// A floating Overview anchor from the unpinned era (or a stale one) must be
+    /// superseded by the pin, never duplicated.
+    #[test]
+    fn pinned_overview_supersedes_floating_anchor_without_duplicates() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        let floating = WidgetAnchor {
+            placement: WidgetPlacement {
+                kind: WidgetKind::Overview,
+                rect: Rect::new(60, 30, 40, 20),
+                side: Side::Right,
+            },
+            hidden_frames: 0,
+            content_top: margins.scroll_top + 30,
+        };
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[floating]);
+        assert_placements_sane("pinned supersede", area, &outcome.visible);
+        let overviews: Vec<_> = outcome
+            .visible
+            .iter()
+            .filter(|p| p.kind == WidgetKind::Overview)
+            .collect();
+        assert_eq!(overviews.len(), 1, "exactly one Overview may exist");
+        assert_eq!(
+            overviews[0].rect.y, area.y,
+            "the surviving Overview must be the pin, not the floating anchor"
+        );
+    }
+
+    /// Other right-side widgets must dock left of the pin column, never under
+    /// it, even when the margin profile reports free space at the right edge.
+    #[test]
+    fn pinned_overview_keeps_other_right_widgets_left_of_the_reserve() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 120, 60);
+        // Wide-free margins everywhere would classically dock a big widget
+        // right-flush; with the pin, everything must stay left of the pin column.
+        let margins = margins_for(60, 60, false);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("pinned with peers", area, &outcome.visible);
+        let pin = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("pin must place");
+        for peer in outcome
+            .visible
+            .iter()
+            .filter(|p| p.kind != WidgetKind::Overview)
+        {
+            if peer.side == Side::Right {
+                assert!(
+                    peer.rect.x + peer.rect.width <= pin.rect.x,
+                    "right-side peer must stay left of the pin: {:?} vs pin {:?}",
+                    peer,
+                    pin.rect
+                );
+            }
+        }
+    }
+
+    /// `pinned_overview_reserve` must agree with the engine's pin width so the
+    /// transcript wrap width and the rendered HUD never disagree. Narrow
+    /// viewports that would starve the transcript decline the pin instead of
+    /// clamping it over the whole column.
+    #[test]
+    fn pinned_reserve_matches_placement_and_clamps_to_viewport() {
+        let data = pinned_data();
+        let area = Rect::new(0, 0, 100, 60);
+        assert_eq!(
+            pinned_overview_reserve(area, &data),
+            pinned_overview_width(area),
+            "reserve and placement width must agree"
+        );
+        // The smallest viewport that still hosts a pin: 80 columns keeps a
+        // 40-column transcript beside the 40-wide HUD.
+        let minimal = Rect::new(0, 0, 80, 40);
+        assert_eq!(pinned_overview_reserve(minimal, &data), Some(40));
+        // Narrower than that starves the transcript: no reserve, no pin.
+        let starved = Rect::new(0, 0, 79, 40);
+        assert_eq!(pinned_overview_reserve(starved, &data), None);
+        // Too narrow to host a widget at all: no reserve, no pin.
+        let tiny = Rect::new(0, 0, 20, 40);
+        assert_eq!(pinned_overview_reserve(tiny, &data), None);
+        // Same for too-short viewports.
+        let short = Rect::new(0, 0, 100, 4);
+        assert_eq!(pinned_overview_reserve(short, &data), None);
+        // No Overview data (single_overview=false): no reserve, no pin.
+        let mut unpinned = pinned_data();
+        unpinned.overview_pinned = false;
+        assert_eq!(pinned_overview_reserve(area, &unpinned), None);
+        unpinned.overview_pinned = true;
+        unpinned.overview_disabled = true;
+        assert_eq!(pinned_overview_reserve(area, &unpinned), None);
+    }
+
+    /// Unpinned (legacy) mode must keep floating behavior: the Overview places
+    /// somewhere in the margins, and nothing reserves a column.
+    #[test]
+    fn unpinned_overview_keeps_legacy_floating_behavior() {
+        let mut data = contended_data();
+        data.overview_pinned = false;
+        let area = Rect::new(0, 0, 100, 60);
+        let margins = margins_for(40, 60, false);
+        assert_eq!(pinned_overview_reserve(area, &data), None);
+        let outcome = calculate_placements_anchored(area, &margins, &data, true, &[]);
+        assert_placements_sane("legacy floating", area, &outcome.visible);
+        let overview = outcome
+            .visible
+            .iter()
+            .find(|p| p.kind == WidgetKind::Overview)
+            .expect("legacy Overview must still place in the margins");
+        assert_ne!(
+            overview.rect.y, area.y,
+            "legacy Overview must float (margin-driven), not pin to the top"
+        );
+    }
 }

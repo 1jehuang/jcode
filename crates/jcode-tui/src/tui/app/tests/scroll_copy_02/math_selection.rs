@@ -81,7 +81,8 @@ fn test_copy_selection_over_inline_math_copies_latex_only_when_fully_selected() 
         .expect("prose line");
     let euler_col = unicode_width::UnicodeWidthStr::width(&text[..text.find("Euler").unwrap()]);
     let done_col = unicode_width::UnicodeWidthStr::width(&text[..text.find(" done.").unwrap()]);
-    let row = layout.messages_area.y + (line_idx - visible_start) as u16;
+    let row = crate::tui::ui::copy_viewport_display_row_for_line(line_idx)
+        .unwrap_or(layout.messages_area.y + (line_idx - visible_start) as u16);
     let screen_x = |target: usize| {
         (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
             .find(|&column| {
@@ -112,7 +113,10 @@ fn test_copy_selection_over_inline_math_copies_latex_only_when_fully_selected() 
         unicode_width::UnicodeWidthStr::width(partial.as_str()),
         "Euler ".len() + 2
     );
-    assert!(!partial.contains('$') && !partial.contains('\\'), "{partial}");
+    assert!(
+        !partial.contains('$') && !partial.contains('\\'),
+        "{partial}"
+    );
     // The whole formula highlighted: copy its LaTeX source.
     assert_eq!(drag(euler_col, done_col), "Euler $e^{i\\pi_{3}} + 1 = 0$");
 }

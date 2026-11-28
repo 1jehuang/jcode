@@ -4,6 +4,17 @@ use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
+pub(crate) fn compact_usage_rows(
+    info: &UsageInfo,
+    width: u16,
+    display_used: bool,
+) -> Vec<Line<'static>> {
+    render_usage_compact(info, width, display_used)
+        .into_iter()
+        .map(|line| jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, width as usize))
+        .collect()
+}
+
 /// Border layout: `Claude limits` top-left with one bar per window in the
 /// body; cost-based providers put the dollar total on the top border.
 pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
@@ -189,7 +200,23 @@ pub(super) fn render_usage_compact(
     usage_display_used: bool,
 ) -> Vec<Line<'static>> {
     if info.limit_reached {
-        return vec![usage_limit_reached_line()];
+        // The standalone widget's footer carries the reset time; keep that
+        // fact in the compact row so the Overview does not lose it.
+        let mut lines = vec![usage_limit_reached_line()];
+        if let Some(reset) = info
+            .five_hour_resets_at
+            .as_deref()
+            .or(info.seven_day_resets_at.as_deref())
+        {
+            lines.push(Line::from(Span::styled(
+                format!("Reset {}", crate::usage::format_reset_time(reset)),
+                Style::default().fg(rgb(140, 140, 150)),
+            )));
+        }
+        if let Some(hint) = info.account_hint.as_deref().filter(|hint| !hint.is_empty()) {
+            lines.push(Line::from(frame::dim(hint.to_string())));
+        }
+        return lines;
     }
     if !info.available {
         return if matches!(info.provider, UsageProvider::Anthropic) {
@@ -209,6 +236,25 @@ pub(super) fn render_usage_compact(
             ),
             Style::default().fg(rgb(140, 140, 150)),
         )])];
+    }
+
+    // Copilot has no quota bars; the token counts are the whole fact, and
+    // folding UsageLimits into the overview must not hide them.
+    if matches!(info.provider, UsageProvider::Copilot) {
+        let line = Line::from(vec![
+            Span::styled("Copilot: ", Style::default().fg(rgb(180, 180, 190)).bold()),
+            Span::styled(
+                format!(
+                    "{} in + {} out",
+                    format_tokens(info.input_tokens),
+                    format_tokens(info.output_tokens)
+                ),
+                Style::default().fg(rgb(140, 140, 150)),
+            ),
+        ]);
+        let fitted = frame::fit(&line, usize::from(width))
+            .unwrap_or_else(|| Line::from(Span::styled("", Style::default())));
+        return vec![fitted];
     }
 
     let five_hr_used = (info.five_hour * 100.0).round().clamp(0.0, 100.0) as u8;
@@ -631,6 +677,34 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Usage unavailable"));
+    }
+
+    #[test]
+    fn copilot_usage_compact_keeps_token_counts_inline() {
+        // Without this arm the overview shows a bare `Copilot limits` header
+        // with no data under it, hiding the only usage fact a Copilot session has.
+        let info = UsageInfo {
+            provider: UsageProvider::Copilot,
+            input_tokens: 12_000,
+            output_tokens: 3_400,
+            available: true,
+            ..Default::default()
+        };
+
+        let lines = render_usage_compact(&info, 40, false);
+        assert_eq!(lines.len(), 1);
+        let text = line_text(&lines[0]);
+        assert!(text.contains("Copilot: 12.0K in + 3.4K out"), "{text}");
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 40);
+
+        // The row truncates instead of wrapping at pocket widths.
+        let narrow = render_usage_compact(&info, 20, false);
+        assert_eq!(narrow.len(), 1);
+        let narrow_text = line_text(&narrow[0]);
+        assert!(
+            UnicodeWidthStr::width(narrow_text.as_str()) <= 20,
+            "{narrow_text}"
+        );
     }
 
     #[test]

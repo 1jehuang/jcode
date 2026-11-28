@@ -37,15 +37,15 @@ fn drag_copy_between_in_chat(
         if past_end {
             col += unicode_width::UnicodeWidthStr::width(needle);
         }
-        let row = layout.messages_area.y + (line_idx - visible_start) as u16;
-        let column = (layout.messages_area.x
-            ..layout.messages_area.x + layout.messages_area.width)
-            .find(|&column| {
-                crate::tui::ui::copy_viewport_point_from_screen(column, row)
-                    .is_some_and(|p| p.abs_line == line_idx && p.column == col)
+        (layout.messages_area.y..layout.messages_area.bottom())
+            .find_map(|row| {
+                (layout.messages_area.x..layout.messages_area.right()).find_map(|column| {
+                    crate::tui::ui::copy_viewport_point_from_screen(column, row)
+                        .filter(|p| p.abs_line == line_idx && p.column == col)
+                        .map(|_| (column, row))
+                })
             })
-            .expect("screen x");
-        (column, row)
+            .expect("visible selection point")
     };
     let (start, end) = (locate(from, false), locate(to, true));
     for (kind, (column, row)) in [
@@ -150,7 +150,10 @@ fn test_drag_from_prose_into_blockquote_stops_at_the_highlight() {
     let copied = drag_copy_between_in_chat(&mut app, &clipboard, &screen, "say", "quick")
         .expect("selection should reach the clipboard");
     assert_eq!(
-        copied.lines().filter(|line| !line.is_empty()).collect::<Vec<_>>(),
+        copied
+            .lines()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>(),
         ["say:", "the quick"],
         "selection must stop at the highlight, without gutter or badge chrome: {copied:?}"
     );

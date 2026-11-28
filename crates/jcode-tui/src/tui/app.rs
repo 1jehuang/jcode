@@ -71,6 +71,7 @@ mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
+mod commands_overview;
 mod commands_plan;
 mod commands_remote;
 mod commands_review;
@@ -1456,6 +1457,10 @@ pub struct App {
     pub is_replay: bool,
     // Suppress terminal title updates for off-screen/silent replay instances.
     suppress_terminal_title_updates: bool,
+    /// Suppress floating info-widget overlays for deterministic render tests.
+    /// Tests that exercise pure transcript geometry (resize/anchor math) set
+    /// this so widget placement never perturbs their expected wrap widths.
+    pub(crate) suppress_info_widget_overlays: bool,
     /// Override for elapsed time during headless video replay.
     pub replay_elapsed_override: Option<Duration>,
     /// Sim-time at which processing started (video replay only)
@@ -1582,7 +1587,7 @@ pub struct App {
     /// Remote todo snapshot paired with its owning session. Never read SSH
     /// session IDs from laptop-local todo storage.
     remote_todos_payload: Option<(String, String)>,
-    remote_todos_cache: std::cell::RefCell<Option<todos_view::remote_cache::RemoteTodoCache>>,
+    remote_todos_cache: std::cell::RefCell<todos_view::remote_cache::RemoteTodoCache>,
     remote_todos_requested_at: Option<Instant>,
     /// The connected server sends a todo snapshot on every change, so no
     /// periodic poll is needed. Learned from the snapshots themselves and

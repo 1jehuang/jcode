@@ -48,7 +48,7 @@ fn startup_slots_keep_changes_at_same_row_as_runtime_then_usage_arrive() {
         let inner = Rect::new(0, 0, width, 40);
         let frames: Vec<_> = [&initial, &runtime, &ready]
             .into_iter()
-            .map(|data| render_sections(data, inner, None))
+            .map(|data| render_sections(data, inner, now_secs()))
             .collect();
         let row = |lines: &Vec<Line<'static>>| {
             lines
@@ -117,18 +117,18 @@ fn startup_runtime_slots_preserve_partial_and_extra_metadata() {
         startup_runtime_pending: true,
         ..Default::default()
     };
-    assert_eq!(model_info_height(&data), 2);
+    assert_eq!(model_info_height(&data, 30), 2);
     data.session_name = Some("otter".into());
-    assert_eq!(model_info_height(&data), 2);
+    assert_eq!(model_info_height(&data, 30), 2);
     data.connection_type = Some("websocket".into());
     data.upstream_provider = Some("upstream".into());
-    assert_eq!(model_info_height(&data), 3);
+    assert_eq!(model_info_height(&data, 30), 3);
     data.startup_runtime_pending = false;
-    assert_eq!(model_info_height(&data), 3);
+    assert_eq!(model_info_height(&data, 30), 3);
     data.session_name = None;
     data.connection_type = None;
     data.upstream_provider = None;
-    assert_eq!(model_info_height(&data), 0);
+    assert_eq!(model_info_height(&data, 30), 0);
 }
 
 #[test]
@@ -154,8 +154,8 @@ fn startup_usage_slots_are_only_for_pending_openai_oauth() {
         ..pending()
     };
     assert!(!data.has_data_for(WidgetKind::UsageLimits));
-    assert_eq!(model_info_height(&data), 0);
-    assert!(render_sections(&data, Rect::new(0, 0, 30, 10), None).is_empty());
+    assert_eq!(model_info_height(&data, 30), 0);
+    assert!(render_sections(&data, Rect::new(0, 0, 30, 10), now_secs()).is_empty());
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn startup_placeholders_fit_even_zero_or_one_cell_width() {
         ..pending()
     };
     for width in 0..20 {
-        let lines = render_sections(&data, Rect::new(0, 0, width, 10), None);
+        let lines = render_sections(&data, Rect::new(0, 0, width, 10), now_secs());
         assert_eq!(lines.len(), 4);
         for line in lines {
             let text = line_text(&line);
@@ -197,7 +197,7 @@ fn known_usage_and_limit_warning_override_startup_reservation() {
         let rows = crate::tui::info_widget_overview::render_overview_usage(&data, 40);
         assert_eq!(rows.len(), if limit_reached { 1 } else { 3 });
         assert!(!rows.iter().any(|line| line_text(line).contains("Loading")));
-        let all = render_sections(&data, Rect::new(0, 0, 40, 30), None);
+        let all = render_sections(&data, Rect::new(0, 0, 40, 30), now_secs());
         assert_eq!(
             compute_page_layout(&data, 40, 30).max_page_height as usize,
             all.len()
