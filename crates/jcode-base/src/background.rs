@@ -14,15 +14,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
+mod delivery;
 mod elapsed_review;
 mod model;
 #[path = "background/stall_watchdog.rs"]
 mod stall_watchdog;
+mod status_writer;
+mod wait;
 
 pub use model::{
     BackgroundCleanupResult, BackgroundTaskEventKind, BackgroundTaskEventRecord,
@@ -34,6 +36,8 @@ use model::{
     EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
+
+use delivery::{HeldDeliveries, held_stop_wake, held_wake};
 
 /// Manages background task execution
 pub struct BackgroundTaskManager {
@@ -48,6 +52,7 @@ pub struct BackgroundTaskManager {
     /// Status files already seen in a terminal state by [`Self::sweep`]. A
     /// finished task never runs again, so the periodic sweep skips them.
     settled: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    held_deliveries: HeldDeliveries,
     output_dir: PathBuf,
 }
 
@@ -67,6 +72,7 @@ impl BackgroundTaskManager {
             progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             settled: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            held_deliveries: Arc::default(),
             output_dir,
         }
     }
@@ -145,9 +151,13 @@ impl BackgroundTaskManager {
         serde_json::from_str(&content).ok()
     }
 
-    async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
-        if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+    fn write_status_file(path: &std::path::Path, status: &TaskStatusFile) {
+        // Keep replacement inside the caller's status lock, even if its task is aborted.
+        if let Err(error) = Self::persist_status_file(path, status) {
+            crate::logging::warn(&format!(
+                "Cannot persist background task status {}: {error}",
+                path.display()
+            ));
         }
     }
 
@@ -172,6 +182,16 @@ impl BackgroundTaskManager {
 
         let output_path = self.output_path_for(&status.task_id);
         let output = fs::read_to_string(&output_path).await.unwrap_or_default();
+        let status_guard = self.progress_updates.lock().await;
+        if let Some(latest) = self.read_status_file(status_path).await {
+            status = latest;
+        }
+        if status.status != BackgroundTaskStatus::Running
+            || !status.detached
+            || status.pid != Some(pid)
+        {
+            return status;
+        }
         let exit_code = reaped_exit.or_else(|| Self::parse_exit_code_from_output(&output));
         let completed_at = Utc::now();
         let duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
@@ -200,26 +220,11 @@ impl BackgroundTaskManager {
             terminal_event_record(final_status.clone(), exit_code, final_error.as_deref()),
         );
 
-        self.write_status_file(status_path, &status).await;
+        let published_wake = held_wake(&self.held_deliveries, &status, status.wake);
+        Self::write_status_file(status_path, &status);
+        drop(status_guard);
 
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: final_status,
-            exit_code,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        self.publish_completion(&status, published_wake, output);
 
         status
     }
@@ -274,6 +279,13 @@ impl BackgroundTaskManager {
         if !Self::status_is_reconcilable_orphan(&status) {
             return status;
         }
+        let status_guard = self.progress_updates.lock().await;
+        if let Some(latest) = self.read_status_file(status_path).await {
+            status = latest;
+        }
+        if !Self::status_is_reconcilable_orphan(&status) {
+            return status;
+        }
         // Belt and braces: never rewrite a task this process is executing.
         if self.is_live_task(&status.task_id) {
             return status;
@@ -293,28 +305,14 @@ impl BackgroundTaskManager {
             &mut status,
             terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
         );
-        self.write_status_file(status_path, &status).await;
+        let published_wake = held_wake(&self.held_deliveries, &status, status.wake);
+        Self::write_status_file(status_path, &status);
+        drop(status_guard);
 
-        let output_path = self.output_path_for(&status.task_id);
-        let output = fs::read_to_string(&output_path).await.unwrap_or_default();
-        let output_preview = if output.len() > 500 {
-            format!("{}...", crate::util::truncate_str(&output, 500))
-        } else {
-            output
-        };
-        Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
-            task_id: status.task_id.clone(),
-            tool_name: status.tool_name.clone(),
-            display_name: status.display_name.clone(),
-            session_id: status.session_id.clone(),
-            status: BackgroundTaskStatus::Failed,
-            exit_code: None,
-            output_preview,
-            output_file: output_path,
-            duration_secs: duration_secs.unwrap_or_default(),
-            notify: status.notify,
-            wake: status.wake,
-        }));
+        let output = fs::read_to_string(self.output_path_for(&status.task_id))
+            .await
+            .unwrap_or_default();
+        self.publish_completion(&status, published_wake, output);
 
         status
     }
@@ -404,7 +402,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&info.status_file, &status).await;
+        Self::write_status_file(&info.status_file, &status);
         self.arm_elapsed_review(tool_name, &info.task_id);
         Self::publish_task_started_activity(
             &info.task_id,
@@ -478,9 +476,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        Self::write_status_file(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -499,6 +495,7 @@ impl BackgroundTaskManager {
         let started_at_rfc3339_for_task = started_at_rfc3339.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -560,9 +557,8 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            let published_wake = held_wake(&held_deliveries, &final_status, wake_flag);
+            Self::write_status_file(&status_path_clone, &final_status);
 
             // Drop this task from the live map now that its terminal status is
             // persisted. Order matters: pruning only after the status-file
@@ -604,7 +600,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             result
@@ -678,7 +674,12 @@ impl BackgroundTaskManager {
         // returning its ID. Adopted work buffers its output until completion,
         // when the wrapper below replaces this initially empty file. Create it
         // before spawning that wrapper so a fast completion cannot be truncated.
-        let _ = std::fs::write(&output_path, "");
+        if let Err(error) = std::fs::write(&output_path, "") {
+            crate::logging::warn(&format!(
+                "Cannot create adopted task output {}: {error}",
+                output_path.display()
+            ));
+        }
 
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
@@ -701,9 +702,7 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
-        }
+        Self::write_status_file(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -722,6 +721,7 @@ impl BackgroundTaskManager {
         let display_name_owned = initial_status.display_name.clone();
         let (delivery_flags_tx, delivery_flags_rx) = watch::channel((notify, wake));
         let status_updates = Arc::clone(&self.progress_updates);
+        let held_deliveries = Arc::clone(&self.held_deliveries);
         let tasks_for_prune = Arc::clone(&self.tasks);
         let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<()>();
         let wrapper_handle = tokio::spawn(runtime_activity.scope(async move {
@@ -749,8 +749,11 @@ impl BackgroundTaskManager {
                 ),
             };
 
-            if let Ok(mut file) = File::create(&output_path_clone).await {
-                let _ = file.write_all(output_text.as_bytes()).await;
+            if let Err(error) = fs::write(&output_path_clone, &output_text).await {
+                crate::logging::warn(&format!(
+                    "Cannot save adopted task output {}: {error}",
+                    output_path_clone.display()
+                ));
             }
 
             let status_guard = status_updates.lock().await;
@@ -791,9 +794,8 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
-            }
+            let published_wake = held_wake(&held_deliveries, &final_status, wake_flag);
+            Self::write_status_file(&status_path_clone, &final_status);
 
             // Prune the live-map entry only after the terminal status file is
             // persisted (and after registration below, so instant completions
@@ -823,7 +825,7 @@ impl BackgroundTaskManager {
                 output_file: output_path_clone,
                 duration_secs,
                 notify: notify_flag,
-                wake: wake_flag,
+                wake: published_wake,
             }));
 
             Ok(TaskResult {
@@ -970,156 +972,6 @@ impl BackgroundTaskManager {
         fs::read_to_string(&output_path).await.ok()
     }
 
-    /// Wait for a task to finish, emit progress, or reach the caller's maximum wait.
-    ///
-    /// This combines bus-driven wakeups with a light periodic status reconciliation so
-    /// detached tasks, missed broadcast messages, or crash/reload edges still return no
-    /// later than `max_wait` and can notice completion without active polling by the agent.
-    pub async fn wait(
-        &self,
-        task_id: &str,
-        max_wait: Duration,
-        return_on_progress: bool,
-    ) -> Option<BackgroundTaskWaitResult> {
-        let mut bus_rx = Bus::global().subscribe();
-        let initial = self.status(task_id).await?;
-        if initial.status != BackgroundTaskStatus::Running {
-            return Some(BackgroundTaskWaitResult {
-                reason: BackgroundTaskWaitReason::AlreadyFinished,
-                task: initial,
-                progress_event: None,
-                event_record: None,
-            });
-        }
-        if max_wait.is_zero() {
-            return Some(BackgroundTaskWaitResult {
-                reason: BackgroundTaskWaitReason::Timeout,
-                task: initial,
-                progress_event: None,
-                event_record: None,
-            });
-        }
-
-        let mut last_progress = initial.progress.clone();
-        let deadline = TokioInstant::now() + max_wait;
-        let timeout = tokio::time::sleep_until(deadline);
-        tokio::pin!(timeout);
-        let mut poll = tokio::time::interval(Duration::from_secs(1));
-        poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                _ = &mut timeout => {
-                    let task = self.status(task_id).await?;
-                    let reason = if task.status == BackgroundTaskStatus::Running {
-                        BackgroundTaskWaitReason::Timeout
-                    } else {
-                        BackgroundTaskWaitReason::Finished
-                    };
-                    return Some(BackgroundTaskWaitResult {
-                        reason,
-                        task,
-                        progress_event: None,
-                        event_record: None,
-                    });
-                }
-                _ = poll.tick() => {
-                    let task = self.status(task_id).await?;
-                    if task.status != BackgroundTaskStatus::Running {
-                        return Some(BackgroundTaskWaitResult {
-                            reason: BackgroundTaskWaitReason::Finished,
-                            task,
-                            progress_event: None,
-                            event_record: None,
-                        });
-                    }
-                    if return_on_progress && task.progress != last_progress {
-                        let event_record = task.event_history.last().cloned();
-                        return Some(BackgroundTaskWaitResult {
-                            reason: progress_wait_reason(event_record.as_ref()),
-                            progress_event: None,
-                            task,
-                            event_record,
-                        });
-                    }
-                    last_progress = task.progress.clone();
-                }
-                event = bus_rx.recv() => {
-                    match event {
-                        Ok(BusEvent::BackgroundTaskCompleted(event)) if event.task_id == task_id => {
-                            let task = self.status(task_id).await?;
-                            return Some(BackgroundTaskWaitResult {
-                                reason: BackgroundTaskWaitReason::Finished,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        Ok(BusEvent::BackgroundTaskProgress(event)) if event.task_id == task_id => {
-                            if return_on_progress {
-                                let task = self.status(task_id).await?;
-                                let event_record = task.event_history.last().cloned();
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: progress_wait_reason(event_record.as_ref()),
-                                    task,
-                                    progress_event: Some(event),
-                                    event_record,
-                                });
-                            }
-                        }
-                        Ok(BusEvent::BackgroundTaskStalled(event)) if event.task_id == task_id => {
-                            // A stall is always worth returning: the caller
-                            // should decide whether to keep waiting or act.
-                            let task = self.status(task_id).await?;
-                            return Some(BackgroundTaskWaitResult {
-                                reason: BackgroundTaskWaitReason::Stalled,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let task = self.status(task_id).await?;
-                            if task.status != BackgroundTaskStatus::Running {
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: BackgroundTaskWaitReason::Finished,
-                                    task,
-                                    progress_event: None,
-                                    event_record: None,
-                                });
-                            }
-                            if return_on_progress && task.progress != last_progress {
-                                let event_record = task.event_history.last().cloned();
-                                return Some(BackgroundTaskWaitResult {
-                                    reason: progress_wait_reason(event_record.as_ref()),
-                                    progress_event: None,
-                                    task,
-                                    event_record,
-                                });
-                            }
-                            last_progress = task.progress.clone();
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            let task = self.status(task_id).await?;
-                            let reason = if task.status == BackgroundTaskStatus::Running {
-                                BackgroundTaskWaitReason::Timeout
-                            } else {
-                                BackgroundTaskWaitReason::Finished
-                            };
-                            return Some(BackgroundTaskWaitResult {
-                                reason,
-                                task,
-                                progress_event: None,
-                                event_record: None,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
     /// Update progress for an existing background task.
     pub async fn update_progress(
         &self,
@@ -1192,7 +1044,7 @@ impl BackgroundTaskManager {
             &mut status,
             progress_event_record(event_kind, progress.clone()),
         );
-        self.write_status_file(&status_path, &status).await;
+        Self::write_status_file(&status_path, &status);
 
         Bus::global().publish(BusEvent::BackgroundTaskProgress(
             BackgroundTaskProgressEvent {
@@ -1211,46 +1063,6 @@ impl BackgroundTaskManager {
     const STALL_POLL_INTERVAL: Duration = Duration::from_secs(5);
     /// Minimum accepted stall window, to keep watchdogs from spamming wakes.
     pub const MIN_STALL_WAKE_SECONDS: u64 = 30;
-
-    /// Update delivery behavior for an existing background task.
-    ///
-    /// This supports retroactively enabling notify/wake after the task was already started.
-    pub async fn update_delivery(
-        &self,
-        task_id: &str,
-        notify: bool,
-        wake: bool,
-    ) -> Result<Option<TaskStatusFile>> {
-        let _status_guard = self.progress_updates.lock().await;
-        let (notify, wake) = normalize_delivery(notify, wake);
-        let status_path = self.status_path_for(task_id);
-        let Some(mut status) = self.read_status_file(&status_path).await else {
-            return Ok(None);
-        };
-        status.notify = notify;
-        status.wake = wake;
-        let event_status = status.status.clone();
-        let event_exit_code = status.exit_code;
-        let event_progress = status.progress.clone();
-        push_task_event(
-            &mut status,
-            BackgroundTaskEventRecord {
-                kind: BackgroundTaskEventKind::DeliveryUpdated,
-                timestamp: Utc::now().to_rfc3339(),
-                message: Some(format!("notify={}, wake={}", notify, wake)),
-                status: Some(event_status),
-                exit_code: event_exit_code,
-                progress: event_progress,
-            },
-        );
-        self.write_status_file(&status_path, &status).await;
-
-        if let Some(task) = self.tasks.read().await.get(task_id) {
-            let _ = task.delivery_flags.send((notify, wake));
-        }
-
-        Ok(Some(status))
-    }
 
     /// Cancel a running task
     pub async fn cancel(&self, task_id: &str) -> Result<bool> {
@@ -1303,37 +1115,40 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
-            }
+            Self::write_status_file(&task.status_path, &final_status);
             let output_path = self.output_path_for(&final_status.task_id);
-            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
-                BackgroundTaskCompleted {
-                    task_id: final_status.task_id,
-                    tool_name: final_status.tool_name,
-                    display_name: final_status.display_name,
-                    session_id: final_status.session_id,
-                    status: final_status.status,
-                    exit_code: final_status.exit_code,
-                    output_preview: "Cancelled by user".to_string(),
-                    output_file: output_path,
-                    duration_secs: final_status.duration_secs.unwrap_or_default(),
-                    notify: notify_flag,
-                    wake: wake_flag,
-                },
-            ));
+            let published_wake =
+                held_stop_wake(&self.held_deliveries, &final_status.task_id, wake_flag);
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                task_id: final_status.task_id,
+                tool_name: final_status.tool_name,
+                display_name: final_status.display_name,
+                session_id: final_status.session_id,
+                status: final_status.status,
+                exit_code: final_status.exit_code,
+                output_preview: "Cancelled by user".to_string(),
+                output_file: output_path,
+                duration_secs: final_status.duration_secs.unwrap_or_default(),
+                notify: notify_flag,
+                wake: published_wake,
+            }));
 
             Ok(true)
         } else {
-            let _status_guard = self.progress_updates.lock().await;
-
             let status_path = self.status_path_for(task_id);
+            let Some(status) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            let status = self
+                .finalize_detached_status_if_needed(status, &status_path)
+                .await;
+            if status.status != BackgroundTaskStatus::Running {
+                return Ok(false);
+            }
+            let _status_guard = self.progress_updates.lock().await;
             let Some(mut status) = self.read_status_file(&status_path).await else {
                 return Ok(false);
             };
-            status = self
-                .finalize_detached_status_if_needed(status, &status_path)
-                .await;
             if status.status != BackgroundTaskStatus::Running || !status.detached {
                 return Ok(false);
             }
@@ -1368,23 +1183,23 @@ impl BackgroundTaskManager {
                 &mut status,
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
-            self.write_status_file(&status_path, &status).await;
+            Self::write_status_file(&status_path, &status);
             let output_path = self.output_path_for(&status.task_id);
-            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
-                BackgroundTaskCompleted {
-                    task_id: status.task_id,
-                    tool_name: status.tool_name,
-                    display_name: status.display_name,
-                    session_id: status.session_id,
-                    status: status.status,
-                    exit_code: status.exit_code,
-                    output_preview: "Cancelled by user".to_string(),
-                    output_file: output_path,
-                    duration_secs: status.duration_secs.unwrap_or_default(),
-                    notify: status.notify,
-                    wake: status.wake,
-                },
-            ));
+            let published_wake =
+                held_stop_wake(&self.held_deliveries, &status.task_id, status.wake);
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                task_id: status.task_id,
+                tool_name: status.tool_name,
+                display_name: status.display_name,
+                session_id: status.session_id,
+                status: status.status,
+                exit_code: status.exit_code,
+                output_preview: "Cancelled by user".to_string(),
+                output_file: output_path,
+                duration_secs: status.duration_secs.unwrap_or_default(),
+                notify: status.notify,
+                wake: published_wake,
+            }));
             Ok(true)
         }
     }
@@ -1457,8 +1272,7 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(BackgroundTaskStatus::Failed, None, Some(&error)),
             );
-            self.write_status_file(&task.status_path, &final_status)
-                .await;
+            Self::write_status_file(&task.status_path, &final_status);
             finalized += 1;
         }
 
