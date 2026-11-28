@@ -52,8 +52,8 @@ pub(in crate::tui::app) fn strip_terminal_control_sequences(
                     None => index = bytes.len(),
                 }
             } else if index < bytes.len() {
-                // Two-character escape such as ESC O or ESC ].
-                index += 1;
+                // ESC consumes one whole character, including Alt+Unicode.
+                index += text[index..].chars().next().map_or(0, char::len_utf8);
             }
             continue;
         }

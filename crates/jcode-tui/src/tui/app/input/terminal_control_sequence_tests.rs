@@ -15,6 +15,10 @@ fn strips_escape_and_bare_report_remnants() {
         ("[12;40R", ""),
         ("[1I", ""),
         ("[1O", ""),
+        // Alt/ESC-prefixed Unicode consumes a whole character.
+        ("a\x1béb", "ab"),
+        ("a\x1b界b", "ab"),
+        ("a\x1b🦀b", "ab"),
         // 8-bit CSI introducer.
         ("\u{9b}[<65;50;24M", ""),
         // Stray C0 controls, but tabs and newlines survive.
