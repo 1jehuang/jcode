@@ -979,13 +979,37 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "GITHUB_TOKEN",
         "GEMINI_API_KEY",
         "CURSOR_API_KEY",
+        // Ambient developer machines routinely carry third-party compatible
+        // provider keys; auto-detect must not see them as configured here.
+        "CEREBRAS_API_KEY",
+        "NVIDIA_API_KEY",
+        "TOGETHER_AI_CODING_API_KEY",
+        "FIREWORKS_CODING_API_KEY",
+        "FIREWORKS_NON_CODING_API_KEY",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
     ]
     .iter()
     .map(|k| (k.to_string(), std::env::var(k).ok()))
     .collect();
+    // Restore-on-drop: a failed assertion or panic inside the test must not
+    // leave the scrubbed provider env missing, which would change later
+    // tests' settings.
+    let _restore = SavedEnvRestore(saved);
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
@@ -997,7 +1021,25 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "GITHUB_TOKEN",
         "GEMINI_API_KEY",
         "CURSOR_API_KEY",
+        "CEREBRAS_API_KEY",
+        "NVIDIA_API_KEY",
+        "TOGETHER_AI_CODING_API_KEY",
+        "FIREWORKS_CODING_API_KEY",
+        "FIREWORKS_NON_CODING_API_KEY",
         "JCODE_ACTIVE_PROVIDER",
+        "JCODE_OPENROUTER_ENV_FILE",
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        "JCODE_OPENROUTER_STATIC_MODELS",
+        "JCODE_OPENROUTER_MODEL",
+        "JCODE_OPENROUTER_CACHE_NAMESPACE",
+        "JCODE_OPENROUTER_PROVIDER_FEATURES",
+        "JCODE_OPENROUTER_TRANSPORT_STATE",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ] {
         crate::env::remove_var(key);
@@ -1055,12 +1097,23 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
     assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
 
-    for (key, value) in saved {
-        if let Some(value) = value {
-            crate::env::set_var(&key, value);
-        } else {
-            crate::env::remove_var(&key);
+    crate::config::invalidate_config_cache();
+}
+
+/// Restores saved env values on drop, including on panic, so a failed test
+/// cannot leave scrubbed provider settings missing for later tests.
+struct SavedEnvRestore(Vec<(String, Option<String>)>);
+
+impl Drop for SavedEnvRestore {
+    fn drop(&mut self) {
+        for (key, value) in &self.0 {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
         }
+        crate::config::invalidate_config_cache();
     }
 }
 

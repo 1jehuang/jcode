@@ -8,7 +8,7 @@ use std::ffi::OsString;
 struct TestEnvGuard {
     prev_home: Option<OsString>,
     _temp_home: tempfile::TempDir,
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::storage::TestEnvGuard,
 }
 
 impl TestEnvGuard {
