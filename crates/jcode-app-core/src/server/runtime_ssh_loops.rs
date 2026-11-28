@@ -27,6 +27,7 @@ struct LoopState {
     version: u32,
     poke_enabled: bool,
     rearm_on_user_turn: bool,
+    user_prompt_since_pause: bool,
     paused_at_unix_secs: Option<u64>,
     paused_todo_fingerprint: Option<String>,
     workflow: Option<Workflow>,
@@ -41,6 +42,7 @@ impl Default for LoopState {
             version: 1,
             poke_enabled: false,
             rearm_on_user_turn: false,
+            user_prompt_since_pause: false,
             paused_at_unix_secs: None,
             paused_todo_fingerprint: None,
             workflow: None,
@@ -65,6 +67,7 @@ fn todo_fingerprint(session_id: &str) -> Option<String> {
 
 fn rearm_state(state: &mut LoopState) {
     state.rearm_on_user_turn = false;
+    state.user_prompt_since_pause = false;
     state.paused_at_unix_secs = None;
     state.paused_todo_fingerprint = None;
     state.poke_enabled = true;
@@ -121,8 +124,9 @@ pub(super) fn initialize_remote_session(session_id: &str, enabled: bool) -> Resu
     Ok(())
 }
 
-/// Re-arm daemon auto-poke when the user sends a new prompt after an Escape
-/// interrupt paused it. Never overrides an explicit `/poke off`.
+/// Record that the user sent a prompt after an Escape interrupt paused
+/// auto-poke, and re-arm if the pause timeout has also elapsed (or todos
+/// changed). Never overrides an explicit `/poke off`.
 pub(super) fn rearm_on_user_turn(session_id: &str) -> Result<bool> {
     let _lock = state_lock().lock().unwrap_or_else(|p| p.into_inner());
     let path = state_path(session_id)?;
@@ -133,12 +137,17 @@ pub(super) fn rearm_on_user_turn(session_id: &str) -> Result<bool> {
     if !state.rearm_on_user_turn {
         return Ok(false);
     }
-    rearm_state(&mut state);
+    state.user_prompt_since_pause = true;
+    let current_todo_fp = todo_fingerprint(session_id);
+    let rearmed = maybe_rearm_paused_state(
+        session_id,
+        &mut state,
+        now_unix_secs(),
+        current_todo_fp.as_deref(),
+    )
+    .is_some();
     crate::storage::write_json(&path, &state)?;
-    crate::logging::info(&format!(
-        "AUTO_POKE_DECISION owner=daemon session={session_id} action=rearm reason=user_turn_after_interrupt"
-    ));
-    Ok(true)
+    Ok(rearmed)
 }
 
 fn maybe_rearm_paused_state(
@@ -156,8 +165,8 @@ fn maybe_rearm_paused_state(
     let todos_changed = state.paused_todo_fingerprint.as_deref() != current_todo_fp;
     let reason = if todos_changed {
         "todos_updated_after_interrupt"
-    } else if elapsed_ready {
-        "pause_timeout_elapsed"
+    } else if elapsed_ready && state.user_prompt_since_pause {
+        "pause_timeout_and_user_turn"
     } else {
         return None;
     };
@@ -218,6 +227,7 @@ pub(super) fn control(
     if command == "poke" && action == "on" {
         return update_state(session_id, |state| {
             state.rearm_on_user_turn = false;
+            state.user_prompt_since_pause = false;
             state.paused_at_unix_secs = None;
             state.paused_todo_fingerprint = None;
             if !state.poke_enabled {
@@ -237,6 +247,7 @@ pub(super) fn control(
         return update_state(session_id, |state| {
             if state.poke_enabled {
                 state.rearm_on_user_turn = true;
+                state.user_prompt_since_pause = false;
                 state.paused_at_unix_secs = Some(now_unix_secs());
                 state.paused_todo_fingerprint = todo_fingerprint(session_id);
             }
@@ -259,6 +270,7 @@ pub(super) fn control(
         if command == "poke" {
             state.poke_enabled = false;
             state.rearm_on_user_turn = false;
+            state.user_prompt_since_pause = false;
             state.paused_at_unix_secs = None;
             state.paused_todo_fingerprint = None;
             if let Some(workflow) = state.workflow.as_mut() {
