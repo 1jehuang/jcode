@@ -50,7 +50,14 @@ impl Config {
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
     fn load_for_update() -> anyhow::Result<Self> {
-        Ok(Self::load_from_file_strict()?.unwrap_or_default())
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+        Self::load_for_update_at_path(&path)
+    }
+
+    fn load_for_update_at_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        Ok(Self::load_from_path(path)?.unwrap_or_default())
     }
 
     /// Load config from file only (no env overrides)
@@ -69,11 +76,15 @@ impl Config {
         let Some(path) = Self::path() else {
             return Ok(None);
         };
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
         let mut config = toml::from_str::<Self>(&content).map_err(|e| {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
@@ -115,7 +126,45 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let mut cfg = Self::load_for_update()?;
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        // Preserve managed config links and serialize writers through the same target.
+        let path = match path.canonicalize() {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
+                path
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        // Lock a stable sibling, not config.toml's inode, which replacement changes.
+        // Never unlink this file: concurrent processes must all lock the same inode.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join("config.toml.lock"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    role_transaction_tests::contended();
+                    if started.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("Timed out waiting for config update lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        let mut cfg = Self::load_for_update_at_path(&path)?;
+        #[cfg(test)]
+        role_transaction_tests::loaded();
         match target {
             "swarm" => cfg.agents.swarm_model = value,
             "review" => cfg.autoreview.model = value,
@@ -124,7 +173,22 @@ impl Config {
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
-        cfg.save()
+        use std::io::Write;
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        match std::fs::metadata(&path) {
+            Ok(metadata) => replacement
+                .as_file()
+                .set_permissions(metadata.permissions())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        replacement.write_all(toml::to_string_pretty(&cfg)?.as_bytes())?;
+        replacement.as_file().sync_all()?;
+        replacement.persist(&path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Self::invalidate_cache();
+        Ok(())
     }
 
     /// Persist the Anthropic cache duration for clients and the shared daemon.
@@ -813,6 +877,10 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "role_transaction_tests.rs"]
+mod role_transaction_tests;
 
 #[cfg(test)]
 mod issue_1056_tests {
