@@ -68,6 +68,11 @@ pub(in crate::tui::app) fn strip_terminal_control_sequences(
             }
             continue;
         }
+        // C1 OSC/ST are controls, not printable composer content.
+        if byte == 0xc2 && matches!(bytes.get(index + 1), Some(0x9c | 0x9d)) {
+            index += 2;
+            continue;
+        }
         // A bare report-shaped run left behind by a torn read.
         if byte == b'['
             && let Some(len) = bare_terminal_report_length(&bytes[index..])
