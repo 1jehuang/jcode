@@ -263,7 +263,7 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
     // More autonomous work cannot remove an explicitly documented constraint
     // or exhausted budget. Preserve the honest assessment instead of demanding
     // a higher score or repeatedly asking for the unavailable acceptance path.
-    if goal_has_documented_stop(goal) {
+    if goal_has_documented_stop(goal) || goal_cannot_complete(goal).is_some() {
         return Vec::new();
     }
 
@@ -293,6 +293,45 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
         reasons.push("gather more evidence about whether the work should stop.");
     }
     reasons
+}
+
+/// An explicit undelivered goal is actionable without opting into quality
+/// reviews. A goal may precede its first todo or outlive its last attempt.
+pub fn undelivered_goal_message(todos: &[TodoItem], goals: &[TodoGoal]) -> Option<String> {
+    let mut gaps = Vec::new();
+    for goal in goals {
+        let Some(state) = goal.delivery_state else {
+            continue;
+        };
+        if state == DeliveryState::OutcomeDelivered
+            || goal_cannot_complete(goal).is_some()
+            || goal_has_documented_stop(goal)
+        {
+            continue;
+        }
+        let group = normalized_group(goal.group.as_deref());
+        let matching = todos
+            .iter()
+            .filter(|t| normalized_group(t.group.as_deref()) == group);
+        // Respect live/paused todos and deliberate cancellation. A mixture
+        // of finished and cancelled attempts does not retire a live goal.
+        if matching.clone().any(is_incomplete_todo)
+            || (matching.clone().next().is_some()
+                && matching
+                    .into_iter()
+                    .all(|t| todo_status_is_cancelled(&t.status)))
+        {
+            continue;
+        }
+        gaps.push(format!(
+            "\n- Goal \"{}\" ({}): the requested outcome is still undelivered. Add or reopen a concrete next action within the user's request. If the requested outcome is already delivered, record the evidence instead.",
+            group.as_deref().unwrap_or("ungrouped goal"),
+            state.as_str()
+        ));
+    }
+    gaps.sort_unstable();
+    gaps.dedup();
+    (!gaps.is_empty()).then(|| format!("{TODO_OWNERSHIP_CONTINUATION_MESSAGE}{}", gaps.concat()))
 }
 
 /// Build an ownership continuation that directs work toward each affected goal

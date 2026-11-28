@@ -416,7 +416,7 @@ fn default_policy_skips_all_quality_reviews_but_keeps_open_work_pokes() {
         let state = TodoSnapshot {
             todos: vec![item],
             goals: vec![TodoGoal {
-                delivery_state: Some(DeliveryState::ChangeMade),
+                delivery_state: Some(DeliveryState::OutcomeDelivered),
                 ..Default::default()
             }],
             long_session_review_due: true,
@@ -435,6 +435,83 @@ fn default_policy_skips_all_quality_reviews_but_keeps_open_work_pokes() {
             Some(FollowUpKind::IncompleteTodos)
         );
     }
+}
+
+#[test]
+fn default_delivery_poke_tracks_outcome_even_after_final_answer_or_without_items() {
+    for todos in [vec![], vec![done("attempt", ConfidenceState::Verified)]] {
+        let mut policy = FollowUpPolicy::new(true);
+        let mut s = snapshot(todos);
+        s.goals.push(TodoGoal::default());
+        for state in [
+            DeliveryState::NotStarted,
+            DeliveryState::ChangeMade,
+            DeliveryState::Integrated,
+            DeliveryState::WorkflowValidated,
+        ] {
+            s.goals[0].delivery_state = Some(state);
+            let poke = policy.decide_after_turn(&s, true).follow_up.unwrap();
+            assert_eq!(poke.kind, FollowUpKind::Ownership);
+            assert!(poke.message.contains("still undelivered"));
+            assert!(
+                policy.decide(&s).follow_up.is_none(),
+                "unchanged gap must not loop"
+            );
+        }
+        s.goals[0].delivery_state = Some(DeliveryState::OutcomeDelivered);
+        assert!(policy.decide_after_turn(&s, true).follow_up.is_none());
+    }
+}
+
+#[test]
+fn default_delivery_poke_respects_stops_cancellation_and_opt_out() {
+    let goal = TodoGoal {
+        delivery_state: Some(DeliveryState::Integrated),
+        ..Default::default()
+    };
+    let mut s = snapshot(vec![todo("withdrawn", "cancelled")]);
+    s.goals.push(goal.clone());
+    assert!(
+        FollowUpPolicy::new(true)
+            .decide_after_turn(&s, true)
+            .follow_up
+            .is_none()
+    );
+    s.todos.clear();
+    assert!(FollowUpPolicy::new(false).decide(&s).follow_up.is_none());
+    s.goals[0].cannot_complete = Some("source no longer exists".into());
+    assert!(FollowUpPolicy::new(true).decide(&s).follow_up.is_none());
+    s.goals[0] = TodoGoal {
+        iteration_maturity: Some(crate::IterationMaturity::BudgetExhausted),
+        stopping_evidence: Some("user's time limit reached".into()),
+        ..goal
+    };
+    assert!(FollowUpPolicy::new(true).decide(&s).follow_up.is_none());
+    s.goals[0].stopping_evidence = None;
+    assert_eq!(
+        kind(&FollowUpPolicy::new(true).decide(&s)),
+        Some(FollowUpKind::Ownership)
+    );
+}
+
+#[test]
+fn delivery_poke_targets_independent_goal_while_a_worker_is_running() {
+    let mut active = todo("waiting", "in_progress");
+    active.group = Some("worker goal".into());
+    active.assigned_to = Some("worker".into());
+    let mut s = snapshot(vec![active]);
+    s.running_workers.push("worker".into());
+    for label in ["worker goal", "parent goal"] {
+        s.goals.push(TodoGoal {
+            group: Some(label.into()),
+            delivery_state: Some(DeliveryState::Integrated),
+            ..Default::default()
+        });
+    }
+    let poke = FollowUpPolicy::new(true).decide(&s).follow_up.unwrap();
+    assert_eq!(poke.kind, FollowUpKind::Ownership);
+    assert!(poke.message.contains("parent goal"));
+    assert!(!poke.message.contains("worker goal"));
 }
 
 #[test]

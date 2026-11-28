@@ -315,7 +315,12 @@ impl FollowUpPolicy {
                     })
             })
             .collect();
-        if !incomplete.is_empty() && actionable.is_empty() {
+        let delivery_message = if actionable.is_empty() {
+            crate::undelivered_goal_message(todos, goals)
+        } else {
+            None
+        };
+        if !incomplete.is_empty() && actionable.is_empty() && delivery_message.is_none() {
             // Waiting is not resistance or completion. A completion wake will
             // re-enter the policy with fresh runtime facts and a fresh budget.
             self.incomplete_budget = IncompleteTodoBudget::default();
@@ -334,13 +339,13 @@ impl FollowUpPolicy {
             });
         }
 
-        if !incomplete.is_empty() {
+        if !actionable.is_empty() {
             return self.poke_incomplete(&actionable);
         }
 
         // Completing or removing the list ends the prior poke cycle.
         self.incomplete_budget = IncompleteTodoBudget::default();
-        if todos.is_empty() {
+        if todos.is_empty() && delivery_message.is_none() {
             // Stay armed: a todo-free turn must not disable poking for later
             // turns that do leave work open.
             self.final_response_requested = false;
@@ -369,10 +374,12 @@ impl FollowUpPolicy {
             .with_effects(effects);
         }
 
-        let ownership_needs_followup =
-            self.gate_digest_enabled && !completed_groups_have_sufficient_delivery(todos, goals);
+        let ownership_needs_followup = delivery_message.is_some()
+            || (self.gate_digest_enabled
+                && !completed_groups_have_sufficient_delivery(todos, goals));
         let gate_budget_left = self.gate_attempts < MAX_GATE_ATTEMPTS;
-        let ownership_message = build_todo_ownership_continuation_message(todos, goals);
+        let ownership_message = delivery_message
+            .unwrap_or_else(|| build_todo_ownership_continuation_message(todos, goals));
         let ownership_fingerprint = Some(ownership_message.clone());
         if ownership_needs_followup && self.last_ownership_fingerprint == ownership_fingerprint {
             // Already asked about this exact gap: keep the honest assessment
@@ -514,7 +521,8 @@ impl ConfidenceSummary {
                 weight += w;
             }
         }
-        let average = (weight > 0).then(|| ConfidenceState::from_level(((sum + weight / 2) / weight) as u8));
+        let average =
+            (weight > 0).then(|| ConfidenceState::from_level(((sum + weight / 2) / weight) as u8));
         let needs_validation = !completed.is_empty()
             && completed.iter().any(|todo| {
                 todo.completion_confidence.is_none()

@@ -367,6 +367,40 @@ async fn ordinary_session_enables_real_followups_without_client_opt_in() {
 }
 
 #[tokio::test]
+async fn undelivered_goal_continues_once_after_last_attempt_finishes() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = RecordingProvider::default();
+    let mut agent = Agent::new_with_initial_working_dir(
+        Arc::new(provider.clone()),
+        crate::tool::Registry::empty(),
+        home.path().to_str(),
+    );
+    let session = agent.session_id().to_owned();
+    let mut s = open_snapshot();
+    s.todos[0].status = "completed".into();
+    todo::save_todos(&session, &s.todos).unwrap();
+    todo::save_goals(
+        &session,
+        &[todo::TodoGoal {
+            delivery_state: Some(todo::DeliveryState::WorkflowValidated),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::unbounded_channel();
+    drop(rx);
+    run_followups(&mut agent, tx.clone()).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    initialize_remote_session(&session, true).unwrap();
+    run_followups(&mut agent, tx).await.unwrap();
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn ordinary_session_respects_host_default_off_and_explicit_on() {
     let _lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
