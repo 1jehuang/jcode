@@ -25,6 +25,11 @@ impl Config {
 # Environment variables override these settings.
 # Run `/config` in jcode to see current settings.
 
+# Emit OSC 9 terminal status side-channel updates for integrations such as herdr.
+# Set to false to disable all `jcode:working`, `jcode:blocked`, and `jcode:idle`
+# escape sequences. Env override: JCODE_TERMINAL_STATUS_OSC9.
+terminal_status_osc9 = true
+
 [cloud]
 # Scoped local resource access after handoff, in seconds (default: 24 hours).
 # Set to 0 to disable. Disconnecting or switching sessions still revokes access.

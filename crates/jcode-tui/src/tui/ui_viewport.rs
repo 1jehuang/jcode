@@ -688,9 +688,8 @@ pub(super) fn draw_messages(
                     now_utc,
                 );
                 let due_ms = now_ms.saturating_add(delay.as_millis().min(u64::MAX as u128) as u64);
-                earliest_age_due_ms = Some(
-                    earliest_age_due_ms.map_or(due_ms, |prev| prev.min(due_ms)),
-                );
+                earliest_age_due_ms =
+                    Some(earliest_age_due_ms.map_or(due_ms, |prev| prev.min(due_ms)));
             }
         }
         super::todo_completion_flash::record_visible_age_deadline(earliest_age_due_ms);

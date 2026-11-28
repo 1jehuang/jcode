@@ -24,7 +24,7 @@
     "crates/jcode-sdk/tests/client_behavior.rs": 1206,
     "crates/jcode-telemetry-core/src/tests.rs": 1799,
     "crates/jcode-tui/src/tui/app/commands_cloud_tests.rs": 1288,
-    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1312,
+    "crates/jcode-tui/src/tui/app/remote_tests.rs": 1357,
     "crates/jcode-tui/src/tui/app/tests.rs": 1915,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_01/part_01.rs": 1590,
     "crates/jcode-tui/src/tui/app/tests/commands_accounts_02/part_01.rs": 1215,

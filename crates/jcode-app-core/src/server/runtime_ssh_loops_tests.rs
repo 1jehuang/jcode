@@ -637,7 +637,11 @@ fn poke_pause_rearms_on_next_user_turn_while_explicit_off_stays_off() {
     let session_id = "session_escape_rearm_test";
     initialize_remote_session(session_id, true).unwrap();
     todo::save_todos(session_id, &open_snapshot().todos).unwrap();
-    assert!(read_state(&state_path(session_id).unwrap()).unwrap().poke_enabled);
+    assert!(
+        read_state(&state_path(session_id).unwrap())
+            .unwrap()
+            .poke_enabled
+    );
 
     // Escape pauses auto-poke for the cancelled turn and records pause metadata.
     let (paused, _) = control(session_id, "poke", &["pause".into()])
@@ -673,8 +677,13 @@ fn poke_pause_rearms_on_next_user_turn_while_explicit_off_stays_off() {
 
     // Once 5 minutes have elapsed AND a user prompt has been sent, it re-arms.
     assert!(
-        maybe_rearm_paused_state(session_id, &mut state, paused_at + 10, initial_fp.as_deref())
-            .is_none()
+        maybe_rearm_paused_state(
+            session_id,
+            &mut state,
+            paused_at + 10,
+            initial_fp.as_deref()
+        )
+        .is_none()
     );
     assert_eq!(
         maybe_rearm_paused_state(
@@ -690,7 +699,9 @@ fn poke_pause_rearms_on_next_user_turn_while_explicit_off_stays_off() {
     assert!(!state.user_prompt_since_pause);
 
     // Explicit /poke off stays off even after user prompt and timeout.
-    control(session_id, "poke", &["on".into()]).unwrap().unwrap();
+    control(session_id, "poke", &["on".into()])
+        .unwrap()
+        .unwrap();
     let (stopped, _) = control(session_id, "poke", &["off".into()])
         .unwrap()
         .unwrap();
@@ -705,10 +716,16 @@ fn poke_pause_rearms_on_next_user_turn_while_explicit_off_stays_off() {
         .unwrap()
         .unwrap();
     assert!(!rearm_on_user_turn(session_id).unwrap());
-    assert!(!read_state(&state_path(session_id).unwrap()).unwrap().poke_enabled);
+    assert!(
+        !read_state(&state_path(session_id).unwrap())
+            .unwrap()
+            .poke_enabled
+    );
 
     // Todo update after Escape re-arms immediately regardless of timeout.
-    control(session_id, "poke", &["on".into()]).unwrap().unwrap();
+    control(session_id, "poke", &["on".into()])
+        .unwrap()
+        .unwrap();
     control(session_id, "poke", &["pause".into()])
         .unwrap()
         .unwrap();

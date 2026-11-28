@@ -9,6 +9,12 @@ impl App {
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
+        // Lazy construction: `then` defers building the guard until the
+        // condition holds, so Drop (the idle emission) cannot fire when the
+        // OSC channel is disabled or this is a replay session.
+        let _exit_osc_idle: Option<ExitStatusOscIdle> =
+            (crate::config::config().terminal_status_osc9 && !self.is_replay)
+                .then(|| ExitStatusOscIdle);
         if crate::tui::is_ssh_remote() {
             self.session.working_dir = remote_working_dir.clone();
         }

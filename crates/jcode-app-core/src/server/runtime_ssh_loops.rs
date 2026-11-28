@@ -256,8 +256,9 @@ pub(super) fn control(
                 workflow.active = false;
             }
             state.policy.disable();
-            let message = "Paused /poke until your next message. The current turn is not cancelled."
-                .to_string();
+            let message =
+                "Paused /poke until your next message. The current turn is not cancelled."
+                    .to_string();
             state.last_notice = Some(message.clone());
             let data = status_data(session_id, state)?;
             Ok(Some((data, message)))
