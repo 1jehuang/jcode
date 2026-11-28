@@ -82,22 +82,6 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 mod subscribe_context;
 use subscribe_context::*;
 
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
-
 struct ProcessingMessage {
     jarvis_voice: bool,
     id: u64,
@@ -2309,13 +2293,13 @@ pub(super) async fn handle_client(
 
             Request::RuntimeCommand { id, command, args } => {
                 let result: anyhow::Result<(serde_json::Value, String)> = async {
-                    // Stop/status must remain available while a loop's model or
-                    // tool turn owns the Agent mutex.
+                    // Stop/status control remains available while a turn owns the Agent mutex.
                     if let Some(result) = super::runtime_ssh_loops::control(&client_session_id, &command, &args)? {
                         return Ok(result);
                     }
-                    // Supplemental SSH/cloud commands intentionally precede the shared
-                    // enum parser so new host workflows do not require a wire-enum release.
+                    // Background cancellation also cannot wait for the Agent mutex.
+                    if command == "background_cancel" { return super::runtime_commands::background_cancel(&client_session_id, &args).await; }
+                    // Supplemental SSH/cloud commands precede the shared enum parser.
                     if super::runtime_ssh_sessions::handles(&command)
                         || super::runtime_ssh_loops::handles(&command)
                         || super::runtime_ssh_accounts::handles(&command)
@@ -2405,7 +2389,9 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        if let Err(error) = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }) {
+                            crate::logging::warn(&format!("Cannot deliver runtime command result to disconnected client: {error}"));
+                        }
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:
