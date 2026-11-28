@@ -492,7 +492,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
 #[test]
 fn test_model_picker_preview_enter_selects_model() {
     let mut app = create_test_app();
-    configure_test_remote_models(&mut app);
+    r23_configure_available_model_browser_routes(&mut app);
 
     for c in "/model g52c".chars() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
@@ -503,6 +503,7 @@ fn test_model_picker_preview_enter_selects_model() {
 
     // Enter from preview mode selects the model and closes the picker
     assert!(app.inline_interactive_state.is_none());
+    assert!(app.pending_route_selection.is_some());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
 }

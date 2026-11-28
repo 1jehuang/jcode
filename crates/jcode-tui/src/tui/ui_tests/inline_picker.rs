@@ -53,6 +53,7 @@ fn model_picker_entry() -> crate::tui::PickerEntry {
 fn model_picker_state() -> TestState {
     TestState {
         inline_interactive_state: Some(crate::tui::InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
             kind: crate::tui::PickerKind::Model,
             filtered: vec![0],
             selected: 0,
@@ -240,13 +241,50 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Filter: gpt"), "{text}");
+    assert!(text.contains("Search: gpt"), "{text}");
     assert!(text.contains("↑↓ route"), "{text}");
     assert!(
-        lines[0]
-            .spans
+        lines
             .iter()
+            .flat_map(|line| &line.spans)
             .any(|span| span.content.contains("openai")
                 && span.style.add_modifier.contains(Modifier::UNDERLINED))
     );
+}
+
+#[test]
+fn model_browser_chrome_fits_narrow_unicode_terminals() {
+    for width in [1, 2, 8, 24, 48, 120] {
+        for height in [1, 2, 3, 4, 12] {
+            let mut state = model_picker_state();
+            let picker = state.inline_interactive_state.as_mut().unwrap();
+            picker.filter = "@超長供應商 模型模型模型".repeat(10);
+            let lines = render_model_suggestions(&state, width, 20, height);
+            assert!(
+                lines[height as usize..]
+                    .iter()
+                    .all(|line| line.trim().is_empty())
+            );
+            let raw = crate::tui::ui::inline_interactive_ui::model_suggestion_lines(
+                state.inline_interactive_state.as_ref().unwrap(),
+                height as usize,
+            );
+            for (index, line) in raw.iter().enumerate() {
+                if line.width() > width as usize {
+                    assert!(
+                        lines[height as usize - raw.len() + index]
+                            .trim_end()
+                            .ends_with('…'),
+                        "{width}/{height}: {lines:?}"
+                    );
+                }
+            }
+        }
+    }
+    let mut state = model_picker_state();
+    state.inline_interactive_state.as_mut().unwrap().filter = "@openai future".into();
+    let text = render_model_suggestions(&state, 120, 20, 12).join("\n");
+    assert!(text.contains("Search: future▏"), "{text}");
+    assert!(text.contains("Provider: openai"), "{text}");
+    assert!(text.contains("Ctrl+P provider"), "{text}");
 }

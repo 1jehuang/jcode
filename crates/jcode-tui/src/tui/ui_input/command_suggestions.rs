@@ -111,3 +111,14 @@ pub(super) fn highlight_command_spans(
     }
     spans
 }
+
+pub(super) fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
+    if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
+        0
+    } else {
+        selected
+            .saturating_add(1)
+            .saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
+            .min(suggestion_count.saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT))
+    }
+}

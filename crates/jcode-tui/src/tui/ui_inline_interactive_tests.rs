@@ -77,6 +77,7 @@ fn selected_fallback_model_shows_warning_notice() {
 
 fn sample_picker() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: crate::tui::PickerKind::Model,
         filtered: vec![0],
         selected: 0,
@@ -123,9 +124,10 @@ fn model_suggestions_align_provider_and_method_columns() {
     picker.filtered.push(1);
     for preview in [false, true] {
         picker.preview = preview;
-        let lines = model_suggestion_lines(&picker, 3);
+        let lines = model_suggestion_lines(&picker, 4);
         let texts: Vec<String> = lines
             .iter()
+            .filter(|line| !line.to_string().starts_with("Search:"))
             .take(2)
             .map(|line| {
                 line.spans
@@ -222,6 +224,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
     }
 
     crate::tui::InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: crate::tui::PickerKind::Account,
         filtered: (0..models.len()).collect(),
         selected: 0,
@@ -234,6 +237,7 @@ fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractive
 
 fn sample_agent_target_picker() -> crate::tui::InlineInteractiveState {
     crate::tui::InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
         kind: crate::tui::PickerKind::Model,
         filtered: vec![0],
         selected: 0,
@@ -613,4 +617,20 @@ fn agent_target_picker_uses_specific_column_labels() {
     assert_eq!(picker.secondary_label(false), "MODEL");
     assert_eq!(picker.tertiary_label(), "CONFIG");
     assert!(!picker.shows_default_shortcut_hint());
+}
+
+#[test]
+fn review_provider_scope_azure_display_keeps_direct_service_identity() {
+    assert_eq!(
+        route_provider_display("Azure OpenAI", "openrouter"),
+        "Azure OpenAI"
+    );
+    assert_eq!(
+        route_provider_display("Azure", "openrouter"),
+        "OpenRouter/Azure"
+    );
+    assert_eq!(
+        route_provider_display("Fireworks", "openrouter"),
+        "OpenRouter/Fireworks"
+    );
 }

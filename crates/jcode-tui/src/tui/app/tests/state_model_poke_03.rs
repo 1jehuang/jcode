@@ -1936,7 +1936,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let glm_row = comtegra_text
         .lines()
-        .find(|line| line.contains("glm-51-nvfp4"))
+        .find(|line| line.contains("glm-51-nvfp4") && !line.starts_with("Search:"))
         .unwrap_or("");
     assert!(
         glm_row.contains("Comtegra GPU Cloud")
@@ -1985,7 +1985,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let kimi25_row = kimi_text
         .lines()
-        .find(|line| line.contains("moonshotai/kimi-k2.5"))
+        .find(|l| l.contains("moonshotai/kimi-k2.5") && !l.starts_with("Search:"))
         .unwrap_or("");
     assert!(
         !kimi25_row.contains('★'),
@@ -1995,7 +1995,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let openrouter_openai_row = openrouter_openai_text
         .lines()
-        .find(|line| line.contains("openai/gpt-5.5"))
+        .find(|l| l.contains("openai/gpt-5.5") && !l.starts_with("Search:"))
         .unwrap_or("");
     assert!(
         openrouter_openai_row.contains("OpenRou")
