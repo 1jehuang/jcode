@@ -375,51 +375,24 @@ fn spawn_background_update_check(args: &Args) {
         return;
     }
 
+    // Source checkouts update via `git pull` and a rebuild. Hot reload
+    // re-execs with `--resume`, so keep those handoffs from starting another
+    // pull/rebuild cycle. Release builds use the throttled download path and
+    // must keep checking, or reboot-restored sessions never update.
+    if args.resume.is_some() && !update::is_release_build() {
+        return;
+    }
+
     if update::is_release_build() {
         std::thread::spawn(move || {
-            use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
-            match update::check_and_maybe_update(auto_update) {
-                update::UpdateCheckResult::UpdateAvailable {
-                    current, latest, ..
-                } => {
-                    logging::info(&format!("Update available: {} -> {}", current, latest));
-                }
-                update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                    // When an interactive TUI session is running, hand the switch
-                    // to the app's graceful reload path (saves the input line,
-                    // waits for the current turn, resumes the session) instead of
-                    // exec-ing over the live UI, which visibly resets the screen.
-                    if let Some(session_id) = terminal::get_current_session() {
-                        logging::info(&format!(
-                            "Updated to {}. Requesting graceful session reload...",
-                            version
-                        ));
-                        Bus::global().publish(BusEvent::SessionUpdateStatus(
-                            SessionUpdateStatus::ReadyToReload {
-                                session_id,
-                                action: ClientMaintenanceAction::Update,
-                                version,
-                            },
-                        ));
-                        return;
-                    }
-                    logging::info(&format!("Updated to {}. Restarting...", version));
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    let args: Vec<String> = std::env::args().skip(1).collect();
-                    let exec_path = build::client_update_candidate(false)
-                        .map(|(p, _)| p)
-                        .unwrap_or(path);
-                    let err = crate::platform::replace_process(
-                        ProcessCommand::new(&exec_path)
-                            .args(&args)
-                            .arg("--no-update"),
-                    );
-                    eprintln!("Failed to exec new binary: {}", err);
-                }
-                update::UpdateCheckResult::Error(e) => {
-                    logging::info(&format!("Update check failed: {}", e));
-                }
-                update::UpdateCheckResult::NoUpdate => {}
+            // Long-lived clients (multi-day sessions, the desktop runtime,
+            // reboot-restored windows) used to check once at launch and never
+            // again, so a release published while they ran was never seen.
+            // Keep checking on a fixed cadence. `check_and_maybe_update` still
+            // applies the persisted 30-minute throttle and rate-limit backoff,
+            // so concurrent clients cannot hammer GitHub.
+            while run_release_update_check(auto_update) == ReleaseCheckOutcome::KeepWatching {
+                std::thread::sleep(RELEASE_UPDATE_RECHECK_INTERVAL);
             }
         });
     } else {
@@ -482,6 +455,68 @@ fn spawn_background_update_check(args: &Args) {
     }
 }
 
+/// How often a running release client re-checks for a newer release.
+const RELEASE_UPDATE_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseCheckOutcome {
+    /// Nothing was installed. Check again later.
+    KeepWatching,
+    /// An update was installed and a reload was requested or attempted.
+    Stop,
+}
+
+fn run_release_update_check(auto_update: bool) -> ReleaseCheckOutcome {
+    use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
+    match update::check_and_maybe_update(auto_update) {
+        update::UpdateCheckResult::UpdateAvailable {
+            current, latest, ..
+        } => {
+            logging::info(&format!("Update available: {} -> {}", current, latest));
+            ReleaseCheckOutcome::KeepWatching
+        }
+        update::UpdateCheckResult::UpdateInstalled { version, path } => {
+            // When an interactive TUI session is running, hand the switch
+            // to the app's graceful reload path (saves the input line,
+            // waits for the current turn, resumes the session) instead of
+            // exec-ing over the live UI, which visibly resets the screen.
+            if let Some(session_id) = terminal::get_current_session() {
+                logging::info(&format!(
+                    "Updated to {}. Requesting graceful session reload...",
+                    version
+                ));
+                Bus::global().publish(BusEvent::SessionUpdateStatus(
+                    SessionUpdateStatus::ReadyToReload {
+                        session_id,
+                        action: ClientMaintenanceAction::Update,
+                        version,
+                    },
+                ));
+                return ReleaseCheckOutcome::Stop;
+            }
+            logging::info(&format!("Updated to {}. Restarting...", version));
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let exec_path = build::client_update_candidate(false)
+                .map(|(p, _)| p)
+                .unwrap_or(path);
+            let err = crate::platform::replace_process(
+                ProcessCommand::new(&exec_path)
+                    .args(&args)
+                    .arg("--no-update"),
+            );
+            eprintln!("Failed to exec new binary: {}", err);
+            ReleaseCheckOutcome::Stop
+        }
+        update::UpdateCheckResult::Error(e) => {
+            logging::info(&format!("Update check failed: {}", e));
+            ReleaseCheckOutcome::KeepWatching
+        }
+        update::UpdateCheckResult::NoUpdate => ReleaseCheckOutcome::KeepWatching,
+    }
+}
+
 fn source_update_check_status(result: anyhow::Result<Option<bool>>) -> crate::bus::UpdateStatus {
     use crate::bus::UpdateStatus;
 
@@ -519,7 +554,10 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
         )
-        && args.resume.is_none()
+    // `--resume` is deliberately not excluded. Reboot restore, terminal
+    // relaunch, and hot reload all start clients with `--resume`, so skipping
+    // them left long-running users on a stale build indefinitely. The update
+    // throttle already prevents redundant checks after a reload handoff.
 }
 
 fn should_auto_install_update(args: &Args) -> bool {
@@ -779,6 +817,38 @@ mod tests {
         assert!(!should_spawn_background_update_check_with_config(
             &args, false
         ));
+    }
+
+    #[test]
+    fn resumed_sessions_still_check_for_updates() {
+        // Reboot restore, terminal relaunch, and hot reload all start the
+        // client with `--resume`. Skipping them stranded long-running users
+        // on old releases with no update check at all.
+        let args = parse_args(&["jcode", "--resume", "session_fox_123"]);
+        assert!(args.resume.is_some());
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
+    }
+
+    #[test]
+    fn explicit_opt_outs_still_suppress_resumed_update_checks() {
+        let args = parse_args(&["jcode", "--resume", "session_fox_123", "--no-update"]);
+        assert!(!should_spawn_background_update_check_with_config(
+            &args, true
+        ));
+        let args = parse_args(&["jcode", "--resume", "session_fox_123"]);
+        assert!(!should_spawn_background_update_check_with_config(
+            &args, false
+        ));
+    }
+
+    #[test]
+    fn long_lived_clients_recheck_within_a_day_without_beating_the_throttle() {
+        // Must be frequent enough that a multi-day session sees a release the
+        // same day, but never faster than the persisted 30-minute throttle.
+        assert!(RELEASE_UPDATE_RECHECK_INTERVAL <= std::time::Duration::from_secs(24 * 60 * 60));
+        assert!(RELEASE_UPDATE_RECHECK_INTERVAL >= std::time::Duration::from_secs(30 * 60));
     }
 
     #[test]
