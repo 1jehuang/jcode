@@ -82,6 +82,14 @@ if [[ -n "$git_hash" ]]; then
   fi
 fi
 
+# Build flags and toolchains can change the executable without changing Git.
+if command -v sha256sum >/dev/null 2>&1; then
+  payload_hash="$(sha256sum < "$bin")"
+else
+  payload_hash="$(shasum -a 256 < "$bin")"
+fi
+hash="$hash-${payload_hash%% *}"
+
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
 builds_dir="$HOME/.jcode/builds"
 version_dir="$builds_dir/versions/$hash"

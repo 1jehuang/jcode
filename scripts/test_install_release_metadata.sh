@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset -f cargo 2>/dev/null || true
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -27,6 +28,7 @@ test "${JCODE_BUILD_GIT_DIRTY:-}" = "${TEST_DIRTY:-0}"
 mkdir -p "$TEST_REPO/target/release"
 cat > "$TEST_REPO/target/release/jcode" <<BIN
 #!/usr/bin/env bash
+# payload variant: ${TEST_PAYLOAD:-one}
 if [[ "\${1:-}" == --version ]]; then printf '%s\\n' 'jcode v0.0.0-dev (${TEST_BINARY_HASH:-$JCODE_BUILD_GIT_HASH}, dirty)'; fi
 BIN
 chmod +x "$TEST_REPO/target/release/jcode"
@@ -37,8 +39,18 @@ run_install() {
     JCODE_INSTALL_DIR="$tmp/launcher" JCODE_SKIP_SERVER_RELOAD=1 "$fixture/scripts/install_release.sh"
 }
 TEST_DIRTY=1 run_install >/dev/null
-test -x "$tmp/home/.jcode/builds/versions/abc123def-dirty/jcode"
-test "$(cat "$tmp/home/.jcode/builds/current-version")" = abc123def-dirty
+first="$(cat "$tmp/home/.jcode/builds/current-version")"
+[[ "$first" =~ ^abc123def-dirty-[0-9a-f]{64}$ ]]
+first_binary="$tmp/home/.jcode/builds/versions/$first/jcode"
+cp "$first_binary" "$tmp/first-payload"
+TEST_DIRTY=1 TEST_PAYLOAD=two run_install >/dev/null
+second="$(cat "$tmp/home/.jcode/builds/current-version")"
+[[ "$second" =~ ^abc123def-dirty-[0-9a-f]{64}$ && "$second" != "$first" ]]
+cmp "$first_binary" "$tmp/first-payload"
+test -x "$tmp/home/.jcode/builds/versions/$second/jcode"
+TEST_DIRTY=1 TEST_PAYLOAD=two run_install >/dev/null
+test "$(cat "$tmp/home/.jcode/builds/current-version")" = "$second"
+test "$(find "$tmp/home/.jcode/builds/versions" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 2
 rm -rf "$tmp/home" "$tmp/launcher"
 if TEST_BINARY_HASH=stale999 TEST_DIRTY=0 run_install >"$tmp/out" 2>"$tmp/err"; then
   echo "installer accepted a binary with stale metadata" >&2; exit 1
