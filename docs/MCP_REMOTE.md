@@ -76,6 +76,20 @@ The MCP management tool accepts ad-hoc remote connections through `url`,
 `transport`, and `headers`, or connects a named configured server without those
 fields. `command`, `args`, and `env` remain the local stdio connection fields.
 
+## Exact tool discovery
+
+The MCP tool's search action accepts `select:<name>[,<name>...]` to load exact
+callable names returned by an earlier search:
+
+```json
+{"action":"search","query":"select:mcp__docs__read,mcp__docs__search"}
+```
+
+Use the advertised canonical names, including any collision suffix. Ambiguous
+legacy names do not broaden selection. Server filters, session tool policies
+and schema/reference budgets still apply. Duplicate names load once; unknown,
+disabled or disallowed names add no schemas. An empty selection returns none.
+
 ## Startup, connection waits, and prompt caching
 
 Session tool registration does not await remote network traffic. Management,
