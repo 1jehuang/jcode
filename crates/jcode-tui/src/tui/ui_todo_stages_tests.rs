@@ -873,9 +873,18 @@ fn narrow_rows_fold_finished_titles_and_never_wrap() {
     );
     assert!(render(&grid_todos(), &[], 30)[0].contains("1 ●●○●●●  2 ○○○"));
     let narrow_header = &render(&grid_todos(), &[], 18)[0];
-    assert!(narrow_header.contains("1 ") && narrow_header.contains("2 "), "{narrow_header}");
-    assert!(!narrow_header.contains('/'), "should compress dots instead of showing counts: {narrow_header}");
-    assert!(narrow_header.contains('●') && narrow_header.contains('○'), "{narrow_header}");
+    assert!(
+        narrow_header.contains("1 ") && narrow_header.contains("2 "),
+        "{narrow_header}"
+    );
+    assert!(
+        !narrow_header.contains('/'),
+        "should compress dots instead of showing counts: {narrow_header}"
+    );
+    assert!(
+        narrow_header.contains('●') && narrow_header.contains('○'),
+        "{narrow_header}"
+    );
 }
 
 #[test]
@@ -900,10 +909,19 @@ fn stage_pips_compress_proportionally_for_large_stages() {
     let rows = render(&todos, &[], 80);
     assert_fits(&rows, 80);
     let header = &rows[0];
-    assert!(!header.contains('/'), "large stages should compress dots instead of showing counts: {header}");
-    assert!(header.contains("1 ") && header.contains("2 ") && header.contains("3 "), "{header}");
+    assert!(
+        !header.contains('/'),
+        "large stages should compress dots instead of showing counts: {header}"
+    );
+    assert!(
+        header.contains("1 ") && header.contains("2 ") && header.contains("3 "),
+        "{header}"
+    );
     let total_dots = header.chars().filter(|&c| c == '●' || c == '○').count();
-    assert!(total_dots >= 50, "should fill header with compressed dots, got {total_dots}: {header}");
+    assert!(
+        total_dots >= 50,
+        "should fill header with compressed dots, got {total_dots}: {header}"
+    );
     assert!(header.contains('●') && header.contains('○'), "{header}");
 }
 

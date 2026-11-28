@@ -21,7 +21,8 @@ struct CompletionPlan {
 }
 
 pub(crate) fn completed_at(msg: &DisplayMessage) -> Option<chrono::DateTime<chrono::Utc>> {
-    if msg.title.as_deref() != Some("Todo completion") || !msg.content.contains("\"completed_at\"") {
+    if msg.title.as_deref() != Some("Todo completion") || !msg.content.contains("\"completed_at\"")
+    {
         return None;
     }
     let snapshot: Snapshot = serde_json::from_str(&msg.content).ok()?;
@@ -501,7 +502,12 @@ mod tests {
             Span::styled("  finished 0s ago", Style::default().fg(todo_meta_color())),
         ]);
         let five_secs_later = completed_at + chrono::Duration::seconds(5);
-        assert!(refresh_age_in_line(&mut line, completed_at, five_secs_later, 80));
+        assert!(refresh_age_in_line(
+            &mut line,
+            completed_at,
+            five_secs_later,
+            80
+        ));
         assert_eq!(line.to_string(), "✓ main  ●  finished 5s ago");
         assert_eq!(
             next_age_change_delay(completed_at, five_secs_later),
@@ -509,7 +515,12 @@ mod tests {
         );
 
         let two_mins_later = completed_at + chrono::Duration::seconds(125);
-        assert!(refresh_age_in_line(&mut line, completed_at, two_mins_later, 80));
+        assert!(refresh_age_in_line(
+            &mut line,
+            completed_at,
+            two_mins_later,
+            80
+        ));
         assert_eq!(line.to_string(), "✓ main  ●  finished 2m ago");
         assert_eq!(
             next_age_change_delay(completed_at, two_mins_later),
