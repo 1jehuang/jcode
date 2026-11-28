@@ -137,6 +137,22 @@ fn test_improve_stop_without_active_run_reports_idle() {
 }
 
 #[test]
+fn test_stop_commands_accept_any_whitespace_after_the_command_name() {
+    for (input, expected) in [
+        ("/improve\nstop", "No active improve loop to stop"),
+        ("/improve\tstop", "No active improve loop to stop"),
+        ("/refactor\nstop", "No active refactor loop to stop"),
+    ] {
+        let mut app = create_test_app();
+        app.input = input.to_string();
+        app.submit_input();
+
+        let msg = app.display_messages().last().expect("missing stop message");
+        assert!(msg.content.contains(expected), "{input:?}: {}", msg.content);
+    }
+}
+
+#[test]
 fn test_improve_stop_queues_stop_prompt_and_clears_mode() {
     let mut app = create_test_app();
     app.improve_mode = Some(ImproveMode::ImproveRun);

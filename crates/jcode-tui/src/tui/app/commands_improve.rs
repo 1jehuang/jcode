@@ -9,7 +9,7 @@ pub(super) fn improve_usage() -> &'static str {
 }
 
 pub(super) fn parse_improve_command(trimmed: &str) -> Option<Result<ImproveCommand, String>> {
-    let rest = trimmed.strip_prefix("/improve")?.trim();
+    let rest = super::commands::slash_command_rest(trimmed, "/improve")?.trim();
     if rest.is_empty() {
         return Some(Ok(ImproveCommand::Run {
             plan_only: false,
@@ -63,7 +63,7 @@ pub(super) fn refactor_usage() -> &'static str {
 }
 
 pub(super) fn parse_refactor_command(trimmed: &str) -> Option<Result<RefactorCommand, String>> {
-    let rest = trimmed.strip_prefix("/refactor")?.trim();
+    let rest = super::commands::slash_command_rest(trimmed, "/refactor")?.trim();
     if rest.is_empty() {
         return Some(Ok(RefactorCommand::Run {
             plan_only: false,
