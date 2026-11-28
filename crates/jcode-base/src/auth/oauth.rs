@@ -1136,33 +1136,12 @@ async fn refresh_openai_tokens_inner(
     refresh_token: &str,
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
-    let result: Result<OAuthTokens> = async {
-        let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
-
-        if let Some(label) = label {
-            crate::auth::codex::update_account_tokens(
-                label,
-                &oauth_tokens.access_token,
-                &oauth_tokens.refresh_token,
-                oauth_tokens.id_token.clone(),
-                None,
-                Some(oauth_tokens.expires_at),
-            )?;
-        } else {
-            crate::logging::info(
-                "Refreshed OpenAI/Codex tokens from an external source without storing them in jcode auth",
-            );
-        }
-        Ok(oauth_tokens)
-    }
-    .await;
-
-    // Route through the shared outcome recorder so a permanently invalidated
-    // OpenAI refresh token lands in the terminal `Rejected` state instead of
-    // being force-refreshed by every background catalog sweep forever.
-    crate::auth::refresh_state::record_refresh_outcome("openai", refresh_token, &result);
-
-    result
+    openai_refresh_cas::refresh_openai_tokens_with(
+        refresh_token,
+        label,
+        request_openai_token_refresh(token_url, timeout, refresh_token),
+    )
+    .await
 }
 
 /// Build a Claude token exchange request (extracted for testability).
@@ -1439,3 +1418,6 @@ mod device_request_tests {
 #[cfg(test)]
 #[path = "oauth_tests/mod.rs"]
 mod tests;
+
+#[path = "openai_refresh_cas.rs"]
+mod openai_refresh_cas;
