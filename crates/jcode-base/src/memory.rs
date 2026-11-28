@@ -61,8 +61,36 @@ pub use prompt_support::{
 };
 
 const LEGACY_NOTE_CATEGORY: &str = "note";
+/// Persisted by the TUI model picker (Alt+M) as the globally marked memory
+/// model. Single source of truth for the on-disk format: the TUI picker reads
+/// and writes this file through this module, so the extraction sidecar and
+/// the picker can never drift apart on the format.
+const MEMORY_MODEL_FILE: &str = "memory_model.json";
+const MEMORY_MODEL_VERSION: u8 = 1;
 const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
 const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
+
+/// Store for the globally marked memory model (`memory_model.json`). Only one
+/// model is marked at a time; new sessions inherit it as the initial
+/// `session.memory_model`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MemoryModelStore {
+    version: u8,
+    model: Option<String>,
+}
+
+impl MemoryModelStore {
+    /// The currently marked memory model, if any.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Mark (or, with `None`, unmark) the memory model. The format version is
+    /// normalized on save, so callers never touch it.
+    pub fn set_model(&mut self, model: Option<String>) {
+        self.model = model;
+    }
+}
 
 /// Producer of synthetic [`MemoryEntry`] values contributed by a higher layer.
 ///
@@ -124,6 +152,84 @@ pub fn memory_sidecar_enabled() -> bool {
 /// Availability of the optional extraction sidecar, never used to gate recall.
 pub fn memory_llm_judge_available() -> bool {
     memory_sidecar_enabled() && crate::sidecar::Sidecar::llm_backend_available()
+}
+
+/// Build a sidecar for memory operations, resolving the model with session
+/// priority: session_memory_model > config memory_model > fallback.
+pub fn sidecar_for_memory(session_memory_model: Option<&str>) -> crate::sidecar::Sidecar {
+    let cfg = &crate::config::config().agents;
+    let persisted_memory_model;
+    let session_memory_model = match session_memory_model.and_then(non_empty_memory_model) {
+        Some(model) => Some(model.to_string()),
+        None => {
+            persisted_memory_model = load_persisted_memory_model();
+            persisted_memory_model
+        }
+    };
+    crate::sidecar::Sidecar::with_session_memory_model(
+        cfg.memory_model.clone(),
+        cfg.memory_sidecar_backend.clone(),
+        session_memory_model,
+    )
+}
+
+fn non_empty_memory_model(model: &str) -> Option<&str> {
+    let model = model.trim();
+    (!model.is_empty()).then_some(model)
+}
+
+pub(crate) fn load_persisted_memory_model() -> Option<String> {
+    load_memory_model_store().model().map(str::to_string)
+}
+
+/// Path of the persisted memory-model marker, if the app config dir resolves.
+pub fn memory_model_store_path() -> Option<std::path::PathBuf> {
+    storage::app_config_dir()
+        .ok()
+        .map(|dir| dir.join(MEMORY_MODEL_FILE))
+}
+
+/// Load the globally marked memory model store. Missing/corrupt files yield
+/// the default (unmarked) store; the version field is normalized to the
+/// current one and empty model entries are cleaned on load.
+pub fn load_memory_model_store() -> MemoryModelStore {
+    let Some(path) = memory_model_store_path() else {
+        return MemoryModelStore::default();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let mut store: MemoryModelStore = serde_json::from_str(&contents).unwrap_or_default();
+            store.version = MEMORY_MODEL_VERSION;
+            // Clean empty/null entries.
+            if store
+                .model
+                .as_deref()
+                .map(str::trim)
+                .map(str::is_empty)
+                .unwrap_or(true)
+            {
+                store.model = None;
+            }
+            store
+        }
+        Err(_) => MemoryModelStore::default(),
+    }
+}
+
+/// Persist the globally marked memory model store to
+/// `memory_model.json`, creating the app config dir when missing.
+pub fn save_memory_model_store(store: &MemoryModelStore) {
+    let Some(path) = memory_model_store_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut store = store.clone();
+    store.version = MEMORY_MODEL_VERSION;
+    if let Ok(json) = serde_json::to_string_pretty(&store) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 /// Recall requires a Jev credential route. Subscription entitlement is checked
@@ -971,7 +1077,7 @@ impl MemoryManager {
 
         let sidecar = crate::session::Session::load_startup_stub(session_id)
             .map(|session| Sidecar::for_session(&session))
-            .unwrap_or_else(|_| Sidecar::new());
+            .unwrap_or_else(|_| sidecar_for_memory(None));
         let extracted = sidecar.extract_memories(transcript).await?;
 
         let mut ids = Vec::new();

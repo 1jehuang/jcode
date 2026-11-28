@@ -15,6 +15,8 @@ impl Default for AgentsConfig {
             voice_jev_model: None,
             memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
+            memory_sidecar_backend: None,
+            memory_sidecar_fallback: String::new(),
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),
