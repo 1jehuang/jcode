@@ -10,7 +10,7 @@ const MIN_WIDGET_WIDTH: u16 = 24;
 /// Maximum width the widget can take.
 const MAX_WIDGET_WIDTH: u16 = 40;
 /// Minimum height needed to show the widget.
-const MIN_WIDGET_HEIGHT: u16 = 5;
+const MIN_WIDGET_HEIGHT: u16 = 3;
 /// How many consecutive frames a widget may stay hidden-in-place before its
 /// anchor is abandoned and Phase 2 is allowed to re-home it elsewhere.
 ///
@@ -64,6 +64,8 @@ pub struct Margins {
     /// placement engine translate a content-anchored widget by the scroll delta so
     /// it rides the transcript instead of holding a fixed screen row.
     pub scroll_top: usize,
+    /// Synthetic chrome rows above the usable transcript viewport.
+    pub content_start_row: usize,
     /// The transcript under the widgets is still changing this frame (a turn is
     /// streaming or a scroll animation is in flight). A resident widget whose
     /// slot got covered waits that churn out in place; once content has settled
@@ -100,16 +102,30 @@ struct MarginSpace {
     x_offset: u16,
 }
 
-/// Choose the per-row widths Phase 2 should dock against: prefer the look-ahead
-/// `reliable` profile, but if it admits no placeable region at all (e.g. dense long
-/// lines cover every candidate row) fall back to `instant` so we still show
-/// something. Returns an owned profile to store in the `MarginSpace`.
-fn dock_widths_with_fallback(reliable: &[u16], instant: &[u16]) -> Vec<u16> {
+/// Prefer look-ahead space when it can host the first widget that fits visibly.
+fn dock_widths_with_fallback(
+    reliable: &[u16],
+    instant: &[u16],
+    available: &[WidgetKind],
+    data: &InfoWidgetData,
+) -> Vec<u16> {
     if reliable.is_empty() {
         return instant.to_vec();
     }
+    let visible_rects = find_all_empty_rects(instant, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
+    let Some(required_height) = available
+        .iter()
+        .map(|&kind| phase2_min_height(kind, data))
+        .find(|needed| {
+            visible_rects
+                .iter()
+                .any(|&(_, height, _)| height >= *needed)
+        })
+    else {
+        return instant.to_vec();
+    };
     let reliable_has_dock =
-        !find_all_empty_rects(reliable, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT).is_empty();
+        !find_all_empty_rects(reliable, MIN_WIDGET_WIDTH, required_height).is_empty();
     if reliable_has_dock {
         reliable.to_vec()
     } else {
@@ -145,14 +161,15 @@ pub(crate) fn calculate_placements_anchored(
     }
     let mut margin_spaces: Vec<MarginSpace> = Vec::new();
     if !margins.right_widths.is_empty() {
-        // Phase 2 docks on the *reliable* (look-ahead) widths so a newly placed
-        // widget lands only where space stays free for a few scroll lines. But if
-        // the reliable profile is so covered that it yields no dock at all (dense
-        // long lines), fall back to the instantaneous widths so we still show
-        // something rather than nothing. Phase 1 always sizes pinned widgets to the
-        // instantaneous widths for full coverage.
-        let mut dock =
-            dock_widths_with_fallback(margins.right_dock_widths(), &margins.right_widths);
+        // Keep look-ahead stability when it fits the highest-priority visible card.
+        // Otherwise use current widths so small reliable pockets cannot hide it.
+        // Phase 1 always sizes pinned widgets against current widths.
+        let mut dock = dock_widths_with_fallback(
+            margins.right_dock_widths(),
+            &margins.right_widths,
+            &available,
+            data,
+        );
         // Never dock below the messages area: a margin profile longer than the
         // area (caller bug or stale data) must not let a widget escape the
         // viewport and draw over the input/status rows beneath it.
@@ -164,7 +181,12 @@ pub(crate) fn calculate_placements_anchored(
         });
     }
     if margins.centered && !margins.left_widths.is_empty() {
-        let mut dock = dock_widths_with_fallback(margins.left_dock_widths(), &margins.left_widths);
+        let mut dock = dock_widths_with_fallback(
+            margins.left_dock_widths(),
+            &margins.left_widths,
+            &available,
+            data,
+        );
         dock.truncate(messages_area.height as usize);
         margin_spaces.push(MarginSpace {
             side: Side::Left,
@@ -213,6 +235,9 @@ pub(crate) fn calculate_placements_anchored(
         WidgetKind::Overview => 0,
         _ => 1,
     });
+    // Rows already taken this frame on each side, so a resident that slides
+    // to dodge text never lands on another resident.
+    let mut claimed: Vec<(Side, usize, usize)> = Vec::new();
 
     // Phase 1: hold each anchored widget in its exact recorded slot.
     //
@@ -239,55 +264,75 @@ pub(crate) fn calculate_placements_anchored(
 
         // Resolve which screen row the widget occupies this frame.
         //
-        // Content-anchored (the user is scrolling): the widget is pinned to a
-        // transcript line (`anchor.content_top`) and rides with it, so it sticks to
-        // the same pocket of negative space and simply scrolls along with the text
-        // rather than churning against a fixed screen row. Because the rows it now
-        // covers map back to the *same* content lines, the free-width profile under
-        // it is invariant frame-to-frame, so its width is stable too. If its content
-        // line has scrolled above the viewport, drop the anchor and let Phase 2 home
-        // a fresh widget into the newly exposed space.
-        //
-        // Screen-anchored (pinned at the bottom / streaming): hold the exact screen
-        // row as before, and refresh `content_top` so a later switch into scrolling
-        // hands off seamlessly.
+        // Residents ride their transcript rows, clamped to the viewport edges.
         let height = prev.rect.height as usize;
-        // Resident model: every anchor is bound to a transcript line and rides
-        // with it, in both scrolling and pinned-at-bottom (streaming) modes. When
-        // new lines append while pinned, `scroll_top` advances and the widget
-        // drifts up with the content it belongs to instead of holding a screen
-        // row while text churns under it. If its content line has scrolled above
-        // the viewport the resident retires, and Phase 2 may house a fresh
-        // instance in newly settled space.
-        let (row_start, target_y, content_top) = {
-            if anchor.content_top < margins.scroll_top {
-                continue;
-            }
-            let row = anchor.content_top - margins.scroll_top;
-            (
-                row,
-                messages_area.y.saturating_add(row as u16),
-                anchor.content_top,
-            )
-        };
-        let row_end = row_start + height;
         let widths = match prev.side {
             Side::Right => &margins.right_widths,
             Side::Left => &margins.left_widths,
         };
-        if height == 0 || row_end > widths.len() || row_end > messages_area.height as usize {
+        // Rows this widget may occupy: below the synthetic top band, inside the
+        // messages area, and inside the measured margin profile.
+        let first_row = margins.content_start_row;
+        let row_limit = widths.len().min(messages_area.height as usize);
+        if height == 0 || first_row + height > row_limit {
             continue;
         }
+        let last_start = row_limit - height;
+        let fit_at = |start: usize| -> u16 {
+            widths[start..start + height]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0)
+                .min(MAX_WIDGET_WIDTH)
+                .min(messages_area.width)
+        };
+
+        // Resident + sticky. The widget rides its transcript line, so it scrolls
+        // with the text it was placed beside. When that line leaves the viewport
+        // the widget stops at the edge instead of being dropped: dropping it made
+        // every scroll re-home it into whatever pocket had settled that frame,
+        // which usually could not fit the whole Overview, so it came back as
+        // scattered Context / KV / Model boxes. Once it is stuck at the edge it
+        // stays there: re-binding it to the line under it would carry it away
+        // from the edge on the next scroll and it would snap back, over and over.
+        let desired = anchor.content_top as isize - margins.scroll_top as isize;
+        let clamped = desired.clamp(first_row as isize, last_start as isize) as usize;
+        // Prefer the row it wants, then the nearest row that fits the whole
+        // box. Moving it whole beats hiding it (flicker) or letting Phase 2
+        // split it into separate Context / KV / Model boxes.
+        let free_of_others = |start: usize| {
+            claimed
+                .iter()
+                .all(|&(side, s, e)| side != prev.side || start + height <= s || start >= e)
+        };
+        let slot = (0..=last_start - first_row)
+            .flat_map(|d| {
+                let below = clamped + d;
+                let above = clamped.checked_sub(d).filter(|&r| r >= first_row && d > 0);
+                [Some(below).filter(|&r| r <= last_start), above]
+            })
+            .flatten()
+            .find(|&start| fit_at(start) >= MIN_WIDGET_WIDTH && free_of_others(start));
+        let row_start = slot.unwrap_or(clamped);
+        let row_end = row_start + height;
+        let target_y = messages_area.y.saturating_add(row_start as u16);
+        // Keep riding the original line while it is on screen and unobstructed.
+        // Otherwise remember the line it wanted, not the one it was pushed to:
+        // binding to the pushed-to line makes it drift with that text and snap
+        // back each frame (a saw-tooth at the edge).
+        let content_top = if row_start as isize == desired {
+            anchor.content_top
+        } else {
+            anchor
+                .content_top
+                .min(margins.scroll_top + last_start)
+                .max(margins.scroll_top + first_row)
+        };
 
         // Widest the widget can be without overrunning the text on any of its rows.
-        let fit_width = widths[row_start..row_end]
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(0)
-            .min(MAX_WIDGET_WIDTH)
-            .min(messages_area.width);
-        let renderable = fit_width >= MIN_WIDGET_WIDTH;
+        let fit_width = fit_at(row_start);
+        let renderable = slot.is_some() && fit_width >= MIN_WIDGET_WIDTH;
 
         // Width is monotonic non-increasing for the life of an anchor: it shrinks to
         // clear newly-wide content but never grows back while pinned. Growing would
@@ -319,7 +364,8 @@ pub(crate) fn calculate_placements_anchored(
                 next_anchors.push(WidgetAnchor {
                     placement: prev.clone(),
                     hidden_frames,
-                    content_top,
+                    // Remember where it wanted to be, so it reappears there.
+                    content_top: anchor.content_top,
                 });
                 // Overview will pop back into its slot, so keep suppressing its
                 // mergeable widgets while it is only transiently hidden.
@@ -330,6 +376,7 @@ pub(crate) fn calculate_placements_anchored(
                 // widget into the slot it will reclaim next frame; otherwise the
                 // returning widget would overlap whatever took its place.
                 reserve_rows(&mut all_rects, prev.side, row_start, row_end);
+                claimed.push((prev.side, row_start, row_end));
             }
             continue;
         }
@@ -342,13 +389,9 @@ pub(crate) fn calculate_placements_anchored(
         // good right after startup. Grow the slot in place into free rows
         // directly above or below when there are any (the render path truncates
         // when there are not, so the widget never disappears).
+        let needed =
+            calculate_widget_height(prev.kind, data, kept_width, messages_area.height) as usize;
         let (row_start, row_end, target_y, content_top) = {
-            let needed = super::info_widget::calculate_widget_height(
-                prev.kind,
-                data,
-                kept_width,
-                messages_area.height,
-            ) as usize;
             if needed > height {
                 let extra = needed - height;
                 let limit = widths.len().min(messages_area.height as usize);
@@ -373,7 +416,9 @@ pub(crate) fn calculate_placements_anchored(
                         && widths[start..end].iter().all(|&w| w >= kept_width)
                         && !occupied(start, end)
                 };
-                if row_start >= extra && free(row_start - extra, row_start) {
+                if row_start.saturating_sub(first_row) >= extra
+                    && free(row_start - extra, row_start)
+                {
                     let start = row_start - extra;
                     (
                         start,
@@ -390,6 +435,12 @@ pub(crate) fn calculate_placements_anchored(
                 (row_start, row_end, target_y, content_top)
             }
         };
+
+        // An incomplete Overview hides all its parts, so re-home only after
+        // trying the resident's current margin for growth.
+        if prev.kind == WidgetKind::Overview && row_end - row_start < needed {
+            continue;
+        }
 
         let kept_x = match prev.side {
             Side::Right => messages_area
@@ -416,6 +467,7 @@ pub(crate) fn calculate_placements_anchored(
         }
 
         reserve_rows(&mut all_rects, prev.side, row_start, row_end);
+        claimed.push((prev.side, row_start, row_end));
     }
 
     // Phase 2: greedily place remaining widgets.
@@ -434,7 +486,7 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
 
-        let min_h = kind.min_height() + 2;
+        let min_h = phase2_min_height(kind, data);
         let preferred = kind.preferred_side();
         let mut best_idx: Option<usize> = None;
         let mut best_score = i32::MIN;
@@ -532,6 +584,20 @@ pub(crate) fn calculate_placements_anchored(
     PlacementOutcome {
         visible: placements,
         anchors: next_anchors,
+    }
+}
+
+// Compact overviews fit by rendered height rather than the fixed ten-row floor.
+fn phase2_min_height(kind: WidgetKind, data: &InfoWidgetData) -> u16 {
+    let floor = kind.min_height() + 2;
+    if kind != WidgetKind::Overview {
+        return floor;
+    }
+    let natural = calculate_widget_height(kind, data, MAX_WIDGET_WIDTH, u16::MAX);
+    if natural > 2 {
+        natural.min(floor)
+    } else {
+        floor
     }
 }
 

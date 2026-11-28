@@ -439,13 +439,10 @@ pub(super) fn draw_messages(
         right_widths: vec![0; top_band_lines as usize],
         left_widths: vec![0; top_band_lines as usize],
         centered: content_margins.centered,
-        // Bind row `r` of the margin to transcript line `scroll_top + r` so info
-        // widgets are residents of the transcript: they ride with the content they
-        // were placed next to, whether the user is scrolling or new lines are
-        // appending while pinned at the bottom. The top band (pinned todos +
-        // prompt preview) is synthetic (not part of the scrolled transcript), so
-        // offset by it to keep the content rows aligned.
+        // Row r stays bound to transcript line scroll_top + r while scrolling
+        // or streaming. Offset the synthetic todo/prompt band from that anchor.
         scroll_top: scroll.saturating_sub(top_band_lines as usize),
+        content_start_row: top_band_lines as usize,
         content_churning: app.is_processing()
             || !app.streaming_text().is_empty()
             || app.has_pending_mouse_scroll_animation(),
