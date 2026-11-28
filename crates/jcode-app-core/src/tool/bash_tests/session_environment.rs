@@ -152,3 +152,7 @@ async fn session_env_background_snapshots_before_deferred_launch() {
         assert!(!output.contains("proxy-replaced"));
     }
 }
+
+#[cfg(unix)]
+#[path = "client_identity.rs"]
+mod client_identity;
