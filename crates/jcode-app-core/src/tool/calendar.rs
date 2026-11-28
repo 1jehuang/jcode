@@ -10,6 +10,13 @@ use crate::google_calendar::{
 
 const DEFAULT_EVENT_MINUTES: i64 = 30;
 
+#[path = "calendar_duration.rs"]
+mod duration;
+
+#[cfg(test)]
+#[path = "calendar_duration_http_tests.rs"]
+mod duration_http_tests;
+
 pub struct CalendarTool {
     client: CalendarClient,
 }
@@ -225,6 +232,12 @@ impl CalendarTool {
             anyhow::bail!("Pass start together with end when changing an event's time");
         }
         if let Some(start) = start {
+            if !require_times && end.is_none() {
+                let (start, end) = self.preserved_times(params, calendar_id, &start).await?;
+                body.insert("start".into(), start);
+                body.insert("end".into(), end);
+                return Ok(body);
+            }
             let end = match end {
                 Some(end) => end,
                 None => default_end(&start)?,
@@ -280,7 +293,7 @@ impl Tool for CalendarTool {
                 },
                 "end": {
                     "type": "string",
-                    "description": "Same formats. Default 30 minutes after start, or next day for all-day."
+                    "description": "Start formats. Create default: +30m, or next day if all-day. Start-only updates preserve duration."
                 },
                 "time_zone": {
                     "type": "string",
