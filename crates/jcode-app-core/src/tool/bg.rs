@@ -661,6 +661,25 @@ impl Tool for BgTool {
                 })?;
                 let (rendered, truncated) = output_preview(&output, tail);
                 let status = manager.status(&task_id).await;
+                let rendered = if let Some(ref info) = status
+                    && info.status != crate::bus::BackgroundTaskStatus::Running
+                {
+                    let mut header = format!("[task {} · status: {}", task_id, info.status);
+                    if let Some(code) = info.exit_code {
+                        header.push_str(&format!(" · exit: {}", code));
+                    }
+                    if let Some(ref err) = info.error {
+                        header.push_str(&format!(" · error: {}", err));
+                    }
+                    header.push(']');
+                    if rendered.is_empty() {
+                        header
+                    } else {
+                        format!("{header}\n\n{rendered}")
+                    }
+                } else {
+                    rendered
+                };
                 Ok(ToolOutput::new(rendered)
                     .with_title(format!("bg {} {}", action, task_id))
                     .with_metadata(json!({

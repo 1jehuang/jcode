@@ -1950,6 +1950,16 @@ pub(super) async fn handle_client(
                 if let Some(snapshot) = try_available_models_snapshot(&agent).await {
                     last_available_models_snapshot = Some(snapshot);
                 }
+                let resumed_id = client_session_id.clone();
+                tokio::spawn(async move {
+                    let pending = crate::background::global()
+                        .take_reload_pending_completions(&resumed_id)
+                        .await;
+                    for completed in pending {
+                        crate::bus::Bus::global()
+                            .publish(crate::bus::BusEvent::BackgroundTaskCompleted(completed));
+                    }
+                });
             }
 
             Request::ResumeAllSessions { id } => {

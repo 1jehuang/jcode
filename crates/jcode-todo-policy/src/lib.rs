@@ -748,7 +748,15 @@ pub fn build_actionable_poke_message(actionable: &[TodoItem]) -> String {
     for todo in actionable.iter().take(GATE_NAMED_TODO_LIMIT) {
         // Names are the public lookup key. Keep the full, escaped name rather
         // than an internal ID or a truncated label the model cannot reference.
-        message.push_str(&format!("\n- {}", serde_json::json!(todo.content)));
+        if todo.waiting_on.is_empty() {
+            message.push_str(&format!("\n- {}", serde_json::json!(todo.content)));
+        } else {
+            message.push_str(&format!(
+                "\n- {} (waiting_on: {}, no longer running)",
+                serde_json::json!(todo.content),
+                todo.waiting_on.join(", ")
+            ));
+        }
     }
     if actionable.len() > GATE_NAMED_TODO_LIMIT {
         message.push_str(&format!(

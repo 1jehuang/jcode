@@ -99,7 +99,7 @@ pub struct BackgroundTaskProgressEvent {
 }
 
 /// Event sent when a background task completes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundTaskCompleted {
     pub task_id: String,
     pub tool_name: String,
