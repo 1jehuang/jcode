@@ -22,6 +22,7 @@ use crate::tui::detect_kv_cache_problem;
 use crate::tui::info_widget::occasional_status_tip;
 use crate::tui::layout_utils;
 use crate::tui::session_facts;
+use jcode_tui_style::theme::input_text_style;
 use ratatui::{prelude::*, style::Modifier, widgets::Paragraph};
 
 fn shell_mode_color() -> Color {
@@ -762,8 +763,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
@@ -2128,7 +2128,7 @@ fn wrap_input_text_with_ghost<'a>(
                 };
                 Style::default().fg(color).bold()
             } else {
-                Style::default()
+                input_text_style()
             };
             if style != previous_style && !text.is_empty() {
                 spans.push(Span::styled(std::mem::take(&mut text), previous_style));

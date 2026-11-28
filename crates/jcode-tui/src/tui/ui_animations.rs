@@ -131,11 +131,14 @@ pub(crate) fn last_idle_animation_area() -> Option<Rect> {
 /// Repaint just the idle-animation rows of an already-rendered frame buffer.
 ///
 /// The surrounding cells were already theme/emoji adapted when the full frame
-/// was drawn, so adaptation is applied to the freshly written animation cells
-/// only: `adapt_buffer_for_theme` inverts colors on light terminals and is not
-/// idempotent, so re-running it over the reused buffer would flip everything
-/// back. The animation writes plain box/shade glyphs and a foreground color, so
-/// per-cell foreground adaptation is the complete equivalent here.
+/// was drawn, so the same `finish_frame` policy is applied to the freshly
+/// written animation cells only: explicit theme backgrounds must still fill
+/// `Color::Reset` cells (a custom light theme keeps its paper background
+/// behind the animation), and the foreground adaptation must follow the
+/// active theme (`adapt_buffer_for_theme` inverts colors on light terminals
+/// and is not idempotent, so re-running it over the reused buffer would flip
+/// everything back; the animation writes plain box/shade glyphs and a
+/// foreground color, so per-cell adaptation is the complete equivalent here).
 pub(crate) fn render_idle_animation_into(buf: &mut Buffer, area: Rect, elapsed: f32) {
     let area = area.intersection(*buf.area());
     // A full frame clears the whole surface before drawing, so the animation
@@ -148,10 +151,23 @@ pub(crate) fn render_idle_animation_into(buf: &mut Buffer, area: Rect, elapsed: 
         }
     }
     render_idle_animation(buf, area, elapsed);
+    // Mirror `finish_frame` for the patch area: fill Reset backgrounds with
+    // the theme background when the theme defines one, then adapt each cell
+    // the way the full-frame pass would (terminal adaptation or the palette
+    // pass, per the active theme).
+    let theme_bg = jcode_tui_style::theme::background_color();
+    let uses_terminal_adaptation = jcode_tui_style::theme::active_theme_uses_terminal_adaptation();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
-            cell.fg = jcode_tui_style::adapt_foreground_for_display(cell.fg, cell.bg);
+            if theme_bg != ratatui::style::Color::Reset && cell.bg == ratatui::style::Color::Reset {
+                cell.bg = theme_bg;
+            }
+            if uses_terminal_adaptation {
+                cell.fg = jcode_tui_style::adapt_foreground_for_display(cell.fg, cell.bg);
+            } else {
+                jcode_tui_style::palette::adapt_cell_for_palette(cell);
+            }
         }
     }
 }
