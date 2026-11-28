@@ -24,6 +24,7 @@ pub mod proctitle;
 pub mod provider_doctor;
 pub mod provider_init;
 pub mod selfdev;
+pub(crate) mod session_export;
 pub mod ssh;
 #[cfg(unix)]
 pub mod ssh_transport;

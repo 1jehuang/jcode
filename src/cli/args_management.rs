@@ -33,6 +33,15 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Export user and assistant turns to Markdown
+    Export {
+        /// Session ID or memorable short name, e.g. fox
+        session: String,
+
+        /// Markdown file to write. Defaults to a sanitized display name in the current directory.
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
