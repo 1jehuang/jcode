@@ -29,6 +29,7 @@ class HostedLinuxPreviewTests(unittest.TestCase):
                     if not key.startswith(("CARGO_", "JUSTRUST_", "JCODE_", "RUST"))}
         self.env.update(PATH=f"{self.bin}:{os.environ['PATH']}",
                         JCODE_BUILD_SEMVER="v1.0.0-preview.42", RECORD=str(self.root / "record"))
+        self.install("uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
         self.command("git", "init", "-q")
         (self.root / ".gitignore").write_text("/bin/\n/record\n/target/\n")
         # Fixture repository identity only, never used for the source checkout.
@@ -123,6 +124,13 @@ else:
     def records(self):
         path = Path(self.env["RECORD"])
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_rejects_non_linux_caller(self):
+        self.install("uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires a Linux caller", result.stderr)
+        self.assertEqual(self.records(), [])
 
     def test_portable_x86_command_and_release_metadata(self):
         result = self.run_script(JUSTRUST_TOOLCHAIN="system", CARGO_PROFILE_RELEASE_OPT_LEVEL="1",
