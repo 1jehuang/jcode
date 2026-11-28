@@ -1,10 +1,9 @@
 use super::*;
-use std::sync::MutexGuard;
 
 mod ranking;
 
 struct EnvGuard {
-    _lock: MutexGuard<'static, ()>,
+    _lock: crate::storage::TestEnvGuard,
     saved: Vec<(&'static str, Option<String>)>,
 }
 

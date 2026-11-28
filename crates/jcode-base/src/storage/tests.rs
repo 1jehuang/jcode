@@ -90,6 +90,55 @@ fn app_config_dir_uses_jcode_home_when_set() {
 }
 
 #[test]
+fn ensure_helper_never_overwrites_a_scoped_home() {
+    // A helper parked between its unset check and its set used to resume after
+    // a locked test scoped its own home, repointing JCODE_HOME at the shared
+    // scratch home under that test (#1784 review: "helpers can overwrite
+    // scoped homes"). After the fix both entry points re-check inside the
+    // install lock, so a scoped home survives a concurrent helper call.
+    let _guard = lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // The helper must observe the scoped home and leave it untouched.
+    ensure_shared_test_jcode_home_if_unset();
+    assert_eq!(
+        std::env::var_os("JCODE_HOME"),
+        Some(temp.path().as_os_str().to_os_string())
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn ensure_helper_installs_shared_home_when_unset() {
+    // Only-when-unset is the helper's whole point: with the variable unset it
+    // must install the shared scratch home (under the install lock, set only
+    // while still unset). The once-done install inside `lock_test_env` is a
+    // separate guarantee: later lock acquisitions never re-fire it.
+    let _guard = lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::remove_var("JCODE_HOME");
+
+    ensure_shared_test_jcode_home_if_unset();
+    assert_eq!(
+        std::env::var_os("JCODE_HOME"),
+        Some(shared_test_jcode_home().as_os_str().to_os_string())
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn upsert_env_file_value_writes_replaces_and_removes_entries() {
     let dir = tempfile::TempDir::new().expect("create temp dir");
     let file = dir.path().join("test.env");
