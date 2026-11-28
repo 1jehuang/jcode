@@ -531,7 +531,12 @@ fn delivery_poke_continues_after_new_completed_todos_even_when_still_partially_d
         assert!(policy.decide_after_turn(&s, true).follow_up.is_none());
         let mut reordered = s.clone();
         reordered.todos.reverse();
-        assert!(policy.decide_after_turn(&reordered, true).follow_up.is_none());
+        assert!(
+            policy
+                .decide_after_turn(&reordered, true)
+                .follow_up
+                .is_none()
+        );
 
         let mut next = done(&format!("phase {step}"), ConfidenceState::Verified);
         next.group = Some("graph integration".into());
