@@ -22,7 +22,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         Vec::new(),
     )));
 
-    let new_registry = Registry::new(provider.clone()).await;
+    let mut new_registry = Registry::new(provider.clone()).await;
     let new_agent = Arc::new(Mutex::new(build_test_agent_with_id(
         provider.clone(),
         new_registry.clone(),
@@ -44,6 +44,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         (
             "conn_existing".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn_existing".to_string(),
                 session_id: target_session_id.to_string(),
                 client_instance_id: None,
@@ -59,6 +60,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         (
             "conn_new".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn_new".to_string(),
                 session_id: temp_session_id.to_string(),
                 client_instance_id: None,
@@ -110,7 +112,7 @@ async fn handle_resume_session_allows_attach_without_local_history() -> Result<(
         "conn_new",
         &new_agent,
         &provider,
-        &new_registry,
+        &mut new_registry,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

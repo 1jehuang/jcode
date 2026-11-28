@@ -309,6 +309,8 @@ pub struct Agent {
     /// to avoid cache invalidation when MCP tools arrive asynchronously.
     /// Cleared on compaction/reset.
     locked_tools: Option<Vec<ToolDefinition>>,
+    // Registry capability updates can arrive while a turn owns the Agent.
+    response_capability_changed: Arc<std::sync::atomic::AtomicBool>,
     /// One-shot guard for the async MCP-registration race (#206).
     ///
     /// MCP servers connect on a background task and register `mcp__*` tools
@@ -488,6 +490,7 @@ impl Agent {
             kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
+            response_capability_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_late_register_resolved: false,
             last_recovery_compaction: None,
             locked_tools_native_deferred: false,
@@ -1181,17 +1184,6 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
-    }
-
-    /// Desktop self-development is selected by the session checkout, including
-    /// restored sessions. It must not set the CLI canary/reload flags.
-    pub fn is_desktop_selfdev(&self) -> bool {
-        self.session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(jcode_selfdev_types::desktop_repo_root)
-            .is_some()
     }
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {

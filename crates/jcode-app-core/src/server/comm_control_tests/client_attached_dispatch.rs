@@ -33,6 +33,7 @@ async fn assign_task_to_client_attached_session_skips_server_side_run() {
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "conn-1".to_string(),
         crate::server::ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "conn-1".to_string(),
             session_id: worker.to_string(),
             client_instance_id: None,

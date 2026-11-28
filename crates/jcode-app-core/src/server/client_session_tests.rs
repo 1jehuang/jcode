@@ -36,16 +36,36 @@ async fn user_response_capability_does_not_block_busy_attachment() {
         Arc::new(MockProvider),
         Registry::empty(),
     )));
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
+        HashMap::from([(session_id.clone(), agent.clone())]),
+    ));
     let busy = agent.lock().await;
+    let connections = Arc::new(RwLock::new(HashMap::from([(
+        "desktop".into(),
+        ClientConnectionInfo {
+            client_id: "desktop".into(),
+            session_id: session_id.clone(),
+            client_instance_id: None,
+            debug_client_id: None,
+            connected_at: Instant::now(),
+            last_seen: Instant::now(),
+            is_processing: false,
+            current_tool_name: None,
+            terminal_env: Vec::new(),
+            supports_user_response: true,
+            disconnect_tx: mpsc::unbounded_channel().0,
+        },
+    )])));
     let registry = busy.registry();
     tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::apply_or_defer_desktop_response_capability(&agent, true),
+        super::response_capability::refresh_session(&sessions, &connections, &session_id),
     )
     .await
     .expect("busy attachment must not wait for the running turn");
     assert!(
-        !registry
+        registry
             .tool_names()
             .await
             .iter()
@@ -67,7 +87,13 @@ async fn user_response_capability_does_not_block_busy_attachment() {
     })
     .await
     .expect("capability applied after the turn releases the lock");
-    super::apply_or_defer_desktop_response_capability(&agent, false).await;
+    connections
+        .write()
+        .await
+        .get_mut("desktop")
+        .unwrap()
+        .supports_user_response = false;
+    super::response_capability::refresh_session(&sessions, &connections, &session_id).await;
     assert!(
         !registry
             .tool_names()
@@ -343,12 +369,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             &target_id,
             Vec::new(),
         )));
-        let source_agent = Arc::new(Mutex::new(build_test_agent_with_id(
-            provider.clone(),
-            registry.clone(),
-            &source_id,
-            Vec::new(),
-        )));
         let sessions = Arc::new(crate::server::session_manager::SessionManager::from_agents(
             HashMap::from([(target_id.clone(), Arc::clone(&target_agent))]),
         ));
@@ -357,6 +377,7 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
         let connections = Arc::new(RwLock::new(HashMap::from([(
             "incoming".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "incoming".to_string(),
                 session_id: source_id,
                 client_instance_id: None,
@@ -375,7 +396,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             let barrier = Arc::clone(&barrier);
             let sessions = Arc::clone(&sessions);
             let connections = Arc::clone(&connections);
-            let source_agent = Arc::clone(&source_agent);
             let target_id = target_id.clone();
             tokio::spawn(async move {
                 barrier.wait().await;
@@ -383,7 +403,6 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
                     &target_id,
                     "incoming",
                     Some("instance-a"),
-                    &source_agent,
                     &sessions,
                     &connections,
                 )

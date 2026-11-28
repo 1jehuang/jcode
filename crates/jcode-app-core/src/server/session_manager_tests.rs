@@ -226,6 +226,8 @@ async fn rejected_rekey_keeps_both_original_owners() -> Result<()> {
         .publish_rekeyed(Some("first"), Arc::clone(&first))
         .await?;
     assert!(!manager.read().await.contains_key("first"));
+    assert!(manager.tool_registry("first").is_none());
+    assert!(manager.tool_registry("new").is_some());
     assert!(Arc::ptr_eq(
         manager.read().await.get("new").unwrap(),
         &first
@@ -247,6 +249,7 @@ async fn publication_rejects_wrong_session_identity() -> Result<()> {
     );
     assert!(manager.read().await.is_empty());
     assert!(manager.turn_observer("wrong").is_none());
+    assert!(manager.tool_registry("wrong").is_none());
     Ok(())
 }
 
@@ -266,6 +269,18 @@ async fn observer_is_available_while_runtime_is_busy_and_retires_with_entry() ->
         .register_new("target".into(), Arc::clone(&runtime))
         .await?;
     let busy = runtime.lock().await;
+    let registry = manager
+        .tool_registry("target")
+        .expect("published tool registry");
+    assert!(registry.unregister("read").await.is_some());
+    assert!(
+        !busy
+            .registry()
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "read")
+    );
     assert_eq!(
         manager
             .turn_observer("target")
@@ -275,6 +290,7 @@ async fn observer_is_available_while_runtime_is_busy_and_retires_with_entry() ->
     );
     assert!(manager.remove_if_same("target", &runtime).await);
     assert!(manager.turn_observer("target").is_none());
+    assert!(manager.tool_registry("target").is_none());
     assert!(manager.reserve("target").await.ensure_vacant().is_err());
     drop(busy);
     Ok(())

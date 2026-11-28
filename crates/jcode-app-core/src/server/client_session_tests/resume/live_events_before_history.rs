@@ -40,6 +40,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "conn_restore".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "conn_restore".to_string(),
             session_id: temp_session_id.to_string(),
             client_instance_id: None,
@@ -106,7 +107,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
     let resume_task = tokio::spawn({
         let agent = Arc::clone(&agent);
         let provider = Arc::clone(&provider);
-        let registry = registry.clone();
+        let mut registry = registry.clone();
         let sessions = Arc::clone(&sessions);
         let shutdown_signals = Arc::clone(&shutdown_signals);
         let soft_interrupt_queues = Arc::clone(&soft_interrupt_queues);
@@ -140,7 +141,7 @@ async fn restored_resume_with_history_backpressure(recovery_turn: bool) -> Resul
                 "conn_restore",
                 &agent,
                 &provider,
-                &registry,
+                &mut registry,
                 &sessions,
                 &shutdown_signals,
                 &soft_interrupt_queues,

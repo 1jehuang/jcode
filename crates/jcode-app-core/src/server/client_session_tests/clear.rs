@@ -20,7 +20,8 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
     let session_env = HashMap::from([("CLEAR_SESSION_SECRET".into(), "test-only".into())]);
     crate::session_env::set_session_env(old_session_id, session_env.clone())?;
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(provider.clone()).await;
+    let mut registry = Registry::new(provider.clone()).await;
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::new(Default::default()));
     let agent = Arc::new(Mutex::new(build_test_agent_with_id(
         provider.clone(),
         registry.clone(),
@@ -56,6 +57,7 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
     let client_connections = Arc::new(RwLock::new(HashMap::from([(
         "conn_clear".to_string(),
         ClientConnectionInfo {
+            supports_user_response: false,
             client_id: "conn_clear".to_string(),
             session_id: old_session_id.to_string(),
             client_instance_id: None,
@@ -131,7 +133,8 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
             "conn_clear",
             &agent,
             &provider,
-            &registry,
+            &mut registry,
+            &mcp_pool,
             &sessions,
             &shutdown_signals,
             &soft_interrupt_queues,
@@ -182,7 +185,8 @@ async fn exercise_clear_session(shared_source: bool) -> Result<()> {
         "conn_clear",
         &agent,
         &provider,
-        &registry,
+        &mut registry,
+        &mcp_pool,
         &sessions,
         &shutdown_signals,
         &soft_interrupt_queues,

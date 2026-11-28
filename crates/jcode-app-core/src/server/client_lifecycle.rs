@@ -20,6 +20,7 @@ use super::client_lightweight_control::{
 };
 use super::client_session::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
+    response_capability::{disconnect as disconnect_response, refresh_session},
 };
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
@@ -81,22 +82,6 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
 use subscribe_context::*;
-
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
 
 struct ProcessingMessage {
     jarvis_voice: bool,
@@ -307,7 +292,6 @@ pub(super) async fn handle_client(
     let mut supports_pdf_panels = false;
     // Keep only the window preference, never a session-specific prefix fingerprint.
     let mut recent_history_messages = None;
-    let mut supports_user_response = false;
     let mut supports_server_failover = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
@@ -332,14 +316,13 @@ pub(super) async fn handle_client(
     };
     let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
-    let registry = Registry::new(provider.clone()).await;
+    let mut registry = Registry::new(provider.clone()).await;
     let registry_ms = t0.elapsed().as_millis();
 
     let mut swarm_enabled = crate::config::config().features.swarm;
     let mut last_available_models_snapshot: Option<Arc<str>> = None;
     let mut model_catalog_retry = ModelCatalogRetry::default();
 
-    // Create a new session for this client
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
@@ -386,6 +369,7 @@ pub(super) async fn handle_client(
         connections.insert(
             client_connection_id.clone(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: client_connection_id.clone(),
                 session_id: client_session_id.clone(),
                 client_instance_id: None,
@@ -1344,7 +1328,8 @@ pub(super) async fn handle_client(
                         &client_connection_id,
                         &agent,
                         &provider,
-                        &registry,
+                        &mut registry,
+                        &mcp_pool,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -1506,6 +1491,7 @@ pub(super) async fn handle_client(
             }
 
             Request::PrepareDisconnect { id } => {
+                disconnect_response(&sessions, &client_connections, &client_connection_id, &client_session_id).await;
                 drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
                 let json = encode_event(&ServerEvent::Done { id });
                 let mut w = writer.lock().await;
@@ -1584,7 +1570,6 @@ pub(super) async fn handle_client(
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
                 recent_history_messages = history_base.and_then(|base| base.recent_messages);
-                supports_user_response = requested_user_response;
                 supports_server_failover = requested_server_failover;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
@@ -1622,7 +1607,7 @@ pub(super) async fn handle_client(
                                 &client_connection_id,
                                 &agent,
                                 &provider,
-                                &registry,
+                                &mut registry,
                                 &sessions,
                                 &shutdown_signals,
                                 &soft_interrupt_queues,
@@ -1764,11 +1749,10 @@ pub(super) async fn handle_client(
                     // front of the client's GetHistory, delaying first paint.
                     last_available_models_snapshot = None;
                 }
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                )
-                .await;
+                if let Some(info) = client_connections.write().await.get_mut(&client_connection_id) {
+                    info.supports_user_response = requested_user_response;
+                }
+                refresh_session(&sessions, &client_connections, &client_session_id).await;
                 if requested_continuation {
                     super::runtime_ssh_loops::initialize_remote_session(
                         &client_session_id,
@@ -1905,7 +1889,7 @@ pub(super) async fn handle_client(
                         &client_connection_id,
                         &agent,
                         &provider,
-                        &registry,
+                        &mut registry,
                         &sessions,
                         &shutdown_signals,
                         &soft_interrupt_queues,
@@ -1935,11 +1919,7 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
-                super::client_session::apply_or_defer_desktop_response_capability(
-                    &agent,
-                    supports_user_response,
-                )
-                .await;
+                refresh_session(&sessions, &client_connections, &client_session_id).await;
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -2405,7 +2385,9 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        if let Err(error) = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }) {
+                            crate::logging::warn(&format!("Cannot deliver runtime command result to disconnected client: {error}"));
+                        }
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:
@@ -3248,6 +3230,8 @@ pub(super) async fn handle_client(
         }
         if sdk_session_before_request != client_session_id {
             drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
+            refresh_session(&sessions, &client_connections, &sdk_session_before_request).await;
+            refresh_session(&sessions, &client_connections, &client_session_id).await;
         }
         if request_lifecycle_logged {
             log_request_lifecycle_handled(
@@ -3280,6 +3264,7 @@ pub(super) async fn handle_client(
         &client_connections,
     )
     .await;
+    refresh_session(&sessions, &client_connections, &client_session_id).await;
 
     // Cleanup serializes the successor decision against live attachment claims.
     // A successor must inherit the active owner, including its completion receiver,

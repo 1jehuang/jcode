@@ -126,7 +126,8 @@ pub(super) async fn handle_clear_session(
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    registry: &Registry,
+    registry: &mut Registry,
+    mcp_pool: &Arc<crate::mcp::SharedMcpPool>,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -174,14 +175,24 @@ pub(super) async fn handle_clear_session(
         )
     };
 
+    let new_registry = Registry::new(Arc::clone(provider)).await;
     let mut new_agent = Agent::new_with_initial_working_dir(
         Arc::clone(provider),
-        registry.clone(),
+        new_registry.clone(),
         working_dir.as_deref(),
     );
     let new_id = new_agent.session_id().to_string();
+    new_registry
+        .register_mcp_tools_for_dir(
+            Some(client_event_tx.clone()),
+            Some(Arc::clone(mcp_pool)),
+            Some(new_id.clone()),
+            working_dir.as_deref().map(PathBuf::from),
+        )
+        .await;
 
     if client_selfdev {
+        new_registry.register_selfdev_tools().await;
         new_agent.set_canary("self-dev");
     }
     if preserve_debug {
@@ -362,6 +373,7 @@ pub(super) async fn handle_clear_session(
             ("elapsed_ms", clear_start.elapsed().as_millis().to_string()),
         ],
     );
+    *registry = new_registry;
     drop(new_lease);
     drop(replacement_lease);
     new_agent
@@ -589,27 +601,9 @@ fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str)
     });
 }
 
-/// Apply to the bound agent, not the connection's temporary registry. Like
-/// working-dir updates, a busy live target must not block client attachment.
-pub(super) async fn apply_or_defer_desktop_response_capability(
-    agent: &Arc<Mutex<Agent>>,
-    supports_user_response: bool,
-) {
-    if let Ok(mut guard) = agent.try_lock() {
-        guard
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-        return;
-    }
-    let agent = Arc::clone(agent);
-    crate::runtime_activity::spawn(async move {
-        agent
-            .lock()
-            .await
-            .set_desktop_response_capability(supports_user_response)
-            .await;
-    });
-}
+#[path = "client_response_capability.rs"]
+pub(super) mod response_capability;
+use response_capability::refresh_session;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_subscribe(
@@ -1238,19 +1232,19 @@ async fn claim_live_target_agent(
     session_id: &str,
     client_connection_id: &str,
     client_instance_id: Option<&str>,
-    _source_agent: &Arc<Mutex<Agent>>,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-) -> Option<Arc<Mutex<Agent>>> {
+) -> Option<(Arc<Mutex<Agent>>, Registry)> {
     let mut connections = client_connections.write().await;
     let sessions_guard = sessions.read().await;
     let target = sessions_guard.get(session_id).cloned()?;
+    let registry = sessions.tool_registry(session_id)?;
     let info = connections.get_mut(client_connection_id)?;
     crate::session::clear_window_closed(session_id);
     info.session_id = session_id.to_string();
     info.client_instance_id = client_instance_id.map(str::to_string);
     info.last_seen = Instant::now();
-    Some(target)
+    Some((target, registry))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1267,7 +1261,7 @@ pub(super) async fn handle_resume_session(
     client_connection_id: &str,
     agent: &Arc<Mutex<Agent>>,
     provider: &Arc<dyn Provider>,
-    registry: &Registry,
+    registry: &mut Registry,
     sessions: &SessionAgents,
     shutdown_signals: &Arc<RwLock<HashMap<String, InterruptSignal>>>,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -1327,13 +1321,14 @@ pub(super) async fn handle_resume_session(
         &session_id,
         client_connection_id,
         incoming_client_instance_id.as_deref(),
-        agent,
         sessions,
         client_connections,
     )
     .await;
 
-    if let Some(live_target_agent) = live_target_agent.as_ref() {
+    if let Some((live_target_agent, target_registry)) = live_target_agent {
+        let live_target_agent = &live_target_agent;
+        *registry = target_registry;
         drop(resume_guard);
         let old_session_id = client_session_id.clone();
 
@@ -1481,6 +1476,7 @@ pub(super) async fn handle_resume_session(
         }
 
         *client_session_id = session_id.clone();
+        refresh_session(sessions, client_connections, &old_session_id).await;
 
         send_resume_todos(&session_id, writer).await?;
         handle_get_history(
@@ -1680,7 +1676,8 @@ pub(super) async fn handle_resume_session(
     // different session into that published Arc: doing so silently changes
     // every observer's runtime beneath its still-old session ID.
     let source_agent = agent;
-    let mut detached = Agent::new(provider.fork(), registry.clone());
+    let restored_registry = Registry::new(Arc::clone(provider)).await;
+    let mut detached = Agent::new(provider.fork(), restored_registry.clone());
     if let Ok(source) = source_agent.try_lock() {
         detached.set_debug(source.is_debug());
     }
@@ -1710,7 +1707,7 @@ pub(super) async fn handle_resume_session(
 
     if result.is_ok() && is_canary {
         *client_selfdev = true;
-        registry.register_selfdev_tools().await;
+        restored_registry.register_selfdev_tools().await;
     }
 
     let restored_ms = resume_start.elapsed().as_millis();
@@ -1752,6 +1749,7 @@ pub(super) async fn handle_resume_session(
             };
 
             resume_guard.publish(Arc::clone(agent)).await?;
+            *registry = restored_registry.clone();
             lap("sessions");
             crate::runtime_memory_log::emit_event(
                 crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
@@ -1772,6 +1770,7 @@ pub(super) async fn handle_resume_session(
                 }
             }
 
+            refresh_session(sessions, client_connections, &old_session_id).await;
             unregister_session_event_sender(swarm_members, &old_session_id, client_connection_id)
                 .await;
             let retired_source = remove_detached_source_if_unclaimed(
@@ -2002,7 +2001,7 @@ pub(super) async fn handle_resume_session(
             let _ = client_event_tx.send(model_changed);
             // Resolve project-local MCP config against the restored session's
             // working dir captured before publication (issue #420).
-            registry
+            restored_registry
                 .register_mcp_tools_for_dir(
                     Some(client_event_tx.clone()),
                     Some(Arc::clone(mcp_pool)),

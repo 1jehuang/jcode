@@ -563,14 +563,26 @@ impl Agent {
             self.registry.register_selfdev_tools().await;
         }
         let tools = match &self.locked_tools {
-            Some(tools) => tools.clone(),
-            None => self.build_filtered_tool_definitions().await,
+            Some(tools)
+                if !self
+                    .response_capability_changed
+                    .load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                tools.clone()
+            }
+            _ => self.build_filtered_tool_definitions().await,
         };
         let prompt = self.build_system_prompt_split(None);
         self.provider.prewarm(&tools, &prompt.static_part).await;
     }
 
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        if self
+            .response_capability_changed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.invalidate_sdk_tools();
+        }
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
@@ -1065,26 +1077,6 @@ impl Agent {
                 && !self.registry.tool_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
-    }
-
-    pub(crate) fn invalidate_sdk_tools(&mut self) {
-        self.mcp_late_register_resolved = false;
-        self.locked_tools = None;
-        self.cache_tracker.reset();
-        self.kv_cache_monitor.reset();
-    }
-
-    pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {
-        let was_enabled = self
-            .registry
-            .tool_names()
-            .await
-            .iter()
-            .any(|n| n == "user_response");
-        if was_enabled != enabled {
-            self.registry.set_desktop_ui_enabled(enabled).await;
-            self.invalidate_sdk_tools();
-        }
     }
 
     pub async fn tool_names(&self) -> Vec<String> {

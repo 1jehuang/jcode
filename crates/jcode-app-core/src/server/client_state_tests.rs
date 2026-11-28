@@ -1,6 +1,4 @@
-use super::handle_get_history;
-use super::handle_get_model_catalog;
-use super::session_activity_snapshot;
+use super::{handle_get_history, handle_get_model_catalog, session_activity_snapshot};
 use crate::agent::Agent;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
@@ -418,6 +416,7 @@ async fn session_activity_snapshot_prefers_live_tool_name_for_target_session() {
         (
             "conn-idle".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn-idle".to_string(),
                 session_id: "other-session".to_string(),
                 client_instance_id: None,
@@ -433,6 +432,7 @@ async fn session_activity_snapshot_prefers_live_tool_name_for_target_session() {
         (
             "conn-target".to_string(),
             ClientConnectionInfo {
+                supports_user_response: false,
                 client_id: "conn-target".to_string(),
                 session_id: "target-session".to_string(),
                 client_instance_id: None,

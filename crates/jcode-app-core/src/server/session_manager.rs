@@ -12,6 +12,11 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, RwLockReadGuard};
 
 type AgentHandle = Arc<Mutex<Agent>>;
 type AgentMap = HashMap<String, AgentHandle>;
+type RuntimeMetadata = (
+    crate::agent::TurnObserver,
+    crate::tool::WeakRegistry,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 #[derive(Default)]
 pub(crate) struct SessionManager {
@@ -21,7 +26,7 @@ pub(crate) struct SessionManager {
     // client or task still owns a handle. These weak tombstones do not retain
     // idle agents and expire as soon as the last old handle is gone.
     owners: StdMutex<HashMap<String, Weak<Mutex<Agent>>>>,
-    observers: StdMutex<HashMap<String, crate::agent::TurnObserver>>,
+    metadata: StdMutex<HashMap<String, RuntimeMetadata>>,
 }
 
 #[cfg(test)]
@@ -34,11 +39,30 @@ impl SessionManager {
     }
 
     pub(super) fn turn_observer(&self, session_id: &str) -> Option<crate::agent::TurnObserver> {
-        self.observers
+        self.metadata
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session_id)
-            .cloned()
+            .map(|(observer, _, _)| observer.clone())
+    }
+
+    pub(super) fn tool_registry(&self, session_id: &str) -> Option<crate::tool::Registry> {
+        self.metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .and_then(|(_, registry, _)| registry.upgrade())
+    }
+
+    pub(super) fn response_capability_registry(
+        &self,
+        session_id: &str,
+    ) -> Option<(crate::tool::Registry, Arc<std::sync::atomic::AtomicBool>)> {
+        self.metadata
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .and_then(|(_, registry, changed)| Some((registry.upgrade()?, Arc::clone(changed))))
     }
 
     pub(super) async fn read(&self) -> RwLockReadGuard<'_, AgentMap> {
@@ -103,7 +127,7 @@ impl SessionManager {
         let mut agents = self.agents.write().await;
         let removed = agents.remove(session_id);
         if removed.is_some() {
-            self.observers
+            self.metadata
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(session_id);
@@ -118,7 +142,7 @@ impl SessionManager {
             .is_some_and(|agent| Arc::ptr_eq(agent, expected))
         {
             agents.remove(session_id);
-            self.observers
+            self.metadata
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(session_id);
@@ -131,7 +155,7 @@ impl SessionManager {
     pub(super) async fn retain(&self, mut keep: impl FnMut(&String, &AgentHandle) -> bool) {
         let mut agents = self.agents.write().await;
         agents.retain(|id, agent| keep(id, agent));
-        self.observers
+        self.metadata
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|id, _| agents.contains_key(id));
@@ -139,13 +163,19 @@ impl SessionManager {
 
     #[cfg(test)]
     pub(super) fn from_agents(agents: AgentMap) -> Self {
-        let observers = agents
+        let metadata = agents
             .iter()
             .filter_map(|(id, agent)| {
-                agent
-                    .try_lock()
-                    .ok()
-                    .map(|owner| (id.clone(), owner.server_turn_observer()))
+                agent.try_lock().ok().map(|owner| {
+                    (
+                        id.clone(),
+                        (
+                            owner.server_turn_observer(),
+                            owner.registry_weak(),
+                            owner.response_capability_invalidator(),
+                        ),
+                    )
+                })
             })
             .collect();
         let owners = agents
@@ -156,7 +186,7 @@ impl SessionManager {
             agents: RwLock::new(agents),
             reservations: StdMutex::default(),
             owners: StdMutex::new(owners),
-            observers: StdMutex::new(observers),
+            metadata: StdMutex::new(metadata),
         }
     }
 
@@ -164,7 +194,7 @@ impl SessionManager {
     pub(super) async fn clear_for_test(&self) {
         self.agents.write().await.clear();
         self.owners.lock().unwrap().clear();
-        self.observers.lock().unwrap().clear();
+        self.metadata.lock().unwrap().clear();
     }
 
     #[cfg(test)]
@@ -252,7 +282,7 @@ impl SessionReservation<'_> {
     }
 
     async fn publish_rekeyed(&self, old_id: Option<&str>, agent: AgentHandle) -> Result<()> {
-        let observer = {
+        let metadata = {
             let owner = agent
                 .try_lock()
                 .map_err(|_| anyhow::anyhow!("Cannot publish a busy runtime"))?;
@@ -262,7 +292,11 @@ impl SessionReservation<'_> {
                     self.session_id
                 );
             }
-            owner.server_turn_observer()
+            (
+                owner.server_turn_observer(),
+                owner.registry_weak(),
+                owner.response_capability_invalidator(),
+            )
         };
         let mut agents = self.manager.agents.write().await;
         let mut owners = self
@@ -298,16 +332,16 @@ impl SessionReservation<'_> {
             agents.remove(old_id);
             owners.remove(old_id);
             self.manager
-                .observers
+                .metadata
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(old_id);
         }
         self.manager
-            .observers
+            .metadata
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(self.session_id.clone(), observer);
+            .insert(self.session_id.clone(), metadata);
         owners.insert(self.session_id.clone(), Arc::downgrade(&agent));
         agents.insert(self.session_id.clone(), agent);
         Ok(())
