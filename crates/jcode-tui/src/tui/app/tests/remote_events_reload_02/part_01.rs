@@ -726,6 +726,41 @@ fn test_handle_server_event_soft_interrupt_injected_combined_content_clears_comp
 }
 
 #[test]
+fn test_handle_server_event_soft_interrupt_injected_publishes_user_image_previews() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.track_pending_soft_interrupt_with_images(
+        11,
+        "check this [image 1]".to_string(),
+        vec![("image/png".to_string(), "ZmFrZS1pbWFnZQ==".to_string())],
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::SoftInterruptInjected {
+            content: "check this [image 1]".to_string(),
+            display_role: Some("user".to_string()),
+            point: "D".to_string(),
+            tools_skipped: None,
+            client_ids: Vec::new(),
+        },
+        &mut remote,
+    );
+
+    assert!(app.pending_soft_interrupts.is_empty());
+    assert!(app.pending_soft_interrupt_images.is_empty());
+    assert_eq!(app.remote_side_pane_images.len(), 1);
+    assert_eq!(app.remote_side_pane_images[0].media_type, "image/png");
+    assert_eq!(app.remote_side_pane_images[0].data, "ZmFrZS1pbWFnZQ==");
+    assert_eq!(
+        app.remote_side_pane_images[0].anchor,
+        Some(crate::session::RenderedImageAnchor::UserPrompt { ordinal: 0 })
+    );
+}
+
+#[test]
 fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pending_previews() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -1787,6 +1787,7 @@ pub struct App {
     interleave_images: Vec<(String, String)>,
     // Message sent as soft interrupt but not yet injected (shown in queue preview until injected)
     pending_soft_interrupts: Vec<String>,
+    pending_soft_interrupt_images: Vec<(String, Vec<(String, String)>)>,
     // Soft interrupts written to the socket but not yet acknowledged by the server.
     pending_soft_interrupt_requests: Vec<(u64, String)>,
     // Every soft interrupt still shown as pending, by request id. Unlike the

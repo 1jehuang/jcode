@@ -10,10 +10,24 @@ impl App {
         request_id: u64,
         content: String,
     ) {
+        self.track_pending_soft_interrupt_with_images(request_id, content, Vec::new());
+    }
+
+    pub(in crate::tui::app) fn track_pending_soft_interrupt_with_images(
+        &mut self,
+        request_id: u64,
+        content: String,
+        images: Vec<(String, String)>,
+    ) {
         let content_bytes = content.len();
         let content_chars = content.chars().count();
         if self.pending_soft_interrupts.is_empty() {
             self.sent_soft_interrupts.clear();
+            self.pending_soft_interrupt_images.clear();
+        }
+        if !images.is_empty() {
+            self.pending_soft_interrupt_images
+                .push((content.clone(), images));
         }
         self.sent_soft_interrupts
             .push((request_id, content.clone()));
@@ -64,6 +78,7 @@ impl App {
             self.pending_soft_interrupts.len()
         ));
         self.pending_soft_interrupts.clear();
+        self.pending_soft_interrupt_images.clear();
         self.pending_soft_interrupt_requests.clear();
         self.sent_soft_interrupts.clear();
         self.soft_interrupt_recovery = None;
@@ -183,7 +198,19 @@ impl App {
         true
     }
 
-    pub(super) fn mark_soft_interrupt_injected(&mut self, content: &str) {
+    fn take_pending_soft_interrupt_images(&mut self, content: &str) -> Vec<(String, String)> {
+        if let Some(index) = self
+            .pending_soft_interrupt_images
+            .iter()
+            .position(|(pending, _)| pending == content)
+        {
+            self.pending_soft_interrupt_images.remove(index).1
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(super) fn mark_soft_interrupt_injected(&mut self, content: &str) -> Vec<(String, String)> {
         crate::logging::info(&format!(
             "REMOTE_SOFT_INTERRUPT_MARK_INJECTED content_bytes={} content_chars={} pending_requests={} pending_messages={}",
             content.len(),
@@ -191,10 +218,11 @@ impl App {
             self.pending_soft_interrupt_requests.len(),
             self.pending_soft_interrupts.len()
         ));
-        if self.mark_combined_soft_interrupt_injected(content) {
-            return;
+        if let Some(images) = self.mark_combined_soft_interrupt_injected(content) {
+            return images;
         }
 
+        let mut injected_images = Vec::new();
         if let Some(index) = self
             .pending_soft_interrupts
             .iter()
@@ -202,6 +230,7 @@ impl App {
         {
             self.pending_soft_interrupts.remove(index);
             self.forget_sent_soft_interrupt(content);
+            injected_images = self.take_pending_soft_interrupt_images(content);
         }
 
         if let Some(index) = self
@@ -211,9 +240,14 @@ impl App {
         {
             self.pending_soft_interrupt_requests.remove(index);
         }
+
+        injected_images
     }
 
-    fn mark_combined_soft_interrupt_injected(&mut self, content: &str) -> bool {
+    fn mark_combined_soft_interrupt_injected(
+        &mut self,
+        content: &str,
+    ) -> Option<Vec<(String, String)>> {
         let mut combined = String::new();
         for (index, pending) in self.pending_soft_interrupts.iter().enumerate() {
             if index > 0 {
@@ -224,8 +258,10 @@ impl App {
             if combined == content {
                 let count = index + 1;
                 let removed: Vec<String> = self.pending_soft_interrupts.drain(..count).collect();
+                let mut images = Vec::new();
                 for removed_content in removed {
                     self.forget_sent_soft_interrupt(&removed_content);
+                    images.extend(self.take_pending_soft_interrupt_images(&removed_content));
                     if let Some(request_index) = self
                         .pending_soft_interrupt_requests
                         .iter()
@@ -234,7 +270,7 @@ impl App {
                         self.pending_soft_interrupt_requests.remove(request_index);
                     }
                 }
-                return true;
+                return Some(images);
             }
 
             if !content.starts_with(&combined) {
@@ -242,7 +278,7 @@ impl App {
             }
         }
 
-        false
+        None
     }
 }
 

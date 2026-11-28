@@ -14,6 +14,7 @@ pub(in crate::tui::app) async fn send_interleave_now(
         return;
     }
     let msg_clone = content.clone();
+    let images_clone = images.clone();
     match remote.soft_interrupt(content, images, false).await {
         Err(e) => {
             app.push_display_message(DisplayMessage::error(format!(
@@ -22,7 +23,7 @@ pub(in crate::tui::app) async fn send_interleave_now(
             )));
         }
         Ok(request_id) => {
-            app.track_pending_soft_interrupt(request_id, msg_clone);
+            app.track_pending_soft_interrupt_with_images(request_id, msg_clone, images_clone);
             app.set_status_notice("⏭ Interleave sent");
         }
     }

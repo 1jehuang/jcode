@@ -2962,7 +2962,7 @@ fn handle_server_event_inner(
                 }
                 app.push_turn_footer(duration);
             }
-            app.mark_soft_interrupt_injected(&content);
+            let injected_images = app.mark_soft_interrupt_injected(&content);
             let role = display_role.unwrap_or_else(|| "user".to_string());
             if role == "background_task" {
                 if let Some(completed) =
@@ -3022,9 +3022,13 @@ fn handle_server_event_inner(
                 }
             } else if role == jcode_tui_messages::jarvis::JARVIS_USER_ROLE {
                 app.push_display_message(DisplayMessage::jarvis_user(content.clone()));
+                if !injected_images.is_empty() {
+                    app.publish_user_image_previews(&injected_images);
+                }
             } else {
                 // Do not coalesce repeated system injections: each delivery is
                 // its own event in the conversation timeline.
+                let is_user = role == "user";
                 let title = (role == "system").then(|| "Context notification".to_string());
                 app.push_display_message(DisplayMessage {
                     role,
@@ -3034,6 +3038,9 @@ fn handle_server_event_inner(
                     title,
                     tool_data: None,
                 });
+                if is_user && !injected_images.is_empty() {
+                    app.publish_user_image_previews(&injected_images);
+                }
             }
             if let Some(n) = tools_skipped {
                 app.set_status_notice(format!("⚡ {} tool(s) skipped", n));

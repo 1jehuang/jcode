@@ -264,6 +264,7 @@ pub(in super::super) async fn process_remote_followups(
         {
             let interleave_images = std::mem::take(&mut app.interleave_images);
             let msg_clone = interleave_msg.clone();
+            let images_clone = interleave_images.clone();
             match remote
                 .soft_interrupt(interleave_msg, interleave_images, false)
                 .await
@@ -275,7 +276,11 @@ pub(in super::super) async fn process_remote_followups(
                     )));
                 }
                 Ok(request_id) => {
-                    app.track_pending_soft_interrupt(request_id, msg_clone);
+                    app.track_pending_soft_interrupt_with_images(
+                        request_id,
+                        msg_clone,
+                        images_clone,
+                    );
                 }
             }
         }
