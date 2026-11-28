@@ -2185,31 +2185,6 @@ fn explicit_cached_context_window_precedes_zai_family_fallback() {
 }
 
 #[test]
-fn named_openai_compatible_model_context_window_overrides_default() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-    let mut config = jcode_base::config::NamedProviderConfig {
-        base_url: "https://compat.example.test/v1".to_string(),
-        api_key: Some("test".to_string()),
-        default_model: Some("custom-long-context".to_string()),
-        models: vec![jcode_base::config::NamedProviderModelConfig {
-            id: "custom-long-context".to_string(),
-            context_window: Some(512_000),
-            reasoning: None,
-            reasoning_effort: None,
-            input: Vec::new(),
-        }],
-        ..Default::default()
-    };
-    config.model_catalog = false;
-
-    let provider =
-        OpenRouterProvider::new_named_openai_compatible("custom", &config).expect("provider");
-
-    assert_eq!(provider.context_window(), 512_000);
-}
-
-#[test]
 fn named_profile_context_window_survives_provider_qualified_model() {
     // Regression for #403: if the runtime model transiently carries the
     // session-routing `<profile>:<model>` prefix, context_window() must still
@@ -3481,6 +3456,9 @@ fn named_openai_compatible_provider_keeps_stable_name_and_profile_display_name()
     assert_eq!(provider.runtime_display_name(), "example-compat");
     assert_eq!(Provider::display_name(&provider), "example-compat");
 }
+
+#[path = "openrouter_context_tests.rs"]
+mod context_tests;
 
 #[path = "openrouter_wire_tests.rs"]
 mod wire_tests;

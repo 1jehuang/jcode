@@ -804,6 +804,15 @@ impl Provider for OpenRouterProvider {
         {
             return limit;
         }
+        // VSLLM's public catalog omits context limits, and its gateway can leave
+        // oversized requests waiting on an upstream channel until they look like
+        // connectivity failures. Keep the unverified default conservative while
+        // allowing an explicit model/profile setting above to override it.
+        if self.profile_id.as_deref().is_some_and(|id| {
+            id.eq_ignore_ascii_case("vsllm") || id.eq_ignore_ascii_case("vsllm-api")
+        }) {
+            return 32_768;
+        }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
         // advertised trained window is not a safe budget. Until the native-API
