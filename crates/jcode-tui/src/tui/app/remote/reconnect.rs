@@ -884,7 +884,14 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         crate::logging::info(&format!(
             "Applying CLI-requested initial model on remote session: {model_spec}"
         ));
-        if let Err(error) = remote.set_model(&model_spec).await {
+        // persist_default=false: this is a startup override for the current
+        // session, not a user-initiated switch. Persisting here would let a
+        // single `jcode --model X` run rewrite the saved default for every
+        // later session on a shared server. Cold launches pass the flag to
+        // server startup without a save, so this also keeps warm and cold
+        // starts behaving the same. Picker, cycle and `/model` actions keep
+        // persist_default=true.
+        if let Err(error) = remote.set_model(&model_spec, false).await {
             crate::logging::warn(&format!(
                 "Failed to apply CLI-requested initial model '{model_spec}': {error}"
             ));
@@ -1154,6 +1161,8 @@ pub(in crate::tui::app) fn finalize_reload_reconnect(
 mod reconnect_context_tests {
     use super::*;
     use crate::tui::app::tests::create_test_app;
+
+    include!("startup_override_body_tests.rs");
 
     #[test]
     fn reconnect_preserves_peeked_context_after_file_is_consumed() {

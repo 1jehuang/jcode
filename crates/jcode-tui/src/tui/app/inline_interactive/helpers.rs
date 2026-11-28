@@ -150,11 +150,19 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
                 bare_name
             }
         }
-        crate::provider::ModelRouteApiMethod::OpenRouter if route.provider != "auto" => format!(
-            "{}@{}",
-            openrouter_route_model_id(&bare_name),
-            route.provider
-        ),
+        crate::provider::ModelRouteApiMethod::OpenRouter if route.provider != "auto" => {
+            // openrouter_route_model_id preserves an existing base@provider
+            // pin; appending route.provider on top would double it.
+            let model_id = openrouter_route_model_id(&bare_name);
+            if model_id
+                .rsplit_once('@')
+                .is_some_and(|(_, pin)| !pin.trim().is_empty())
+            {
+                model_id
+            } else {
+                format!("{}@{}", model_id, route.provider)
+            }
+        }
         _ => bare_name,
     }
 }

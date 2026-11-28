@@ -82,7 +82,10 @@ async fn cancel_publishes_background_task_completed_event() -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "timed out waiting for BackgroundTaskCompleted");
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for BackgroundTaskCompleted"
+        );
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(BusEvent::BackgroundTaskCompleted(ev))) if ev.task_id == info.task_id => {
                 assert_eq!(ev.status, BackgroundTaskStatus::Failed);
