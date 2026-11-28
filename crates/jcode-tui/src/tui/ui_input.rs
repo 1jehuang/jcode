@@ -762,8 +762,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
