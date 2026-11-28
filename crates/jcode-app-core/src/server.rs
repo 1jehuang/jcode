@@ -497,6 +497,7 @@ use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
     cleanup_socket_pair, configure_serve_replace, connect_socket, debug_socket_path,
     default_socket_path, has_live_listener, is_server_ready, is_shared_socket,
+    socket_env_var_name,
     reap_stale_socket_if_dead, set_socket_path, socket_path, socket_path_is_custom,
     wait_for_server_ready,
 };
