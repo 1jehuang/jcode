@@ -21,7 +21,7 @@ impl BackgroundTaskManager {
             return None;
         }
         status.stall_wake_seconds = Some(stall_wake_seconds);
-        self.write_status_file(&status_path, &status).await;
+        Self::write_status_file(&status_path, &status);
         drop(status_guard);
 
         let task_id_owned = task_id.to_string();
@@ -151,7 +151,7 @@ impl BackgroundTaskManager {
             && status.stall_wake_seconds.is_some()
         {
             status.stall_wake_seconds = None;
-            self.write_status_file(&status_path, &status).await;
+            Self::write_status_file(&status_path, &status);
             return true;
         }
         disarmed
