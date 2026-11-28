@@ -238,21 +238,38 @@ gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,targetCommitis
 gh release upload "$tag" "$work/$archive" "$work/SHA256SUMS" --repo "$repo" --clobber
 gh release edit "$tag" --repo "$repo" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest
 
-# Announce on Discord via lightweight workflow dispatch.
+# Announce on Discord directly when a local webhook is available, else fall back to workflow dispatch.
 current_step="dispatch_discord"
 write_status
-if ! gh workflow run discord-release.yml --repo "$repo" --ref master -f "tag=$tag"; then
-  echo "Failed to dispatch discord-release.yml for $tag"
-  discord_status="failed"
-  publish_state="failed"
-  publish_detail="gh workflow run discord-release.yml failed for $tag"
-  write_status
-  exit 1
+discord_webhook="${DISCORD_RELEASE_WEBHOOK:-}"
+if [ -z "$discord_webhook" ] && [ -f "${JCODE_HOME:-$HOME/.jcode}/discord-release-webhook" ]; then
+  discord_webhook=$(tr -d '\r\n' < "${JCODE_HOME:-$HOME/.jcode}/discord-release-webhook")
+fi
+if [ -n "$discord_webhook" ] && [ -f scripts/post_discord_release.py ]; then
+  gh_token="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
+  if ! GH_TOKEN="$gh_token" DISCORD_RELEASE_WEBHOOK="$discord_webhook" python3 scripts/post_discord_release.py --tag "$tag"; then
+    echo "Failed to post Discord announcement directly for $tag"
+    discord_status="failed"
+    publish_state="failed"
+    publish_detail="direct post_discord_release.py failed for $tag"
+    write_status
+    exit 1
+  fi
+  discord_status="posted"
+else
+  if ! gh workflow run discord-release.yml --repo "$repo" --ref master -f "tag=$tag"; then
+    echo "Failed to dispatch discord-release.yml for $tag"
+    discord_status="failed"
+    publish_state="failed"
+    publish_detail="gh workflow run discord-release.yml failed for $tag"
+    write_status
+    exit 1
+  fi
+  discord_status="dispatched"
 fi
 
-discord_status="dispatched"
 publish_state="published"
-publish_detail="published $tag ($short_sha) and dispatched Discord announcement"
+publish_detail="published $tag ($short_sha) and announced on Discord ($discord_status)"
 write_status
 
 echo "=== $(date -Iseconds) linux-release published $tag ($short_sha) ==="

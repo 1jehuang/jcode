@@ -186,6 +186,33 @@ exit 0
             self.assertEqual(status['step'], 'check_remote_master')
             self.assertIn('simulated gh api failure', status['detail'])
 
+    def test_direct_discord_webhook_skips_workflow_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, sha, jcode_home, calls, env = self._setup_repo(root)
+            marker = root / 'discord_posted.txt'
+            (repo / 'scripts/post_discord_release.py').write_text(
+                f'import os, sys; open({str(marker)!r}, "w").write(" ".join(sys.argv[1:]) + "|" + os.environ["DISCORD_RELEASE_WEBHOOK"])\n',
+                encoding='utf-8',
+            )
+            subprocess.check_call(['git', 'add', 'scripts/post_discord_release.py'], cwd=repo, env=env)
+            subprocess.check_call(['git', 'commit', '-qm', 'add stub discord poster'], cwd=repo, env=env)
+            sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, env=env, text=True).strip()
+            env['REMOTE_SHA'] = sha
+            (jcode_home / 'discord-release-webhook').write_text('https://discord.test/webhook\n', encoding='utf-8')
+            proc = subprocess.run(
+                ['bash', 'scripts/publish_linux_release_direct.sh', sha, 'Direct notes'],
+                cwd=repo,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, (jcode_home / 'logs/linux-release.log').read_text())
+            status = json.loads((jcode_home / 'logs/linux-release-status.json').read_text())
+            self.assertEqual(status['state'], 'published')
+            self.assertEqual(status['discord_status'], 'posted')
+            self.assertEqual(marker.read_text(), '--tag v1.1.3|https://discord.test/webhook')
+            self.assertNotIn('workflow run discord-release.yml', calls.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()
