@@ -378,19 +378,38 @@ fn lock_private(base: &Path, relative: &Path) -> Result<std::fs::File> {
     {
         use std::os::fd::{AsRawFd, FromRawFd};
         let (dir, name) = open_parent(base, relative, true)?;
-        let fd = unsafe {
-            libc::openat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDWR
-                    | libc::O_CREAT
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
-                0o600,
-            )
+        // Concurrent first-time creators race to make the lock file. On macOS
+        // openat(2) with O_CREAT can still fail with ENOENT while another
+        // thread is mid-creation of the same new name, so retry that errno
+        // briefly instead of surfacing a spurious "cannot lock private state".
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let fd = loop {
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd >= 0 {
+                break fd;
+            }
+            let error = std::io::Error::last_os_error();
+            ensure!(
+                error.kind() == std::io::ErrorKind::NotFound,
+                "cannot lock private state"
+            );
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "private state lock timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        ensure!(fd >= 0, "cannot lock private state");
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         ensure!(file.metadata()?.is_file(), "invalid private lock");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -757,6 +776,37 @@ mod tests {
             unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn concurrent_first_time_lock_creation_survives_openat_enoent() {
+        // macOS openat(2) with O_CREAT can return ENOENT while another thread
+        // is mid-creation of the same new lock file; lock_private must retry
+        // instead of failing (reproduced standalone at ~8% of racing opens).
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let rounds = 40;
+        for round in 0..rounds {
+            let project = tempfile::tempdir().unwrap();
+            std::fs::create_dir(project.path().join(".git")).unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    let barrier = &barrier;
+                    let project = project.path();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        lock_workspace_hydration(project).unwrap();
+                    });
+                }
+            });
+            let relative = environment_relative(project.path())
+                .unwrap()
+                .with_extension("hydrate.lock");
+            assert!(home.path().join(relative).exists(), "round {round}");
+        }
     }
 
     #[test]
