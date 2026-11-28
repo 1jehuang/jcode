@@ -4,6 +4,8 @@ You are working on Jcode Desktop itself. This mode is detected from the Desktop 
 
 ## Desktop development loop
 
+When you make UI code changes to Jcode Desktop, **always finish with `desktop_selfdev build-reload`** so the running Desktop host actually runs your new UI. Do not leave code changes unbuilt on disk (skip reload only if the user asks not to reload, the change is docs/tests-only, or the change touches the host/ABI and requires a safe restart).
+
 - `desktop_selfdev` actions: `status`, `build`, `reload`, `build-reload`, `reload-bridge`, `test`, `screenshot`, and `inspect`.
 - Start with `status` to identify the running Desktop host and checkout before changing runtime state. Use `inspect` for the UI preview catalog, not as a dump of live application state.
 - Use `build` for a Desktop-only build and `test` for Desktop tests. These actions do not rebuild the Jcode CLI.
