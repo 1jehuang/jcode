@@ -94,12 +94,15 @@ use catalog_activity::format_auth_catalog_refresh_complete;
 
 #[path = "provider_control/deferred_operations.rs"]
 mod deferred_operations;
+#[path = "provider_control/persist_model_default.rs"]
+mod persist_model_default;
 use deferred_operations::{
     apply_auth_route_to_agent, apply_auth_runtime_model_to_agent, auth_refresh_targets,
     log_provider_control_completed, log_provider_control_deferred,
     log_provider_control_lock_acquired, spawn_deferred_agent_mutation,
     spawn_deferred_auth_refreshes, spawn_deferred_provider_operation,
 };
+use persist_model_default::persist_confirmed_model_default;
 
 fn send_model_changed_result(
     id: u64,
@@ -163,6 +166,7 @@ fn send_model_changed_result(
 fn apply_cycle_model(
     id: u64,
     direction: i8,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -215,17 +219,33 @@ fn apply_cycle_model(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+            &next_model,
+            &agent.provider_name(),
+            None,
+        );
+        persist_confirmed_model_default(&next_model, provider_key.as_deref());
+    }
 }
 
 pub(super) async fn handle_cycle_model(
     id: u64,
     direction: i8,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_cycle_model(id, direction, &mut agent_guard, client_event_tx);
+        apply_cycle_model(
+            id,
+            direction,
+            persist_default,
+            &mut agent_guard,
+            client_event_tx,
+        );
     } else {
         spawn_deferred_agent_mutation(
             "cycle_model",
@@ -233,7 +253,7 @@ pub(super) async fn handle_cycle_model(
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_cycle_model(id, direction, agent_guard, client_event_tx);
+                apply_cycle_model(id, direction, persist_default, agent_guard, client_event_tx);
             },
         );
     }
@@ -246,6 +266,7 @@ pub(super) use premium_mode_control::handle_set_premium_mode;
 fn apply_set_model(
     id: u64,
     model: String,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -274,7 +295,16 @@ fn apply_set_model(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        let provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
+            &model,
+            &agent.provider_name(),
+            None,
+        );
+        persist_confirmed_model_default(&model, provider_key.as_deref());
+    }
 }
 
 pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
@@ -355,6 +385,7 @@ fn apply_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     automatic_failover: bool,
+    persist_default: bool,
     agent: &mut Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -406,17 +437,36 @@ fn apply_set_route(
             )
         })
     };
+    let confirmed = persist_default && result.is_ok();
     send_model_changed_result(id, result, current, agent, client_event_tx);
+    if confirmed {
+        // The picker already resolved the route into a spec + provider key
+        // pair (default_model_selection_from_route); persist exactly those,
+        // not a bare model id that would lose the OAuth/API distinction.
+        let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+            &agent.provider_model(),
+            selection.api_method.as_str(),
+            &selection.provider_label,
+        );
+        persist_confirmed_model_default(&selection.model_spec, selection.provider_key.as_deref());
+    }
 }
 
 pub(super) async fn handle_set_model(
     id: u64,
     model: String,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_model(id, model, &mut agent_guard, client_event_tx);
+        apply_set_model(
+            id,
+            model,
+            persist_default,
+            &mut agent_guard,
+            client_event_tx,
+        );
     } else {
         spawn_deferred_agent_mutation(
             "set_model",
@@ -424,7 +474,7 @@ pub(super) async fn handle_set_model(
             Arc::clone(agent),
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
-                apply_set_model(id, model, agent_guard, client_event_tx);
+                apply_set_model(id, model, persist_default, agent_guard, client_event_tx);
             },
         );
     }
@@ -434,6 +484,7 @@ pub(super) async fn handle_set_route(
     id: u64,
     selection: crate::provider::RouteSelection,
     automatic_failover: bool,
+    persist_default: bool,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -442,6 +493,7 @@ pub(super) async fn handle_set_route(
             id,
             selection,
             automatic_failover,
+            persist_default,
             &mut agent_guard,
             client_event_tx,
         );
@@ -456,6 +508,7 @@ pub(super) async fn handle_set_route(
                     id,
                     selection,
                     automatic_failover,
+                    persist_default,
                     agent_guard,
                     client_event_tx,
                 );

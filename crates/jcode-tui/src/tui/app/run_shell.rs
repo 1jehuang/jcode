@@ -887,6 +887,9 @@ impl App {
         }
 
         self.extract_session_memories().await;
+        // A model switch made right before quitting would otherwise wait out
+        // the 500 ms debounce that never fires again after this loop exits.
+        self.force_flush_pending_model_config_persist();
 
         Ok(RunResult {
             reload_session: self.reload_requested.take(),

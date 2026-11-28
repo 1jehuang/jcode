@@ -384,6 +384,11 @@ impl App {
             }
         }
 
+        // Same orderly-shutdown flush as the local loop: an SSH/remote
+        // client's own config default must not be lost to the debounce when
+        // the user switches and immediately quits.
+        self.force_flush_pending_model_config_persist();
+
         Ok(RunResult {
             reload_session: self.reload_requested.take(),
             rebuild_session: self.rebuild_requested.take(),

@@ -938,6 +938,7 @@ impl App {
         match self.provider.set_model(&next_model) {
             Ok(()) => {
                 self.finalize_model_switch(&next_model);
+                self.persist_model_switch_to_config(&next_model, None);
                 let auth_suffix = switched_model_account_suffix(
                     self.provider.active_auth_method_label(),
                     self.provider.active_oauth_account_email().as_deref(),
