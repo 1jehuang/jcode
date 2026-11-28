@@ -144,7 +144,7 @@ fn auth_provider_hint_resolves_every_emitted_login_completed_provider() {
 
 #[test]
 fn auth_changed_event_for_anthropic_api_login_targets_claude_api_route() {
-    let auth = super::auth_changed_event_for_login_provider("Anthropic API")
+    let auth = auth_changed_event_for_login_provider("Anthropic API")
         .expect("Anthropic API login should produce a typed auth event");
     // The server maps the descriptor id `anthropic-api` to the `claude-api`
     // route family for model selection and labelling.
@@ -164,7 +164,7 @@ fn auth_changed_event_for_anthropic_api_login_targets_claude_api_route() {
 
 #[test]
 fn auth_changed_event_for_oauth_claude_login_is_not_marked_as_api_key_paste() {
-    let auth = super::auth_changed_event_for_login_provider("claude")
+    let auth = auth_changed_event_for_login_provider("claude")
         .expect("Claude OAuth login should produce a typed auth event");
     assert_eq!(auth.provider.as_str(), "claude");
     // OAuth logins are not API-key pastes.
@@ -174,7 +174,7 @@ fn auth_changed_event_for_oauth_claude_login_is_not_marked_as_api_key_paste() {
 
 #[test]
 fn auth_changed_event_for_cerebras_login_carries_runtime_and_catalog_identity() {
-    let auth = super::auth_changed_event_for_login_provider("Cerebras")
+    let auth = auth_changed_event_for_login_provider("Cerebras")
         .expect("Cerebras login should produce typed auth event");
 
     assert_eq!(auth.provider.as_str(), "cerebras");

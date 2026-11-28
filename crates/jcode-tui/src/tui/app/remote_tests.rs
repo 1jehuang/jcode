@@ -1,8 +1,8 @@
-use super::reconnect;
-use super::{
-    RemoteRunState, auth_provider_hint_for_login_provider, handle_post_connect,
-    handle_server_event, process_remote_followups,
+use super::auth_mapping::{
+    auth_changed_event_for_login_provider, auth_provider_hint_for_login_provider,
 };
+use super::reconnect;
+use super::{RemoteRunState, handle_post_connect, handle_server_event, process_remote_followups};
 use crate::protocol::{
     MemoryActivitySnapshot, MemoryPipelineSnapshot, MemoryStateSnapshot, MemoryStepStatusSnapshot,
     ServerEvent,
