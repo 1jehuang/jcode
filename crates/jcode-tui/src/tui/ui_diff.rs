@@ -256,6 +256,34 @@ fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine>
 }
 
 pub(super) fn collect_diff_lines(content: &str) -> Vec<ParsedDiffLine> {
+    let (primary, attached) = split_attached_file_diff(content);
+    let primary_lines = collect_diff_lines_from_slice(primary);
+    if !primary_lines.is_empty() {
+        return primary_lines;
+    }
+    if let Some(attached_diff) = attached {
+        return collect_diff_lines_from_slice(attached_diff);
+    }
+    Vec::new()
+}
+
+fn split_attached_file_diff(content: &str) -> (&str, Option<&str>) {
+    const MARKER: &str = "\n\nFile diff:\n```diff\n";
+    if let Some(idx) = content.find(MARKER) {
+        let before = &content[..idx];
+        let rest = &content[idx + MARKER.len()..];
+        let diff = rest.split_once("\n```").map(|(d, _)| d).unwrap_or(rest);
+        return (before, Some(diff));
+    }
+    const LEADING_MARKER: &str = "File diff:\n```diff\n";
+    if let Some(rest) = content.strip_prefix(LEADING_MARKER) {
+        let diff = rest.split_once("\n```").map(|(d, _)| d).unwrap_or(rest);
+        return ("", Some(diff));
+    }
+    (content, None)
+}
+
+fn collect_diff_lines_from_slice(content: &str) -> Vec<ParsedDiffLine> {
     let mut file_path = None;
     let mut lines = Vec::new();
 
@@ -544,5 +572,55 @@ mod tests {
         assert_eq!(lines[1].prefix, "3+ ");
         assert_eq!(lines[2].kind, DiffLineKind::Add);
         assert_eq!(lines[2].prefix, "4+ ");
+    }
+
+    #[test]
+    fn collect_diff_lines_does_not_duplicate_attached_file_diff_when_numbered_summary_present() {
+        let content = "\
+Edited tools/ship-toolchain.py: replaced 1 occurrence(s)
+549- remote_root = capture(
+549+ remote_root = subprocess.check_output(
+556+ text=True,
+
+File diff:
+```diff
+--- a/tools/ship-toolchain.py
++++ b/tools/ship-toolchain.py
+@@ -546,6 +546,7 @@
+-    remote_root = capture(
++    remote_root = subprocess.check_output(
++        text=True,
+```
+";
+
+        let lines = collect_diff_lines(content);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].prefix, "549- ");
+        assert_eq!(lines[1].prefix, "549+ ");
+        assert_eq!(lines[2].prefix, "556+ ");
+    }
+
+    #[test]
+    fn collect_diff_lines_uses_attached_file_diff_when_primary_has_no_diff_lines() {
+        let content = "\
+Successfully wrote 2 lines to demo.txt
+
+File diff:
+```diff
+--- /dev/null
++++ b/demo.txt
+@@ -0,0 +1,2 @@
++hello
++world
+```
+";
+
+        let lines = collect_diff_lines(content);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].kind, DiffLineKind::Add);
+        assert_eq!(lines[0].content, "hello");
+        assert_eq!(lines[0].file_path.as_deref(), Some("demo.txt"));
+        assert_eq!(lines[1].kind, DiffLineKind::Add);
+        assert_eq!(lines[1].content, "world");
     }
 }
