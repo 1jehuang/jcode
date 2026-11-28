@@ -2,6 +2,22 @@
 
 use super::*;
 
+pub(super) fn event_for_transport(
+    mut event: ServerEvent,
+    supports_turn_identity: bool,
+) -> Option<ServerEvent> {
+    if supports_turn_identity {
+        return Some(event);
+    }
+    loop {
+        event = match event {
+            ServerEvent::TurnEvent { event, .. } => *event,
+            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
+            event => return Some(event),
+        };
+    }
+}
+
 /// Session and payload of a todo snapshot, for skipping identical resends.
 pub(super) fn todos_event_key(event: &ServerEvent) -> Option<(String, String)> {
     match event {
