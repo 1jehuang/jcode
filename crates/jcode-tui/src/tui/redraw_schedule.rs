@@ -327,6 +327,10 @@ pub(crate) const REDRAW_SWARM_SPINNER: Duration =
 /// happens to arrive. Unfocused clients skip this so backgrounded windows do
 /// not burn CPU animating a glyph nobody can see; terminal statuses render
 /// fixed glyphs and need no animation frames.
+fn todo_completion_age_redraw_active(state: &dyn TuiState) -> bool {
+    state.client_focused() && ui::todo_completion_flash::age_update_due(state.now_millis())
+}
+
 fn swarm_spinner_redraw_active(state: &dyn TuiState) -> bool {
     state.client_focused()
         && state
@@ -523,7 +527,14 @@ fn redraw_interval_focused_policy(
         && crate::build::read_build_progress().is_none()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)
+        && !todo_completion_age_redraw_active(state)
     {
+        if state.client_focused()
+            && let Some(rem) = ui::todo_completion_flash::age_update_remaining(state.now_millis())
+            && rem < REDRAW_DEEP_IDLE
+        {
+            return rem.max(REDRAW_IDLE);
+        }
         return REDRAW_DEEP_IDLE;
     }
 
@@ -689,6 +700,7 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         && crate::build::read_build_progress().is_none()
         && !swarm_spinner_redraw_active(state)
         && !session_picker_spinner_redraw_active(state)
+        && !todo_completion_age_redraw_active(state)
     {
         return false;
     }
@@ -711,6 +723,11 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
 
     if session_picker_spinner_redraw_active(state) {
         record_full_frame_redraw_reason("session_picker_spinner");
+        return true;
+    }
+
+    if todo_completion_age_redraw_active(state) {
+        record_full_frame_redraw_reason("todo_completion_age");
         return true;
     }
 

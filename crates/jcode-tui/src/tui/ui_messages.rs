@@ -6,7 +6,7 @@ mod tool_rendering;
 pub(crate) use tool_rendering::render_tool_message;
 
 #[path = "ui_messages/todo_completion.rs"]
-mod todo_completion;
+pub(crate) mod todo_completion;
 #[cfg(test)]
 #[path = "ui_messages/todo_payload_cache_tests.rs"]
 mod todo_payload_cache_tests;

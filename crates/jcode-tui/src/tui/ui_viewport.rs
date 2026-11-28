@@ -644,6 +644,58 @@ pub(super) fn draw_messages(
         }
     }
 
+    // Refresh live relative ages (`finished Xs ago`) on visible todo completion
+    // reports in place so cached transcript frames stay current without
+    // invalidating the body cache.
+    {
+        let mut earliest_age_due_ms: Option<u64> = None;
+        if let Some(body) = prepared
+            .sections
+            .iter()
+            .find(|section| section.kind == PreparedSectionKind::Body)
+        {
+            let messages = app.display_messages();
+            let now_utc = chrono::Utc::now();
+            let content_width = area.width.saturating_sub(4).max(1) as usize;
+            let mut prev_end = 0usize;
+            for (msg_idx, boundary) in body.prepared.message_boundaries.iter().enumerate() {
+                let start = body.line_start + prev_end;
+                let end = body.line_start + boundary.wrapped_len;
+                prev_end = boundary.wrapped_len;
+                if end <= scroll || start >= visible_end {
+                    continue;
+                }
+                let Some(msg) = messages.get(msg_idx) else {
+                    continue;
+                };
+                let Some(completed_at) =
+                    crate::tui::ui::messages::todo_completion::completed_at(msg)
+                else {
+                    continue;
+                };
+                for abs_idx in start.max(scroll)..end.min(visible_end) {
+                    if let Some(line) = visible_lines.get_mut(abs_idx - scroll) {
+                        crate::tui::ui::messages::todo_completion::refresh_age_in_line(
+                            line,
+                            completed_at,
+                            now_utc,
+                            content_width,
+                        );
+                    }
+                }
+                let delay = crate::tui::ui::messages::todo_completion::next_age_change_delay(
+                    completed_at,
+                    now_utc,
+                );
+                let due_ms = now_ms.saturating_add(delay.as_millis().min(u64::MAX as u128) as u64);
+                earliest_age_due_ms = Some(
+                    earliest_age_due_ms.map_or(due_ms, |prev| prev.min(due_ms)),
+                );
+            }
+        }
+        super::todo_completion_flash::record_visible_age_deadline(earliest_age_due_ms);
+    }
+
     // A todo completion report that just arrived pulses its text color briefly.
     if policy.enable_decorative_animations
         && let Some((msg_idx, t)) =

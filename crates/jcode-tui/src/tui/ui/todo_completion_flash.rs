@@ -16,6 +16,7 @@ struct FlashState {
     initialized: bool,
     seen: HashSet<u64>,
     active: Option<(u64, u64)>,
+    next_age_update_at_ms: Option<u64>,
 }
 
 fn with_state<R>(f: impl FnOnce(&mut FlashState) -> R) -> R {
@@ -72,6 +73,34 @@ pub(crate) fn active(now_ms: u64) -> bool {
         state
             .active
             .is_some_and(|(_, start)| now_ms.saturating_sub(start) <= TODO_COMPLETION_FLASH_MS)
+    })
+}
+
+/// Record the earliest monotonic timestamp at which a visible todo completion
+/// report's relative age (`finished Xs ago`) will change, or `None` if no
+/// timestamped completion report is currently in the viewport.
+pub(crate) fn record_visible_age_deadline(next_update_at_ms: Option<u64>) {
+    with_state(|state| {
+        state.next_age_update_at_ms = next_update_at_ms;
+    });
+}
+
+/// Whether a visible todo completion report's relative age has crossed its next
+/// display boundary and needs a redraw.
+pub(crate) fn age_update_due(now_ms: u64) -> bool {
+    with_state(|state| {
+        state
+            .next_age_update_at_ms
+            .is_some_and(|due| now_ms >= due)
+    })
+}
+
+/// Time remaining until the next visible todo completion age boundary, if any.
+pub(crate) fn age_update_remaining(now_ms: u64) -> Option<std::time::Duration> {
+    with_state(|state| {
+        state
+            .next_age_update_at_ms
+            .map(|due| std::time::Duration::from_millis(due.saturating_sub(now_ms)))
     })
 }
 
