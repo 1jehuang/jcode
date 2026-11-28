@@ -76,6 +76,8 @@ pub mod model_usage;
 pub mod output_style;
 pub mod plan;
 pub mod platform;
+pub mod plugin;
+mod plugin_components;
 pub mod power_inhibit;
 pub mod process_memory;
 pub mod process_title;
