@@ -1193,17 +1193,6 @@ fn record_cloud_problem(command: &str, session_id: &str, exit: Option<i32>, stde
     ));
 }
 
-fn report_session_ids(report: &serde_json::Value, field: &str) -> Vec<String> {
-    report[field]
-        .as_array()
-        .map(|ids| {
-            ids.iter()
-                .filter_map(|id| id.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 #[path = "commands_cloud_tests.rs"]
 mod tests;

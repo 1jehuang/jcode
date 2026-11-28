@@ -25,6 +25,11 @@
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
+mod dispatch;
+mod plugin_hooks;
+pub use dispatch::{PreparedHooks, dispatch_observer, prepare_hooks, run_pre_tool_gate};
+mod sync_runner;
+
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -119,13 +124,17 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
         crate::logging::warn("Hook 'pre_tool' printed invalid JSON on stdout (ignored)");
         return CommandVerdict::default();
     };
+    parse_gate_value(&value)
+}
+
+fn parse_gate_value(value: &Value) -> CommandVerdict {
     let specific = value.get("hookSpecificOutput").unwrap_or(&Value::Null);
     let mut verdict = CommandVerdict::default();
 
-    let top_decision = json_str(&value, "decision").map(str::to_ascii_lowercase);
+    let top_decision = json_str(value, "decision").map(str::to_ascii_lowercase);
     if matches!(top_decision.as_deref(), Some("block" | "deny")) {
         verdict.block = Some(
-            json_str(&value, "reason")
+            json_str(value, "reason")
                 .unwrap_or("blocked by pre_tool hook")
                 .to_string(),
         );
@@ -135,14 +144,14 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
         Some("deny") => {
             verdict.block = Some(
                 json_str(specific, "permissionDecisionReason")
-                    .or_else(|| json_str(&value, "reason"))
+                    .or_else(|| json_str(value, "reason"))
                     .unwrap_or("blocked by pre_tool hook")
                     .to_string(),
             );
         }
         Some("ask") => {
             let reason = json_str(specific, "permissionDecisionReason")
-                .or_else(|| json_str(&value, "reason"));
+                .or_else(|| json_str(value, "reason"));
             verdict.block = Some(match reason {
                 Some(reason) => format!("requires user approval: {reason}"),
                 None => "requires user approval (pre_tool hook asked)".to_string(),
@@ -161,7 +170,7 @@ fn parse_gate_stdout(stdout: &str) -> CommandVerdict {
     }
     let context: Vec<&str> = [
         json_str(specific, "additionalContext"),
-        json_str(&value, "systemMessage"),
+        json_str(value, "systemMessage"),
     ]
     .into_iter()
     .flatten()
@@ -183,6 +192,7 @@ pub struct HookEvent {
     /// Extra env fields. Keys are suffixes: ("STATUS", "ok") becomes
     /// `JCODE_HOOK_STATUS=ok` and `"status": "ok"` in the JSON payload.
     pub fields: Vec<(&'static str, String)>,
+    plugin_tool_payload: Option<(Value, Value)>,
 }
 
 impl HookEvent {
@@ -192,6 +202,7 @@ impl HookEvent {
             session_id: None,
             cwd: None,
             fields: Vec::new(),
+            plugin_tool_payload: None,
         }
     }
 
@@ -209,6 +220,11 @@ impl HookEvent {
         self.fields.push((key, value.into()));
         self
     }
+
+    pub fn plugin_tool_payload(mut self, input: Value, response: Value) -> Self {
+        self.plugin_tool_payload = Some((input, response));
+        self
+    }
 }
 
 /// Run `future` with the terminal identity of the client that initiated it.
@@ -220,6 +236,30 @@ where
     F: std::future::Future,
 {
     CLIENT_TERMINAL_ENV.scope(env, future).await
+}
+
+/// Carry the current client's terminal identity into `future`, which is about
+/// to be spawned: task-locals do not cross `tokio::spawn`, and tools run in
+/// spawned tasks, so they would otherwise see the server's inherited one.
+pub fn inherit_client_terminal_env<F>(future: F) -> impl std::future::Future<Output = F::Output>
+where
+    F: std::future::Future,
+{
+    let env = CLIENT_TERMINAL_ENV.try_with(Clone::clone);
+    async move {
+        match env {
+            Ok(env) => CLIENT_TERMINAL_ENV.scope(env, future).await,
+            Err(_) => future.await,
+        }
+    }
+}
+
+/// Give `cmd` the terminal identity of the client whose request runs it, so a
+/// shared server's children never speak as the pane that started the server.
+pub fn apply_current_client_terminal_env(cmd: &mut std::process::Command) {
+    let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
+        crate::terminal_launch::apply_client_terminal_env(cmd, env);
+    });
 }
 
 /// The configured commands for `event`, in declaration order.
@@ -255,6 +295,11 @@ pub fn hook_command(event: &str) -> Option<String> {
 /// skip payload construction entirely when no hook is set.
 pub fn hook_configured(event: &str) -> bool {
     !hook_commands(event).is_empty()
+}
+
+/// Scope-aware fast path; plugin discovery never executes commands.
+pub fn hook_configured_for_dir(event: &str, cwd: Option<&str>) -> bool {
+    prepare_hooks(event, cwd).is_some()
 }
 
 /// Run configured tool-input transformers in declaration order. Transformers
@@ -498,9 +543,7 @@ fn build_hook_process(
         cmd.current_dir(cwd);
     }
     apply_event_env(&mut cmd, event);
-    let _ = CLIENT_TERMINAL_ENV.try_with(|env| {
-        crate::terminal_launch::apply_client_terminal_env(&mut cmd, env);
-    });
+    apply_current_client_terminal_env(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -515,96 +558,6 @@ fn build_hook_process(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     Ok(cmd)
-}
-
-/// Fire an observer hook for `event` if one is configured.
-///
-/// Detached and fire-and-forget: failures are logged, never propagated, and
-/// the hook process cannot block the agent.
-pub fn dispatch_observer(event: HookEvent) {
-    let command_lines = hook_commands(event.event);
-    if command_lines.is_empty() {
-        return;
-    }
-    let event_name = event.event;
-    for command_line in command_lines {
-        match build_hook_process(&command_line, &event) {
-            Ok(mut cmd) => {
-                cmd.stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                match crate::platform::spawn_detached_without_console_window(&mut cmd) {
-                    Ok(child) => {
-                        crate::platform::reap_detached(child);
-                        crate::logging::debug(&format!(
-                            "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
-                            event.session_id
-                        ));
-                    }
-                    Err(error) => crate::logging::warn(&format!(
-                        "Hook '{event_name}' command '{command_line}' failed to start: {error}"
-                    )),
-                }
-            }
-            Err(error) => crate::logging::warn(&format!(
-                "Hook '{event_name}' command '{command_line}' is invalid: {error}"
-            )),
-        }
-    }
-}
-
-/// Run the `pre_tool` gate hook for a tool call, if configured.
-///
-/// The hook receives `JCODE_HOOK_TOOL_NAME` plus the full tool input JSON on
-/// stdin (and truncated in `JCODE_HOOK_TOOL_INPUT`). Contract:
-///
-/// - exit 0: allow the tool call, optionally with a JSON object on stdout
-///   (see [`parse_gate_stdout`]) that can deny, rewrite input, or add context
-/// - exit 2: block it; stderr becomes the error shown to the model
-/// - anything else (other exits, timeout, spawn failure): fail open
-pub async fn run_pre_tool_gate(
-    session_id: &str,
-    working_dir: Option<&str>,
-    tool_name: &str,
-    tool_input_json: &str,
-) -> GateOutcome {
-    let command_lines = hook_commands("pre_tool");
-    let mut outcome = GateOutcome::allow();
-    if command_lines.is_empty() {
-        return outcome;
-    }
-
-    let mut current_input = tool_input_json.to_string();
-    for command_line in command_lines {
-        let mut event = HookEvent::new("pre_tool")
-            .session_id(session_id)
-            .field("TOOL_NAME", tool_name)
-            .field(
-                "TOOL_INPUT",
-                truncate_bytes(&current_input, TOOL_INPUT_ENV_LIMIT),
-            );
-        if let Some(cwd) = working_dir {
-            event = event.cwd(cwd);
-        }
-        let verdict = run_pre_tool_command(&command_line, &event, tool_name, &current_input).await;
-        if let Some(reason) = verdict.block {
-            if outcome.decision == GateDecision::Allow {
-                outcome.decision = GateDecision::Block { reason };
-            }
-        } else if outcome.decision == GateDecision::Allow
-            && let Some(updated) = verdict.updated_input
-        {
-            current_input = updated.to_string();
-            outcome.updated_input = Some(updated);
-        }
-        if let Some(context) = verdict.context {
-            outcome.additional_context.push(context);
-        }
-    }
-    if outcome.decision != GateDecision::Allow {
-        outcome.updated_input = None;
-    }
-    outcome
 }
 
 async fn run_pre_tool_command(

@@ -8,6 +8,7 @@ mod environment;
 mod idle_hibernation;
 mod inline_tail;
 mod interrupts;
+mod lifecycle_hooks;
 mod messages;
 #[cfg(test)]
 mod model_usage_tests;
@@ -1183,17 +1184,6 @@ impl Agent {
         &self.session.id
     }
 
-    /// Desktop self-development is selected by the session checkout, including
-    /// restored sessions. It must not set the CLI canary/reload flags.
-    pub fn is_desktop_selfdev(&self) -> bool {
-        self.session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(jcode_selfdev_types::desktop_repo_root)
-            .is_some()
-    }
-
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
             if self.session.original_working_dir.is_none()
@@ -1259,22 +1249,6 @@ impl Agent {
             );
         }
         self.fire_session_lifecycle_hook("session_end", "close");
-    }
-
-    /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
-    /// No-op when the hook is not configured.
-    pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
-        if !crate::hooks::hook_configured(event_name) {
-            return;
-        }
-        let mut event = crate::hooks::HookEvent::new(event_name)
-            .session_id(self.session.id.clone())
-            .field("SOURCE", source)
-            .field("MODEL", self.provider_model());
-        if let Some(cwd) = self.working_dir() {
-            event = event.cwd(cwd);
-        }
-        crate::hooks::dispatch_observer(event);
     }
 
     pub fn mark_crashed(&mut self, message: Option<String>) {

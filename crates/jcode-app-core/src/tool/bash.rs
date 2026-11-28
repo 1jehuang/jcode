@@ -730,19 +730,9 @@ fn configure_background_command_stdio(command: &mut TokioCommand) {
         .stderr(Stdio::piped());
 }
 
-/// Keep cloud environment values out of tool arguments and transcript output.
-/// Read on each spawn so a just-completed opaque transfer is available to the
-/// next command without changing the long-lived daemon's global environment.
-fn cloud_command_environment(
-    working_dir: Option<&Path>,
-) -> Result<std::collections::BTreeMap<String, String>> {
-    let root = match working_dir {
-        Some(path) => path.to_path_buf(),
-        None => std::env::current_dir()?,
-    };
-    crate::cloud_environment::load_environment(&root)
-        .map_err(|_| anyhow::anyhow!("could not load saved cloud environment"))
-}
+#[path = "bash_environment.rs"]
+mod environment;
+use environment::cloud_command_environment;
 
 #[cfg(unix)]
 fn build_detached_shell_wrapper(command: &str) -> StdCommand {
@@ -959,6 +949,7 @@ impl BashTool {
         let mut command = build_shell_command(&params.command);
         command.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         command.envs(crate::session_env::session_env(&ctx.session_id));
+        crate::hooks::apply_current_client_terminal_env(command.as_std_mut());
         command
             .env("JCODE_SESSION_ID", &ctx.session_id)
             .kill_on_drop(true)
@@ -1109,6 +1100,7 @@ impl BashTool {
         let mut cmd = build_detached_shell_wrapper(&params.command);
         cmd.envs(cloud_command_environment(ctx.working_dir.as_deref())?);
         cmd.envs(crate::session_env::session_env(&ctx.session_id));
+        crate::hooks::apply_current_client_terminal_env(&mut cmd);
         cmd.env("JCODE_SESSION_ID", &ctx.session_id);
         let stdout = OpenOptions::new()
             .create(true)
@@ -1270,6 +1262,7 @@ impl BashTool {
 					let mut cmd = build_shell_command(&command);
 					cmd.envs(cloud_environment);
 					cmd.envs(session_environment);
+                    crate::hooks::apply_current_client_terminal_env(cmd.as_std_mut());
 					cmd.env("JCODE_SESSION_ID", &session_id_env);
 					// build_shell_command runs the child in its own session
 					// (setsid), so it is already its own process group leader.

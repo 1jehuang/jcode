@@ -53,15 +53,20 @@ pub struct ActivityReservation {
 }
 
 impl ActivityReservation {
-    /// Keep admission and its owner together across a task boundary. Nested
-    /// detached callbacks inherit the same owner even after this future ends.
-    pub async fn scope<F: std::future::Future>(self, future: F) -> F::Output {
+    /// Keep admission, session ownership and the initiating client's terminal
+    /// identity together across a task boundary. Capture before the spawn.
+    pub fn scope<F: std::future::Future>(
+        self,
+        future: F,
+    ) -> impl std::future::Future<Output = F::Output> {
         let session = self.session.clone();
-        let _activity = self;
-        match session {
-            Some(session) => SESSION.scope(session, future).await,
-            None => future.await,
-        }
+        crate::hooks::inherit_client_terminal_env(async move {
+            let _activity = self;
+            match session {
+                Some(session) => SESSION.scope(session, future).await,
+                None => future.await,
+            }
+        })
     }
 }
 

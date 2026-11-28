@@ -98,6 +98,10 @@ impl Registry {
         match result {
             Ok(output) => {
                 event = event.field("OUTPUT_BYTES", output.output.len().to_string());
+                if event_name == "post_tool" {
+                    event = event
+                        .plugin_tool_payload(input.clone(), Value::String(output.output.clone()));
+                }
             }
             Err(error) => {
                 const ERROR_LIMIT: usize = 1000;
@@ -117,10 +121,13 @@ impl Registry {
         result: &Result<ToolOutput>,
         latency_ms: u64,
     ) {
-        if !crate::hooks::hook_configured("post_tool") {
+        let Some(hooks) = crate::hooks::prepare_hooks(
+            "post_tool",
+            ctx.working_dir.as_ref().and_then(|p| p.to_str()),
+        ) else {
             return;
-        }
-        crate::hooks::dispatch_observer(Self::post_tool_event(
+        };
+        hooks.dispatch_observer(Self::post_tool_event(
             "post_tool",
             resolved_name,
             input,
