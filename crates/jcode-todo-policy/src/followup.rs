@@ -190,6 +190,10 @@ impl Decision {
     }
 }
 
+/// One canonicalized todo item tracked for follow-up ownership: id, content,
+/// normalized group, status.
+type TodoOwnershipWork = (String, String, Option<String>, String);
+
 /// Per-session follow-up state. Keep one per session and reuse it across turns.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FollowUpPolicy {
@@ -201,7 +205,7 @@ pub struct FollowUpPolicy {
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
     #[serde(default)]
-    last_ownership_work: Option<Vec<(String, String, Option<String>, String)>>,
+    last_ownership_work: Option<Vec<TodoOwnershipWork>>,
     incomplete_budget: IncompleteTodoBudget,
     gate_digest_enabled: bool,
     gate_digest_delivered: bool,
@@ -211,7 +215,7 @@ pub fn is_incomplete_todo(todo: &TodoItem) -> bool {
     !todo_status_is_completed(&todo.status) && !todo_status_is_cancelled(&todo.status)
 }
 
-fn canonical_todo_work(todos: &[TodoItem]) -> Vec<(String, String, Option<String>, String)> {
+fn canonical_todo_work(todos: &[TodoItem]) -> Vec<TodoOwnershipWork> {
     let mut items: Vec<_> = todos
         .iter()
         .map(|todo| {

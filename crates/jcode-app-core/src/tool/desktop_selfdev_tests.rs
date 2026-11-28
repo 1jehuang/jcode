@@ -275,7 +275,7 @@ async fn reload_sends_c_and_requires_completion_acknowledgement() {
         let result = host.reload(root.path(), 5).await;
         assert_eq!(result.is_ok(), expected_ok);
         if expected_ok {
-            assert_eq!(result.unwrap(), true);
+            assert!(result.unwrap());
         }
         receiver.await.unwrap();
     }

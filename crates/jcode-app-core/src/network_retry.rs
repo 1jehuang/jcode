@@ -134,10 +134,7 @@ pub mod test_hooks {
     }
 
     pub(super) fn current_hooks() -> Option<TestNetworkHooks> {
-        match ACTIVE_TEST_HOOKS.try_with(Clone::clone) {
-            Ok(hooks) => Some(hooks),
-            Err(_) => None,
-        }
+        ACTIVE_TEST_HOOKS.try_with(Clone::clone).ok()
     }
 }
 
@@ -628,15 +625,31 @@ mod tests {
         let change = tokio::sync::Notify::new();
         let wait = wait_until_online_with(true, || ready(online.get()), |_| change.notified());
         tokio::pin!(wait);
-        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_pending()))).await;
+        poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         change.notify_one(); // Unrelated route event, still offline.
-        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_pending()))).await;
+        poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
         online.set(true);
         change.notify_one();
-        poll_fn(|cx| Poll::Ready(assert!(wait.as_mut().poll(cx).is_ready()))).await;
+        poll_fn(|cx| {
+            assert!(wait.as_mut().poll(cx).is_ready());
+            Poll::Ready(())
+        })
+        .await;
         let provider_only = wait_until_online_with(true, || ready(true), |_| ready(()));
         tokio::pin!(provider_only);
-        poll_fn(|cx| Poll::Ready(assert!(provider_only.as_mut().poll(cx).is_pending()))).await;
+        poll_fn(|cx| {
+            assert!(provider_only.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
     }
 
     #[test]
