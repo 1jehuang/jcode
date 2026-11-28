@@ -5,16 +5,21 @@ fn test_anthropic_reasoning_effort_request_parts() {
     let provider = AnthropicProvider::new();
     provider.set_model("claude-sonnet-4-6").unwrap();
     provider.set_reasoning_effort("none").unwrap();
-    assert!(
-        provider.set_reasoning_effort("minimal").is_err(),
-        "Anthropic must reject rather than silently promote minimal to max"
+    // `minimal` is a valid ladder rung (config ladders like
+    // `agents.memory_effort` expose it) but the Anthropic request surface has
+    // no such level: it maps down to `low` instead of being rejected or
+    // silently promoted upward to the model default/max.
+    provider.set_reasoning_effort("minimal").unwrap();
+    assert_eq!(
+        provider.reasoning_effort().as_deref(),
+        Some("low"),
+        "minimal must pin the lowest Claude effort, never promote to max"
     );
 
     assert_eq!(
         provider.available_efforts(),
         vec!["none", "low", "medium", "high", "max", "swarm"]
     );
-    assert_eq!(provider.reasoning_effort().as_deref(), Some("none"));
 
     // Sonnet 4.6 supports the real `max` API level (but not `xhigh`).
     provider.set_reasoning_effort("max").unwrap();

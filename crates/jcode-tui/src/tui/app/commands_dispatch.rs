@@ -33,6 +33,7 @@ pub(super) fn ssh_presentation_command(input: &str) -> bool {
             | "/compact-notifications"
             | "/show-agentgrep-output"
             | "/tool-call-details"
+            | "/overview"
             | "/colors"
             | "/color"
             | "/cls"
@@ -74,6 +75,9 @@ pub(super) fn handle_ssh_presentation_command(app: &mut App, input: &str) -> boo
     }
     if matches!(input, "/version" | "/changelog") {
         return super::state_ui::handle_info_command(app, input);
+    }
+    if super::commands_overview::handle_overview_command(app, input) {
+        return true;
     }
     if matches!(
         input.split_whitespace().next(),
@@ -502,6 +506,8 @@ mod tests {
             "/compact-notifications off",
             "/show-agentgrep-output on",
             "/tool-call-details on",
+            "/overview",
+            "/overview off",
             "/colors",
             "/color harmony",
             "/todos",

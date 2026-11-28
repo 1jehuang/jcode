@@ -132,6 +132,23 @@ pub(super) fn render_kv_cache_rates_line(cache: &CacheHitInfo) -> Line<'static> 
     Line::from(spans)
 }
 
+pub(super) fn render_kv_cache_compact(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+    // Border facts need body rows when the cache is folded into Overview.
+    let framed = render_kv_cache_widget(data, inner);
+    framed
+        .title
+        .into_iter()
+        .chain(framed.title_right)
+        .chain(framed.lines)
+        .chain(framed.footer)
+        .chain(framed.footer_right)
+        .filter(|line| line.width() > 0)
+        .map(|line| {
+            jcode_tui_render::truncate_line_with_ellipsis_to_width(&line, inner.width as usize)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 pub(super) fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     let Some(lifetime_ratio) = cache.hit_ratio() else {

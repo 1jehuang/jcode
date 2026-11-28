@@ -696,10 +696,15 @@ impl AnthropicProvider {
             "off" | "disabled" => Some("none".to_string()),
             // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // Stored verbatim; resolved to a real effort in `actual_effort_for_model`.
+            // `minimal` maps to `low` at store time (same ladder as
+            // `resolved_effort_for_model`), so config ladders that include it
+            // (e.g. `agents.memory_effort`) pin the lowest Claude effort
+            // instead of being dropped as unsupported.
             "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" => Some(value),
+            "minimal" => Some("low".to_string()),
             other => {
                 jcode_base::logging::info(&format!(
-                    "Warning: Ignoring unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max.",
+                    "Warning: Ignoring unsupported Anthropic reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max.",
                     other
                 ));
                 None
@@ -1629,6 +1634,7 @@ impl Provider for AnthropicProvider {
                     | "off"
                     | "disabled"
                     | "none"
+                    | "minimal"
                     | "low"
                     | "medium"
                     | "high"
@@ -1638,7 +1644,7 @@ impl Provider for AnthropicProvider {
             )
         {
             anyhow::bail!(
-                "Unsupported Anthropic reasoning effort '{}'; expected none|low|medium|high|xhigh|max|swarm",
+                "Unsupported Anthropic reasoning effort '{}'; expected none|minimal|low|medium|high|xhigh|max|swarm",
                 effort
             );
         }

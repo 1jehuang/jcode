@@ -65,10 +65,11 @@ impl SettlementTracker {
 
     /// Ingest this frame's margin profile and return the settled dock profile.
     ///
-    /// Row `r` of the margins corresponds to absolute transcript line
-    /// `margins.scroll_top + r`. Returns per-row widths where unsettled rows are
-    /// zeroed. Also prunes observations far outside the viewport so memory stays
-    /// bounded on long transcripts.
+    /// Row `r` of the margins resolves to the absolute transcript line it shows
+    /// via [`Margins::line_at_row`] (`scroll_top + r` when no per-row map is
+    /// set, so the identity viewport keys identically to before). Returns
+    /// per-row widths where unsettled rows are zeroed. Also prunes observations
+    /// far outside the viewport so memory stays bounded on long transcripts.
     pub fn observe(&mut self, margins: &Margins, area_width: u16) -> SettledMargins {
         if area_width != self.area_width {
             // Global re-wrap: every line index and width changed meaning.
@@ -80,7 +81,7 @@ impl SettlementTracker {
         let mut right = Vec::with_capacity(rows);
         let mut left = Vec::with_capacity(rows);
         for row in 0..rows {
-            let line = margins.scroll_top + row;
+            let line = margins.line_at_row(row);
             let w_right = margins.right_widths.get(row).copied().unwrap_or(0);
             let w_left = margins.left_widths.get(row).copied().unwrap_or(0);
             let entry = self.lines.entry(line).or_default();
@@ -100,8 +101,10 @@ impl SettlementTracker {
         // back, and this keeps the map proportional to the viewport, not the
         // transcript.
         let keep_radius = rows.saturating_mul(8).max(512);
-        let lo = margins.scroll_top.saturating_sub(keep_radius);
-        let hi = margins.scroll_top.saturating_add(rows + keep_radius);
+        let lo = margins.line_at_row(0).saturating_sub(keep_radius);
+        let hi = margins
+            .line_at_row(rows.saturating_sub(1))
+            .saturating_add(keep_radius);
         if self.lines.len() > keep_radius * 4 {
             self.lines.retain(|&line, _| line >= lo && line < hi);
         }

@@ -2772,7 +2772,7 @@ fn parse_alignment_value(raw: &str) -> Option<bool> {
     }
 }
 
-fn parse_on_off_value(raw: &str) -> Option<bool> {
+pub(super) fn parse_on_off_value(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "on" | "compact" | "true" | "1" | "yes" | "enable" | "enabled" => Some(true),
         "off" | "full" | "false" | "0" | "no" | "disable" | "disabled" => Some(false),
@@ -2816,9 +2816,14 @@ fn handle_compact_notifications_command(app: &mut App, trimmed: &str) -> bool {
             if enabled { "on" } else { "off" }
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied compact notifications {} for this session, but failed to save it as the default: {}",
-            if enabled { "on" } else { "off" },
-            error
+            "Compact notifications were not changed: saving the choice to config failed ({}). \
+             The live setting still follows the previous default ({}).",
+            error,
+            if crate::config::config().display.compact_notifications {
+                "on"
+            } else {
+                "off"
+            }
         ))),
     }
 
@@ -2862,9 +2867,14 @@ fn handle_tool_call_details_command(app: &mut App, trimmed: &str) -> bool {
             if enabled { "on" } else { "off" }
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied tool call details {} for this session, but failed to save it as the default: {}",
-            if enabled { "on" } else { "off" },
-            error
+            "Tool call details were not changed: saving the choice to config failed ({}). \
+             The live setting still follows the previous default ({}).",
+            error,
+            if crate::config::config().display.tool_call_details {
+                "on"
+            } else {
+                "off"
+            }
         ))),
     }
 
@@ -2907,9 +2917,14 @@ fn handle_show_agentgrep_output_command(app: &mut App, trimmed: &str) -> bool {
             if enabled { "on" } else { "off" }
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied show agentgrep output {} for this session, but failed to save it as the default: {}",
-            if enabled { "on" } else { "off" },
-            error
+            "Show agentgrep output was not changed: saving the choice to config failed ({}). \
+             The live setting still follows the previous default ({}).",
+            error,
+            if crate::config::config().display.show_agentgrep_output {
+                "on"
+            } else {
+                "off"
+            }
         ))),
     }
 
@@ -3310,9 +3325,10 @@ fn handle_reasoning_display_command(app: &mut App, trimmed: &str) -> bool {
             mode.label()
         ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
-            "Applied thinking display {} for this session, but failed to save it as the default: {}",
-            mode.label(),
-            error
+            "Thinking display was not changed: saving the choice to config failed ({}). \
+             The live setting still follows the previous default ({}).",
+            error,
+            crate::config::config().display.reasoning_display().label()
         ))),
     }
 
@@ -3329,6 +3345,10 @@ pub(super) fn handle_display_settings_command(app: &mut App, trimmed: &str) -> b
 
 pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     if handle_display_settings_command(app, trimmed) {
+        return true;
+    }
+
+    if super::commands_overview::handle_overview_command(app, trimmed) {
         return true;
     }
 

@@ -77,6 +77,7 @@ A blocked command must not silently execute against the laptop.
 | `/ssh` | Blocked | Nested SSH connection setup is not supported. |
 | `/remote` | Runtime | Manage the VM gateway status, pairing and config. Changes may require coordinated server restart, never automatic laptop restart. |
 | `/git` | Wire | `/git` and `/git status` run fixed `git status --short --branch` through daemon input-shell, using daemon CWD. Other arguments are rejected. |
+| `/overview` | UI | Toggle the client's consolidated Overview panel against separate margin widgets. The saved layout belongs to the displaying terminal, never to VM session storage. |
 | `/colors`, `/color`, `/alignment`, `/latex`, `/thinking-display`, `/thinking`, `/reasoning`, `/compact-notifications`, `/show-agentgrep-output`, `/tool-call-details` | UI | Client presentation preferences intentionally belong to the displaying terminal. Saved settings affect the laptop UI, never VM session storage. |
 | `/hotkeys`, `/keys`, `/keybindings` | UI | Inspect the displaying terminal's keys and personal hotkey usage, not VM keyboard state. |
 | `/terminal-setup` | UI | Configure the terminal displaying the client. This intentionally changes client terminal settings, not VM settings. |

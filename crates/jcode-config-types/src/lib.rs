@@ -626,6 +626,12 @@ pub struct AgentsConfig {
     pub memory_jev_threshold: f32,
     /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
+    /// Optional reasoning effort override for the memory extraction sidecar
+    /// (`"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, ...).
+    /// Effective on every backend: OpenAI effort, Claude thinking budget or
+    /// `output_config` effort (model-dependent), or the live provider's effort
+    /// knob. Leave unset for the per-model default.
+    pub memory_effort: Option<String>,
     /// Whether optional automatic memory extraction may use a text-generating
     /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
@@ -714,6 +720,7 @@ fn default_memory_rerank_min_agree() -> usize {
 
 #[path = "lib_agents_defaults.rs"]
 mod agents_defaults;
+
 /// How swarm-created agents should be spawned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]

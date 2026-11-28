@@ -86,7 +86,9 @@ fn test_local_tool_error_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied error".to_string()));
-    let copied = clipboard.text().expect("tool error should reach the clipboard");
+    let copied = clipboard
+        .text()
+        .expect("tool error should reach the clipboard");
     assert!(
         copied.contains("permission denied"),
         "clipboard should carry the tool error: {copied:?}"
@@ -150,7 +152,9 @@ fn test_local_blockquote_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied quote".to_string()));
-    let copied = clipboard.text().expect("blockquote should reach the clipboard");
+    let copied = clipboard
+        .text()
+        .expect("blockquote should reach the clipboard");
     assert!(
         copied.contains("the quick brown fox") && copied.contains("jumps over the lazy dog"),
         "clipboard should carry the quoted lines: {copied:?}"
@@ -224,8 +228,7 @@ fn test_copy_selection_metrics_match_built_selection_text() {
     let text = app
         .current_copy_selection_text()
         .expect("selection text for full transcript");
-    let (chars, lines) =
-        crate::tui::ui::copy_selection_metrics(range).expect("selection metrics");
+    let (chars, lines) = crate::tui::ui::copy_selection_metrics(range).expect("selection metrics");
 
     assert_eq!(
         chars,
@@ -490,8 +493,10 @@ fn test_copy_selection_mouse_drag_extracts_expected_multiline_range() {
     let _print_end_col = (print_text.find(");").expect("print end") + 2) as u16;
 
     let base_y = layout.messages_area.y;
-    let start_row = base_y + (fn_line_idx - visible_start) as u16;
-    let end_row = base_y + (print_line_idx - visible_start) as u16;
+    let start_row = crate::tui::ui::copy_viewport_display_row_for_line(fn_line_idx)
+        .unwrap_or(base_y + (fn_line_idx - visible_start) as u16);
+    let end_row = crate::tui::ui::copy_viewport_display_row_for_line(print_line_idx)
+        .unwrap_or(base_y + (print_line_idx - visible_start) as u16);
 
     let start_x = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
         .find(|&column| {
@@ -568,7 +573,8 @@ fn test_copy_selection_mouse_click_does_not_enter_mode() {
         })
         .expect("println line");
 
-    let row = layout.messages_area.y + (target.0 - visible_start) as u16;
+    let row = crate::tui::ui::copy_viewport_display_row_for_line(target.0)
+        .unwrap_or(layout.messages_area.y + (target.0 - visible_start) as u16);
     let col = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
         .find(|&column| {
             crate::tui::ui::copy_viewport_point_from_screen(column, row)
@@ -626,8 +632,10 @@ fn test_copy_selection_mouse_drag_auto_copies_and_keeps_highlight() {
     let fn_col = unicode_width::UnicodeWidthStr::width(&fn_text[..fn_byte]) as u16;
 
     let base_y = layout.messages_area.y;
-    let start_row = base_y + (fn_line_idx - visible_start) as u16;
-    let end_row = base_y + (print_line_idx - visible_start) as u16;
+    let start_row = crate::tui::ui::copy_viewport_display_row_for_line(fn_line_idx)
+        .unwrap_or(base_y + (fn_line_idx - visible_start) as u16);
+    let end_row = crate::tui::ui::copy_viewport_display_row_for_line(print_line_idx)
+        .unwrap_or(base_y + (print_line_idx - visible_start) as u16);
 
     let start_x = (layout.messages_area.x..layout.messages_area.x + layout.messages_area.width)
         .find(|&column| {
@@ -1001,9 +1009,7 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
         modifiers: KeyModifiers::empty(),
     });
     assert!(!app.progress_copy_selection_edge_autoscroll());
-    assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(
-        &app
-    ));
+    assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app));
 }
 
 #[test]
@@ -1195,9 +1201,7 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
         row: near_top_row,
         modifiers: KeyModifiers::empty(),
     });
-    assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(
-        &app
-    ));
+    assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(&app));
 }
 
 #[test]
@@ -1526,8 +1530,7 @@ fn test_changelog_overlay_mouse_drag_release_copies_text() {
         .expect("changelog overlay should register a copy viewport snapshot");
     let line_idx = (visible_start..visible_end)
         .find(|&abs_line| {
-            crate::tui::ui::copy_viewport_line_text(abs_line)
-                .is_some_and(|t| !t.trim().is_empty())
+            crate::tui::ui::copy_viewport_line_text(abs_line).is_some_and(|t| !t.trim().is_empty())
         })
         .expect("expected a visible non-empty changelog line");
 
