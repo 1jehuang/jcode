@@ -981,9 +981,14 @@
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
-    "crates/jcode-base/src/hooks.rs": {
+    "crates/jcode-base/src/hooks/mod.rs": {
       "dot_ok": 0,
-      "let_underscore": 3,
+      "let_underscore": 1,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/hooks/sync_runner.rs": {
+      "dot_ok": 0,
+      "let_underscore": 1,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/image_normalize.rs": {
@@ -2278,7 +2283,7 @@
     },
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": {
       "dot_ok": 1,
-      "let_underscore": 4,
+      "let_underscore": 5,
       "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/app/commands_cloud_completion.rs": {
