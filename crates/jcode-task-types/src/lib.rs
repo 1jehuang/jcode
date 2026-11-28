@@ -200,7 +200,7 @@ macro_rules! semantic_state {
     (
         $(#[$meta:meta])*
         $name:ident {
-            $( $variant:ident = $label:literal, score: $score:literal ),+ $(,)?
+            $( $variant:ident = $label:literal $(| $legacy:literal)*, score: $score:literal ),+ $(,)?
         }
     ) => {
         $(#[$meta])*
@@ -244,6 +244,10 @@ macro_rules! semantic_state {
             {
                 use serde::de::Error;
                 let raw = String::deserialize(deserializer)?;
+                match raw.trim().to_ascii_lowercase().as_str() {
+                    $( $( $legacy => return Ok(Self::$variant), )* )+
+                    _ => {}
+                }
                 Self::parse(&raw).ok_or_else(|| {
                     D::Error::custom(format!(
                         concat!("invalid ", stringify!($name), " state: {}"),
@@ -389,11 +393,18 @@ semantic_state! {
 semantic_state! {
     /// How far a goal's result actually traveled toward the user's outcome.
     DeliveryState {
-        NotStarted = "not_started", score: 0,
-        ChangeMade = "change_made", score: 25,
-        Integrated = "integrated", score: 65,
-        WorkflowValidated = "workflow_validated", score: 88,
-        OutcomeDelivered = "outcome_delivered", score: 98,
+        Undelivered = "undelivered" | "not_started" | "change_made" | "integrated" | "workflow_validated", score: 0,
+        PartiallyDelivered = "partially_delivered", score: 50,
+        Delivered = "delivered" | "outcome_delivered", score: 98,
+    }
+}
+
+semantic_state! {
+    /// How the result was checked, independent of whether it reached the user.
+    VerificationState {
+        Unchecked = "unchecked", score: 0,
+        CheckedInIsolation = "checked_in_isolation", score: 50,
+        CheckedEndToEnd = "checked_end_to_end", score: 98,
     }
 }
 
@@ -613,6 +624,7 @@ pub struct TodoPlanChange {
 /// taste judgment. Items like "read the auth code" have no meaningful score of
 /// their own, so the score lives here instead of on `TodoItem`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub struct TodoGoal {
     /// Group label this goal describes. `None` covers the ungrouped list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,7 +676,7 @@ pub struct TodoGoal {
     pub feedback_loop_traceability_history: Vec<FeedbackLoopTraceability>,
     /// How far the goal's result actually traveled toward the user's outcome:
     /// required on incoming goal assessments. Historical goals may omit it;
-    /// missing data is distinct from an explicit assessment of `not_started`.
+    /// missing data is distinct from an explicit assessment of `undelivered`.
     #[serde(
         default,
         alias = "end_to_end_ownership",
@@ -679,6 +691,12 @@ pub struct TodoGoal {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub delivery_state_history: Vec<DeliveryState>,
+    /// What verification has actually been performed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_state: Option<VerificationState>,
+    /// Distinct verification states, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_state_history: Vec<VerificationState>,
     /// Intrinsic difficulty of this goal. Descriptive, never gated: it only
     /// calibrates how much delivery follow-through a completion review expects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -706,6 +724,47 @@ pub struct TodoGoal {
     pub cannot_complete: Option<String>,
 }
 
+impl Serialize for TodoGoal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TodoGoal::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TodoGoal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Inspect the old labels before the field deserializer collapses them.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let legacy_checked = |v: &serde_json::Value| {
+            v.as_str()
+                .is_some_and(|s| s.trim().eq_ignore_ascii_case("workflow_validated"))
+        };
+        let current_checked = raw
+            .get("delivery_state")
+            .or_else(|| raw.get("end_to_end_ownership"))
+            .is_some_and(legacy_checked);
+        let history_checked = raw
+            .get("delivery_state_history")
+            .or_else(|| raw.get("end_to_end_ownership_history"))
+            .and_then(|v| v.as_array())
+            .is_some_and(|v| v.iter().any(legacy_checked));
+        let mut goal = TodoGoal::deserialize(raw).map_err(serde::de::Error::custom)?;
+        if current_checked && goal.verification_state.is_none() {
+            goal.verification_state = Some(VerificationState::CheckedEndToEnd);
+        }
+        if history_checked
+            && !goal
+                .verification_state_history
+                .contains(&VerificationState::CheckedEndToEnd)
+        {
+            goal.verification_state_history
+                .insert(0, VerificationState::CheckedEndToEnd);
+        }
+        let mut seen = std::collections::HashSet::new();
+        goal.delivery_state_history.retain(|s| seen.insert(*s));
+        Ok(goal)
+    }
+}
+
 /// A goal field changed by a todo-tool update. This lets transcript renderers
 /// show a concise quality-gate refinement instead of repeating the full plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,6 +778,7 @@ pub enum TodoGoalField {
     FeedbackLoopTraceability,
     #[serde(alias = "end_to_end_ownership")]
     DeliveryState,
+    VerificationState,
     Autonomy,
     IterationMaturity,
     StoppingEvidence,
@@ -825,8 +885,8 @@ mod semantic_state_tests {
             "clear"
         );
         assert_eq!(
-            serde_json::to_value(DeliveryState::OutcomeDelivered).unwrap(),
-            "outcome_delivered"
+            serde_json::to_value(DeliveryState::Delivered).unwrap(),
+            "delivered"
         );
         assert_eq!(
             serde_json::to_value(Difficulty::OpenEnded).unwrap(),
@@ -890,8 +950,8 @@ mod semantic_state_tests {
         assert!(IntentUnderstanding::Uncertain < IntentUnderstanding::Partial);
         assert!(IntentUnderstanding::Partial < IntentUnderstanding::Clear);
         assert!(ConfidenceState::Speculative < ConfidenceState::Verified);
-        assert!(DeliveryState::NotStarted < DeliveryState::ChangeMade);
-        assert!(DeliveryState::ChangeMade < DeliveryState::WorkflowValidated);
+        assert!(DeliveryState::Undelivered < DeliveryState::PartiallyDelivered);
+        assert!(DeliveryState::PartiallyDelivered < DeliveryState::Delivered);
         assert!(FeedbackLoopRelevance::Indirect < FeedbackLoopRelevance::Synthetic);
         assert!(FeedbackLoopRelevance::Synthetic < FeedbackLoopRelevance::Representative);
         assert!(FeedbackLoopRelevance::Representative < FeedbackLoopRelevance::AcceptanceBlocked);
@@ -911,16 +971,68 @@ mod semantic_state_tests {
     #[test]
     fn goal_serializes_new_field_names_only() {
         let goal = TodoGoal {
-            delivery_state: Some(DeliveryState::WorkflowValidated),
+            delivery_state: Some(DeliveryState::Undelivered),
             difficulty: Some(Difficulty::Involved),
             autonomy: Some(Autonomy::Proactive),
             ..Default::default()
         };
         let json = serde_json::to_value(&goal).unwrap();
-        assert_eq!(json["delivery_state"], "workflow_validated");
+        assert_eq!(json["delivery_state"], "undelivered");
         assert_eq!(json["difficulty"], "involved");
         assert_eq!(json["autonomy"], "proactive");
         assert!(json.get("end_to_end_ownership").is_none());
+    }
+
+    #[test]
+    fn legacy_delivery_and_verification_migrate_independently() {
+        for (label, delivery, verification) in [
+            ("not_started", DeliveryState::Undelivered, None),
+            ("change_made", DeliveryState::Undelivered, None),
+            ("integrated", DeliveryState::Undelivered, None),
+            (
+                "workflow_validated",
+                DeliveryState::Undelivered,
+                Some(VerificationState::CheckedEndToEnd),
+            ),
+            ("outcome_delivered", DeliveryState::Delivered, None),
+        ] {
+            let goal: TodoGoal =
+                serde_json::from_value(serde_json::json!({ "end_to_end_ownership": label }))
+                    .unwrap();
+            assert_eq!(
+                (goal.delivery_state, goal.verification_state),
+                (Some(delivery), verification)
+            );
+            assert!(DeliveryState::parse(label).is_none()); // legacy input is read-only
+        }
+        let goal: TodoGoal = serde_json::from_value(serde_json::json!({
+            "delivery_state": "workflow_validated",
+            "verification_state": "checked_in_isolation",
+            "end_to_end_ownership_history": ["not_started", "integrated", "workflow_validated", "outcome_delivered"],
+            "verification_state_history": ["checked_in_isolation"]
+        })).unwrap();
+        assert_eq!(
+            goal.verification_state,
+            Some(VerificationState::CheckedInIsolation)
+        );
+        assert_eq!(
+            goal.delivery_state_history,
+            [DeliveryState::Undelivered, DeliveryState::Delivered]
+        );
+        assert_eq!(
+            goal.verification_state_history,
+            [
+                VerificationState::CheckedEndToEnd,
+                VerificationState::CheckedInIsolation
+            ]
+        );
+        let saved = serde_json::to_string(&goal).unwrap();
+        assert_eq!(serde_json::from_str::<TodoGoal>(&saved).unwrap(), goal);
+        assert!(!saved.contains("workflow_validated"));
+        assert_eq!(
+            serde_json::from_str::<TodoGoal>("{}").unwrap(),
+            TodoGoal::default()
+        );
     }
 
     #[test]
