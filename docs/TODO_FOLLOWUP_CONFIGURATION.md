@@ -9,7 +9,9 @@ To opt in, add the following to `~/.jcode/config.toml` (or your `JCODE_HOME/conf
 todo_gate_digest = true
 ```
 
-Set `todo_gate_digest = false` to disable automatic quality reviews again. Auto-poke must also be enabled for a model follow-up to run (`features.auto_poke`, or `/poke on`). `/poke off` does not hide completion reports. Incomplete-work pokes are independent of the quality-review toggle.
+Set `todo_gate_digest = false` to disable automatic quality reviews again. Auto-poke must also be enabled for a model follow-up to run (`features.auto_poke`, or `/poke on`). `/poke off` does not hide completion reports. Incomplete-work and delivery pokes are independent of the quality-review toggle.
+
+Checking off the last task does not deliver the goal. If auto-poke is on, a goal explicitly assessed as `not_started`, `change_made`, `integrated`, or `workflow_validated` can prompt a concrete next action within the user's request. This also applies to a goal with no tasks yet. A missing legacy assessment does not trigger a delivery poke. A goal with only cancelled tasks, a `cannot_complete` reason, or a documented stop is exempt. Auto-poke does not repeat the same unchanged delivery gap or treat it as success.
 
 ## Daemon ownership
 

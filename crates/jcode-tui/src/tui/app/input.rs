@@ -1458,13 +1458,9 @@ impl App {
             // campaign ownership is migrated as well.
             return self.schedule_overnight_poke_followup_if_needed();
         }
-        if self.all_open_todos_are_paused() {
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
-            return false;
-        }
         self.schedule_auto_poke_followup_after_response(final_response_delivered)
-            || self.schedule_overnight_poke_followup_if_needed()
+            || (!self.all_open_todos_are_paused()
+                && self.schedule_overnight_poke_followup_if_needed())
     }
 
     #[cfg(test)]
@@ -1522,19 +1518,26 @@ impl App {
             .filter(|todo| !self.todo_is_paused_for_auto_followup(todo))
             .cloned()
             .collect();
-        if incomplete.is_empty() && todos.iter().any(super::commands::is_incomplete_poke_todo) {
-            // User-only blockers and live waits are neither resistance nor
-            // completion. Do not spend work or assessment review budgets.
-            self.last_auto_poke_fingerprint = None;
-            self.auto_poke_attempts = 0;
-            return false;
-        }
         let todo_session_id = self
             .remote_session_id
             .as_deref()
             .unwrap_or(&self.session.id)
             .to_string();
         let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
+        let delivery_message = incomplete
+            .is_empty()
+            .then(|| crate::todo::undelivered_goal_message(&todos, &goals))
+            .flatten();
+        if delivery_message.is_none()
+            && incomplete.is_empty()
+            && todos.iter().any(super::commands::is_incomplete_poke_todo)
+        {
+            // User-only blockers and live waits are neither resistance nor
+            // completion. Do not spend work or assessment review budgets.
+            self.last_auto_poke_fingerprint = None;
+            self.auto_poke_attempts = 0;
+            return false;
+        }
         let plan = crate::todo::load_plan(&todo_session_id).unwrap_or_default();
         let todo_fingerprint =
             serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
@@ -1570,7 +1573,7 @@ impl App {
             // one fresh nudge rather than being mistaken for the old stall.
             self.last_auto_poke_fingerprint = None;
             self.auto_poke_attempts = 0;
-            if todos.is_empty() {
+            if todos.is_empty() && delivery_message.is_none() {
                 // No todo list exists yet for this session. Auto-poke is armed
                 // by default (`features.auto_poke`), so disarming here would
                 // silently kill the feature for the whole session after the
@@ -1579,6 +1582,7 @@ impl App {
                 // simply do nothing this turn.
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
+                self.todo_completion_gate_attempts = 0;
                 self.last_todo_ownership_fingerprint = None;
                 self.todo_gate_digest_delivered = false;
                 return false;
@@ -1600,12 +1604,14 @@ impl App {
                     return true;
                 }
             }
-            let ownership_needs_followup = quality_reviews_enabled
-                && !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
+            let ownership_needs_followup = delivery_message.is_some()
+                || (quality_reviews_enabled
+                    && !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals));
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
-            let ownership_message =
-                crate::todo::build_todo_ownership_continuation_message(&todos, &goals);
+            let ownership_message = delivery_message.unwrap_or_else(|| {
+                crate::todo::build_todo_ownership_continuation_message(&todos, &goals)
+            });
             // Only a different actionable gap merits another ownership turn.
             // Reworded evidence, confidence updates and descriptive assessment
             // changes must not re-arm a nudge the agent already received.

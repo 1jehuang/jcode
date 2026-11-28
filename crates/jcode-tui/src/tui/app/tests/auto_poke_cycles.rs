@@ -1,5 +1,5 @@
 #[test]
-fn default_auto_poke_does_not_recheck_completed_confidence_or_ownership() {
+fn default_auto_poke_rechecks_undelivered_goal_but_not_completed_confidence() {
     with_temp_jcode_home(|| {
         assert!(!crate::config::config().features.todo_gate_digest);
         for confidence in [
@@ -32,19 +32,53 @@ fn default_auto_poke_does_not_recheck_completed_confidence_or_ownership() {
             )
             .expect("save weak ownership");
             assert!(app.schedule_auto_poke_followup_if_needed());
-            assert_eq!(
-                app.queued_messages,
-                vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
-            );
+            assert_eq!(app.queued_messages.len(), 1);
+            assert!(app.queued_messages[0].contains("still undelivered"));
             assert!(!app.todo_confidence_spike_challenged);
-            assert_eq!(app.todo_completion_gate_attempts, 0);
+            assert_eq!(app.todo_completion_gate_attempts, 1);
             assert!(
                 !app.display_messages()
                     .iter()
-                    .any(|message| message.content.contains("Double-checking")
-                        || message.content.contains("Checking end-to-end"))
+                    .any(|message| message.content.contains("Double-checking"))
             );
         }
+    });
+}
+
+#[test]
+fn paused_login_does_not_hide_an_independent_undelivered_goal() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "login".into(),
+                group: Some("account".into()),
+                status: "pending".into(),
+                requires_user_auth: Some(crate::todo::TodoUserAuth {
+                    reason: "Only the user can log in".into(),
+                }),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                group: Some("offline".into()),
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        assert!(app.schedule_turn_end_followups_after_response(true));
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(app.queued_messages[0].contains("offline"));
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(!app.schedule_turn_end_followups_after_response(true));
+        assert!(app.queued_messages.is_empty());
     });
 }
 
@@ -176,7 +210,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
@@ -284,7 +318,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         crate::todo::save_goals(
             &app.session.id,
             &[crate::todo::TodoGoal {
-                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
