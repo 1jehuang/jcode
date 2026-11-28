@@ -625,7 +625,43 @@ pub struct AgentsConfig {
     #[serde(default = "default_memory_jev_threshold")]
     pub memory_jev_threshold: f32,
     /// Optional model override for memory extraction only, never recall.
+    ///
+    /// When `memory_sidecar_backend` is unset ("auto"), this is only used for
+    /// OpenAI or Claude models; any other value falls back to auto-select. When
+    /// `memory_sidecar_backend = "provider"`, this model is passed to the active
+    /// provider via `set_model` before `complete_simple`, so the sidecar uses the
+    /// model you specify instead of the provider's default.
     pub memory_model: Option<String>,
+    /// Explicit backend selection for the memory sidecar.
+    ///
+    /// - `"auto"` (default): auto-select OpenAI, then Claude, then the active
+    ///   provider, based on which credentials exist.
+    /// - `"openai"`: force the OpenAI Responses API backend (requires Codex
+    ///   credentials).
+    /// - `"claude"`: force the Claude Messages API backend (requires Claude
+    ///   credentials).
+    /// - `"provider"`: dispatch through the active agent provider via
+    ///   `complete_simple`. Works with any provider (Copilot, Gemini, Cursor,
+    ///   Bedrock, OpenRouter, custom OpenAI-compatible, etc.). Use this when
+    ///   you want the sidecar to use your main provider's model instead of
+    ///   OpenAI/Claude.
+    ///
+    /// Env override: `JCODE_MEMORY_SIDECAR_BACKEND`.
+    #[serde(default)]
+    pub memory_sidecar_backend: Option<String>,
+    /// Fallback behavior when no memory model is marked (neither at session
+    /// level nor in config).
+    ///
+    /// - `"openai_claude"` (default): try OpenAI, then Claude, then the active
+    ///   provider's current model. This preserves the legacy auto-select behavior.
+    /// - `"provider"`: use the active provider's current model directly, skipping
+    ///   the OpenAI/Claude credential checks.
+    /// - `"none"`: memory sidecar is disabled when no model is explicitly marked,
+    ///   preventing unintended use of a different model for memory.
+    ///
+    /// Env override: `JCODE_MEMORY_SIDECAR_FALLBACK`.
+    #[serde(default)]
+    pub memory_sidecar_fallback: String,
     /// Whether optional automatic memory extraction may use a text-generating
     /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
@@ -714,6 +750,7 @@ fn default_memory_rerank_min_agree() -> usize {
 
 #[path = "lib_agents_defaults.rs"]
 mod agents_defaults;
+
 /// How swarm-created agents should be spawned.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
