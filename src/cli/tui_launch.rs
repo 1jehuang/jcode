@@ -10,6 +10,7 @@ use crate::{
     build, id, logging, replay, server, session, setup_hints, startup_profile, tui, video_export,
 };
 
+use super::args::Args;
 use super::hot_exec::{execute_requested_action, has_requested_action};
 
 use super::terminal::{
@@ -134,14 +135,10 @@ mod turn_envelope_tests {
     }
 }
 
-pub async fn run_tui_client(
-    resume_session: Option<String>,
+pub(crate) async fn run_tui_client(
+    args: &Args,
     startup_hints: Option<setup_hints::StartupHints>,
     server_spawning: bool,
-    fresh_spawn: bool,
-    remote_working_dir: Option<String>,
-    onboarding_sim: bool,
-    update_sim: bool,
     initial_model_spec: Option<String>,
 ) -> Result<()> {
     startup_profile::mark("tui_client_enter");
@@ -152,7 +149,7 @@ pub async fn run_tui_client(
     startup_profile::mark("keyboard_enhancement");
     startup_profile::mark("terminal_modes");
 
-    if let Some(ref session_id) = resume_session {
+    if let Some(session_id) = &args.resume {
         set_current_session(session_id);
     }
     let native_ssh = std::env::var_os("JCODE_SSH_REMOTE").is_some();
@@ -163,7 +160,7 @@ pub async fn run_tui_client(
 
     if native_ssh {
         let host = std::env::var("JCODE_SSH_REMOTE").unwrap_or_default();
-        let label = resume_session.as_deref().unwrap_or("new session");
+        let label = args.resume.as_deref().unwrap_or("new session");
         crate::process_title::set_client_remote_display_title(
             &host,
             label,
@@ -173,7 +170,7 @@ pub async fn run_tui_client(
             std::io::stdout(),
             crossterm::terminal::SetTitle(format!("jcode SSH {host} {label}"))
         );
-    } else if let Some(ref session_id) = resume_session {
+    } else if let Some(session_id) = &args.resume {
         let session_name = id::extract_session_name(session_id)
             .map(|s| s.to_string())
             .unwrap_or_else(|| session_id.clone());
@@ -199,21 +196,21 @@ pub async fn run_tui_client(
     }
     startup_profile::mark("terminal_title");
 
-    let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
+    let mut app = tui::App::new_for_remote_with_options(args.resume.clone(), args.fresh_spawn);
     if let Some(model_spec) = initial_model_spec {
         app.set_initial_model_spec(model_spec);
     }
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }
-    if onboarding_sim {
+    if args.onboarding_sim {
         app.start_onboarding_simulator_on_launch();
     }
-    if update_sim {
+    if args.update_sim {
         app.start_update_simulator_on_launch();
     }
     startup_profile::mark("app_new_for_remote");
-    if resume_session.is_none()
+    if args.resume.is_none()
         && let Some(hints) = startup_hints
     {
         apply_startup_hints(&mut app, hints);
@@ -222,7 +219,9 @@ pub async fn run_tui_client(
     startup_profile::mark("pre_run_remote");
     startup_profile::report_to_log();
 
-    let result = app.run_remote(terminal, remote_working_dir).await;
+    let result = app
+        .run_remote(terminal, args.remote_working_dir.clone())
+        .await;
 
     // On the error path, `?` returns here while `tui_runtime` is still alive, so
     // its `Drop` guarantees the terminal is restored (issue #214). On the happy

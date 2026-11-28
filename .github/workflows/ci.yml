@@ -216,6 +216,11 @@ jobs:
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
+      - name: Run build manifest retention regression
+        if: runner.os == 'Linux'
+        shell: bash
+        run: cargo test --locked --target ${{ matrix.target }} -p jcode-build-support --lib daily_prune_waits_for_manifest_repair
+
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -557,9 +562,9 @@ jobs:
             -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-app-core', '--no-default-features', '--lib', 'tool::agentgrep::tests::search_cancellation_', '--', '--nocapture')
 
           & ./scripts/invoke_cargo_with_timeout.ps1 `
-            -Name 'Windows adopted background cancellation tests' `
+            -Name 'Windows adopted background and status writer tests' `
             -TimeoutSeconds 300 `
-            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'background::tests::adopted_task_', '--', '--nocapture')
+            -CargoArgs @('test', '--locked', '--target', 'x86_64-pc-windows-msvc', '-p', 'jcode-base', '--no-default-features', '--lib', 'adopted_task_', '--', '--nocapture')
 
       - name: Run Windows launcher backup sweep test
         shell: pwsh
