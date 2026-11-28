@@ -546,7 +546,7 @@ async fn context_limit_recovery_announces_measured_token_counts() {
         );
     }
 
-    assert!(agent.try_auto_compact_after_context_limit("maximum context length exceeded"));
+    assert!(agent.try_auto_compact_after_context_limit("maximum context length exceeded", &[]));
     match agent.take_recovery_compaction_event() {
         ServerEvent::Compaction {
             trigger,
