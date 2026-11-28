@@ -347,6 +347,8 @@ pub fn render_completion_report(todos: &[TodoItem], plan: &TodoPlan, goals: &[To
         );
         field!("Delivery state", delivery_state);
         hist!("Delivery state", delivery_state_history);
+        field!("Verification state", verification_state);
+        hist!("Verification state", verification_state_history);
         field!("Difficulty (descriptive)", difficulty);
         field!("Autonomy (descriptive)", autonomy);
         field!("Iteration maturity", iteration_maturity);

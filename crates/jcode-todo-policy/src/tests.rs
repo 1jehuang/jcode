@@ -644,8 +644,8 @@ fn newly_completed_group_requires_sufficient_delivery() {
 
     for delivery in [
         None,
-        Some(DeliveryState::ChangeMade),
-        Some(DeliveryState::Integrated),
+        Some(DeliveryState::Undelivered),
+        Some(DeliveryState::PartiallyDelivered),
     ] {
         assert!(!newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -656,40 +656,36 @@ fn newly_completed_group_requires_sufficient_delivery() {
     assert!(newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
-        &[delivery_goal(
-            Some("ship"),
-            Some(DeliveryState::WorkflowValidated)
-        )],
+        &[delivery_goal(Some("ship"), Some(DeliveryState::Delivered))],
     ));
 }
 
-/// Difficulty never raises the delivery-state bar by itself. Operational
-/// outcome delivery comes from the request, not implementation difficulty.
+/// Difficulty and even end-to-end verification cannot substitute for delivery.
 #[test]
 fn difficulty_is_descriptive_and_never_raises_the_delivery_bar() {
     let previous = vec![todo("work", "in_progress", Some("ship"))];
     let completed = vec![todo("work", "completed", Some("ship"))];
 
-    let mut hard = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+    let mut hard = delivery_goal(Some("ship"), Some(DeliveryState::PartiallyDelivered));
+    hard.verification_state = Some(VerificationState::CheckedEndToEnd);
     hard.difficulty = Some(Difficulty::Hard);
     hard.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
     hard.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
-    assert!(newly_completed_groups_have_sufficient_delivery(
+    assert!(!newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
         &[hard.clone()],
     ));
-    hard.delivery_state = Some(DeliveryState::OutcomeDelivered);
+    hard.delivery_state = Some(DeliveryState::Delivered);
     assert!(newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
         &[hard],
     ));
 
-    // A trivial goal, and one with no difficulty at all, pass at
-    // workflow_validated: absent difficulty is never punished.
+    // Delivered work passes regardless of difficulty.
     for difficulty in [None, Some(Difficulty::Trivial), Some(Difficulty::Routine)] {
-        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Delivered));
         goal.difficulty = difficulty;
         assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -700,17 +696,14 @@ fn difficulty_is_descriptive_and_never_raises_the_delivery_bar() {
 
     assert_eq!(
         required_delivery_state(Some(Difficulty::Involved)),
-        DeliveryState::WorkflowValidated
+        DeliveryState::Delivered
     );
-    assert_eq!(
-        required_delivery_state(None),
-        DeliveryState::WorkflowValidated
-    );
+    assert_eq!(required_delivery_state(None), DeliveryState::Delivered);
 }
 
 #[test]
 fn feedback_loop_completion_bar_scales_at_involved_difficulty() {
-    let mut ordinary = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+    let mut ordinary = delivery_goal(None, Some(DeliveryState::Delivered));
     assert!(delivery_state_passes(&ordinary));
     ordinary.feedback_loop_relevance = Some(FeedbackLoopRelevance::Indirect);
     assert!(!delivery_state_passes(&ordinary));
@@ -718,7 +711,7 @@ fn feedback_loop_completion_bar_scales_at_involved_difficulty() {
     ordinary.feedback_loop_coverage = Some(FeedbackLoopCoverage::Narrow);
     assert!(!delivery_state_passes(&ordinary));
 
-    let mut involved = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+    let mut involved = delivery_goal(None, Some(DeliveryState::Delivered));
     involved.difficulty = Some(Difficulty::Involved);
     assert!(!delivery_state_passes(&involved));
     involved.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
@@ -734,7 +727,7 @@ fn feedback_loop_completion_bar_scales_at_involved_difficulty() {
 
 #[test]
 fn feedback_loop_traceability_scales_at_involved_difficulty() {
-    let mut goal = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+    let mut goal = delivery_goal(None, Some(DeliveryState::Delivered));
     goal.feedback_loop_traceability = Some(FeedbackLoopTraceability::Partial);
     assert!(delivery_state_passes(&goal));
 
@@ -753,7 +746,7 @@ fn feedback_loop_traceability_scales_at_involved_difficulty() {
 fn research_completion_requires_stopping_evidence() {
     let previous = vec![todo("work", "in_progress", Some("ship"))];
     let completed = vec![todo("work", "completed", Some("ship"))];
-    let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+    let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Delivered));
     goal.difficulty = Some(Difficulty::Research);
     goal.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
     goal.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
@@ -778,7 +771,7 @@ fn autonomy_requires_necessary_followthrough_at_completion() {
     let previous = vec![todo("work", "in_progress", Some("ship"))];
     let completed = vec![todo("work", "completed", Some("ship"))];
     for autonomy in [None, Some(Autonomy::RequestedOnly)] {
-        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Delivered));
         goal.autonomy = autonomy;
         assert!(!newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -791,7 +784,7 @@ fn autonomy_requires_necessary_followthrough_at_completion() {
         Autonomy::Proactive,
         Autonomy::Stewardship,
     ] {
-        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
+        let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Delivered));
         goal.autonomy = Some(autonomy);
         assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -812,7 +805,7 @@ fn iteration_maturity_requires_terminal_basis_and_supporting_evidence() {
         Some(IterationMaturity::Improving),
         Some(IterationMaturity::PlateauUnproven),
     ] {
-        let mut goal = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+        let mut goal = delivery_goal(Some("search"), Some(DeliveryState::Delivered));
         goal.iteration_maturity = maturity;
         assert!(!newly_completed_groups_have_sufficient_delivery(
             &previous,
@@ -821,7 +814,7 @@ fn iteration_maturity_requires_terminal_basis_and_supporting_evidence() {
         ));
     }
 
-    let mut plateau = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+    let mut plateau = delivery_goal(Some("search"), Some(DeliveryState::Delivered));
     plateau.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
     assert!(!newly_completed_groups_have_sufficient_delivery(
         &previous,
@@ -836,7 +829,7 @@ fn iteration_maturity_requires_terminal_basis_and_supporting_evidence() {
         &[plateau],
     ));
 
-    let outcome = delivery_goal(Some("search"), Some(DeliveryState::WorkflowValidated));
+    let outcome = delivery_goal(Some("search"), Some(DeliveryState::Delivered));
     assert!(newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
@@ -863,10 +856,7 @@ fn delivery_gate_normalizes_groups_and_supports_ungrouped_work() {
     assert!(newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
-        &[delivery_goal(
-            Some(" ship"),
-            Some(DeliveryState::OutcomeDelivered)
-        )],
+        &[delivery_goal(Some(" ship"), Some(DeliveryState::Delivered))],
     ));
 
     let previous = vec![todo("work", "in_progress", None)];
@@ -874,7 +864,7 @@ fn delivery_gate_normalizes_groups_and_supports_ungrouped_work() {
     assert!(newly_completed_groups_have_sufficient_delivery(
         &previous,
         &completed,
-        &[delivery_goal(None, Some(DeliveryState::OutcomeDelivered))],
+        &[delivery_goal(None, Some(DeliveryState::Delivered))],
     ));
 }
 
@@ -906,14 +896,14 @@ fn ownership_message_names_the_field_that_must_be_raised() {
 #[test]
 fn ownership_continuation_identifies_each_failing_field_and_goal() {
     let todos = vec![todo("work", "completed", Some("ship"))];
-    let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::Integrated));
+    let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::PartiallyDelivered));
     goal.autonomy = Some(Autonomy::RequestedOnly);
     goal.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
     goal.stopping_evidence = None;
 
     let message = build_todo_ownership_continuation_message(&todos, &[goal]);
     assert!(message.contains("Goal \"ship\""));
-    assert!(message.contains("complete workflow"));
+    assert!(message.contains("deliver the requested outcome"));
     assert!(!message.contains("ownership of the necessary follow-through"));
     assert!(message.contains("evidence about whether the work should stop"));
     assert!(!message.contains("workflow_validated"));
@@ -939,8 +929,8 @@ fn completed_groups_require_sufficient_delivery_at_turn_finish() {
 
     let completed = vec![todo("work", "completed", Some("ship"))];
     for delivery in [
-        Some(DeliveryState::ChangeMade),
-        Some(DeliveryState::Integrated),
+        Some(DeliveryState::Undelivered),
+        Some(DeliveryState::PartiallyDelivered),
     ] {
         assert!(!completed_groups_have_sufficient_delivery(
             &completed,
@@ -949,10 +939,7 @@ fn completed_groups_require_sufficient_delivery_at_turn_finish() {
     }
     assert!(completed_groups_have_sufficient_delivery(
         &completed,
-        &[delivery_goal(
-            Some("ship"),
-            Some(DeliveryState::WorkflowValidated)
-        )],
+        &[delivery_goal(Some("ship"), Some(DeliveryState::Delivered))],
     ));
 }
 
@@ -964,7 +951,7 @@ fn ownership_gate_does_not_turn_assessment_metadata_into_more_work() {
         &todos,
         &[TodoGoal::default()]
     ));
-    let mut goal = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+    let mut goal = delivery_goal(None, Some(DeliveryState::Delivered));
     goal.autonomy = Some(Autonomy::RequestedOnly);
     goal.difficulty = Some(Difficulty::Hard);
     goal.feedback_loop_traceability = Some(FeedbackLoopTraceability::Partial);
@@ -990,7 +977,7 @@ fn ownership_gate_respects_documented_stops_but_not_unsupported_ones() {
         IterationMaturity::BudgetExhausted,
         IterationMaturity::PlateauConfirmed,
     ] {
-        let mut goal = delivery_goal(None, Some(DeliveryState::Integrated));
+        let mut goal = delivery_goal(None, Some(DeliveryState::PartiallyDelivered));
         goal.iteration_maturity = Some(maturity);
         goal.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceBlocked);
         for evidence in [None, Some("".into()), Some("  ".into())] {
@@ -1028,15 +1015,15 @@ fn ownership_gate_still_names_explicit_unfinished_work_only() {
     unfinished.iteration_maturity = Some(IterationMaturity::Improving);
     let goals = [
         unfinished,
-        delivery_goal(Some("done"), Some(DeliveryState::WorkflowValidated)),
-        delivery_goal(Some("open"), Some(DeliveryState::ChangeMade)),
+        delivery_goal(Some("done"), Some(DeliveryState::Delivered)),
+        delivery_goal(Some("open"), Some(DeliveryState::Undelivered)),
     ];
     assert!(!completed_groups_have_sufficient_delivery(&todos, &goals));
     let message = build_todo_ownership_continuation_message(&todos, &goals);
     assert!(message.contains("Goal \"unfinished\": keep iterating"));
     assert!(!message.contains("Goal \"done\""));
     assert!(!message.contains("Goal \"open\""));
-    assert!(!message.contains("complete workflow"));
+    assert!(!message.contains("deliver the requested outcome"));
 }
 
 #[test]
@@ -1046,8 +1033,8 @@ fn ownership_followup_is_stable_across_todo_order_and_evidence_wording() {
         todo("a", "completed", Some("a")),
     ];
     let mut goals = [
-        delivery_goal(Some("b"), Some(DeliveryState::Integrated)),
-        delivery_goal(Some("a"), Some(DeliveryState::ChangeMade)),
+        delivery_goal(Some("b"), Some(DeliveryState::PartiallyDelivered)),
+        delivery_goal(Some("a"), Some(DeliveryState::Undelivered)),
     ];
     let message = build_todo_ownership_continuation_message(&todos, &goals);
     todos.reverse();

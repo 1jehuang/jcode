@@ -73,8 +73,13 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
             FeedbackLoopTraceability::Unmapped,
             FeedbackLoopTraceability::Complete,
         ],
-        delivery_state: Some(DeliveryState::OutcomeDelivered),
-        delivery_state_history: vec![DeliveryState::ChangeMade, DeliveryState::OutcomeDelivered],
+        delivery_state: Some(DeliveryState::Delivered),
+        delivery_state_history: vec![DeliveryState::Undelivered, DeliveryState::Delivered],
+        verification_state: Some(VerificationState::CheckedEndToEnd),
+        verification_state_history: vec![
+            VerificationState::Unchecked,
+            VerificationState::CheckedEndToEnd,
+        ],
         difficulty: Some(Difficulty::Involved),
         autonomy: Some(Autonomy::NecessaryFollowthrough),
         iteration_maturity: Some(IterationMaturity::OutcomeReached),
@@ -94,7 +99,7 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
         "synthetic",
         "narrow",
         "unmapped",
-        "change&#95;made",
+        "undelivered",
     ] {
         assert!(earlier.contains(value), "{value}");
     }
@@ -105,6 +110,8 @@ fn improved_histories_remain_prominent_and_all_goal_fields_render() {
         "Autonomy (descriptive)",
         "Iteration maturity",
         "Delivery state history",
+        "Verification state history",
+        "checked&#95;end&#95;to&#95;end",
         "Feedback loop traceability history",
     ] {
         assert!(report.contains(value), "{value}");

@@ -35,7 +35,7 @@ pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
     FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
     IterationMaturity, LANE_OWNER_WORKER, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem,
-    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth,
+    TodoPlan, TodoPlanChange, TodoPlanField, TodoUserAuth, VerificationState,
 };
 
 /// Return the canonical todo status for model-written status vocabulary.
@@ -135,11 +135,10 @@ pub fn completion_confidence_passes(state: Option<ConfidenceState>) -> bool {
     state.is_some_and(|state| state >= ConfidenceState::Validated)
 }
 
-/// The minimum delivery state for a completed goal. Outcome delivery is only
-/// appropriate when the request itself includes operational delivery, so it
-/// must not be inferred from difficulty.
+/// Only delivery of the requested outcome clears the delivery gap, regardless
+/// of difficulty or verification.
 pub fn required_delivery_state(_difficulty: Option<Difficulty>) -> DeliveryState {
-    DeliveryState::WorkflowValidated
+    DeliveryState::Delivered
 }
 
 /// Whether a completed goal's delivery and validation clear their
@@ -272,7 +271,7 @@ fn ownership_followup_reasons(goal: &TodoGoal) -> Vec<&'static str> {
         .delivery_state
         .is_some_and(|state| state < required_delivery_state(goal.difficulty))
     {
-        reasons.push("carry the work through the complete workflow.");
+        reasons.push("deliver the requested outcome.");
     }
     if goal
         .iteration_maturity
@@ -303,7 +302,7 @@ pub fn undelivered_goal_message(todos: &[TodoItem], goals: &[TodoGoal]) -> Optio
         let Some(state) = goal.delivery_state else {
             continue;
         };
-        if state == DeliveryState::OutcomeDelivered || goal_cannot_complete(goal).is_some() {
+        if state == DeliveryState::Delivered || goal_cannot_complete(goal).is_some() {
             continue;
         }
         let group = normalized_group(goal.group.as_deref());

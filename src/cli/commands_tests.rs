@@ -14,7 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 fn run_delivery_goal(group: &str) -> crate::todo::TodoGoal {
     crate::todo::TodoGoal {
         group: Some(group.into()),
-        delivery_state: Some(crate::todo::DeliveryState::Integrated),
+        delivery_state: Some(crate::todo::DeliveryState::PartiallyDelivered),
         ..Default::default()
     }
 }
@@ -37,7 +37,7 @@ fn run_delivery_continues_empty_and_completed_snapshots_without_quality_review()
             Some(Err("unchanged_delivery"))
         );
         let mut goal = run_delivery_goal("ship");
-        goal.delivery_state = Some(crate::todo::DeliveryState::OutcomeDelivered);
+        goal.delivery_state = Some(crate::todo::DeliveryState::Delivered);
         assert_eq!(budget.follow_up(&todos, || vec![goal], false), None);
     }
 }

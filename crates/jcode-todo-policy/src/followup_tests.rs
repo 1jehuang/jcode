@@ -416,7 +416,7 @@ fn default_policy_skips_all_quality_reviews_but_keeps_open_work_pokes() {
         let state = TodoSnapshot {
             todos: vec![item],
             goals: vec![TodoGoal {
-                delivery_state: Some(DeliveryState::OutcomeDelivered),
+                delivery_state: Some(DeliveryState::Delivered),
                 ..Default::default()
             }],
             long_session_review_due: true,
@@ -442,12 +442,13 @@ fn default_delivery_poke_tracks_outcome_even_after_final_answer_or_without_items
     for todos in [vec![], vec![done("attempt", ConfidenceState::Verified)]] {
         let mut policy = FollowUpPolicy::new(true);
         let mut s = snapshot(todos);
-        s.goals.push(TodoGoal::default());
+        s.goals.push(TodoGoal {
+            verification_state: Some(crate::VerificationState::CheckedEndToEnd),
+            ..Default::default()
+        });
         for state in [
-            DeliveryState::NotStarted,
-            DeliveryState::ChangeMade,
-            DeliveryState::Integrated,
-            DeliveryState::WorkflowValidated,
+            DeliveryState::Undelivered,
+            DeliveryState::PartiallyDelivered,
         ] {
             s.goals[0].delivery_state = Some(state);
             let poke = policy.decide_after_turn(&s, true).follow_up.unwrap();
@@ -458,7 +459,7 @@ fn default_delivery_poke_tracks_outcome_even_after_final_answer_or_without_items
                 "unchanged gap must not loop"
             );
         }
-        s.goals[0].delivery_state = Some(DeliveryState::OutcomeDelivered);
+        s.goals[0].delivery_state = Some(DeliveryState::Delivered);
         assert!(policy.decide_after_turn(&s, true).follow_up.is_none());
     }
 }
@@ -466,7 +467,7 @@ fn default_delivery_poke_tracks_outcome_even_after_final_answer_or_without_items
 #[test]
 fn default_delivery_poke_respects_stops_cancellation_and_opt_out() {
     let goal = TodoGoal {
-        delivery_state: Some(DeliveryState::Integrated),
+        delivery_state: Some(DeliveryState::PartiallyDelivered),
         ..Default::default()
     };
     let mut s = snapshot(vec![todo("withdrawn", "cancelled")]);
@@ -512,9 +513,9 @@ fn delivered_goal_only_cycles_do_not_consume_future_retry_budgets() {
     let mut s = snapshot(vec![]);
     s.goals.push(TodoGoal::default());
     for _ in 0..=MAX_GATE_ATTEMPTS {
-        s.goals[0].delivery_state = Some(DeliveryState::ChangeMade);
+        s.goals[0].delivery_state = Some(DeliveryState::Undelivered);
         assert_eq!(kind(&policy.decide(&s)), Some(FollowUpKind::Ownership));
-        s.goals[0].delivery_state = Some(DeliveryState::OutcomeDelivered);
+        s.goals[0].delivery_state = Some(DeliveryState::Delivered);
         assert!(policy.decide(&s).follow_up.is_none());
     }
 }
@@ -529,7 +530,7 @@ fn delivery_poke_targets_independent_goal_while_a_worker_is_running() {
     for label in ["worker goal", "parent goal"] {
         s.goals.push(TodoGoal {
             group: Some(label.into()),
-            delivery_state: Some(DeliveryState::Integrated),
+            delivery_state: Some(DeliveryState::PartiallyDelivered),
             ..Default::default()
         });
     }
@@ -635,7 +636,7 @@ fn ownership_gate_asks_once_per_distinct_gap() {
     let state = TodoSnapshot {
         todos: vec![done("ship", ConfidenceState::Verified)],
         goals: vec![TodoGoal {
-            delivery_state: Some(DeliveryState::ChangeMade),
+            delivery_state: Some(DeliveryState::Undelivered),
             ..Default::default()
         }],
         ..Default::default()
@@ -794,7 +795,7 @@ fn delivered_final_does_not_bypass_work_or_quality_gates() {
     review.long_session_review_due = true;
     let mut ownership = snapshot(vec![done("ship", ConfidenceState::Verified)]);
     ownership.goals.push(TodoGoal {
-        delivery_state: Some(DeliveryState::ChangeMade),
+        delivery_state: Some(DeliveryState::Undelivered),
         ..Default::default()
     });
     let mut spike = done("ship", ConfidenceState::Verified);
