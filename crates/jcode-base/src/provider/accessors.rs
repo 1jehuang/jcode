@@ -66,6 +66,23 @@ impl MultiProvider {
         self.anthropic_provider().is_some()
     }
 
+    /// The anthropic-compatible profile that `JCODE_NAMED_PROVIDER_PROFILE` names.
+    pub(super) fn active_named_anthropic_profile() -> Option<String> {
+        let Ok(name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") else {
+            return None;
+        };
+        let anthropic = crate::config::config()
+            .providers
+            .get(&name)
+            .is_some_and(|profile| {
+                matches!(
+                    profile.provider_type,
+                    crate::config::NamedProviderType::AnthropicCompatible
+                )
+            });
+        anthropic.then_some(name)
+    }
+
     pub(super) fn provider_slot_available(&self, provider: ActiveProvider) -> bool {
         match provider {
             ActiveProvider::Claude => self.has_claude_runtime(),
