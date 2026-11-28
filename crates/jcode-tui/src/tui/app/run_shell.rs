@@ -574,6 +574,7 @@ impl StatusSpinnerRenderer {
         }
         app.refresh_terminal_title_metrics();
         app.sync_herdr_agent_state();
+        app.emit_agent_status_osc();
         app.poll_oauth_account_telemetry();
         app.enter_idle_hibernation(self.last_frame.as_ref());
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
@@ -756,10 +757,29 @@ fn status_spinner_patch_style() -> Style {
     ))
 }
 
+/// Emits `idle` on drop so every TUI exit path (normal quit, error via `?`,
+/// early return) resets the OSC 9 status a terminal integration last saw.
+/// Without this a busy client that quits leaves `jcode:working` behind.
+struct ExitStatusOscIdle;
+
+impl Drop for ExitStatusOscIdle {
+    fn drop(&mut self) {
+        jcode_core::console::emit_osc9_status_ignored("idle");
+    }
+}
+
 impl App {
     /// Run the TUI application
     /// Returns Some(session_id) if hot-reload was requested
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<RunResult> {
+        // Skip the exit emission entirely when the OSC channel is disabled or
+        // this is not a live session, mirroring `agent_osc_state`'s gating.
+        // Lazy construction: `then` defers building the guard until the
+        // condition holds, so Drop (the idle emission) cannot fire when the
+        // OSC channel is disabled or this is a replay session.
+        let _exit_osc_idle: Option<ExitStatusOscIdle> =
+            (crate::config::config().terminal_status_osc9 && !self.is_replay)
+                .then(|| ExitStatusOscIdle);
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
