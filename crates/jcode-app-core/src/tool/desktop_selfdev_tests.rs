@@ -251,9 +251,14 @@ async fn process_output_is_bounded() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
-async fn reload_sends_only_r_and_requires_real_acknowledgement() {
+async fn reload_sends_c_and_requires_completion_acknowledgement() {
     use tokio::io::AsyncWriteExt;
-    for reply in [b"ok\n", b"bad"] {
+    let root = checkout();
+    for (reply, expected_ok) in [
+        (&b"ok\n"[..], true),
+        (&b"err:build failed\n"[..], false),
+        (&b"bad\n"[..], false),
+    ] {
         let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
         let mut host = Host {
             path: "test.sock".into(),
@@ -264,10 +269,14 @@ async fn reload_sends_only_r_and_requires_real_acknowledgement() {
         let receiver = tokio::spawn(async move {
             let mut request = [0];
             server.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request, b"R");
+            assert_eq!(&request, b"C");
             server.write_all(reply).await.unwrap();
         });
-        assert_eq!(host.reload().await.is_ok(), reply == b"ok\n");
+        let result = host.reload(root.path(), 5).await;
+        assert_eq!(result.is_ok(), expected_ok);
+        if expected_ok {
+            assert_eq!(result.unwrap(), true);
+        }
         receiver.await.unwrap();
     }
 }

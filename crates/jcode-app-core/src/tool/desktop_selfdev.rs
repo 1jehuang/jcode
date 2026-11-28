@@ -89,21 +89,27 @@ impl Tool for DesktopSelfDevTool {
             return Ok(ToolOutput::new(serde_json::to_string_pretty(&json!({
                 "mode":"desktop", "repo":root,
                 "instance": host.as_ref().map(|h| json!({"socket":h.path,"pid":h.pid,"profile":h.profile})),
-                "default_build_profile":"debug", "reload_completion_verifiable":false,
-                "note":"Instance metadata only. Host R protocol acknowledges enqueueing, not build/reload completion. Inspect lists UI preview states, not full app state."
+                "default_build_profile":"debug", "reload_completion_verifiable":true,
+                "note":"Instance metadata only. Host C protocol acknowledges reload completion (falls back to R on older hosts). Inspect lists UI preview states, not full app state."
             }))?));
         }
-        // Desktop's R protocol always rebuilds and reloads. Keep build-reload
-        // callable for older transcripts without advertising a duplicate action.
+        // Desktop's C protocol rebuilds, reloads, and replies with completion status
+        // (falling back to legacy R on older hosts). Keep build-reload callable for
+        // older transcripts without advertising a duplicate action.
         if matches!(input.action.as_str(), "reload" | "build-reload") {
             let host = host.as_mut().context(
                 "No Desktop instance is running. Start Desktop from this checkout first.",
             )?;
-            host.reload().await?;
+            let completed = host.reload(&root, timeout).await?;
+            let message = if completed {
+                "Host rebuilt and reloaded the Desktop UI cleanly."
+            } else {
+                "Host acknowledged legacy R (queued rebuild-and-reload). Restart the Desktop host once to enable completion acknowledgement."
+            };
             return Ok(ToolOutput::new(serde_json::to_string_pretty(&json!({
                 "action":input.action,"socket":host.path,"pid":host.pid,
-                "acknowledged":true,"completed":false,
-                "message":"Host acknowledged R: the same rebuild-and-reload request as Ctrl+R, without focusing the window. Build success and UI generation are not verified by this protocol."
+                "acknowledged":true,"completed":completed,
+                "message":message
             }))?));
         }
         let profile = host.as_ref().map(|h| h.profile.as_str()).unwrap_or("debug");
@@ -393,23 +399,56 @@ async fn connect_host(_root: &Path, _path: &Path) -> Result<Host> {
 }
 
 impl Host {
-    async fn reload(&mut self) -> Result<()> {
+    /// Request a rebuild-and-reload and wait for completion via the `C` protocol.
+    /// Returns `Ok(true)` when the host confirmed completion, `Ok(false)` when
+    /// falling back to legacy fire-and-forget `R` on an older host, or `Err` if
+    /// the rebuild/reload failed or timed out.
+    async fn reload(&mut self, root: &Path, timeout_secs: u64) -> Result<bool> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            use tokio::io::AsyncWriteExt;
-            tokio::time::timeout(Duration::from_secs(3), async {
-                self.stream.write_all(b"R").await?;
-                let mut response = [0; 3];
-                self.stream.read_exact(&mut response).await?;
-                if &response != b"ok\n" {
-                    bail!("Invalid Desktop reload acknowledgement");
-                }
-                Ok::<_, anyhow::Error>(())
-            }).await.context("Desktop reload acknowledgement timed out. Request may have been queued, do not blindly retry.")??;
-            Ok(())
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let line = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+                self.stream.write_all(b"C").await?;
+                let mut reader = BufReader::new(&mut self.stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await?;
+                Ok::<_, anyhow::Error>(line)
+            })
+            .await
+            .context("Desktop reload completion timed out.")??;
+
+            if line.is_empty() {
+                // Older host closed the connection without replying to unknown 'C'.
+                // Fall back to legacy 'R' on a fresh verified connection.
+                let mut legacy = connect_host(root, &self.path).await?;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    legacy.stream.write_all(b"R").await?;
+                    let mut response = [0; 3];
+                    legacy.stream.read_exact(&mut response).await?;
+                    if &response != b"ok\n" {
+                        bail!("Invalid Desktop reload acknowledgement");
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .context("Desktop reload acknowledgement timed out. Request may have been queued, do not blindly retry.")??;
+                return Ok(false);
+            }
+
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed == "ok" {
+                return Ok(true);
+            }
+            if let Some(err) = trimmed.strip_prefix("err:") {
+                bail!("Desktop reload failed: {err}");
+            }
+            bail!("Invalid Desktop reload completion response: {trimmed}");
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        bail!("Desktop reload requires Linux or macOS instance verification")
+        {
+            let _ = (root, timeout_secs);
+            bail!("Desktop reload requires Linux or macOS instance verification")
+        }
     }
 }
 
