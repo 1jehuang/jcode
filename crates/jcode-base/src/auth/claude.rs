@@ -952,6 +952,10 @@ pub fn import_native_credentials_into_account() -> Result<String> {
     let creds = load_native_credentials()
         .context("Could not read Claude Code native credentials to import")?;
 
+    import_native_credentials_into_account_from(creds)
+}
+
+pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> Result<String> {
     if creds.refresh_token.trim().is_empty() {
         // Without a refresh token we cannot keep the account alive past the
         // current access token, so we do not persist a dead-end account.
@@ -961,8 +965,31 @@ pub fn import_native_credentials_into_account() -> Result<String> {
         );
     }
 
-    let label = login_target_label(None)?;
-    upsert_account(AnthropicAccount {
+    // Never use the current login target: native reuse must not overwrite an
+    // unrelated active account. Match an existing snapshot or allocate a label
+    // from the latest store, skipping holes and arbitrary user labels.
+    let _store_lock =
+        crate::auth::account_store::lock_store(&crate::storage::jcode_dir()?, "auth.json")?;
+    let mut auth = load_auth_file()?;
+    if let Some(account) = auth.anthropic_accounts.iter().find(|account| {
+        account.access == creds.access_token && account.refresh == creds.refresh_token
+    }) {
+        return Ok(account.label.clone());
+    }
+    let mut index = 1;
+    let label = loop {
+        let candidate =
+            crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index);
+        if !auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == candidate)
+        {
+            break candidate;
+        }
+        index += 1;
+    };
+    auth.anthropic_accounts.push(AnthropicAccount {
         label: label.clone(),
         access: creds.access_token,
         refresh: creds.refresh_token,
@@ -970,7 +997,12 @@ pub fn import_native_credentials_into_account() -> Result<String> {
         email: None,
         subscription_type: creds.subscription_type.or_else(|| Some("max".to_string())),
         scopes: creds.scopes,
-    })
+    });
+    if auth.active_anthropic_account.is_none() {
+        auth.active_anthropic_account = Some(label.clone());
+    }
+    save_auth_file(&auth)?;
+    Ok(label)
 }
 
 pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
@@ -1011,3 +1043,7 @@ pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
 #[cfg(test)]
 #[path = "claude_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "claude_native_import_tests.rs"]
+mod native_import_tests;
