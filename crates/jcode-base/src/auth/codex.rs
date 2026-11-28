@@ -57,6 +57,10 @@ struct LegacyTokens {
 
 const ACCOUNT_LABEL_PREFIX: &str = "openai";
 
+#[path = "codex_refresh_cas.rs"]
+mod refresh_cas;
+pub(super) use refresh_cas::{capture_refresh_account, commit_refresh_account};
+
 /// Set the runtime override for the active account label.
 /// This allows `/account switch <label>` to take effect without rewriting the file.
 pub fn set_active_account_override(label: Option<String>) {
@@ -380,6 +384,23 @@ pub fn load_credentials() -> Result<CodexCredentials> {
     }
 
     anyhow::bail!("No OpenAI tokens or API key found")
+}
+
+/// Identity of this saved login, preferring its ChatGPT workspace over email.
+pub fn account_identity(account: &OpenAiAccount) -> Option<String> {
+    let account_id = account
+        .account_id
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_account_id));
+    let email = account
+        .email
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_email));
+    // A login email can own multiple ChatGPT workspaces/subscriptions. The
+    // provider account ID identifies the workspace and survives token refresh.
+    crate::auth::account_store::account_identity(None, account_id.as_deref(), "").or_else(|| {
+        crate::auth::account_store::account_identity(email.as_deref(), None, &account.refresh_token)
+    })
 }
 
 pub fn load_oauth_credentials() -> Result<CodexCredentials> {

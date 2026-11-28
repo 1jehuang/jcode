@@ -125,3 +125,37 @@ Notes:
 - Other tool-specific importers exist for Claude Code, Codex, Gemini CLI,
   GitHub Copilot, and Cursor (see `auth/claude.rs`, `auth/codex.rs`,
   `auth/gemini.rs`, `auth/copilot.rs`, `auth/cursor.rs`).
+
+
+## Claude sign-in through the installed CLI
+
+For interactive Claude login, Jcode offers its own OAuth flow and the installed
+Claude Code CLI. If `claude` is installed, `jcode login --provider claude` prefers
+`claude auth login`. Use `--oauth` or set `JCODE_CLAUDE_LOGIN_METHOD=oauth` to keep
+Jcode's browser flow. Use `--claude-code` to select the CLI explicitly. Account
+labels, browserless and scriptable requests, and noninteractive shells keep the
+existing Jcode flow.
+
+CLI sign-in runs on the Jcode host. It still needs approval before Jcode reuses
+that login for direct Anthropic requests. Jcode validates the credential snapshot
+before granting native trust or activating an imported account. An unrelated
+saved account is retained, and a newer account selection or revoked native
+approval stops activation. Environment-only tokens stay in the environment.
+If another trusted source shadows a newly approved file, Jcode removes that
+unused approval. An unchanged custom Claude file alongside native credentials
+is rejected when the just-completed login cannot be identified safely.
+
+In `/login`, choose the Claude method before starting authentication. SSH clients
+show instructions for the remote host. Sessions using explicit configuration or home directories show the exact command to run with the same environment, since a new
+terminal might select a different profile.
+
+When `/login` opens Claude Code sign-in in another terminal, complete the displayed
+command so Jcode can identify that attempt's result and select its saved account.
+Background token refresh does not complete sign-in. A daemon-connected session
+also waits for the daemon to confirm the account before reporting success.
+Pressing Enter checks the same result; it cannot confirm an unfinished command.
+`/cancel` stops waiting and rejects late completion in the TUI; cancel the
+independent terminal command there to stop sign-in. Waiting expires after ten
+minutes. Default CLI selection respects `NO_BROWSER`, `JCODE_NO_BROWSER` and the
+shared headless/SSH browser policy; explicit `--claude-code` remains available on
+an interactive host.

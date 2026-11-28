@@ -935,7 +935,10 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
 
     facts.effort = Some("medium".to_string());
     let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
-    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    let mismatched_rendered: String = mismatched_spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
     assert!(
         mismatched_rendered.contains("Gemini 4 Neon Low")
             && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),
@@ -950,4 +953,32 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
             && swarm_rendered.contains(crate::tui::app::effort_display_label("swarm")),
         "expected swarm effort label to remain visible, got: {swarm_rendered}"
     );
+}
+
+#[test]
+fn caption_cells_show_score_and_do_not_wrap() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
+    for (score, expected, prefix) in [
+        (None, Color::DarkGray, "Heard:"),
+        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
+        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
+        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
+        (Some((0.95, true)), Color::Green, "95% Trigger:"),
+    ] {
+        let row = crate::tui::JarvisCaption {
+            id: 1,
+            text: "界".repeat(40),
+            score,
+        };
+        terminal
+            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (x, c) in prefix.chars().enumerate() {
+            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
+            assert_eq!(buffer[(x as u16, 0)].fg, expected);
+        }
+        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
+    }
 }

@@ -15,6 +15,8 @@ pub use debug_events::{DebugEvent, DebugMessage};
 #[path = "backend_protocol_io.rs"]
 mod protocol_io;
 
+mod route_selection;
+
 use crate::protocol::{AuthChanged, FeatureToggle, HistoryBase, Request, ServerEvent};
 use crate::server;
 use crate::transport::{Stream, WriteHalf};
@@ -967,37 +969,6 @@ impl RemoteConnection {
         };
         self.next_request_id += 1;
         self.send_request(request).await?;
-        Ok(id)
-    }
-
-    pub async fn set_route_selection(
-        &mut self,
-        selection: crate::provider::RouteSelection,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        let request = Request::SetRoute {
-            id,
-            selection,
-            automatic_failover: false,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await?;
-        Ok(id)
-    }
-
-    /// Apply an automatic target only if the daemon still approves its pool membership.
-    pub async fn set_route_selection_for_failover(
-        &mut self,
-        selection: crate::provider::RouteSelection,
-    ) -> Result<u64> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_request(Request::SetRoute {
-            id,
-            selection,
-            automatic_failover: true,
-        })
-        .await?;
         Ok(id)
     }
 

@@ -224,3 +224,52 @@ async fn oauth_account_binding_survives_global_switch_refresh_and_fork() {
         "removed pinned account must not use cached bearer"
     );
 }
+
+#[test]
+fn completed_login_verification_uses_selected_grant_and_preserves_failed_runtime() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let _sandbox = AccountSandbox::new();
+    let previous = save_account("verify-previous", "previous-access", "previous-refresh");
+    let selected = save_account("verify-selected", "selected-access", "selected-refresh");
+    let provider = AnthropicProvider::new();
+    provider.set_oauth_account(Some(&previous)).unwrap();
+    provider
+        .set_credential_mode(AnthropicCredentialMode::OAuth)
+        .unwrap();
+    let selected_credentials = auth::claude::load_credentials_for_account(&selected).unwrap();
+    let fingerprint = auth::claude_cli_completion::fingerprint(&selected_credentials);
+    let route = jcode_provider_core::RouteSelection {
+        model: "claude-sonnet-4-6".into(),
+        runtime_key: jcode_provider_core::RuntimeKey::ClaudeOAuth,
+        api_method: format!("claude-oauth@{selected}"),
+        provider_label: "Claude".into(),
+        detail: String::new(),
+    };
+    let original = provider.model();
+    assert!(
+        provider
+            .set_route_selection_verified(&route, &fingerprint)
+            .is_err()
+    );
+    assert_eq!(provider.model(), original);
+    assert_eq!(provider.oauth_account_label(), Some(previous));
+    let replacement = provider.fork();
+    replacement.set_oauth_account(Some(&selected)).unwrap();
+    replacement
+        .set_route_selection_verified(&route, &fingerprint)
+        .unwrap();
+    assert_eq!(replacement.model(), route.model);
+    assert_eq!(replacement.oauth_account_label(), Some(selected));
+    auth::claude::update_account_tokens(
+        replacement.oauth_account_label().as_deref().unwrap(),
+        "replacement-access",
+        "replacement-refresh",
+        i64::MAX,
+    )
+    .unwrap();
+    assert!(
+        replacement
+            .set_route_selection_verified(&route, &fingerprint)
+            .is_err()
+    );
+}

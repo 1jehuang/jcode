@@ -42,7 +42,7 @@ use super::provider_control::{
     handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_context_cap, handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort,
-    handle_set_route, handle_set_service_tier, handle_set_transport,
+    handle_set_route_verified, handle_set_service_tier, handle_set_transport,
     handle_switch_anthropic_account, handle_switch_openai_account,
     try_available_models_catalog_offloaded,
 };
@@ -81,22 +81,6 @@ const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
 #[path = "client_subscribe_context.rs"]
 mod subscribe_context;
 use subscribe_context::*;
-
-fn event_for_transport(
-    mut event: ServerEvent,
-    supports_turn_identity: bool,
-) -> Option<ServerEvent> {
-    if supports_turn_identity {
-        return Some(event);
-    }
-    loop {
-        event = match event {
-            ServerEvent::TurnEvent { event, .. } => *event,
-            ServerEvent::TurnStarted { .. } | ServerEvent::TurnState { .. } => return None,
-            event => return Some(event),
-        };
-    }
-}
 
 struct ProcessingMessage {
     jarvis_voice: bool,
@@ -1982,8 +1966,8 @@ pub(super) async fn handle_client(
                 handle_set_model(id, model, &agent, &client_event_tx).await;
             }
 
-            Request::SetRoute { id, selection, automatic_failover } => {
-                handle_set_route(id, selection, automatic_failover, &agent, &client_event_tx).await;
+            Request::SetRoute { id, selection, automatic_failover, verification } => {
+                handle_set_route_verified(id, selection, automatic_failover, verification, &agent, &client_event_tx).await;
             }
 
             Request::SetAgentModel { id, target, model, global } => {
@@ -2405,7 +2389,9 @@ pub(super) async fn handle_client(
                                 .and_then(|value| value.as_str().map(str::to_owned))
                         } else { None };
                         if next_prompt.is_some() { data["started"] = serde_json::json!(true); }
-                        let _ = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message });
+                        if let Err(error) = client_event_tx.send(ServerEvent::RuntimeCommandResult { id, command, data, message }) {
+                            crate::logging::warn(&format!("Cannot deliver runtime command result to disconnected client: {error}"));
+                        }
                         if let Some(content) = next_prompt {
                             // The execute closure has returned and dropped its
                             // Agent guard. Reuse the actual message lifecycle:

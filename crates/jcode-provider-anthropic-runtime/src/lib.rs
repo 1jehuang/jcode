@@ -21,7 +21,7 @@ mod usage_recording;
 mod catalog;
 
 use jcode_base::auth;
-use jcode_base::auth::oauth;
+use jcode_base::auth::{claude_cli_completion::inherit_validation_refreshes, oauth};
 use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
 fn oauth_beta_headers(model: &str) -> &'static str {
     jcode_provider_core::anthropic_oauth_beta_headers(model)
@@ -987,18 +987,6 @@ impl AnthropicProvider {
         self.get_oauth_access_token().await
     }
 
-    fn load_oauth_credentials(&self) -> Result<auth::claude::ClaudeCredentials> {
-        match self.oauth_account_label() {
-            Some(label) => auth::claude::load_credentials_for_account(&label),
-            None => auth::claude::load_credentials(),
-        }
-    }
-
-    fn oauth_refresh_label(&self) -> Option<String> {
-        self.oauth_account_label()
-            .or_else(auth::claude::active_account_label)
-    }
-
     fn catalog_scope_for_route(&self, oauth: bool) -> String {
         if oauth && let Some(label) = self.oauth_account_label() {
             format!("oauth::{label}")
@@ -1425,7 +1413,7 @@ impl Provider for AnthropicProvider {
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
-        tokio::spawn(async move {
+        let stream = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1450,7 +1438,8 @@ impl Provider for AnthropicProvider {
                 retry_settings,
             )
             .await;
-        });
+        };
+        tokio::spawn(inherit_validation_refreshes(stream));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -1479,6 +1468,14 @@ impl Provider for AnthropicProvider {
                 }
             }
         }
+    }
+
+    fn set_route_selection_verified(
+        &self,
+        selection: &jcode_provider_core::RouteSelection,
+        fingerprint: &str,
+    ) -> Result<()> {
+        self.select_verified_oauth_route(selection, fingerprint)
     }
 
     fn set_oauth_account(&self, label: Option<&str>) -> Result<()> {
@@ -1870,7 +1867,7 @@ impl Provider for AnthropicProvider {
         let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic
-        tokio::spawn(async move {
+        let stream = async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
                     connection: "https/sse".to_string(),
@@ -1895,7 +1892,8 @@ impl Provider for AnthropicProvider {
                 retry_settings,
             )
             .await;
-        });
+        };
+        tokio::spawn(inherit_validation_refreshes(stream));
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -2482,6 +2480,7 @@ mod context_window;
 mod native_web_search;
 #[cfg(test)]
 mod native_web_search_sse_tests;
+mod oauth_selection;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]

@@ -127,6 +127,16 @@ impl MultiProvider {
             }
             ActiveProvider::OpenAI
         };
+        self.set_model_on_oauth_account(target, Some(label), model, None)
+    }
+
+    pub(super) fn set_model_on_oauth_account(
+        &self,
+        target: ActiveProvider,
+        account: Option<&str>,
+        model: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<()> {
         self.reconcile_auth_if_provider_missing(target);
         let runtime = match target {
             ActiveProvider::Claude => self.anthropic_provider(),
@@ -135,9 +145,23 @@ impl MultiProvider {
         }
         .ok_or_else(|| anyhow!("{} runtime is not configured", Self::provider_label(target)))?;
         let replacement = runtime.fork();
-        replacement.set_oauth_account(Some(label))?;
+        replacement.set_oauth_account(account)?;
         replacement.set_credential_mode(CredentialMode::OAuth)?;
-        replacement.set_model(&model_name_for_provider(target, model.trim()))?;
+        let model = model_name_for_provider(target, model.trim());
+        if let Some(fingerprint) = fingerprint {
+            replacement.set_route_selection_verified(
+                &RouteSelection {
+                    model: model.into_owned(),
+                    runtime_key: RuntimeKey::ClaudeOAuth,
+                    api_method: "claude-oauth".into(),
+                    provider_label: "Claude".into(),
+                    detail: String::new(),
+                },
+                fingerprint,
+            )?;
+        } else {
+            replacement.set_model(&model)?;
+        }
         let slot = match target {
             ActiveProvider::Claude => &self.anthropic,
             ActiveProvider::OpenAI => &self.openai,

@@ -1,3 +1,9 @@
+#[path = "auth_claude_cli_route.rs"]
+mod claude_cli_route;
+#[path = "auth_claude_cli_wait.rs"]
+mod claude_cli_wait;
+#[path = "auth_claude_login.rs"]
+mod claude_login;
 #[path = "auth_subscription_status.rs"]
 mod subscription_status;
 
@@ -535,16 +541,13 @@ impl App {
     }
 
     fn begin_pending_login(&mut self, pending: PendingLogin) {
+        if let Some(previous) = self.pending_login.take() {
+            self.cancel_claude_cli_selection(&previous);
+        }
         if let Some((provider, method)) = pending.telemetry_context() {
             crate::telemetry::record_auth_started(&provider, &method);
         }
         self.pending_login = Some(pending);
-    }
-
-    pub(super) fn start_claude_login(&mut self) {
-        let label = crate::auth::claude::login_target_label(None)
-            .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
-        self.start_claude_login_for_account(&label);
     }
 
     pub(super) fn start_jcode_login(&mut self) {
@@ -801,151 +804,6 @@ impl App {
                     Some("Jcode account logout complete"),
                 ),
             ));
-        });
-    }
-
-    pub(super) fn start_claude_login_for_account(&mut self, label: &str) {
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-        use sha2::{Digest, Sha256};
-
-        let verifier: String = {
-            use rand::Rng;
-            const CHARSET: &[u8] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-            let mut rng = rand::rng();
-            (0..64)
-                .map(|_| {
-                    let idx = rng.random_range(0..CHARSET.len());
-                    CHARSET[idx] as char
-                })
-                .collect()
-        };
-
-        let mut hasher = Sha256::new();
-        hasher.update(verifier.as_bytes());
-        let hash = hasher.finalize();
-        let challenge = URL_SAFE_NO_PAD.encode(hash);
-
-        // Try a loopback callback first so the user never has to copy/paste the
-        // authorization code (mirrors the OpenAI/Gemini flows). Claude uses the
-        // PKCE verifier as the OAuth `state`, so we wait for that on the
-        // listener. If binding fails we fall back to manual paste with the
-        // hosted redirect page.
-        let callback_listener = crate::auth::oauth::bind_callback_listener(0).ok();
-        let callback_port = callback_listener
-            .as_ref()
-            .and_then(|l| l.local_addr().ok())
-            .map(|addr| addr.port());
-        let callback_available = callback_listener.is_some() && callback_port.is_some();
-
-        let (auth_url, redirect_uri) = match callback_port {
-            Some(port) if callback_available => {
-                let redirect_uri = format!("http://localhost:{}/callback", port);
-                let auth_url =
-                    crate::auth::oauth::claude_auth_url(&redirect_uri, &challenge, &verifier);
-                (auth_url, redirect_uri)
-            }
-            _ => {
-                let redirect_uri = crate::auth::oauth::claude::REDIRECT_URI.to_string();
-                let auth_url =
-                    crate::auth::oauth::claude_auth_url(&redirect_uri, &challenge, &verifier);
-                (auth_url, redirect_uri)
-            }
-        };
-        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
-            &auth_url,
-            "Scan this on another device if this machine has no browser:",
-        )
-        .map(|section| format!("\n\n{section}"))
-        .unwrap_or_default();
-
-        let browser_opened = Self::open_auth_browser(&auth_url);
-        let preflight = Self::record_oauth_preflight(
-            "claude",
-            browser_opened,
-            callback_port.map(|p| format!("localhost:{}", p)).as_deref(),
-            Some(callback_available),
-        );
-
-        // Spawn the loopback waiter. On success it publishes LoginCompleted just
-        // like the manual paste path, so onboarding and account UI react
-        // identically.
-        if let (Some(listener), true) = (callback_listener, callback_available) {
-            let verifier_clone = verifier.clone();
-            let label_clone = label.to_string();
-            let redirect_clone = redirect_uri.clone();
-            tokio::spawn(async move {
-                match Self::claude_login_callback(
-                    verifier_clone,
-                    label_clone,
-                    redirect_clone,
-                    listener,
-                )
-                .await
-                {
-                    Ok(msg) => {
-                        crate::logging::info(&format!("Claude login: {}", msg));
-                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                            provider: "claude".to_string(),
-                            success: true,
-                            message: msg,
-                        }));
-                    }
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "Claude automatic callback did not complete: {}",
-                            e
-                        ));
-                    }
-                }
-            });
-        }
-
-        let callback_line = if callback_available {
-            "Waiting for the browser callback... (this completes automatically)\n".to_string()
-        } else {
-            "After logging in, copy the callback URL or authorization code and paste it here.\n"
-                .to_string()
-        };
-        let details = format!(
-            "{}{}{}{}",
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                format!("{preflight}\n")
-            },
-            callback_line,
-            if preflight.is_empty() {
-                String::new()
-            } else {
-                "Manual-safe fallback is already active here.\n".to_string()
-            },
-            qr_section.trim_start_matches('\n')
-        );
-
-        self.show_oauth_login_progress(
-            auth_progress::CLAUDE_LOGIN_TITLE,
-            "Claude",
-            Some(label),
-            &auth_url,
-            browser_opened,
-            callback_available,
-            "Paste callback URL or code here if needed",
-            &details,
-        );
-        if callback_available {
-            self.set_status_notice(format!("Login [{}]: waiting...", label));
-        } else {
-            self.set_status_notice(format!("Login [{}]: paste code...", label));
-        }
-        self.begin_pending_login(PendingLogin::ClaudeAccount {
-            verifier,
-            label: label.to_string(),
-            redirect_uri: if callback_available {
-                Some(redirect_uri)
-            } else {
-                None
-            },
         });
     }
 
@@ -2171,6 +2029,7 @@ impl App {
                 self.pending_login = Some(pending);
                 return;
             }
+            self.cancel_claude_cli_selection(&pending);
             // Signal the Muse subscription background task (if any) and drop
             // its credential slot: no late progress, error, or approval event
             // is accepted afterwards, and nothing is ever persisted.
@@ -2206,13 +2065,22 @@ impl App {
             return;
         }
 
+        if trimmed.is_empty() && matches!(pending, PendingLogin::ClaudeMethodChoice) {
+            if crate::auth::claude::prefer_claude_code_cli_login() {
+                self.start_claude_code_cli_login();
+            } else {
+                self.start_jcode_claude_login();
+            }
+            return;
+        }
+
         if trimmed.is_empty()
             && !matches!(
                 &pending,
                 PendingLogin::ApiKeyProfile {
                     api_key_optional: true,
                     ..
-                }
+                } | PendingLogin::ClaudeCli { .. }
             )
         {
             let help = match &pending {
@@ -2254,6 +2122,24 @@ impl App {
         }
 
         match pending {
+            PendingLogin::ClaudeMethodChoice => match trimmed.to_ascii_lowercase().as_str() {
+                "1" | "jcode" | "oauth" => self.start_jcode_claude_login(),
+                "2" | "cli" | "claude-code" => self.start_claude_code_cli_login(),
+                _ => {
+                    self.push_display_message(DisplayMessage::system(
+                        "Choose 1 for Jcode OAuth or 2 for Claude Code CLI, or /cancel.",
+                    ));
+                    self.pending_login = Some(PendingLogin::ClaudeMethodChoice);
+                }
+            },
+            pending @ PendingLogin::ClaudeCli { .. } => {
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("done") {
+                    self.handle_claude_cli_input(pending);
+                } else {
+                    self.pending_login = Some(pending);
+                    self.set_status_notice("Complete sign-in in the terminal, then press Enter here; /cancel stops waiting");
+                }
+            }
             PendingLogin::Exchanging { provider } => {
                 self.set_status_notice("Login only: exchanging credentials, input not sent to AI");
                 self.pending_login = Some(PendingLogin::Exchanging { provider });
@@ -3542,7 +3428,10 @@ impl App {
             .and_then(|s| s.split_whitespace().next())
     }
 
-    pub(super) fn handle_login_completed(&mut self, login: LoginCompleted) {
+    pub(super) fn handle_login_completed(&mut self, mut login: LoginCompleted) {
+        if !self.accept_claude_cli_completion(&mut login) {
+            return;
+        }
         if login.provider == "copilot_code" {
             if jcode_tui_messages::parse_collapsible_swarm_content(&login.message).is_some() {
                 self.upsert_login_progress_card(

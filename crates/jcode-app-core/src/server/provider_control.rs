@@ -12,6 +12,10 @@ use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 
 use super::SessionAgents;
+mod routes;
+#[cfg(test)]
+use routes::handle_set_route;
+pub(super) use routes::handle_set_route_verified;
 static AUTH_REFRESH_GENERATIONS: OnceLock<StdMutex<HashMap<String, u64>>> = OnceLock::new();
 static NEXT_AUTH_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -351,64 +355,6 @@ pub(super) fn automatic_failover_source_is_pool_member(agent: &Agent) -> bool {
         )
 }
 
-fn apply_set_route(
-    id: u64,
-    selection: crate::provider::RouteSelection,
-    automatic_failover: bool,
-    agent: &mut Agent,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    crate::logging::event_info(
-        "server_set_route_request",
-        vec![
-            ("id", id.to_string()),
-            ("requested_model", selection.model.clone()),
-            ("requested_provider", selection.provider_label.clone()),
-            ("requested_api_method", selection.api_method.clone()),
-            ("current_model", agent.provider_model()),
-            ("current_provider", agent.provider_name()),
-        ],
-    );
-
-    let current = agent.provider_model();
-    let result = {
-        let ineligible = if !automatic_failover {
-            None
-        } else if crate::config::Config::load()
-            .provider
-            .cross_provider_failover
-            != crate::config::CrossProviderFailoverMode::Countdown
-        {
-            Some("countdown auto-switch is disabled")
-        } else if !automatic_failover_source_is_pool_member(agent) {
-            Some("source account is not in the auto-switch group")
-        } else if !crate::provider::MultiProvider::is_failover_route_pool_approved(
-            &selection.routed_model_spec(),
-        ) {
-            Some("target account is not eligible in the auto-switch group")
-        } else {
-            None
-        };
-        let result = if let Some(why) = ineligible {
-            Err(anyhow::anyhow!("Auto-switch canceled: {why}."))
-        } else {
-            agent.set_route_selection(&selection)
-        };
-        if result.is_ok() {
-            agent.reset_provider_session();
-        }
-        result.map(|_| {
-            (
-                agent.provider_model(),
-                agent.provider_name(),
-                agent.active_resolved_credential(),
-                agent.provider_reasoning_effort(),
-            )
-        })
-    };
-    send_model_changed_result(id, result, current, agent, client_event_tx);
-}
-
 pub(super) async fn handle_set_model(
     id: u64,
     model: String,
@@ -425,40 +371,6 @@ pub(super) async fn handle_set_model(
             client_event_tx.clone(),
             move |agent_guard, client_event_tx| {
                 apply_set_model(id, model, agent_guard, client_event_tx);
-            },
-        );
-    }
-}
-
-pub(super) async fn handle_set_route(
-    id: u64,
-    selection: crate::provider::RouteSelection,
-    automatic_failover: bool,
-    agent: &Arc<Mutex<Agent>>,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
-) {
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        apply_set_route(
-            id,
-            selection,
-            automatic_failover,
-            &mut agent_guard,
-            client_event_tx,
-        );
-    } else {
-        spawn_deferred_agent_mutation(
-            "set_route",
-            id,
-            Arc::clone(agent),
-            client_event_tx.clone(),
-            move |agent_guard, client_event_tx| {
-                apply_set_route(
-                    id,
-                    selection,
-                    automatic_failover,
-                    agent_guard,
-                    client_event_tx,
-                );
             },
         );
     }

@@ -2214,21 +2214,14 @@ impl Provider for MultiProvider {
     }
 
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
-        if selection.model.trim().is_empty() {
-            anyhow::bail!("Model cannot be empty");
-        }
-
-        // The subscription is a distinct endpoint/auth runtime, not a model
-        // alias. Handle its structured identity before converting other routes
-        // back into their legacy string specs.
-        if selection.runtime_key == RuntimeKey::JcodeSubscription {
-            return self.set_model_on_jcode_subscription(&selection.model);
-        }
-
-        // Routing-prefix policy lives once in RouteSelection::routed_model_spec
-        // so this orchestrator and every single-runtime provider agree on the
-        // spec string. set_model then dispatches it to the right sub-provider.
-        self.set_model(&selection.routed_model_spec())
+        self.select_route(selection)
+    }
+    fn set_route_selection_verified(
+        &self,
+        selection: &RouteSelection,
+        fingerprint: &str,
+    ) -> Result<()> {
+        self.select_verified_route(selection, fingerprint)
     }
 
     fn available_models(&self) -> Vec<&'static str> {
