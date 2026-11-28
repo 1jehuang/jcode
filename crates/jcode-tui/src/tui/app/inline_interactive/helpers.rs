@@ -277,7 +277,49 @@ impl App {
     pub(in crate::tui::app) fn apply_inline_interactive_filter(
         picker: &mut InlineInteractiveState,
     ) {
-        if picker.filter.is_empty() {
+        // Runtime model pickers accept `@provider` scopes next to the search
+        // text. Scope each entry to its first matching route so the row shows
+        // (and Enter selects) that provider's route.
+        let (scopes, search) = if picker_is_runtime_model_picker(picker) {
+            split_model_picker_filter(&picker.filter)
+        } else {
+            (Vec::new(), picker.filter.clone())
+        };
+        // Put back routes an earlier scope switched, so each pass starts from
+        // the user's own route choices. Entries still in scope are switched
+        // again below; the rest keep the route the user had before.
+        for (index, original) in std::mem::take(&mut picker.scoped_route_restore) {
+            if let Some(entry) = picker.entries.get_mut(index)
+                && original < entry.options.len()
+            {
+                entry.selected_option = original;
+            }
+        }
+        let mut scoped: Option<Vec<usize>> = None;
+        if !scopes.is_empty() {
+            let mut keep = Vec::new();
+            for (index, entry) in picker.entries.iter_mut().enumerate() {
+                if let Some(option_index) = entry
+                    .options
+                    .iter()
+                    .position(|option| model_route_matches_scopes(option, &scopes))
+                {
+                    if !entry
+                        .active_option()
+                        .is_some_and(|option| model_route_matches_scopes(option, &scopes))
+                    {
+                        picker
+                            .scoped_route_restore
+                            .push((index, entry.selected_option));
+                        entry.selected_option = option_index;
+                    }
+                    keep.push(index);
+                }
+            }
+            scoped = Some(keep);
+        }
+        let candidates: Vec<usize> = scoped.unwrap_or_else(|| (0..picker.entries.len()).collect());
+        if search.trim().is_empty() {
             let collapsed_login = picker.kind == crate::tui::PickerKind::Login
                 && picker.entries.iter().any(|entry| {
                     matches!(entry.action, crate::tui::PickerAction::ExpandLoginProviders)
@@ -290,20 +332,19 @@ impl App {
                     .filter_map(|(i, entry)| Self::is_login_starter_entry(entry).then_some(i))
                     .collect();
             } else {
-                picker.filtered = (0..picker.entries.len()).collect();
+                picker.filtered = candidates;
             }
         } else {
-            let query = picker.filter.trim();
+            let query = search.trim();
             // Prepare the query once per keystroke instead of re-parsing and
             // re-lowercasing it for every entry.
-            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&search);
             let query_words: Vec<String> =
                 query.split_whitespace().map(|w| w.to_lowercase()).collect();
-            let mut scored: Vec<(usize, bool, i32)> = picker
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
+            let mut scored: Vec<(usize, bool, i32)> = candidates
+                .into_iter()
+                .filter_map(|i| {
+                    let m = &picker.entries[i];
                     if matches!(m.action, crate::tui::PickerAction::ExpandLoginProviders) {
                         return None;
                     }

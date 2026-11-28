@@ -76,6 +76,8 @@ impl App {
 
         self.inline_view_state = None;
         self.inline_interactive_state = Some(InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: PickerKind::Model,
             filtered: (0..5).collect(),
             entries: models,
@@ -319,6 +321,8 @@ impl App {
 
         self.inline_view_state = None;
         let mut picker = InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: PickerKind::Login,
             filtered: (0..models.len()).collect(),
             entries: models,

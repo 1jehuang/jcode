@@ -204,6 +204,13 @@ impl App {
             return false;
         }
 
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|p| p.kind == PickerKind::Model && p.filtered.is_empty())
+        {
+            return true;
+        }
         if let Some(ref mut picker) = self.inline_interactive_state {
             picker.preview = false;
         }
@@ -231,6 +238,7 @@ impl App {
                     && picker.filter.is_empty()
                     && picker.selected == 0)
                     || (picker.kind == PickerKind::Account && picker.filter.is_empty())
+                    || picker_enter_should_focus_model_browser(picker)
             })
             .unwrap_or(false)
         {

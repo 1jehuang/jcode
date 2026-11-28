@@ -1,4 +1,7 @@
+#[path = "ui_inline_interactive/effort_step.rs"]
+mod effort_step;
 use super::*;
+use effort_step::model_effort_step_lines;
 use ratatui::widgets::{Block, BorderType, Borders};
 use unicode_width::UnicodeWidthStr;
 
@@ -68,6 +71,7 @@ fn route_method_display(route: &crate::tui::PickerOption) -> String {
 fn route_provider_display(provider: &str, api_method: &str) -> String {
     if crate::provider::ModelRouteApiMethod::parse(api_method).is_openrouter()
         && provider != "auto"
+        && crate::provider::normalize_model_route_provider_label(provider) != "azureopenai"
         && !provider.contains("OpenRouter")
     {
         format!("OpenRouter/{}", provider)
@@ -471,14 +475,45 @@ pub(super) fn model_suggestion_lines(
     if available_rows == 0 {
         return Vec::new();
     }
+    if let Some(step) = picker.effort_step.as_deref() {
+        return model_effort_step_lines(picker, step, available_rows);
+    }
     let dim = Style::default().fg(dim_color());
+    let browsing = !picker.preview
+        && picker
+            .entries
+            .iter()
+            .any(|e| matches!(e.action, crate::tui::PickerAction::Model));
+    let search_rows = usize::from(browsing && available_rows > 1);
+    let available_rows = available_rows - search_rows;
+    let mut lines = Vec::new();
+    if search_rows > 0 {
+        let (_, search) = crate::tui::app::split_model_picker_filter(&picker.filter);
+        let provider = crate::tui::app::model_picker_active_provider(picker)
+            .unwrap_or_else(|| "All".to_string());
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Search: {search}▏ · Provider: {provider} ({}/{})",
+                picker.filtered.len(),
+                picker.entries.len()
+            ),
+            dim,
+        )));
+    }
     if picker.filtered.is_empty() {
         let message = if picker.filter.is_empty() {
             "No matching models".to_string()
         } else {
             format!("No matching models for {}", picker.filter)
         };
-        return vec![Line::from(Span::styled(message, dim))];
+        lines.push(Line::from(Span::styled(message, dim)));
+        if browsing && available_rows > 1 {
+            lines.push(Line::from(Span::styled(
+                "Backspace edit search · Ctrl+P provider · Esc clear",
+                dim,
+            )));
+        }
+        return lines;
     }
     let selected = picker.selected.min(picker.filtered.len() - 1);
     let selected_entry = &picker.entries[picker.filtered[selected]];
@@ -486,7 +521,12 @@ pub(super) fn model_suggestion_lines(
     let hint = model_picker_top_hint(picker);
     let hint_rows = usize::from(available_rows > 1);
     let notice_rows = usize::from(notice.is_some() && available_rows > hint_rows + 1);
-    let visible = crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+    let visible_limit = if browsing {
+        16
+    } else {
+        crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+    };
+    let visible = visible_limit
         .min(available_rows - hint_rows - notice_rows)
         .min(picker.filtered.len());
     let start = selected.saturating_sub(visible - 1);
@@ -511,7 +551,6 @@ pub(super) fn model_suggestion_lines(
             )));
         }
     }
-    let mut lines = Vec::new();
     for row in start..start + visible {
         let entry = &picker.entries[picker.filtered[row]];
         let route = entry.active_option();
@@ -581,15 +620,17 @@ pub(super) fn model_suggestion_lines(
         lines.push(Line::from(Span::styled(notice.unwrap().0, dim)));
     }
     if hint_rows > 0 {
-        let filter = if !picker.preview && !picker.filter.is_empty() {
+        let filter = if !picker.preview && !picker.filter.is_empty() && search_rows == 0 {
             format!("Filter: {} · ", picker.filter)
         } else {
             String::new()
         };
-        let navigation = if !picker.preview && picker.column > 0 {
+        let navigation = if browsing && picker.column == 0 {
+            "↑↓ choose · Enter select · Ctrl+P provider · Esc clear/cancel"
+        } else if !picker.preview && picker.column > 0 {
             "↑↓ route · ←→ column · Enter select · Esc cancel"
         } else {
-            "↑↓ choose · Enter select · Esc cancel"
+            "↑↓ choose · Enter select · Ctrl+P provider · Esc cancel"
         };
         let shortcuts = hint
             .map(|hint| format!(" ·{}", hint.trim_start_matches(" keys:")))

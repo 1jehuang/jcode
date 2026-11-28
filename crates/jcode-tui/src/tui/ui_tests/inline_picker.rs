@@ -53,6 +53,8 @@ fn model_picker_entry() -> crate::tui::PickerEntry {
 fn model_picker_state() -> TestState {
     TestState {
         inline_interactive_state: Some(crate::tui::InlineInteractiveState {
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
             kind: crate::tui::PickerKind::Model,
             filtered: vec![0],
             selected: 0,
@@ -240,13 +242,94 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Filter: gpt"), "{text}");
+    assert!(text.contains("Search: gpt"), "{text}");
     assert!(text.contains("↑↓ route"), "{text}");
     assert!(
-        lines[0]
-            .spans
+        lines
             .iter()
+            .flat_map(|line| &line.spans)
             .any(|span| span.content.contains("openai")
                 && span.style.add_modifier.contains(Modifier::UNDERLINED))
     );
+}
+
+#[test]
+fn model_browser_chrome_fits_narrow_unicode_terminals() {
+    for width in [1, 2, 8, 24, 48, 120] {
+        for height in [1, 2, 3, 4, 12] {
+            let mut state = model_picker_state();
+            let picker = state.inline_interactive_state.as_mut().unwrap();
+            picker.filter = "@超長供應商 模型模型模型".repeat(10);
+            let lines = render_model_suggestions(&state, width, 20, height);
+            assert!(
+                lines[height as usize..]
+                    .iter()
+                    .all(|line| line.trim().is_empty())
+            );
+            let raw = crate::tui::ui::inline_interactive_ui::model_suggestion_lines(
+                state.inline_interactive_state.as_ref().unwrap(),
+                height as usize,
+            );
+            for (index, line) in raw.iter().enumerate() {
+                if line.width() > width as usize {
+                    assert!(
+                        lines[height as usize - raw.len() + index]
+                            .trim_end()
+                            .ends_with('…'),
+                        "{width}/{height}: {lines:?}"
+                    );
+                }
+            }
+        }
+    }
+    let mut state = model_picker_state();
+    state.inline_interactive_state.as_mut().unwrap().filter = "@openai future".into();
+    let text = render_model_suggestions(&state, 120, 20, 12).join("\n");
+    assert!(text.contains("Search: future▏"), "{text}");
+    assert!(text.contains("Provider: openai"), "{text}");
+    assert!(text.contains("Ctrl+P provider"), "{text}");
+}
+
+#[test]
+fn model_effort_step_keeps_selected_level_visible_in_short_terminals() {
+    let mut state = model_picker_state();
+    let mut parent = state.inline_interactive_state.take().unwrap();
+    parent.entries[0].name = "未來模型".repeat(20);
+    let model = parent.entries[0].clone();
+    let mut picker = parent.clone();
+    picker.entries = ["low", "med", "high", "xhigh", "max"]
+        .iter()
+        .map(|name| {
+            let mut entry = model.clone();
+            entry.name = (*name).into();
+            entry.options.clear();
+            entry.effort = Some((*name).into());
+            entry
+        })
+        .collect();
+    picker.filtered = (0..5).collect();
+    picker.selected = 4;
+    picker.effort_step = Some(Box::new(crate::tui::ModelEffortStep {
+        model,
+        parent,
+        save_default: false,
+        parent_needs_refresh: false,
+    }));
+    state.inline_interactive_state = Some(picker);
+    for height in [1, 2, 3, 4, 12] {
+        for width in [1, 2, 8, 24, 80] {
+            let lines = render_model_suggestions(&state, width, 20, height);
+            assert!(
+                lines[height as usize..]
+                    .iter()
+                    .all(|line| line.trim().is_empty())
+            );
+            if width >= 8 {
+                assert!(
+                    lines.join("\n").contains("▸ max"),
+                    "{width}/{height}: {lines:?}"
+                );
+            }
+        }
+    }
 }

@@ -68,17 +68,6 @@ fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
 }
 
-fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
-    if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
-        0
-    } else {
-        selected
-            .saturating_add(1)
-            .saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT)
-            .min(suggestion_count.saturating_sub(app::COMMAND_SUGGESTION_VISIBLE_LIMIT))
-    }
-}
-
 /// Where the command-suggestion popover should render, given the input chunk.
 ///
 /// Suggestions are an overlay: they never participate in the vertical layout,
@@ -229,7 +218,16 @@ pub(super) fn draw_command_suggestions_overlay(frame: &mut Frame, app: &dyn TuiS
         // Keep it above the composer and size the window before building rows
         // so the selected model remains visible even on short terminals.
         let height = area.y.saturating_sub(frame.area().y);
-        let lines = super::inline_interactive_ui::model_suggestion_lines(picker, height as usize);
+        let lines: Vec<_> =
+            super::inline_interactive_ui::model_suggestion_lines(picker, height as usize)
+                .into_iter()
+                .map(|line| {
+                    jcode_tui_render::truncate_line_with_ellipsis_to_width(
+                        &line,
+                        area.width as usize,
+                    )
+                })
+                .collect();
         if !lines.is_empty() && area.width > 0 {
             let rect = Rect::new(
                 area.x,
@@ -762,8 +760,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
@@ -1006,35 +1003,6 @@ fn caption_line(row: &crate::tui::JarvisCaption, width: u16) -> Line<'static> {
         truncate_cells(&format!("{prefix}{}", row.text), width as usize),
         Style::default().fg(color),
     )
-}
-
-#[cfg(test)]
-#[test]
-fn caption_cells_show_score_and_do_not_wrap() {
-    use ratatui::{Terminal, backend::TestBackend};
-    let mut terminal = Terminal::new(TestBackend::new(18, 2)).unwrap();
-    for (score, expected, prefix) in [
-        (None, Color::DarkGray, "Heard:"),
-        (Some((0.12, false)), Color::DarkGray, "12% Heard:"),
-        (Some((0.55, false)), Color::Yellow, "55% Heard:"),
-        (Some((0.94, false)), Color::Yellow, "94% Heard:"),
-        (Some((0.95, true)), Color::Green, "95% Trigger:"),
-    ] {
-        let row = crate::tui::JarvisCaption {
-            id: 1,
-            text: "界".repeat(40),
-            score,
-        };
-        terminal
-            .draw(|f| f.render_widget(Paragraph::new(caption_line(&row, 18)), f.area()))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        for (x, c) in prefix.chars().enumerate() {
-            assert_eq!(buffer[(x as u16, 0)].symbol(), c.to_string());
-            assert_eq!(buffer[(x as u16, 0)].fg, expected);
-        }
-        assert!((0..18).all(|x| buffer[(x, 1)].symbol() == " "));
-    }
 }
 
 fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {

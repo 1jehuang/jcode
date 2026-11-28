@@ -1782,7 +1782,6 @@ pub enum PickerAction {
 /// Unified inline picker with three columns.
 #[derive(Debug, Clone)]
 pub struct InlineInteractiveState {
-    /// Which inline picker is currently active.
     pub kind: PickerKind,
     /// All visible picker entries and their available actions/options.
     pub entries: Vec<PickerEntry>,
@@ -1792,26 +1791,21 @@ pub struct InlineInteractiveState {
     pub selected: usize,
     /// Active column: 0=primary item, 1=secondary option, 2=tertiary option.
     pub column: usize,
-    /// Filter text applied to the picker kind's searchable text.
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
+    /// Route choices temporarily replaced by a provider scope.
+    pub scoped_route_restore: Vec<(usize, usize)>,
+    /// Model list retained while choosing a reasoning level.
+    pub effort_step: Option<Box<ModelEffortStep>>,
 }
 
-impl InlineInteractiveState {
-    pub fn debug_memory_profile(&self) -> serde_json::Value {
-        let entries_bytes: usize = self.entries.iter().map(estimate_picker_entry_bytes).sum();
-        let filtered_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();
-        let filter_bytes = self.filter.capacity();
-        serde_json::json!({
-            "entries_count": self.entries.len(),
-            "filtered_count": self.filtered.len(),
-            "entries_bytes": entries_bytes,
-            "filtered_bytes": filtered_bytes,
-            "filter_bytes": filter_bytes,
-            "total_estimate_bytes": entries_bytes + filtered_bytes + filter_bytes,
-        })
-    }
+#[derive(Debug, Clone)]
+pub struct ModelEffortStep {
+    pub model: PickerEntry,
+    pub parent: InlineInteractiveState,
+    pub save_default: bool,
+    pub parent_needs_refresh: bool,
 }
 
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {

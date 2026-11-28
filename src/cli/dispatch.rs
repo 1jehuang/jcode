@@ -356,7 +356,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
-            selfdev::run_self_dev(build, args.resume).await?;
+            selfdev::run_self_dev(build, args).await?;
         }
         Some(Command::Debug {
             command,
@@ -685,9 +685,9 @@ fn auth_doctor_provider_arg<'a>(
 }
 
 mod resume;
-use resume::resolve_resume_arg;
 #[cfg(test)]
 use resume::{ResumeResolutionFailureAction, resolve_resume_id, resume_resolution_failure_action};
+use resume::{resolve_resume_arg, wait_for_existing_reload_server};
 
 mod subcommand_mapping;
 use subcommand_mapping::*;
@@ -861,17 +861,7 @@ async fn run_default_command(args: Args) -> Result<()> {
     if std::env::var("JCODE_RESUMING").is_err() && server_running {
         output::stderr_info("Connecting to server...");
     }
-    tui_launch::run_tui_client(
-        args.resume,
-        startup_hints,
-        !server_running,
-        args.fresh_spawn,
-        args.remote_working_dir,
-        args.onboarding_sim,
-        args.update_sim,
-        initial_model_spec,
-    )
-    .await?;
+    tui_launch::run_tui_client(&args, startup_hints, !server_running, initial_model_spec).await?;
 
     Ok(())
 }
@@ -907,34 +897,6 @@ fn print_provider_test_coverage_report(report: &str, colorize: bool) {
 
 pub(crate) async fn server_is_running() -> bool {
     server_is_running_at(&server::socket_path()).await
-}
-
-async fn wait_for_existing_reload_server(context: &str) -> bool {
-    if let Some(state) = server::recent_reload_state(std::time::Duration::from_secs(30)) {
-        match state.phase {
-            server::ReloadPhase::Starting => {
-                crate::logging::info(&format!(
-                    "Reload state=starting during {}; waiting for existing server to return",
-                    context
-                ));
-                return wait_for_reloading_server().await;
-            }
-            server::ReloadPhase::Failed => {
-                crate::logging::warn(&format!(
-                    "Reload state=failed during {} on {}: {}; recent_state={}",
-                    context,
-                    server::socket_path().display(),
-                    state
-                        .detail
-                        .unwrap_or_else(|| "unknown reload failure".to_string()),
-                    server::reload_state_summary(std::time::Duration::from_secs(60))
-                ));
-            }
-            server::ReloadPhase::SocketReady => {}
-        }
-    }
-
-    false
 }
 
 pub(crate) async fn wait_for_resuming_server(context: &str, timeout: std::time::Duration) -> bool {

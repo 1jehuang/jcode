@@ -319,6 +319,8 @@ fn test_inline_ui_gap_height_only_when_inline_ui_visible() {
     assert_eq!(inline_ui_gap_height(&state), 0);
 
     let inline_interactive_state = crate::tui::InlineInteractiveState {
+        scoped_route_restore: Vec::new(),
+        effort_step: None,
         kind: crate::tui::PickerKind::Model,
         entries: vec![],
         filtered: vec![],
