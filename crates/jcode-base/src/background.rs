@@ -1307,21 +1307,19 @@ impl BackgroundTaskManager {
                 let _ = fs::write(&task.status_path, json).await;
             }
             let output_path = self.output_path_for(&final_status.task_id);
-            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
-                BackgroundTaskCompleted {
-                    task_id: final_status.task_id,
-                    tool_name: final_status.tool_name,
-                    display_name: final_status.display_name,
-                    session_id: final_status.session_id,
-                    status: final_status.status,
-                    exit_code: final_status.exit_code,
-                    output_preview: "Cancelled by user".to_string(),
-                    output_file: output_path,
-                    duration_secs: final_status.duration_secs.unwrap_or_default(),
-                    notify: notify_flag,
-                    wake: wake_flag,
-                },
-            ));
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                task_id: final_status.task_id,
+                tool_name: final_status.tool_name,
+                display_name: final_status.display_name,
+                session_id: final_status.session_id,
+                status: final_status.status,
+                exit_code: final_status.exit_code,
+                output_preview: "Cancelled by user".to_string(),
+                output_file: output_path,
+                duration_secs: final_status.duration_secs.unwrap_or_default(),
+                notify: notify_flag,
+                wake: wake_flag,
+            }));
 
             Ok(true)
         } else {
@@ -1370,21 +1368,19 @@ impl BackgroundTaskManager {
             );
             self.write_status_file(&status_path, &status).await;
             let output_path = self.output_path_for(&status.task_id);
-            Bus::global().publish(BusEvent::BackgroundTaskCompleted(
-                BackgroundTaskCompleted {
-                    task_id: status.task_id,
-                    tool_name: status.tool_name,
-                    display_name: status.display_name,
-                    session_id: status.session_id,
-                    status: status.status,
-                    exit_code: status.exit_code,
-                    output_preview: "Cancelled by user".to_string(),
-                    output_file: output_path,
-                    duration_secs: status.duration_secs.unwrap_or_default(),
-                    notify: status.notify,
-                    wake: status.wake,
-                },
-            ));
+            Bus::global().publish(BusEvent::BackgroundTaskCompleted(BackgroundTaskCompleted {
+                task_id: status.task_id,
+                tool_name: status.tool_name,
+                display_name: status.display_name,
+                session_id: status.session_id,
+                status: status.status,
+                exit_code: status.exit_code,
+                output_preview: "Cancelled by user".to_string(),
+                output_file: output_path,
+                duration_secs: status.duration_secs.unwrap_or_default(),
+                notify: status.notify,
+                wake: status.wake,
+            }));
             Ok(true)
         }
     }
