@@ -98,9 +98,10 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
     if let Some(release_status) = build::read_linux_release_status() {
         status.push_str("\n## Linux Release Publish\n\n");
         let failed = release_status.state == "failed"
+            || release_status.macos_status.as_deref() == Some("failed")
             || release_status.discord_status.as_deref() == Some("failed");
         if failed {
-            status.push_str("**WARNING:** Last Linux release publish or Discord announcement failed!\n");
+            status.push_str("**WARNING:** Last self-dev release publish, macOS build, or Discord announcement failed!\n");
         }
         status.push_str(&format!(
             "**State:** {} (step: `{}`)\n",
@@ -111,6 +112,9 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
             status.push_str(&format!("**Target:** {} (`{}`)\n", tag, short_sha));
         } else {
             status.push_str(&format!("**Commit:** `{}`\n", short_sha));
+        }
+        if let Some(macos) = release_status.macos_status.as_deref() {
+            status.push_str(&format!("**macOS:** {}\n", macos));
         }
         if let Some(discord) = release_status.discord_status.as_deref() {
             status.push_str(&format!("**Discord:** {}\n", discord));

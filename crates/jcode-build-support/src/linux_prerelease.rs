@@ -11,6 +11,8 @@ pub struct LinuxReleaseStatus {
     pub state: String,
     pub step: String,
     #[serde(default)]
+    pub macos_status: Option<String>,
+    #[serde(default)]
     pub discord_status: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,

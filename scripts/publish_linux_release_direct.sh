@@ -20,6 +20,7 @@ echo "=== $(date -Iseconds) linux-release start sha=$sha ==="
 current_step="init"
 publish_state="running"
 publish_detail=""
+macos_status="pending"
 discord_status="pending"
 tag=""
 work=""
@@ -32,6 +33,7 @@ write_status() {
       --arg tag "$tag" \
       --arg state "$publish_state" \
       --arg step "$current_step" \
+      --arg macos_status "$macos_status" \
       --arg discord_status "$discord_status" \
       --arg detail "$publish_detail" \
       --arg updated_at "$(date -Iseconds)" \
@@ -41,12 +43,32 @@ write_status() {
         tag: (if $tag == "" then null else $tag end),
         state: $state,
         step: $step,
+        macos_status: $macos_status,
         discord_status: $discord_status,
         detail: (if $detail == "" then null else $detail end),
         updated_at: $updated_at,
         log_file: $log_file
       }' >"$tmp" 2>/dev/null && mv -f "$tmp" "$status_file" || rm -f "$tmp"
   fi
+}
+
+run_with_mirror_retry() {
+  local attempt=1
+  local max_attempts=2
+  local err_log="$work/justrust-attempt.log"
+  while true; do
+    if "$@" > >(tee "$err_log") 2>&1; then
+      return 0
+    fi
+    local rc=$?
+    if [ "$attempt" -lt "$max_attempts" ] && grep -q "another connection changed the source mirror" "$err_log" 2>/dev/null; then
+      echo "Transient justrust source mirror collision; retrying (attempt $((attempt + 1))/$max_attempts)..."
+      attempt=$((attempt + 1))
+      sleep 2
+      continue
+    fi
+    return "$rc"
+  done
 }
 
 on_exit() {
@@ -157,7 +179,7 @@ fi
 # Build portable glibc 2.17 Linux binary on our hosted justrust service.
 current_step="build_hosted_binary"
 write_status
-JCODE_BUILD_SEMVER="$tag" bash scripts/build_preview_linux_hosted.sh x86_64-unknown-linux-gnu
+run_with_mirror_retry env JCODE_BUILD_SEMVER="$tag" bash scripts/build_preview_linux_hosted.sh x86_64-unknown-linux-gnu
 
 current_step="verify_binary"
 binary="$repo_root/target/x86_64-unknown-linux-gnu/release/jcode"
@@ -236,6 +258,23 @@ fi
 gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,targetCommitish | \
   jq -e --arg sha "$sha" '.isDraft and (.isPrerelease | not) and .targetCommitish == $sha' >/dev/null
 gh release upload "$tag" "$work/$archive" "$work/SHA256SUMS" --repo "$repo" --clobber
+
+# Build and upload macOS arm64 asset on hosted justrust when enabled (default: on).
+current_step="build_hosted_macos"
+write_status
+if [ "${JCODE_SKIP_MACOS_RELEASE:-0}" != "1" ] && [ -x scripts/publish_macos_release_direct.sh ]; then
+  if run_with_mirror_retry bash scripts/publish_macos_release_direct.sh "$sha" "$tag"; then
+    macos_status="published"
+    title="jcode $tag · Linux + macOS"
+  else
+    echo "Warning: hosted macOS arm64 release build failed for $tag; continuing with Linux release"
+    macos_status="failed"
+  fi
+else
+  macos_status="skipped"
+fi
+write_status
+
 gh release edit "$tag" --repo "$repo" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest
 
 # Announce on Discord directly when a local webhook is available, else fall back to workflow dispatch.
