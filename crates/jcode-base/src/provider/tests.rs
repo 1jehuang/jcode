@@ -222,12 +222,15 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        cursor_acp: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         session_id: RwLock::new(None),
+        working_dir: RwLock::new(None),
         active: RwLock::new(ActiveProvider::OpenAI),
+        active_external: RwLock::new(None),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         catalog_scope: next_catalog_scope(),
@@ -718,22 +721,7 @@ fn standard_openrouter_catalog_refresh_is_noop_when_cache_fresh() {
     });
 }
 
-#[test]
-fn standard_openrouter_catalog_refresh_skips_without_key() {
-    with_clean_provider_test_env(|| {
-        let runtime = enter_test_runtime();
-        runtime.block_on(async {
-            // No OPENROUTER_API_KEY configured: the refresh must not be
-            // scheduled regardless of cache state.
-            assert!(
-                !openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
-                    "unit test missing key"
-                ),
-                "standard OpenRouter refresh must be skipped when no key is configured"
-            );
-        });
-    });
-}
+include!("tests/openrouter_refresh_without_key.rs");
 
 #[test]
 fn standard_openrouter_catalog_refresh_fires_when_named_profile_owns_slot() {
@@ -786,6 +774,9 @@ struct StubExternalRuntime {
     model: std::sync::RwLock<String>,
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
     oauth_account: std::sync::RwLock<Option<String>>,
+    /// When set, `prefetch_models` fails so refresh-fanout tests can assert
+    /// error classification for this runtime.
+    fail_refresh: std::sync::RwLock<bool>,
 }
 
 impl StubExternalRuntime {
@@ -803,11 +794,15 @@ impl StubExternalRuntime {
             model: std::sync::RwLock::new(models[0].to_string()),
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
             oauth_account: std::sync::RwLock::new(None),
+            fail_refresh: std::sync::RwLock::new(false),
         }
     }
 
     fn cursor() -> Self {
-        Self::new("cursor", "Cursor", "cursor", cursor::AVAILABLE_MODELS)
+        // Mirrors the real jcode-provider-cursor-runtime CursorCliProvider,
+        // whose model_routes advertise the direct HTTPS API transport as
+        // "Cursor (API)" to distinguish it from the Cursor CLI ACP provider.
+        Self::new("cursor", "Cursor (API)", "cursor", cursor::AVAILABLE_MODELS)
     }
 
     fn antigravity() -> Self {
@@ -825,6 +820,18 @@ impl StubExternalRuntime {
             "GitHub Copilot",
             "copilot",
             copilot::FALLBACK_MODELS,
+        )
+    }
+
+    fn cursor_acp() -> Self {
+        // Mirrors the real jcode-provider-cursor-acp-runtime provider, which
+        // advertises foundation models from multiple vendors under one
+        // "Cursor ACP" label with the `cursor-acp` api_method.
+        Self::new(
+            "cursor-acp",
+            "Cursor ACP",
+            "cursor-acp",
+            &["claude-opus-5[thinking=true]", "gpt-5.3-codex[]"],
         )
     }
 
@@ -937,10 +944,39 @@ impl Provider for StubExternalRuntime {
     fn oauth_account_label(&self) -> Option<String> {
         self.oauth_account.read().unwrap().clone()
     }
+
+    fn supports_compaction(&self) -> bool {
+        // Only the Cursor ACP stub claims compaction support; the routing test
+        // asserts MultiProvider forwards this through the external path.
+        self.name == "cursor-acp"
+    }
+
+    async fn prefetch_models(&self) -> anyhow::Result<()> {
+        if *self
+            .fail_refresh
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            anyhow::bail!("stub {} catalog refresh failed", self.name);
+        }
+        Ok(())
+    }
 }
 
 fn test_cursor_runtime() -> Arc<dyn Provider> {
     Arc::new(StubExternalRuntime::cursor())
+}
+
+fn test_cursor_acp_runtime() -> Arc<dyn Provider> {
+    Arc::new(StubExternalRuntime::cursor_acp())
+}
+
+/// Cursor ACP stub whose `prefetch_models` always fails, for refresh-fanout
+/// error-classification tests.
+fn test_failing_cursor_acp_runtime() -> Arc<dyn Provider> {
+    let stub = StubExternalRuntime::cursor_acp();
+    *stub.fail_refresh.write().unwrap() = true;
+    Arc::new(stub)
 }
 
 fn test_antigravity_runtime() -> Arc<dyn Provider> {
@@ -970,6 +1006,7 @@ fn register_test_external_runtimes() {
         test_openai_runtime() as Arc<dyn Provider>
     });
     external::register_external_provider(external::CURSOR_RUNTIME, test_cursor_runtime);
+    external::register_external_provider(external::CURSOR_ACP_RUNTIME, test_cursor_acp_runtime);
     external::register_external_provider(external::ANTIGRAVITY_RUNTIME, test_antigravity_runtime);
     external::register_external_provider(external::COPILOT_RUNTIME, test_copilot_runtime);
     // OpenRouter tests exercise the real runtime (profile-scoped catalogs,
@@ -1014,12 +1051,42 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(Some(test_cursor_runtime())),
+        cursor_acp: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         session_id: RwLock::new(None),
+        working_dir: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Cursor),
+        active_external: RwLock::new(None),
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: None,
+        catalog_scope: super::catalog_memo::next_catalog_scope(),
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+fn test_multi_provider_with_cursor_acp() -> MultiProvider {
+    MultiProvider {
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        cursor_acp: RwLock::new(Some(test_cursor_acp_runtime())),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(None),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        // Cursor ACP is selected via the external active-provider mechanism,
+        // not via ActiveProvider; use a neutral default for the picker test.
+        session_id: RwLock::new(None),
+        working_dir: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenAI),
+        active_external: RwLock::new(None),
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: None,
         catalog_scope: next_catalog_scope(),
@@ -1205,72 +1272,5 @@ include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/account_failover.rs");
 include!("tests/catalog_subscription.rs");
-
-#[test]
-fn jcode_subscription_model_prefix_parses_explicit_specs() {
-    assert_eq!(
-        super::jcode_subscription_model_prefix("jcode:gpt-5.5"),
-        Some("gpt-5.5")
-    );
-    assert_eq!(
-        super::jcode_subscription_model_prefix("jcode-subscription: gpt-5.5 "),
-        Some("gpt-5.5")
-    );
-    assert_eq!(super::jcode_subscription_model_prefix("jcode:"), None);
-    assert_eq!(super::jcode_subscription_model_prefix("gpt-5.5"), None);
-    assert_eq!(
-        super::jcode_subscription_model_prefix("openai:gpt-5.5"),
-        None
-    );
-}
-
-/// A session persisted on one credential (e.g. `claude-api:`) must not stay
-/// pinned to it after the deployment moved to the other credential. The
-/// runtime pin wins; with no pin, the bare provider prefix lets auto mode pick.
-#[test]
-fn stale_credential_route_fallback_follows_runtime_pin_or_drops_to_auto() {
-    with_clean_provider_test_env(|| {
-        // Runtime pinned to Claude OAuth, session persisted on the API key.
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude");
-        let (request, healed) = stale_credential_route_fallback("claude-api:claude-sonnet-5")
-            .expect("stale API-key pin must fall back to the runtime's OAuth route");
-        assert_eq!(request, "claude-oauth:claude-sonnet-5");
-        assert_eq!(healed.provider_key.as_deref(), Some("claude-oauth"));
-        assert_eq!(healed.route_api_method.as_deref(), Some("claude-oauth"));
-        assert_eq!(healed.stale_request, "claude-api:claude-sonnet-5");
-
-        // The reverse move: runtime on the API key, session persisted on OAuth.
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "claude-api");
-        let (request, healed) = stale_credential_route_fallback("claude-oauth:claude-sonnet-5")
-            .expect("stale OAuth pin must fall back to the runtime's API-key route");
-        assert_eq!(request, "claude-api:claude-sonnet-5");
-        assert_eq!(healed.provider_key.as_deref(), Some("claude-api"));
-        assert_eq!(
-            healed.route_api_method.as_deref(),
-            Some("anthropic-api-key")
-        );
-
-        // The runtime pins the very credential that failed: that is a real
-        // auth failure, not a stale session, so there is nothing to fall back to.
-        assert!(stale_credential_route_fallback("claude-api:claude-sonnet-5").is_none());
-
-        // A runtime pin for the *other* provider says nothing about this one:
-        // drop to auto mode.
-        crate::env::set_var("JCODE_RUNTIME_PROVIDER", "openai-api");
-        let (request, healed) = stale_credential_route_fallback("claude-api:claude-sonnet-5")
-            .expect("unpinned provider falls back to auto mode");
-        assert_eq!(request, "claude:claude-sonnet-5");
-        assert_eq!(healed.provider_key.as_deref(), Some("claude"));
-        assert_eq!(healed.route_api_method, None);
-
-        crate::env::remove_var("JCODE_RUNTIME_PROVIDER");
-        let (request, _) = stale_credential_route_fallback("openai-oauth:gpt-5.5")
-            .expect("no runtime pin falls back to auto mode");
-        assert_eq!(request, "openai:gpt-5.5");
-
-        // Requests that pin no credential have nothing to recover.
-        assert!(stale_credential_route_fallback("claude:claude-sonnet-5").is_none());
-        assert!(stale_credential_route_fallback("claude-sonnet-5").is_none());
-        assert!(stale_credential_route_fallback("openrouter:z-ai/glm-5.2@Novita").is_none());
-    });
-}
+include!("tests/credential_route_resolution.rs");
+include!("tests/catalog_cursor_acp.rs");

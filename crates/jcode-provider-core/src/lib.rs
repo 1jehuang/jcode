@@ -80,10 +80,10 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
-    /// Bind requests to a stable application session for provider-side affinity.
-    /// This is distinct from a provider response id used to resume a stream.
-    /// Backends without session-affinity support can retain the default no-op.
+    /// Bind stable application-session affinity, not a provider response ID.
     fn set_session_id(&self, _session_id: &str) {}
+    /// Bind provider-owned tools to the application's session workspace.
+    fn set_working_dir(&self, _working_dir: &std::path::Path) {}
 
     /// Prepare provider-specific request state before the foreground completion.
     ///
@@ -925,6 +925,7 @@ pub enum RuntimeKey {
     Copilot,
     Gemini,
     Cursor,
+    CursorAcp,
     Bedrock,
     Antigravity,
     CodeAssistOAuth,
@@ -957,6 +958,7 @@ impl RuntimeKey {
             },
             ModelRouteApiMethod::Copilot => Self::Copilot,
             ModelRouteApiMethod::Cursor => Self::Cursor,
+            ModelRouteApiMethod::CursorAcp => Self::CursorAcp,
             ModelRouteApiMethod::Bedrock => Self::Bedrock,
             ModelRouteApiMethod::CodeAssistOAuth => Self::CodeAssistOAuth,
             ModelRouteApiMethod::AntigravityHttps => Self::Antigravity,
@@ -984,6 +986,7 @@ impl RuntimeKey {
             Self::Copilot => "copilot".to_string(),
             Self::Gemini => "gemini".to_string(),
             Self::Cursor => "cursor".to_string(),
+            Self::CursorAcp => "cursor-acp".to_string(),
             Self::Bedrock => "bedrock".to_string(),
             Self::Antigravity => "antigravity".to_string(),
             Self::CodeAssistOAuth => "code-assist-oauth".to_string(),
@@ -1072,14 +1075,15 @@ impl RouteSelection {
             }
             RuntimeKey::Copilot => format!("copilot:{model}"),
             RuntimeKey::Cursor => format!("cursor:{model}"),
+            RuntimeKey::CursorAcp => format!("cursor-acp:{model}"),
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
             RuntimeKey::GrokBuild => grok_build_model_spec(model),
-            RuntimeKey::Gemini
-            | RuntimeKey::CodeAssistOAuth
-            | RuntimeKey::RemoteCatalog
-            | RuntimeKey::Current
-            | RuntimeKey::Other { .. } => model.to_string(),
+            RuntimeKey::Gemini => format!("gemini:{model}"),
+            RuntimeKey::CodeAssistOAuth => format!("gemini:{model}"),
+            RuntimeKey::RemoteCatalog | RuntimeKey::Current | RuntimeKey::Other { .. } => {
+                model.to_string()
+            }
         }
     }
 }
@@ -1121,6 +1125,7 @@ pub enum ModelRouteApiMethod {
     OpenAiCompatible { profile_id: Option<String> },
     Copilot,
     Cursor,
+    CursorAcp,
     Bedrock,
     CodeAssistOAuth,
     AntigravityHttps,
@@ -1175,6 +1180,7 @@ impl ModelRouteApiMethod {
             "openai-compatible" => Self::OpenAiCompatible { profile_id: None },
             "copilot" => Self::Copilot,
             "cursor" => Self::Cursor,
+            "cursor-acp" => Self::CursorAcp,
             "bedrock" => Self::Bedrock,
             "code-assist-oauth" => Self::CodeAssistOAuth,
             "https" => Self::AntigravityHttps,
@@ -1245,6 +1251,7 @@ impl ModelRouteApiMethod {
             Self::OpenRouter => "openrouter".to_string(),
             Self::Copilot => "copilot".to_string(),
             Self::Cursor => "cursor".to_string(),
+            Self::CursorAcp => "cursor-acp".to_string(),
             Self::Bedrock => "bedrock".to_string(),
             Self::AntigravityHttps => "https".to_string(),
             Self::RemoteCatalog => "remote-catalog".to_string(),
@@ -1286,7 +1293,7 @@ pub fn model_route_provider_labels_match(route_provider: &str, current_provider:
                 "copilot" | "copilotcode" | "githubcopilot",
                 "copilot" | "githubcopilot"
             )
-            | ("cursor", "cursor")
+            | ("cursor" | "cursor(api)", "cursor" | "cursor(api)")
             | ("bedrock" | "awsbedrock", "bedrock" | "awsbedrock")
             | ("openrouter", "openrouter" | "auto")
     )

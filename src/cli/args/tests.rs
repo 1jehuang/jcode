@@ -310,6 +310,9 @@ fn test_provider_choice_aliases_parse() {
 
     let args = Args::try_parse_from(["jcode", "--provider", "cgc", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Comtegra);
+
+    let args = Args::try_parse_from(["jcode", "--provider", "cursor-acp", "run", "smoke"]).unwrap();
+    assert_eq!(args.provider, ProviderChoice::CursorAcp);
 }
 
 #[test]
@@ -1199,41 +1202,7 @@ fn api_bridge_socket_flags_do_not_collide() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
-    for command in ["api", "api-bridge"] {
-        let args = Args::try_parse_from([
-            "jcode",
-            "--no-update",
-            "--socket",
-            "/isolated/daemon.sock",
-            command,
-            "--stdio",
-        ])
-        .expect("stdio bridge must accept the API alias and daemon override");
-        assert_eq!(args.socket.as_deref(), Some("/isolated/daemon.sock"));
-        assert!(args.no_update);
-        assert!(matches!(
-            args.command,
-            Some(Command::ApiBridge {
-                api_socket: None,
-                stdio: true
-            })
-        ));
-        assert!(
-            Args::try_parse_from([
-                "jcode",
-                command,
-                "--stdio",
-                "--api-socket",
-                "/isolated/api.sock",
-            ])
-            .is_err(),
-            "stdio must not silently ignore an API socket override"
-        );
-    }
-}
+include!("tests/api_stdio.rs");
 
 #[path = "tests_additional_tests.rs"]
 mod additional_cloud_lifecycle_commands_parse_their_contracts;

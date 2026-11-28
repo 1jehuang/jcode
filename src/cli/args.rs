@@ -50,6 +50,7 @@ pub(crate) struct Args {
     pub(crate) jarvis_screen: bool,
 
     /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
+    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, cursor-acp, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 

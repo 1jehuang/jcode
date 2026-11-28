@@ -448,7 +448,7 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let t = Instant::now();
-        provider.set_session_id(&session.id);
+        Self::bind_provider_context(provider.as_ref(), &session);
         let skills = SkillRegistry::shared_snapshot();
         let skills_ms = t.elapsed().as_millis();
         let tool_config = &crate::config::config().tools;
@@ -1192,24 +1192,6 @@ impl Agent {
             .map(std::path::Path::new)
             .and_then(jcode_selfdev_types::desktop_repo_root)
             .is_some()
-    }
-
-    pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
-        if working_dir.is_some() {
-            if self.session.original_working_dir.is_none()
-                && self.session.working_dir != working_dir
-                && self
-                    .session
-                    .messages
-                    .iter()
-                    .any(|message| message.role == Role::User)
-            {
-                self.session.original_working_dir = self.session.working_dir.clone();
-            }
-            self.session.working_dir = working_dir;
-            self.unlock_tools();
-            self.session.refresh_initial_session_context_message();
-        }
     }
 
     /// Mark this agent session as closed and persist it.

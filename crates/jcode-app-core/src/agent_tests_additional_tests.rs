@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "agent_workspace_binding_tests.rs"]
+mod workspace_binding;
+
 #[tokio::test]
 async fn working_directory_moves_preserve_first_active_session_origin() {
     let mut agent = Agent::new(Arc::new(BoundSavedAccountProvider), Registry::empty());

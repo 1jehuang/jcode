@@ -652,6 +652,7 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
         ProviderChoice::AlibabaCodingPlan,
         ProviderChoice::OpenaiCompatible,
         ProviderChoice::Cursor,
+        ProviderChoice::CursorAcp,
         ProviderChoice::Copilot,
         ProviderChoice::Gemini,
         ProviderChoice::Antigravity,
@@ -674,6 +675,15 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
                         .map(|alias| (*alias).to_string())
                         .collect(),
                     detail: Some(provider.menu_detail.to_string()),
+                }
+            } else if matches!(choice, ProviderChoice::CursorAcp) {
+                ProviderListEntry {
+                    id: choice.as_arg_value().to_string(),
+                    display_name: "Cursor ACP".to_string(),
+                    auth_kind: None,
+                    recommended: false,
+                    aliases: Vec::new(),
+                    detail: Some("Use the installed Cursor CLI through ACP".to_string()),
                 }
             } else {
                 ProviderListEntry {

@@ -524,6 +524,15 @@ profile = "standard"
 # Existing daemons keep their current server-wide tool config.
 # ACP clients get the same tools as the TUI. Use "minimal" to cut them down.
 tool_profile = "full"
+# Permission mode when jcode acts as the Cursor ACP client (driving Cursor's
+# agent subprocess). `jcode` (default) applies jcode's safety classification:
+# read-only/search tools are auto-approved, execute/edit tools are cancelled
+# (fail-closed) so a human is required for destructive operations. `yolo`
+# auto-approves all permission requests and bypasses jcode's safety
+# classification — set it explicitly only when you understand the risk. A
+# specific option ID (e.g. `allow-always` or `reject-once`) only matches that
+# option. Overridable by the JCODE_CURSOR_ACP_PERMISSION env var.
+permission_mode = "jcode"
 
 [provider]
 # Default model (optional, uses provider default if not set)

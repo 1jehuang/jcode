@@ -42,34 +42,64 @@ fn auth_doctor_provider_focus_uses_global_provider_when_positional_is_absent() {
 
 #[test]
 fn client_initial_model_spec_formats_provider_and_model_for_running_server() {
-    assert_eq!(
-        client_initial_model_spec(
-            &ProviderChoice::Openrouter,
-            Some("thinkingmachines/inkling-2-mini"),
+    for (provider, model, profile, expected) in [
+        (
+            ProviderChoice::Openrouter,
+            "thinkingmachines/inkling-2-mini",
             None,
+            "openrouter:thinkingmachines/inkling-2-mini",
         ),
-        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
-    );
-    assert_eq!(
-        client_initial_model_spec(&ProviderChoice::Auto, Some("gpt-5.4"), None),
-        Some("gpt-5.4".to_string())
-    );
-    assert_eq!(
-        client_initial_model_spec(
-            &ProviderChoice::Openrouter,
-            Some("openrouter:thinkingmachines/inkling-2-mini"),
+        (ProviderChoice::Auto, "gpt-5.4", None, "gpt-5.4"),
+        (
+            ProviderChoice::Openrouter,
+            "openrouter:thinkingmachines/inkling-2-mini",
             None,
+            "openrouter:thinkingmachines/inkling-2-mini",
         ),
-        Some("openrouter:thinkingmachines/inkling-2-mini".to_string())
-    );
+        (
+            ProviderChoice::Auto,
+            "my-model",
+            Some("my-profile"),
+            "my-profile:my-model",
+        ),
+        (
+            ProviderChoice::CursorAcp,
+            "future-acp-2099",
+            None,
+            "cursor-acp:future-acp-2099",
+        ),
+        (
+            ProviderChoice::CursorAcp,
+            "gemini:future-model",
+            None,
+            "gemini:future-model",
+        ),
+    ] {
+        assert_eq!(
+            client_initial_model_spec(&provider, Some(model), profile).unwrap(),
+            Some(expected.into())
+        );
+    }
     assert_eq!(
-        client_initial_model_spec(&ProviderChoice::Auto, Some("my-model"), Some("my-profile")),
-        Some("my-profile:my-model".to_string())
-    );
-    assert_eq!(
-        client_initial_model_spec(&ProviderChoice::Openrouter, None, None),
+        client_initial_model_spec(&ProviderChoice::Auto, None, None).unwrap(),
         None
     );
+}
+
+#[test]
+fn provider_only_running_server_selection_returns_a_non_destructive_error() {
+    for provider in [
+        ProviderChoice::CursorAcp,
+        ProviderChoice::Openrouter,
+        ProviderChoice::Gemini,
+    ] {
+        let error = client_initial_model_spec(&provider, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("existing server was left running"));
+        assert!(error.contains("--model <id>"));
+    }
+    assert!(client_initial_model_spec(&ProviderChoice::Auto, None, Some("profile")).is_err());
 }
 
 #[test]

@@ -13,6 +13,7 @@ use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
 pub mod copilot;
 pub mod cursor;
+mod cursor_acp_selection;
 mod dispatch;
 pub mod external;
 mod failover;
@@ -30,6 +31,7 @@ mod registry;
 mod route_builders;
 mod routing;
 mod selection;
+mod session_context;
 mod startup;
 mod state;
 mod stream_start;
@@ -56,6 +58,7 @@ pub use catalog_routes::{
     remote_model_is_server_copilot_only, remote_model_routes_fallback,
     remote_model_routes_lightweight_fallback, remote_model_should_offer_copilot_route,
     remote_openai_compatible_route_for_model, simplified_model_routes_for_picker,
+    simplified_model_routes_for_provider,
 };
 pub use jcode_provider_core::attempt_tracker;
 pub use jcode_provider_core::cli_provider_arg_for_session_key;
@@ -285,6 +288,11 @@ pub struct MultiProvider {
     /// `jcode-provider-cursor-runtime` and is instantiated through
     /// `external::instantiate_external_provider`.
     cursor: RwLock<Option<Arc<dyn Provider>>>,
+    /// Cursor CLI ACP provider (external, hot-swappable). Held as
+    /// `dyn Provider`: the concrete runtime lives downstream in
+    /// `jcode-provider-cursor-acp-runtime` and is instantiated through
+    /// `external::instantiate_external_provider`.
+    cursor_acp: RwLock<Option<Arc<dyn Provider>>>,
     /// AWS Bedrock provider (native Converse/ConverseStream, IAM/SigV4)
     bedrock: RwLock<Option<Arc<bedrock::BedrockProvider>>>,
     /// OpenRouter API provider
@@ -299,7 +307,14 @@ pub struct MultiProvider {
     active_openai_compatible_profile: RwLock<Option<String>>,
     /// Stable application session identity, retained across runtime replacement.
     session_id: RwLock<Option<String>>,
+    working_dir: RwLock<Option<std::path::PathBuf>>,
     active: RwLock<ActiveProvider>,
+    /// Active external runtime not represented in the `ActiveProvider` enum
+    /// (currently only `"cursor-acp"`). When set, completions bypass the
+    /// normal `ActiveProvider`-based failover loop and dispatch directly to
+    /// the corresponding sub-provider. Cleared by `set_active_provider`.
+    active_external: RwLock<Option<String>>,
+    /// Use Claude CLI instead of direct API (legacy mode)
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
     startup_notices: RwLock<Vec<String>>,
@@ -325,19 +340,6 @@ pub struct MultiProvider {
 }
 
 impl MultiProvider {
-    fn bound_session_id(&self) -> Option<String> {
-        self.session_id
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    fn bind_provider_session(&self, provider: &dyn Provider) {
-        if let Some(session_id) = self.bound_session_id() {
-            provider.set_session_id(&session_id);
-        }
-    }
-
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
         account_failover::same_provider_account_candidates(provider)
@@ -485,6 +487,7 @@ impl MultiProvider {
         self.bind_auto_account_for_request(self.active_provider())?;
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
+        self.spawn_cursor_acp_catalog_refresh_if_needed();
 
         // Provider capabilities are authoritative at this request chokepoint.
         // Keep images in persisted history, but replace them in the ephemeral
@@ -499,6 +502,39 @@ impl MultiProvider {
         // whole turn is rejected (#381). Only clones when a clamp is required.
         let clamped_messages = image_clamp::clamp_outbound_images(messages);
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
+
+        // External runtimes not in the ActiveProvider enum (cursor-acp) bypass
+        // the normal failover loop and dispatch directly to their sub-provider.
+        if let Some(ext_key) = self.active_external_provider()
+            && ext_key == external::CURSOR_ACP_RUNTIME
+        {
+            let Some(cursor_acp) = self.cursor_acp_provider() else {
+                anyhow::bail!(
+                    "Cursor ACP runtime is not available. Ensure the Cursor CLI is installed and configured."
+                );
+            };
+            return match mode {
+                CompletionMode::Unified { system } => {
+                    cursor_acp
+                        .complete(messages, tools, system, resume_session_id)
+                        .await
+                }
+                CompletionMode::Split {
+                    system_static,
+                    system_dynamic,
+                } => {
+                    cursor_acp
+                        .complete_split(
+                            messages,
+                            tools,
+                            system_static,
+                            system_dynamic,
+                            resume_session_id,
+                        )
+                        .await
+                }
+            };
+        }
 
         // Deferred definitions are only meaningful to providers with native
         // deferred loading. Never let them reach a provider that would send
@@ -1468,6 +1504,18 @@ impl MultiProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cursor);
         }
 
+        let already_has_cursor_acp = self.cursor_acp_provider().is_some();
+        if !already_has_cursor_acp
+            && let Some(cursor_acp) =
+                external::instantiate_expected_external_provider(external::CURSOR_ACP_RUNTIME)
+        {
+            crate::logging::info("Hot-initialized Cursor ACP provider after login");
+            *self
+                .cursor_acp
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cursor_acp);
+        }
+
         let already_has_bedrock = self.bedrock_provider().is_some();
         if !already_has_bedrock && bedrock::BedrockProvider::has_credentials() {
             crate::logging::info("Hot-initialized AWS Bedrock provider after login");
@@ -1532,13 +1580,22 @@ impl MultiProvider {
         // through the canonical prefix-aware path. Handing the raw spec to a
         // single provider would make it reject the id and silently keep its
         // fallback default model.
-        if explicit_model_provider_prefix(model).is_some()
+        if model.starts_with("cursor-acp:")
+            || explicit_model_provider_prefix(model).is_some()
             || model.split_once(':').is_some_and(|(method, _)| {
                 jcode_provider_core::oauth_account_label(method).is_some()
             })
             || Self::openai_compatible_model_prefix(model).is_some()
         {
             return self.set_model(model);
+        }
+
+        if default_provider.is_some_and(|provider| {
+            provider
+                .trim()
+                .eq_ignore_ascii_case(external::CURSOR_ACP_RUNTIME)
+        }) {
+            return self.set_model_on_cursor_acp(model);
         }
 
         // A configured default_provider is a routing decision, not just a
@@ -1693,10 +1750,11 @@ impl Default for MultiProvider {
 #[async_trait]
 impl Provider for MultiProvider {
     fn set_session_id(&self, session_id: &str) {
-        *self
-            .session_id
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id.to_owned());
+        self.bind_session_id(session_id);
+    }
+
+    fn set_working_dir(&self, working_dir: &std::path::Path) {
+        self.bind_working_dir(working_dir);
     }
 
     fn catalog_sharing_identity(&self) -> Option<String> {
@@ -1768,6 +1826,9 @@ impl Provider for MultiProvider {
     }
 
     fn name(&self) -> &str {
+        if self.active_external_provider().is_some() {
+            return "Cursor ACP";
+        }
         match self.active_provider() {
             ActiveProvider::Claude => "Claude",
             ActiveProvider::OpenAI => "OpenAI",
@@ -1781,6 +1842,9 @@ impl Provider for MultiProvider {
     }
 
     fn display_name(&self) -> String {
+        if self.active_external_provider().is_some() {
+            return self.name().to_string();
+        }
         // The OpenRouter slot multiplexes the public aggregator and every
         // direct OpenAI-compatible profile (NVIDIA NIM, DeepSeek, ...). Ask the
         // active execution runtime for its own label so the UI reflects the
@@ -1794,6 +1858,12 @@ impl Provider for MultiProvider {
     }
 
     fn model(&self) -> String {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.model())
+                .unwrap_or_else(|| "composer-2.5".to_string());
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 // Prefer anthropic if available
@@ -1989,6 +2059,12 @@ impl Provider for MultiProvider {
     }
 
     fn supports_image_input(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.supports_image_input())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -2047,6 +2123,7 @@ impl Provider for MultiProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
+        self.spawn_cursor_acp_catalog_refresh_if_needed();
         // Model/profile switches change route availability details; rebuild
         // the catalog on next read instead of serving the memoized copy.
         self.invalidate_routes_memo();
@@ -2101,6 +2178,19 @@ impl Provider for MultiProvider {
         // `--model jcode:gpt-5.5` silently stayed on the previous model.
         if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
             return self.set_model_on_jcode_subscription(target_model);
+        }
+
+        if let Some(model) = requested_model.strip_prefix("cursor-acp:") {
+            return self.set_model_on_cursor_acp(model);
+        }
+        // Bare ids belong to the active external runtime, explicit routes do not.
+        if self.active_external_provider().as_deref() == Some(external::CURSOR_ACP_RUNTIME)
+            && explicit_model_provider_prefix(requested_model).is_none()
+            && Self::named_provider_profile_model_prefix(requested_model).is_none()
+            && !requested_model.contains('@')
+            && Self::openai_compatible_model_prefix(requested_model).is_none()
+        {
+            return self.set_model_on_cursor_acp(requested_model);
         }
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
@@ -2225,6 +2315,14 @@ impl Provider for MultiProvider {
             return self.set_model_on_jcode_subscription(&selection.model);
         }
 
+        if selection.runtime_key == RuntimeKey::CursorAcp {
+            return self.set_model_on_cursor_acp(&selection.model);
+        }
+        if matches!(selection.runtime_key, RuntimeKey::OpenRouter) {
+            return self
+                .set_model_on_provider(ActiveProvider::OpenRouter, &selection.routed_model_spec());
+        }
+
         // Routing-prefix policy lives once in RouteSelection::routed_model_spec
         // so this orchestrator and every single-runtime provider agree on the
         // spec string. set_model then dispatches it to the right sub-provider.
@@ -2239,6 +2337,12 @@ impl Provider for MultiProvider {
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.available_models_for_switching())
+                .unwrap_or_default();
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -2376,6 +2480,12 @@ impl Provider for MultiProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.handles_tools_internally())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 // Direct API does NOT handle tools internally - jcode executes them
@@ -2401,6 +2511,11 @@ impl Provider for MultiProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .and_then(|provider| provider.reasoning_effort());
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -2418,6 +2533,12 @@ impl Provider for MultiProvider {
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .ok_or_else(|| anyhow::anyhow!("Cursor ACP provider not available"))?
+                .set_reasoning_effort(effort);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -2446,6 +2567,12 @@ impl Provider for MultiProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|provider| provider.available_efforts())
+                .unwrap_or_default();
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self
                 .anthropic_provider()
@@ -2519,6 +2646,15 @@ impl Provider for MultiProvider {
     }
 
     fn native_compaction_mode(&self) -> Option<String> {
+        // External runtimes (Cursor ACP) are not in the `ActiveProvider` enum;
+        // route compaction capability through the external runtime when it is
+        // the effective active provider, so compaction does not fall back to
+        // the previously selected provider.
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .and_then(|p| p.native_compaction_mode());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self
                 .openai_provider()
@@ -2528,6 +2664,11 @@ impl Provider for MultiProvider {
     }
 
     fn native_compaction_threshold_tokens(&self) -> Option<usize> {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .and_then(|p| p.native_compaction_threshold_tokens());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self
                 .openai_provider()
@@ -2537,6 +2678,9 @@ impl Provider for MultiProvider {
     }
 
     fn transport(&self) -> Option<String> {
+        if self.active_external_provider().is_some() {
+            return self.cursor_acp_provider().and_then(|p| p.transport());
+        }
         match self.active_provider() {
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.transport()),
             _ => None,
@@ -2568,6 +2712,12 @@ impl Provider for MultiProvider {
     }
 
     fn supports_compaction(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.supports_compaction())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().is_some(),
             ActiveProvider::OpenAI => self
@@ -2602,6 +2752,12 @@ impl Provider for MultiProvider {
     }
 
     fn uses_jcode_compaction(&self) -> bool {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.uses_jcode_compaction())
+                .unwrap_or(false);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => self.anthropic_provider().is_some(),
             ActiveProvider::OpenAI => self
@@ -2638,6 +2794,19 @@ impl Provider for MultiProvider {
         existing_summary_text: Option<&str>,
         existing_openai_encrypted_content: Option<&str>,
     ) -> Result<NativeCompactionResult> {
+        if self.active_external_provider().is_some() {
+            let provider = self.cursor_acp_provider();
+            if let Some(cursor_acp) = provider {
+                return cursor_acp
+                    .native_compact(
+                        messages,
+                        existing_summary_text,
+                        existing_openai_encrypted_content,
+                    )
+                    .await;
+            }
+            return Err(anyhow::anyhow!("Cursor ACP provider unavailable"));
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -2754,6 +2923,12 @@ impl Provider for MultiProvider {
     }
 
     fn context_window(&self) -> usize {
+        if self.active_external_provider().is_some() {
+            return self
+                .cursor_acp_provider()
+                .map(|p| p.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT);
+        }
         match self.active_provider() {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
@@ -2844,6 +3019,12 @@ impl Provider for MultiProvider {
             None
         };
         mark("cursor", &mut laps);
+        let cursor_acp_provider = self
+            .cursor_acp
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|p| p.fork());
         let bedrock_provider = if self.bedrock_provider().is_some() {
             Some(Arc::new(new_bedrock_provider()))
         } else {
@@ -2869,12 +3050,15 @@ impl Provider for MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            cursor_acp: RwLock::new(cursor_acp_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             session_id: RwLock::new(self.bound_session_id()),
+            working_dir: RwLock::new(self.bound_working_dir()),
             active: RwLock::new(active),
+            active_external: RwLock::new(None),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,
             catalog_scope: self.catalog_scope,
@@ -2882,14 +3066,31 @@ impl Provider for MultiProvider {
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
         };
 
+        provider.bind_instantiated_providers();
         let runtimes_ms = fork_start.elapsed().as_millis();
         let catalog_start = std::time::Instant::now();
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
+        provider.spawn_cursor_acp_catalog_refresh_if_needed();
         let catalog_ms = catalog_start.elapsed().as_millis();
         let set_model_start = std::time::Instant::now();
-        let switch_request = self.fork_model_switch_request(active, &current_model);
-        let _ = provider.set_model(&switch_request);
+        if self.active_external_provider().is_some() {
+            // Cursor ACP was active on the template — replicate the selection
+            // on the fork instead of going through set_model, which cannot
+            // route bare cursor-acp model names.
+            if let Some(cursor_acp) = provider.cursor_acp_provider()
+                && let Err(err) = cursor_acp.set_model(&current_model)
+            {
+                crate::logging::warn(&format!(
+                    "Failed to preserve Cursor ACP model '{}' for forked session: {err}",
+                    current_model
+                ));
+            }
+            provider.set_active_provider_external("cursor-acp");
+        } else {
+            let switch_request = self.fork_model_switch_request(active, &current_model);
+            let _ = provider.set_model(&switch_request);
+        }
         crate::logging::info(&format!(
             "[TIMING] provider fork: runtimes={}ms ({}), catalog_spawn={}ms, set_model={}ms, total={}ms",
             runtimes_ms,
@@ -2915,6 +3116,9 @@ impl Provider for MultiProvider {
         // Reconstruction uses the same composition root. Selection, home,
         // reloadable config and auth/catalog revisions remain part of the key.
         provider.catalog_scope = self.catalog_scope;
+        if let Some(working_dir) = self.bound_working_dir() {
+            provider.set_working_dir(&working_dir);
+        }
 
         // An explicit CLI initial provider/model remains the starting selection
         // for new sessions, while each session can switch freely afterward.

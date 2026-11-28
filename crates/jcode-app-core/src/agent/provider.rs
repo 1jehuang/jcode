@@ -1,6 +1,34 @@
 use super::*;
 
 impl Agent {
+    pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
+        if working_dir.is_some() {
+            if self.session.original_working_dir.is_none()
+                && self.session.working_dir != working_dir
+                && self
+                    .session
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User)
+            {
+                self.session.original_working_dir = self.session.working_dir.clone();
+            }
+            self.session.working_dir = working_dir;
+            Self::bind_provider_context(self.provider.as_ref(), &self.session);
+            self.unlock_tools();
+            self.session.refresh_initial_session_context_message();
+        }
+    }
+
+    pub(in crate::agent) fn bind_provider_context(provider: &dyn Provider, session: &Session) {
+        provider.set_session_id(&session.id);
+        if let Some(working_dir) = session.working_dir.as_deref() {
+            provider.set_working_dir(std::path::Path::new(working_dir));
+        } else if let Ok(working_dir) = std::env::current_dir() {
+            provider.set_working_dir(&working_dir);
+        }
+    }
+
     pub fn set_premium_mode(&self, mode: crate::provider::copilot::PremiumMode) {
         self.provider.set_premium_mode(mode);
     }
@@ -374,10 +402,7 @@ impl Agent {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
                 self.session.reasoning_effort = current.clone();
-                crate::session_effort::record_session_effort(
-                    &self.session.id,
-                    current.as_deref(),
-                );
+                crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
             }
@@ -532,6 +557,7 @@ impl Agent {
             self.session.original_working_dir = self.session.working_dir.clone();
         }
         self.session.working_dir = Some(dir.to_string());
+        Self::bind_provider_context(self.provider.as_ref(), &self.session);
         self.refresh_agents_md_snapshot();
         self.session.refresh_initial_session_context_message();
         self.log_env_snapshot("working_dir");
