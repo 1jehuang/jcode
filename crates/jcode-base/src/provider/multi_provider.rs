@@ -488,6 +488,7 @@ fn claude_saved_account_readiness_uses_live_access_or_usable_refresh() {
         (now - 60_000, "saved-account-fresh-refresh", true),
     ] {
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-otter".into(),
             access: "saved-access".into(),
             refresh: refresh.into(),
@@ -501,5 +502,61 @@ fn claude_saved_account_readiness_uses_live_access_or_usable_refresh() {
             saved_account_can_serve_model("claude", "claude-otter", "claude-sonnet-4-6"),
             expected
         );
+    }
+}
+
+impl MultiProvider {
+    pub(super) fn select_route(&self, selection: &RouteSelection) -> Result<()> {
+        if selection.model.trim().is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+
+        // An unqualified structured OAuth route selects default resolution,
+        // including approved external sources, rather than retaining a saved pin.
+        if selection.runtime_key == RuntimeKey::ClaudeOAuth
+            && selection.api_method == "claude-oauth"
+        {
+            return self.set_model_on_oauth_account(
+                ActiveProvider::Claude,
+                None,
+                &selection.model,
+                None,
+            );
+        }
+
+        // The subscription is a distinct endpoint/auth runtime, not a model
+        // alias. Handle its structured identity before converting other routes
+        // back into their legacy string specs.
+        if selection.runtime_key == RuntimeKey::JcodeSubscription {
+            return self.set_model_on_jcode_subscription(&selection.model);
+        }
+
+        // Routing-prefix policy lives once in RouteSelection::routed_model_spec
+        // so this orchestrator and every single-runtime provider agree on the
+        // spec string. set_model then dispatches it to the right sub-provider.
+        self.set_model(&selection.routed_model_spec())
+    }
+}
+
+impl MultiProvider {
+    pub(super) fn select_verified_route(
+        &self,
+        selection: &RouteSelection,
+        fingerprint: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            selection.runtime_key == RuntimeKey::ClaudeOAuth
+                && (selection.api_method == "claude-oauth"
+                    || (selection.api_method.starts_with("claude-oauth@")
+                        && selection.account_label().is_some()))
+                && !selection.model.trim().is_empty(),
+            "Invalid Claude sign-in route"
+        );
+        self.set_model_on_oauth_account(
+            ActiveProvider::Claude,
+            selection.account_label(),
+            &selection.model,
+            Some(fingerprint),
+        )
     }
 }

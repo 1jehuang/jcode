@@ -88,7 +88,7 @@ async fn assert_delta_wire_excludes_saved_response_output(empty_completion: bool
         creds.refresh_token = "fixture-refresh".into();
     }
     let identity = openai_websocket_prewarm::prewarm_identity(&creds, Some("gpt-5.6-sol"), None);
-    let credentials = Arc::new(RwLock::new(creds));
+    let credentials = Arc::new(RwLock::new(creds.into()));
     let state = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
         identity,
@@ -236,7 +236,7 @@ async fn persistent_terminal_public_case(
         .await
         .unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     *provider.persistent_ws.lock().await = Some(PersistentWsState {
@@ -356,7 +356,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         while ws.next().await.is_some_and(|frame| frame.is_ok()) {}
     });
     let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
-    let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
+    let credentials = Arc::new(RwLock::new(prewarm_test_credentials().into()));
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream,
         identity: openai_websocket_prewarm::prewarm_identity(
@@ -454,7 +454,7 @@ async fn fresh_ws_terminal_error_ends_stream_with_socket_open() {
         while ws.next().await.is_some_and(|frame| frame.is_ok()) {}
     });
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     let messages = vec![ChatMessage::user("hi")];

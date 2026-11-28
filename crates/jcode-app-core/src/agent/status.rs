@@ -229,13 +229,20 @@ impl Agent {
     }
 
     pub(super) fn provider_key_for_new_session(&self) -> Option<String> {
-        if let Some(label) = self.provider.oauth_account_label() {
-            let method = if self.provider.name().eq_ignore_ascii_case("openai") {
-                "openai-oauth"
-            } else {
-                "claude-oauth"
-            };
+        if let Some((method, label)) =
+            crate::provider::account_routes::observed_oauth_account_route(self.provider.as_ref())
+        {
             return Some(format!("{method}@{label}"));
+        }
+        if self.provider.credential_mode() == jcode_provider_core::CredentialMode::ApiKey
+            && self.provider.active_resolved_credential()
+                == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+        {
+            match self.provider.name().to_ascii_lowercase().as_str() {
+                "openai" => return Some("openai-api".into()),
+                "claude" | "anthropic" => return Some("claude-api".into()),
+                _ => {}
+            }
         }
         if self
             .provider
@@ -260,6 +267,12 @@ impl Agent {
     /// session's route metadata is rewritten to match, so swarm workers and
     /// later resumes inherit the route this session actually runs on.
     pub(crate) fn restore_session_model_from_session(&mut self) {
+        if let Err(error) =
+            crate::provider::account_routes::restore_account_pin_route(&mut self.session)
+        {
+            logging::error(&format!("Cannot restore saved account identity: {error:#}"));
+            return;
+        }
         let Some(model) = self.session.model.clone() else {
             self.session.model = Some(self.provider_model());
             return;
@@ -284,6 +297,12 @@ impl Agent {
                     self.session.route_api_method = healed.route_api_method;
                 }
                 self.reconcile_explicit_provider_pin_route();
+                if let Err(error) = crate::provider::account_routes::apply_restored_account_pin(
+                    self.provider.as_ref(),
+                    &mut self.session,
+                ) {
+                    logging::error(&format!("Cannot bind restored account identity: {error:#}"));
+                }
             }
             Err(e) => {
                 logging::error(&format!(

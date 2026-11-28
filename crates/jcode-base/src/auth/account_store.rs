@@ -32,7 +32,7 @@ impl Drop for StoreLockGuard {
         let mut owner = self.lock.owner.lock().unwrap_or_else(|e| e.into_inner());
         owner.depth -= 1;
         if owner.depth == 0 {
-            // Closing the last descriptor releases flock, including on unwind.
+            // Closing the last descriptor releases the file lock, including on unwind.
             owner.file = None;
             owner.thread = None;
             self.lock.available.notify_one();
@@ -42,8 +42,7 @@ impl Drop for StoreLockGuard {
 
 /// Lock one store in the jcode home directory for a complete read/modify/write
 /// transaction. Nested acquisitions on the same thread are supported, including
-/// load-time migration calling save. Unix also serializes independent processes.
-/// Other platforms retain process-local serialization (no cross-process flock).
+/// load-time migration calling save. The sidecar also serializes independent processes.
 pub(crate) fn lock_store(home: &Path, store_name: &str) -> Result<StoreLockGuard> {
     anyhow::ensure!(
         !store_name.is_empty()
@@ -144,12 +143,81 @@ fn open_store_lock(_home: &Path, path: &Path) -> Result<std::fs::File> {
             "Unsafe account store lock path"
         );
     }
-    Ok(std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(path)?)
+        .open(path)?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Identity claims, or a fingerprint of the current refresh generation if claims are absent.
+pub fn account_identity(
+    email: Option<&str>,
+    account_id: Option<&str>,
+    refresh_token: &str,
+) -> Option<String> {
+    let non_empty = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    non_empty(email)
+        .map(|email| email.to_ascii_lowercase())
+        .or_else(|| non_empty(account_id).map(|id| format!("id:{id}")))
+        .or_else(|| {
+            let refresh = refresh_token.trim();
+            (!refresh.is_empty()).then(|| {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(refresh.as_bytes());
+                format!("rt:{}", &hex::encode(digest)[..16])
+            })
+        })
+}
+
+/// Resolve identity before a positional label, refusing missing or ambiguous evidence.
+pub fn resolve_pin<T>(
+    pin: &jcode_provider_core::AccountPin,
+    accounts: &[T],
+    label: impl Fn(&T) -> &str,
+    identity: impl Fn(&T) -> Option<String>,
+    record_id: impl Fn(&T) -> Option<&str>,
+) -> Option<String> {
+    if let Some(expected) = pin.record_id.as_deref() {
+        let mut records = accounts
+            .iter()
+            .filter(|account| record_id(account) == Some(expected));
+        if let Some(account) = records.next() {
+            if records.next().is_some() {
+                return None;
+            }
+            // A local record may gain/change an email, but cannot silently move workspaces.
+            if let Some(workspace) = pin.identity.as_deref().filter(|id| id.starts_with("id:"))
+                && identity(account).as_deref() != Some(workspace)
+            {
+                return None;
+            }
+            return Some(label(account).to_owned());
+        }
+        if pin
+            .identity
+            .as_deref()
+            .is_none_or(|id| id.starts_with("rt:"))
+        {
+            return None;
+        }
+    }
+    let mut matches = accounts
+        .iter()
+        .filter(|account| match pin.identity.as_deref() {
+            Some(expected) => identity(account).as_deref() == Some(expected),
+            None => label(account) == pin.label,
+        });
+    let account = matches.next()?;
+    matches.next().is_none().then(|| label(account).to_owned())
 }
 
 /// Runtime (process-local) active-account overrides, keyed by provider

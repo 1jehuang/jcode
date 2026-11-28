@@ -128,7 +128,7 @@ async fn opaque_recovery_public_case(
         }).await.is_err());
     });
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     let messages = vec![

@@ -10,6 +10,8 @@
 // Tests hold the std env/home serialization lock across awaits on purpose.
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+mod account_binding;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
@@ -686,11 +688,29 @@ fn spawn_persistent_ws_keepalive_with_interval(
     })
 }
 
+#[path = "openai_credentials.rs"]
+mod openai_credentials;
+use openai_credentials::CachedCredentials;
+
+fn reload_capabilities(
+    scope: &str,
+    model: &str,
+    efforts: &StdRwLock<HashMap<String, Vec<String>>>,
+    tiers: &StdRwLock<HashMap<String, Vec<String>>>,
+    selected_effort: &StdRwLock<Option<String>>,
+) {
+    *tiers.write().unwrap_or_else(|p| p.into_inner()) =
+        jcode_base::provider::cached_openai_service_tiers_for_scope(scope).unwrap_or_default();
+    *efforts.write().unwrap_or_else(|p| p.into_inner()) =
+        jcode_base::provider::cached_openai_reasoning_efforts_for_scope(scope).unwrap_or_default();
+    openai_credentials::revalidate_effort(model, selected_effort, efforts);
+}
+
 pub struct OpenAIProvider {
     client: Client,
-    credentials: Arc<RwLock<CodexCredentials>>,
+    credentials: Arc<RwLock<CachedCredentials>>,
     credential_mode: Arc<RwLock<OpenAICredentialMode>>,
-    oauth_account: StdRwLock<Option<String>>,
+    oauth_account: Arc<StdRwLock<Option<jcode_provider_core::AccountPin>>>,
     model: Arc<RwLock<String>>,
     prompt_cache_key: Option<String>,
     cache_session_id: StdRwLock<String>,
@@ -849,9 +869,9 @@ impl OpenAIProvider {
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
-            credentials: Arc::new(RwLock::new(credentials)),
+            credentials: Arc::new(RwLock::new(credentials.into())),
             credential_mode: Arc::new(RwLock::new(credential_mode)),
-            oauth_account: StdRwLock::new(None),
+            oauth_account: Arc::new(StdRwLock::new(None)),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key,
             cache_session_id: StdRwLock::new(Self::new_cache_session_id()),
@@ -884,49 +904,24 @@ impl OpenAIProvider {
     }
 
     fn load_selected_credentials(&self, mode: OpenAICredentialMode) -> Result<CodexCredentials> {
-        match (mode, self.oauth_account_label()) {
-            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(label)) => {
-                jcode_base::auth::codex::load_credentials_for_account(&label)
+        match (mode, self.oauth_account_pin()) {
+            (OpenAICredentialMode::Auto | OpenAICredentialMode::OAuth, Some(pin)) => {
+                jcode_base::auth::account_pins::load_openai(&pin)
+                    .map(|(credentials, _)| credentials)
             }
             _ => load_credentials_for_mode(mode),
         }
     }
 
-    fn refresh_account_label(&self) -> Option<String> {
-        self.oauth_account_label()
-            .or_else(jcode_base::auth::codex::active_account_label)
-    }
-
-    pub(crate) fn reload_credentials_now(&self) {
-        let mode = self
-            .credential_mode
-            .try_read()
-            .map(|mode| *mode)
-            .unwrap_or(OpenAICredentialMode::Auto);
-        if let Ok(credentials) = self.load_selected_credentials(mode) {
-            match self.credentials.try_write() {
-                Ok(mut guard) => {
-                    *guard = credentials;
-                    self.browser_only.store(false, AtomicOrdering::Release);
-                    drop(guard);
-                    self.reload_cached_reasoning_efforts();
-                }
-                Err(_) => {
-                    jcode_base::logging::info(
-                        "OpenAI credentials were updated on disk, but the in-memory credential lock was busy; async refresh will retry",
-                    );
-                }
-            }
-        }
-
-        self.clear_persistent_ws_try("credentials reloaded");
+    fn refresh_account_label(&self) -> Option<jcode_provider_core::AccountPin> {
+        self.oauth_account_pin()
     }
 
     pub(crate) fn set_credential_mode(&self, mode: OpenAICredentialMode) -> Result<()> {
         let credentials = self.load_selected_credentials(mode)?;
         match self.credentials.try_write() {
             Ok(mut guard) => {
-                *guard = credentials;
+                openai_credentials::adopt_stored(&mut guard, credentials);
                 self.browser_only.store(false, AtomicOrdering::Release);
                 drop(guard);
                 self.reload_cached_reasoning_efforts();
@@ -963,22 +958,14 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let tiers =
-            jcode_base::provider::cached_openai_service_tiers_for_scope(&self.catalog_scope())
-                .unwrap_or_default();
-        *self
-            .model_service_tiers
-            .write()
-            .unwrap_or_else(|p| p.into_inner()) = tiers;
+        reload_capabilities(
+            &self.catalog_scope(),
+            &self.model(),
+            &self.model_reasoning_efforts,
+            &self.model_service_tiers,
+            &self.reasoning_effort,
+        );
         self.warn_unsupported_service_tier();
-        let cached =
-            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
-                .unwrap_or_default();
-        match self.model_reasoning_efforts.write() {
-            Ok(mut efforts) => *efforts = cached,
-            Err(poisoned) => *poisoned.into_inner() = cached,
-        }
-        self.revalidate_reasoning_effort();
     }
 
     fn supports_service_tier(&self, model: &str, tier: &str) -> bool {
@@ -1153,28 +1140,11 @@ impl OpenAIProvider {
     }
 
     fn revalidate_reasoning_effort(&self) {
-        let current = self
-            .reasoning_effort
-            .read()
-            .map(|effort| effort.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        let Some(current) = current else {
-            return;
-        };
-        if jcode_base::prompt::is_swarm_effort(&current)
-            || self.available_efforts().contains(&current.as_str())
-        {
-            return;
-        }
-        jcode_base::logging::info(&format!(
-            "Clearing OpenAI reasoning effort '{}' because model '{}' does not advertise it",
-            current,
-            self.model()
-        ));
-        match self.reasoning_effort.write() {
-            Ok(mut effort) => *effort = None,
-            Err(poisoned) => *poisoned.into_inner() = None,
-        }
+        openai_credentials::revalidate_effort(
+            &self.model(),
+            &self.reasoning_effort,
+            &self.model_reasoning_efforts,
+        );
     }
 
     /// Resolve swarm effort only at the wire boundary, preserving the stored mode.

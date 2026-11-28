@@ -1,7 +1,6 @@
 //! Local-only execution of the exact generated shell, with downloaded artifacts
 //! supplied by a fake curl. No network, cloud host or user installation is used.
 use super::*;
-use std::path::Path;
 
 #[test]
 fn release_policy_is_exact_and_development_has_no_fallback() {
@@ -40,6 +39,7 @@ fn release_policy_is_exact_and_development_has_no_fallback() {
 mod shell {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -63,7 +63,7 @@ case "$*" in
   '--no-update --no-selfdev cloud cancel-return --help') exit 0 ;;
   '--no-update --no-selfdev cloud replace-receive --help') exit 0 ;;
   '--no-update --no-selfdev cloud group-protocol --help') exit 0 ;;
-  '--no-update --no-selfdev cloud credentials --help') {credentials} ;;
+  '--no-update --no-selfdev cloud credentials --help') {credentials} && printf '%s\n' '--expected-pin' ;;
   '--no-update --no-selfdev cloud router-credentials --help') {credentials} ;;
   *) exit 95 ;;
 esac
@@ -225,6 +225,32 @@ cp "$HOME/fixtures/${url##*/}" "$dest"
                     .exists()
             );
         }
+    }
+
+    #[test]
+    fn legacy_credential_help_triggers_upgrade_to_a_guarded_exporter() {
+        let f = Fixture::new();
+        f.installed(true);
+        let legacy = std::fs::read_to_string(f.backend())
+            .unwrap()
+            .replace("--expected-pin", "--legacy-export");
+        executable(&f.backend(), &legacy);
+        f.artifact(true, false, None);
+        let result = f.run(None);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            f.backend().is_symlink(),
+            "legacy help must not count as a capable installation"
+        );
+        assert!(
+            std::fs::read_to_string(f.dir.path().join("downloads"))
+                .unwrap()
+                .contains("releases/latest")
+        );
     }
 
     #[test]
@@ -813,5 +839,41 @@ exec /usr/bin/mv "$@"
             .unwrap();
         assert!(result.status.success());
         assert_eq!(String::from_utf8(result.stdout).unwrap(), value);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_capability_probe_rejects_credentials_help_without_pin_check() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let script = prepare_script_for_paths("", None, "/unused", false);
+    let start = script.find("probe() {").unwrap();
+    let end = script[start..].find("version_output() {").unwrap() + start;
+    for (pinned, help_exit) in [(false, 0), (true, 0), (true, 9)] {
+        let binary = dir.path().join("jcode");
+        let help = if pinned {
+            "--expected-pin"
+        } else {
+            "Usage: credentials"
+        };
+        std::fs::write(&binary, format!("#!/bin/sh\ncase \"$*\" in *'cloud credentials --help') printf '%s\\n' '{help}'; exit {help_exit} ;; *) exit 0 ;; esac\n")).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "warm=0; cli=; backend=;\n{}\ncapable \"$1\"",
+                &script[start..end]
+            ))
+            .arg("capability-fixture")
+            .arg(&binary)
+            .env("HOME", dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(
+            result.status.success(),
+            pinned && help_exit == 0,
+            "conditional export requires both the flag and a successful help command"
+        );
     }
 }

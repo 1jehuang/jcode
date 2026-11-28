@@ -110,6 +110,7 @@ mod tests {
     }
     fn account(label: &str, credentials: &CodexCredentials) -> OpenAiAccount {
         OpenAiAccount {
+            record_id: None,
             label: label.into(),
             access_token: credentials.access_token.clone(),
             refresh_token: credentials.refresh_token.clone(),

@@ -129,7 +129,12 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
         assert!(!app.agent_models_global_scope);
         let roles = app.inline_interactive_state.as_ref().expect("role list");
         assert!(roles.is_agent_target_picker());
-        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        assert!(
+            roles
+                .entries
+                .iter()
+                .all(|entry| entry.name.ends_with("[session]"))
+        );
         configure_test_remote_models(&mut app);
         app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
         app.is_remote = false;
@@ -505,4 +510,46 @@ fn test_model_picker_preview_enter_selects_model() {
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
+    with_temp_jcode_home(|| {
+        // `account_store::upsert_account` assigns its own canonical label
+        // (`claude-<animal>`) and ignores the requested one for a new account,
+        // so capture what it actually returns instead of assuming the request
+        // was honoured.
+        let mut assigned = Vec::new();
+        for index in 1..=3 {
+            assigned.push(
+                crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                    record_id: None,
+                    label: format!("requested-{index}"),
+                    access: format!("access-{index}"),
+                    refresh: format!("refresh-{index}"),
+                    expires: 100 + index,
+                    email: None,
+                    subscription_type: None,
+                    scopes: Vec::new(),
+                })
+                .unwrap(),
+            );
+        }
+        let last = assigned
+            .last()
+            .expect("three accounts were created")
+            .clone();
+        crate::auth::claude::set_active_account(&last).unwrap();
+
+        let labels: Vec<_> = crate::auth::claude::list_accounts()
+            .unwrap()
+            .into_iter()
+            .map(|account| account.label)
+            .collect();
+        assert_eq!(labels, assigned);
+
+        assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
+        assert!(crate::auth::claude::list_accounts().unwrap().is_empty());
+        assert!(crate::auth::claude::active_account_label().is_none());
+    });
 }

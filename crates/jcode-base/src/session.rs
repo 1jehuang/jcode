@@ -1,4 +1,7 @@
 use crate::id::{extract_session_name, new_id, new_memorable_session_id_avoiding};
+mod startup_snapshot;
+use startup_snapshot::{RemoteStartupSessionSnapshot, SessionStartupStub};
+
 use crate::message::{ContentBlock, Message, Role};
 pub use crate::storage::{
     SessionCounts, SessionPresence, active_session_ids, find_active_session_id_by_pid,
@@ -103,6 +106,8 @@ pub struct Session {
     /// "openai-compatible:nvidia-nim", "openai-api").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_api_method: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_pins: BTreeMap<String, jcode_provider_core::AccountPin>,
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -186,69 +191,6 @@ pub struct Session {
     memory_profile_dirty: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct SessionStartupStub {
-    id: String,
-    #[serde(default)]
-    parent_id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    custom_title: Option<String>,
-    #[serde(default)]
-    system_prompt: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    #[serde(default)]
-    compaction: Option<std::sync::Arc<StoredCompactionState>>,
-    #[serde(default)]
-    provider_session_id: Option<String>,
-    #[serde(default)]
-    provider_key: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    route_api_method: Option<String>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default)]
-    context_cap: Option<usize>,
-    #[serde(default)]
-    subagent_model: Option<String>,
-    #[serde(default)]
-    agent_model_overrides: AgentModelOverrides,
-    #[serde(default)]
-    improve_mode: Option<SessionImproveMode>,
-    #[serde(default)]
-    autoreview_enabled: Option<bool>,
-    #[serde(default)]
-    autojudge_enabled: Option<bool>,
-    #[serde(default)]
-    is_canary: bool,
-    #[serde(default)]
-    testing_build: Option<String>,
-    #[serde(default)]
-    working_dir: Option<String>,
-    #[serde(default)]
-    original_working_dir: Option<String>,
-    #[serde(default)]
-    short_name: Option<String>,
-    #[serde(default)]
-    status: SessionStatus,
-    #[serde(default)]
-    last_pid: Option<u32>,
-    #[serde(default)]
-    last_active_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    is_debug: bool,
-    #[serde(default)]
-    saved: bool,
-    #[serde(default)]
-    save_label: Option<String>,
-    #[serde(default)]
-    migration_epoch: u64,
-}
-
 const MAX_SESSION_JOURNAL_BYTES: u64 = 512 * 1024;
 
 /// Max number of environment snapshots to retain per session
@@ -278,6 +220,12 @@ fn is_zero_u64(value: &u64) -> bool {
 }
 
 impl Session {
+    pub fn inherit_provider_route(&mut self, parent: &Self) {
+        self.provider_key = parent.provider_key.clone();
+        self.route_api_method = parent.route_api_method.clone();
+        self.account_pins = parent.account_pins.clone();
+    }
+
     fn session_from_startup_stub(stub: SessionStartupStub) -> Self {
         let mut session = Self::create_with_id(stub.id, stub.parent_id, stub.title);
         session.custom_title = stub.custom_title;
@@ -289,6 +237,7 @@ impl Session {
         session.provider_key = stub.provider_key;
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
+        session.account_pins = stub.account_pins;
         session.reasoning_effort = stub.reasoning_effort;
         session.context_cap = stub.context_cap;
         session.subagent_model = stub.subagent_model;
@@ -330,6 +279,7 @@ impl Session {
         session.provider_key = snapshot.provider_key;
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
+        session.account_pins = snapshot.account_pins;
         session.reasoning_effort = snapshot.reasoning_effort;
         session.context_cap = snapshot.context_cap;
         session.subagent_model = snapshot.subagent_model;
@@ -536,6 +486,7 @@ impl Session {
             provider_key: self.provider_key.clone(),
             route_api_method: self.route_api_method.clone(),
             route_api_method_present: true,
+            account_pins: Some(self.account_pins.clone()),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             context_cap: self.context_cap,
@@ -741,6 +692,9 @@ impl Session {
         self.provider_session_id = meta.provider_session_id;
         self.model_usage_turn_id = meta.model_usage_turn_id;
         self.provider_key = meta.provider_key;
+        if let Some(pins) = meta.account_pins {
+            self.account_pins = pins;
+        }
         if meta.route_api_method_present {
             self.route_api_method = meta.route_api_method;
         }
@@ -790,6 +744,7 @@ impl Session {
             provider_key: None,
             model: None,
             route_api_method: None,
+            account_pins: BTreeMap::new(),
             reasoning_effort: None,
             context_cap: None,
             subagent_model: None,
@@ -850,6 +805,7 @@ impl Session {
             provider_key: None,
             model: None,
             route_api_method: None,
+            account_pins: BTreeMap::new(),
             reasoning_effort: None,
             context_cap: None,
             subagent_model: None,
@@ -1701,69 +1657,6 @@ request in this new forked session, using the inherited conversation only as con
 mod redaction;
 #[cfg(test)]
 use redaction::redact_json_value;
-
-#[derive(Debug, Deserialize)]
-struct RemoteStartupSessionSnapshot {
-    id: String,
-    #[serde(default)]
-    parent_id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    custom_title: Option<String>,
-    #[serde(default)]
-    system_prompt: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    #[serde(default, deserialize_with = "parallel_messages::deserialize")]
-    messages: Vec<StoredMessage>,
-    #[serde(default)]
-    compaction: Option<std::sync::Arc<StoredCompactionState>>,
-    #[serde(default)]
-    provider_session_id: Option<String>,
-    #[serde(default)]
-    provider_key: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    route_api_method: Option<String>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    #[serde(default)]
-    context_cap: Option<usize>,
-    #[serde(default)]
-    subagent_model: Option<String>,
-    #[serde(default)]
-    agent_model_overrides: AgentModelOverrides,
-    #[serde(default)]
-    improve_mode: Option<SessionImproveMode>,
-    #[serde(default)]
-    autoreview_enabled: Option<bool>,
-    #[serde(default)]
-    autojudge_enabled: Option<bool>,
-    #[serde(default)]
-    is_canary: bool,
-    #[serde(default)]
-    testing_build: Option<String>,
-    #[serde(default)]
-    working_dir: Option<String>,
-    #[serde(default)]
-    original_working_dir: Option<String>,
-    #[serde(default)]
-    short_name: Option<String>,
-    #[serde(default)]
-    status: SessionStatus,
-    #[serde(default)]
-    last_pid: Option<u32>,
-    #[serde(default)]
-    last_active_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    is_debug: bool,
-    #[serde(default)]
-    saved: bool,
-    #[serde(default)]
-    save_label: Option<String>,
-}
 
 #[cfg(test)]
 #[path = "session_tests/mod.rs"]

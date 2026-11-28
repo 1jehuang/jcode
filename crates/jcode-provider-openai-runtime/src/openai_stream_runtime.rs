@@ -83,8 +83,8 @@ mod opaque_rejection_tests;
 /// This is intentionally outside the generic retry loop. Even a transient
 /// failure of this single HTTPS attempt must not schedule another replay.
 pub(super) async fn recover_opaque_ws_rejection(
-    credentials: Arc<RwLock<CodexCredentials>>,
-    account_label: Option<String>,
+    credentials: Arc<RwLock<CachedCredentials>>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     request: &Value,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) {
@@ -242,119 +242,9 @@ use self::openai_stream_timeout::{
     effective_https_idle_timeout, effective_ws_completion_timeout_secs, send_websocket_frame,
 };
 
-pub(super) async fn openai_access_token(
-    account_label: Option<String>,
-    credentials: &Arc<RwLock<CodexCredentials>>,
-) -> anyhow::Result<String> {
-    if let Some(label) = account_label.as_deref() {
-        let is_oauth = {
-            let tokens = credentials.read().await;
-            !tokens.refresh_token.is_empty() || tokens.id_token.is_some()
-        };
-        if is_oauth {
-            // Cloud handoff/login can replace the file while this daemon keeps
-            // its provider alive. Never send or refresh the old cached copy.
-            let mut tokens = credentials.write().await;
-            *tokens = jcode_base::auth::codex::load_credentials_for_account(label)?;
-        }
-    }
-    let (access_token, refresh_token, needs_refresh, is_oauth) = {
-        let tokens = credentials.read().await;
-        if tokens.access_token.is_empty() {
-            anyhow::bail!("OpenAI access token is empty");
-        }
-
-        let should_refresh = if let Some(expires_at) = tokens.expires_at {
-            expires_at < chrono::Utc::now().timestamp_millis() + 300_000
-                && !tokens.refresh_token.is_empty()
-        } else {
-            false
-        };
-
-        (
-            tokens.access_token.clone(),
-            tokens.refresh_token.clone(),
-            should_refresh,
-            !tokens.refresh_token.is_empty() || tokens.id_token.is_some(),
-        )
-    };
-
-    if is_oauth && let Some(label) = account_label.as_deref() {
-        // A deleted explicit login must not continue using its cached bearer.
-        jcode_base::auth::codex::load_credentials_for_account(label)?;
-    }
-
-    if !needs_refresh {
-        return Ok(access_token);
-    }
-
-    if refresh_token.is_empty() {
-        return Ok(access_token);
-    }
-
-    force_refresh_openai_token(credentials, &refresh_token, account_label).await
-}
-
-/// Unconditionally refresh the OpenAI access token using the stored refresh
-/// token, persisting the rotated credentials in place. Used when the server
-/// rejects the current access token (401/403) even though it had not yet hit
-/// its local expiry window.
-pub(super) async fn force_refresh_openai_token(
-    credentials: &Arc<RwLock<CodexCredentials>>,
-    refresh_token: &str,
-    account_label: Option<String>,
-) -> anyhow::Result<String> {
-    // Rotation, persistence, and the in-memory commit form one transaction.
-    // It runs as its own task so a cancelled caller (dropped stream, aborted
-    // turn) cannot strand rotated tokens on disk while this provider keeps the
-    // consumed refresh token in memory. The network wait inside is bounded by
-    // `oauth::OPENAI_REFRESH_TIMEOUT`.
-    let refresh_token = refresh_token.to_string();
-    refresh_and_commit_openai_tokens(credentials, async move {
-        match account_label {
-            Some(label) => oauth::refresh_openai_tokens_for_account(&refresh_token, &label).await,
-            None => oauth::refresh_openai_tokens(&refresh_token).await,
-        }
-    })
-    .await
-}
-
-/// Run `refresh` (rotation plus persistence) and the in-memory commit as one
-/// task that survives cancellation of the caller.
-pub(super) async fn refresh_and_commit_openai_tokens(
-    credentials: &Arc<RwLock<CodexCredentials>>,
-    refresh: impl std::future::Future<Output = anyhow::Result<oauth::OAuthTokens>> + Send + 'static,
-) -> anyhow::Result<String> {
-    let credentials = Arc::clone(credentials);
-    oauth::run_refresh_transaction(async move {
-        let refreshed = refresh.await?;
-        Ok(commit_refreshed_openai_tokens(&credentials, refreshed).await)
-    })
-    .await
-}
-
-async fn commit_refreshed_openai_tokens(
-    credentials: &Arc<RwLock<CodexCredentials>>,
-    refreshed: oauth::OAuthTokens,
-) -> String {
-    let mut tokens = credentials.write().await;
-    let account_id = tokens.account_id.clone();
-    let id_token = refreshed
-        .id_token
-        .clone()
-        .or_else(|| tokens.id_token.clone());
-    let new_access_token = refreshed.access_token.clone();
-
-    *tokens = CodexCredentials {
-        access_token: new_access_token.clone(),
-        refresh_token: refreshed.refresh_token,
-        id_token,
-        account_id,
-        expires_at: Some(refreshed.expires_at),
-    };
-
-    new_access_token
-}
+#[cfg(test)]
+use super::openai_credentials::refresh_and_commit_openai_tokens;
+pub(super) use super::openai_credentials::{force_refresh_openai_token, openai_access_token};
 
 /// Privacy-safe context for a websocket stall: the provider response id (a
 /// correlation handle, not content) and how long the stream had been silent.
@@ -373,7 +263,7 @@ fn ws_stall_diagnostics(
 
 /// Stream the response from OpenAI API
 #[allow(clippy::too_many_arguments)]
-fn response_http_request(
+pub(crate) fn response_http_request(
     client: &Client,
     url: &str,
     access_token: &str,
@@ -529,7 +419,7 @@ mod full_replay_tests;
 /// after cancellation has no response id and receives a full, independent replay.
 pub(super) async fn try_persistent_ws_continuation(
     persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
-    credentials: &Arc<RwLock<CodexCredentials>>,
+    credentials: &Arc<RwLock<CachedCredentials>>,
     request: &Value,
     input: &[Value],
     input_item_count: usize,
@@ -583,7 +473,7 @@ pub(super) async fn try_persistent_ws_continuation(
 
 async fn continue_persistent_ws_locked(
     guard: &mut Option<PersistentWsState>,
-    credentials: &Arc<RwLock<CodexCredentials>>,
+    credentials: &Arc<RwLock<CachedCredentials>>,
     request: &Value,
     input: &[Value],
     input_item_count: usize,
@@ -1412,8 +1302,8 @@ mod fresh_ws_wire_tests;
 /// Stream response via WebSocket, saving the connection for reuse.
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
-    credentials: Arc<RwLock<CodexCredentials>>,
-    account_label: Option<String>,
+    credentials: Arc<RwLock<CachedCredentials>>,
+    account_label: Option<jcode_provider_core::AccountPin>,
     request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
@@ -1439,7 +1329,7 @@ pub(super) async fn stream_response_websocket_persistent(
 }
 
 async fn stream_response_websocket_authenticated(
-    credentials: Arc<RwLock<CodexCredentials>>,
+    credentials: Arc<RwLock<CachedCredentials>>,
     request: &Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,

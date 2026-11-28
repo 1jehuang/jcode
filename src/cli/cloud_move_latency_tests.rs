@@ -141,6 +141,7 @@ case "$JCODE_CLOUD_LATENCY_TEST_MODE" in
     exit 9
     ;;
 esac
+if [ "$4" = credentials ]; then printf '%s\n' '--expected-pin'; fi
 "#,
         );
         // A marker at the first local repository probe proves that preparation

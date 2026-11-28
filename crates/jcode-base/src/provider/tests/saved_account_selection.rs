@@ -1,3 +1,5 @@
+#[path = "verified_route.rs"]
+mod verified_route;
 use super::*;
 
 #[test]

@@ -240,6 +240,16 @@ pub(crate) enum Command {
         #[arg(long, alias = "headless")]
         no_browser: bool,
 
+        /// Sign in with the installed Claude Code CLI and approve credential reuse.
+        /// Used by default for interactive Claude login when the CLI is installed.
+        #[arg(long, conflicts_with_all = ["no_browser", "account", "oauth"])]
+        claude_code: bool,
+        #[arg(long, hide = true, requires = "claude_code")]
+        claude_code_completion: Option<std::path::PathBuf>,
+        /// Use Jcode's OAuth browser flow for Claude.
+        #[arg(long)]
+        oauth: bool,
+
         /// Print a script-friendly auth URL and persist temporary login state for later completion.
         #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
         print_auth_url: bool,
@@ -1067,13 +1077,16 @@ pub(crate) enum CloudCommand {
     /// Internal: transfer one named OAuth account over the private SSH channel.
     #[command(hide = true)]
     Credentials {
-        #[arg(long = "provider", id = "cloud_credential_provider")]
-        provider: String,
+        #[arg(from_global)]
+        provider: ProviderChoice,
         #[arg(long = "account", id = "cloud_credential_account")]
         account: String,
         /// Export to stdout instead of importing from stdin.
         #[arg(long)]
         export: bool,
+        /// Require the source account captured by the returning session.
+        #[arg(long, requires = "export")]
+        expected_pin: Option<String>,
     },
 
     /// Internal: import the account router's API keys, provider token stores
@@ -1170,3 +1183,7 @@ pub(crate) use management::ProviderCommand;
 pub(crate) use management::SessionCommand;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "args/claude_login_tests.rs"]
+mod claude_login_tests;

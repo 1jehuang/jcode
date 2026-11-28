@@ -365,7 +365,7 @@ pub(super) fn create_transfer_session_from_parent(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
+    child.inherit_provider_route(parent);
     child.subagent_model = parent.subagent_model.clone();
     child.improve_mode = parent.improve_mode;
     child.autoreview_enabled = parent.autoreview_enabled;

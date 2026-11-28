@@ -149,6 +149,7 @@ pub(crate) fn run_migrate(
                 mcp_servers: configured_mcp_servers(),
                 auth_account,
                 auth_accounts: accounts.clone(),
+                auth_pin_proofs: Vec::new(),
             },
             session_sha256: String::new(),
             todos_sha256: None,
@@ -195,6 +196,30 @@ pub(crate) fn run_migrate(
             common_remote_commit(target, &host, &repo).as_deref(),
         )?;
         for (sess, member) in sessions.iter_mut().zip(&mut journal.group.members) {
+            member.manifest.auth_account = session_credentials(sess)?.map(|payload| CloudAccount {
+                provider: payload.provider(),
+                label: payload.label().into(),
+            });
+            if let Some(account) = &member.manifest.auth_account {
+                sess.route_api_method = Some(account.route());
+            }
+        }
+        let (credentials, mut proofs) = if dry_run {
+            (Vec::new(), std::collections::BTreeMap::new())
+        } else {
+            capture_credentials(&sessions, &accounts)?
+        };
+        for (sess, member) in sessions.iter_mut().zip(&mut journal.group.members) {
+            if let Some(proofs) = proofs.remove(&sess.id) {
+                set_pin_proofs(&mut member.manifest, proofs);
+                member.manifest.auth_accounts = credentials
+                    .iter()
+                    .map(|p| CloudAccount {
+                        provider: p.provider(),
+                        label: p.label().into(),
+                    })
+                    .collect();
+            }
             let mut member_repo = repo.clone();
             member_repo.working_dir = sess
                 .working_dir
@@ -248,7 +273,7 @@ pub(crate) fn run_migrate(
         if !dry_run {
             save_journal(&directory, &journal)?;
         }
-        transfer_and_verify(&journal.group, &stage, target, &host, dry_run)?;
+        transfer_and_verify(&journal.group, &stage, target, &host, dry_run, &credentials)?;
         Ok(())
     })();
     if let Err(error) = prepared {
@@ -282,22 +307,12 @@ fn transfer_and_verify(
     target: &Target,
     host: &str,
     dry_run: bool,
+    credentials: &[CloudCredentialTransfer],
 ) -> Result<()> {
     if !dry_run {
         let mut baselines = Vec::new();
-        for account in &root(group)?.manifest.auth_accounts {
-            let payload = transfer::export_cloud_account_at(
-                &storage::jcode_dir()?,
-                account.provider,
-                Some(&account.label),
-            )?;
-            retry_ssh(host, "group credentials", || {
-                target.exchange_credentials(host, account, Some(payload.as_bytes()))
-            })?;
-            baselines.push(CloudAuthBaseline {
-                account: account.clone(),
-                fingerprint: credential_fingerprint(&payload),
-            });
+        for payload in credentials {
+            baselines.push(send_credentials(target, host, payload)?);
         }
         let router = export_router_credentials()?;
         if !router.is_empty() {

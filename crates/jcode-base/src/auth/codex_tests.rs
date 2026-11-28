@@ -222,6 +222,7 @@ fn multi_account_active_switch_works() {
     set_active_account_override(None);
 
     upsert_account(OpenAiAccount {
+        record_id: None,
         label: "personal".to_string(),
         access_token: "at_personal".to_string(),
         refresh_token: "rt_personal".to_string(),
@@ -232,6 +233,7 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
     upsert_account(OpenAiAccount {
+        record_id: None,
         label: "work".to_string(),
         access_token: "at_work".to_string(),
         refresh_token: "rt_work".to_string(),
@@ -457,6 +459,7 @@ fn load_auth_file_preserves_existing_named_labels() {
 #[test]
 fn serving_account_label_follows_credentials_not_active_login() {
     let account = |label: &str, access: &str, refresh: &str, id: &str| OpenAiAccount {
+        record_id: None,
         label: label.into(),
         access_token: access.into(),
         refresh_token: refresh.into(),

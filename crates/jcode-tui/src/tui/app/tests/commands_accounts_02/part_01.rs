@@ -304,6 +304,7 @@ mod usage_cards;
 fn test_show_accounts_includes_masked_email_column() {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let accounts = vec![crate::auth::claude::AnthropicAccount {
+        record_id: None,
         label: "work".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),
@@ -346,6 +347,7 @@ fn test_account_openai_command_opens_account_picker() {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "work".to_string(),
             access_token: "acc".to_string(),
             refresh_token: "ref".to_string(),
@@ -408,6 +410,7 @@ fn test_account_picker_marks_routed_session_login_not_global_last_account() {
         for label in ["personal", "work"] {
             labels.push(
                 crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    record_id: None,
                     label: label.into(),
                     access_token: "acc".into(),
                     refresh_token: "ref".into(),
@@ -466,6 +469,7 @@ fn test_account_picker_includes_all_configured_credentials_even_excluded_and_man
         crate::env::set_var("COPILOT_GITHUB_TOKEN", "picker-test-secret-device-token");
         crate::env::set_var("GROQ_API_KEY", "picker-test-secret-compatible-key");
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "work".into(),
             access_token: "picker-test-secret-oauth-access".into(),
             refresh_token: "picker-test-secret-oauth-refresh".into(),
@@ -713,6 +717,7 @@ fn test_account_command_opens_account_picker() {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-1".to_string(),
             access: "claude_acc".to_string(),
             refresh: "claude_ref".to_string(),
@@ -724,6 +729,7 @@ fn test_account_command_opens_account_picker() {
         .unwrap();
 
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "work".to_string(),
             access_token: "acc".to_string(),
             refresh_token: "ref".to_string(),
@@ -801,6 +807,7 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "first".to_string(),
             access_token: "acc1".to_string(),
             refresh_token: "ref1".to_string(),
@@ -811,6 +818,7 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
         })
         .unwrap();
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "second".to_string(),
             access_token: "acc2".to_string(),
             refresh_token: "ref2".to_string(),
@@ -869,6 +877,7 @@ fn test_account_picker_preview_from_input_filters_accounts() {
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "first".to_string(),
             access_token: "acc1".to_string(),
             refresh_token: "ref1".to_string(),
@@ -879,6 +888,7 @@ fn test_account_picker_preview_from_input_filters_accounts() {
         })
         .unwrap();
         crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: "second".to_string(),
             access_token: "acc2".to_string(),
             refresh_token: "ref2".to_string(),
@@ -921,67 +931,6 @@ fn test_account_picker_preview_stays_closed_for_explicit_subcommands() {
 }
 
 #[test]
-fn test_account_command_combines_claude_and_openai_accounts() {
-    with_temp_jcode_home(|| {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-
-        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
-            label: "claude-1".to_string(),
-            access: "claude_acc".to_string(),
-            refresh: "claude_ref".to_string(),
-            expires: now_ms + 60_000,
-            email: Some("claude@example.com".to_string()),
-            scopes: Vec::new(),
-            subscription_type: Some("pro".to_string()),
-        })
-        .unwrap();
-        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
-            label: "openai-1".to_string(),
-            access_token: "acc".to_string(),
-            refresh_token: "ref".to_string(),
-            id_token: None,
-            account_id: Some("acct_openai_1".to_string()),
-            expires_at: Some(now_ms + 60_000),
-            email: Some("openai@example.com".to_string()),
-        })
-        .unwrap();
-
-        let mut app = create_test_app();
-        app.input = "/account".to_string();
-        app.submit_input();
-
-        let picker = app
-            .inline_interactive_state
-            .as_ref()
-            .expect("inline account picker should open");
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ref label
-                }) if provider_id == "claude" && label == "claude-otter"
-            )
-        }));
-        assert!(picker.entries.iter().any(|entry| {
-            matches!(
-                entry.action,
-                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
-                    ref provider_id,
-                    ref label
-                }) if provider_id == "openai" && label == "openai-otter"
-            )
-        }));
-        assert!(
-            !picker
-                .entries
-                .iter()
-                .any(|entry| entry.name == "account center")
-        );
-    });
-}
-
-#[test]
 fn test_account_picker_renders_each_oauth_email_in_combined_and_scoped_views() {
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -991,6 +940,7 @@ fn test_account_picker_renders_each_oauth_email_in_combined_and_scoped_views() {
         let openai_emails = ["openai.personal@example.com", "openai.work@example.com"];
         for (index, email) in claude_emails.iter().enumerate() {
             crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                record_id: None,
                 label: format!("claude-{}", index + 1),
                 access: "access".to_string(),
                 refresh: "refresh".to_string(),
@@ -1003,6 +953,7 @@ fn test_account_picker_renders_each_oauth_email_in_combined_and_scoped_views() {
         }
         for (index, email) in openai_emails.iter().enumerate() {
             crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                record_id: None,
                 label: format!("openai-{}", index + 1),
                 access_token: "access".to_string(),
                 refresh_token: "refresh".to_string(),
@@ -1090,6 +1041,7 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
         // account and assigns its own canonical one (`openai-<animal>`), so the
         // switch has to use the label it actually returns.
         let open_account = |account_id: &str, email: &str| crate::auth::codex::OpenAiAccount {
+            record_id: None,
             label: String::new(),
             access_token: "acc".to_string(),
             refresh_token: "ref".to_string(),

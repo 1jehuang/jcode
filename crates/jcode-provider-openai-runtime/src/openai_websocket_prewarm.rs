@@ -144,7 +144,7 @@ impl PrewarmSlot {
 
     pub(super) fn start(
         self: &Arc<Self>,
-        credentials: Arc<RwLock<CodexCredentials>>,
+        credentials: Arc<RwLock<CachedCredentials>>,
         request: &Value,
     ) {
         let request = prewarm_request(request);
@@ -479,7 +479,7 @@ mod tests {
             "input": [{"role": "user", "content": "private conversation"}]
         });
         let expected_wire = serde_json::to_string(&prewarm_request(&request)).unwrap();
-        let credentials = Arc::new(RwLock::new(credentials()));
+        let credentials = Arc::new(RwLock::new(credentials().into()));
         // Keep the task suspended before any network activity.
         let _credentials_guard = credentials.write().await;
         let slot = Arc::new(PrewarmSlot::default());
@@ -530,7 +530,7 @@ mod tests {
         let mut creds = credentials();
         creds.refresh_token = "must-never-be-sent-to-refresh-endpoint".into();
         creds.expires_at = Some(0);
-        let credentials = Arc::new(RwLock::new(creds));
+        let credentials = Arc::new(RwLock::new(creds.into()));
         let slot = Arc::new(PrewarmSlot::default());
         slot.start(
             Arc::clone(&credentials),

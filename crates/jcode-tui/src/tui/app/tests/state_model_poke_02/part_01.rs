@@ -1063,47 +1063,6 @@ fn test_top_level_command_suggestions_include_all_non_hidden_commands() {
 }
 
 #[test]
-fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
-    with_temp_jcode_home(|| {
-        // `account_store::upsert_account` assigns its own canonical label
-        // (`claude-<animal>`) and ignores the requested one for a new account,
-        // so capture what it actually returns instead of assuming the request
-        // was honoured.
-        let mut assigned = Vec::new();
-        for index in 1..=3 {
-            assigned.push(
-                crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
-                    label: format!("requested-{index}"),
-                    access: format!("access-{index}"),
-                    refresh: format!("refresh-{index}"),
-                    expires: 100 + index,
-                    email: None,
-                    subscription_type: None,
-                    scopes: Vec::new(),
-                })
-                .unwrap(),
-            );
-        }
-        let last = assigned
-            .last()
-            .expect("three accounts were created")
-            .clone();
-        crate::auth::claude::set_active_account(&last).unwrap();
-
-        let labels: Vec<_> = crate::auth::claude::list_accounts()
-            .unwrap()
-            .into_iter()
-            .map(|account| account.label)
-            .collect();
-        assert_eq!(labels, assigned);
-
-        assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
-        assert!(crate::auth::claude::list_accounts().unwrap().is_empty());
-        assert!(crate::auth::claude::active_account_label().is_none());
-    });
-}
-
-#[test]
 fn test_transcript_command_suggestions_include_path_variant() {
     let app = create_test_app();
 

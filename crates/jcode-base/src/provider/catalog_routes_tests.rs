@@ -36,6 +36,7 @@ fn saved_account_catalogs_keep_work_personal_and_named_accounts_separate() {
         openai_accounts: ["work", "personal", "research"]
             .into_iter()
             .map(|label| crate::auth::codex::OpenAiAccount {
+                record_id: None,
                 label: label.into(),
                 access_token: "test-access".into(),
                 refresh_token: "test-refresh".into(),

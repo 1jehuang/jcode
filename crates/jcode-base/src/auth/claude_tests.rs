@@ -35,6 +35,7 @@ fn jcode_auth_file_default_is_empty() {
 fn jcode_auth_file_roundtrip() {
     let auth = JcodeAuthFile {
         anthropic_accounts: vec![AnthropicAccount {
+            record_id: None,
             label: "work".to_string(),
             access: "acc_123".to_string(),
             refresh: "ref_456".to_string(),
@@ -151,6 +152,7 @@ fn jcode_auth_file_multi_account() {
     let auth = JcodeAuthFile {
         anthropic_accounts: vec![
             AnthropicAccount {
+                record_id: None,
                 label: "personal".to_string(),
                 access: "acc_personal".to_string(),
                 refresh: "ref_personal".to_string(),
@@ -160,6 +162,7 @@ fn jcode_auth_file_multi_account() {
                 email: None,
             },
             AnthropicAccount {
+                record_id: None,
                 label: "work".to_string(),
                 access: "acc_work".to_string(),
                 refresh: "ref_work".to_string(),
@@ -210,6 +213,7 @@ fn anthropic_account_no_subscription_type() {
 #[test]
 fn anthropic_account_email_serialized_when_present() {
     let account = AnthropicAccount {
+        record_id: None,
         label: "test".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),
@@ -226,6 +230,7 @@ fn anthropic_account_email_serialized_when_present() {
 #[test]
 fn anthropic_account_email_omitted_when_none() {
     let account = AnthropicAccount {
+        record_id: None,
         label: "test".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),
@@ -241,6 +246,7 @@ fn anthropic_account_email_omitted_when_none() {
 #[test]
 fn anthropic_account_subscription_type_serialized_when_present() {
     let account = AnthropicAccount {
+        record_id: None,
         label: "test".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),
@@ -257,6 +263,7 @@ fn anthropic_account_subscription_type_serialized_when_present() {
 #[test]
 fn anthropic_account_subscription_type_omitted_when_none() {
     let account = AnthropicAccount {
+        record_id: None,
         label: "test".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),
@@ -273,6 +280,7 @@ fn anthropic_account_subscription_type_omitted_when_none() {
 fn update_account_profile_sets_email() {
     let mut auth = JcodeAuthFile::default();
     auth.anthropic_accounts.push(AnthropicAccount {
+        record_id: None,
         label: "test".to_string(),
         access: "acc".to_string(),
         refresh: "ref".to_string(),

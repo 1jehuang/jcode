@@ -278,6 +278,31 @@ pub fn runtime_env_pinned_mode(provider: DualAuthProvider) -> Option<AuthMode> {
     )
 }
 
+/// A sign-in route is conditional on both its origin and the completed grant.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AuthRouteVerification {
+    pub fingerprint: String,
+    pub completion_path: std::path::PathBuf,
+    pub attempt: String,
+    pub previous_model: String,
+    pub previous_provider: String,
+    pub previous_serving_account_label: Option<String>,
+    pub previous_credential: Option<ResolvedCredential>,
+}
+
+/// Account-qualified OAuth method, preserving the case-sensitive saved label.
+pub fn oauth_account_label(method: &str) -> Option<&str> {
+    let (base, label) = method.trim().split_once('@')?;
+    if !matches!(base, "claude-oauth" | "openai-oauth")
+        || label.is_empty()
+        || label.contains([':', '@'])
+        || label.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(label)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

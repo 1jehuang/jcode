@@ -372,3 +372,61 @@ pub(super) async fn refresh_model_catalog_with_progress(
         }
     }
 }
+
+impl App {
+    /// Shared post-switch bookkeeping for every local model/provider switch
+    /// path (/model, model cycling, failover, post-login activation).
+    ///
+    /// Centralized so all paths agree on what a switch means: reset provider
+    /// session ids, drop upstream/status details, invalidate the model picker
+    /// cache, update the context limit, recompute the session provider key,
+    /// and persist the session. Returns the active model after the switch.
+    ///
+    /// `model_request` is the original request string (it may carry an
+    /// explicit provider prefix like `openrouter:`); for provider-level
+    /// switches without a model request, pass the active model name.
+    pub(in crate::tui::app) fn finalize_model_switch(&mut self, model_request: &str) -> String {
+        self.usage_reset.openai_quota_rejected = false;
+        self.provider_session_id = None;
+        self.session.provider_session_id = None;
+        self.upstream_provider = None;
+        self.status_detail = None;
+        self.invalidate_model_picker_cache();
+        let active_model = self.provider.model();
+        self.update_context_limit_for_model(&active_model, None);
+        self.session.provider_key =
+            crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                model_request,
+                self.provider.name(),
+                self.session.provider_key.as_deref(),
+            );
+        if let Some((method, label)) =
+            crate::provider::account_routes::observed_oauth_account_route(self.provider.as_ref())
+        {
+            self.session.route_api_method = Some(format!("{method}@{label}"));
+        } else if self
+            .session
+            .route_api_method
+            .as_deref()
+            .is_some_and(|method| {
+                jcode_provider_core::oauth_account_label(method).is_some()
+                    || (self.provider.active_resolved_credential()
+                        == Some(jcode_provider_core::ResolvedCredential::ApiKey)
+                        && matches!(method, "claude-oauth" | "openai-oauth"))
+            })
+        {
+            self.session.route_api_method = None;
+        }
+        self.session.model = Some(active_model.clone());
+        crate::provider::account_routes::record_account_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+        );
+        if let Err(error) = self.session.save() {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Model switched for this session, but the saved route could not be persisted: {error}"
+            )));
+        }
+        active_model
+    }
+}

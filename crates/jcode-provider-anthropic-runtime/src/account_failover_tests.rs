@@ -159,6 +159,7 @@ fn http_retry_decision_with_policy(
     } {
         let stored_label =
             jcode_base::auth::claude::upsert_account(jcode_base::auth::claude::AnthropicAccount {
+                record_id: None,
                 label: label.into(),
                 access: format!("access-{label}"),
                 refresh: format!("refresh-{label}"),
@@ -580,7 +581,7 @@ fn http_retry_decision_with_policy(
                 },
                 tx,
                 Arc::new(RwLock::new(None)),
-                Some(account_labels[0].clone()),
+                Some(jcode_base::auth::account_pins::claude_pin(&account_labels[0]).unwrap()),
                 "claude-sonnet-4-6".into(),
                 "test-session".into(),
                 Arc::new(std::sync::RwLock::new("claude-sonnet-4-6".into())),

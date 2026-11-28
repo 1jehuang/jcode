@@ -301,3 +301,66 @@ fn test_turn_error_does_not_clobber_new_input() {
     // We must not overwrite text the user already started.
     assert_eq!(app.input, "new prompt");
 }
+
+#[test]
+fn test_account_command_combines_claude_and_openai_accounts() {
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
+            label: "claude-1".to_string(),
+            access: "claude_acc".to_string(),
+            refresh: "claude_ref".to_string(),
+            expires: now_ms + 60_000,
+            email: Some("claude@example.com".to_string()),
+            scopes: Vec::new(),
+            subscription_type: Some("pro".to_string()),
+        })
+        .unwrap();
+        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            record_id: None,
+            label: "openai-1".to_string(),
+            access_token: "acc".to_string(),
+            refresh_token: "ref".to_string(),
+            id_token: None,
+            account_id: Some("acct_openai_1".to_string()),
+            expires_at: Some(now_ms + 60_000),
+            email: Some("openai@example.com".to_string()),
+        })
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.input = "/account".to_string();
+        app.submit_input();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("inline account picker should open");
+        assert!(picker.entries.iter().any(|entry| {
+            matches!(
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                    ref provider_id,
+                    ref label
+                }) if provider_id == "claude" && label == "claude-otter"
+            )
+        }));
+        assert!(picker.entries.iter().any(|entry| {
+            matches!(
+                entry.action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                    ref provider_id,
+                    ref label
+                }) if provider_id == "openai" && label == "openai-otter"
+            )
+        }));
+        assert!(
+            !picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "account center")
+        );
+    });
+}

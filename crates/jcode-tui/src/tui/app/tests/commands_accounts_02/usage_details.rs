@@ -6,6 +6,7 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
             .into_iter()
             .map(|label| {
                 crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                    record_id: None,
                     label: label.to_string(),
                     access_token: "acc".into(),
                     refresh_token: "ref".into(),

@@ -205,6 +205,7 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
         };
 
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-1".to_string(),
             access: "test-access-token".to_string(),
             refresh: "test-refresh-token".to_string(),
@@ -320,6 +321,7 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
         };
 
         crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+            record_id: None,
             label: "claude-1".to_string(),
             access: "test-access-token".to_string(),
             refresh: "test-refresh-token".to_string(),

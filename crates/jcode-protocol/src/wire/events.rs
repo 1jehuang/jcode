@@ -106,6 +106,9 @@ pub struct TurnIdentity {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    /// Explicit grant verification for a correlated sign-in route request.
+    #[serde(rename = "auth_route_verified")]
+    AuthRouteVerified { id: u64, verified: bool },
     /// Authoritative attachment boundary, sent before the corresponding History.
     #[serde(rename = "turn_state")]
     TurnState {

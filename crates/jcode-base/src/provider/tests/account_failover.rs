@@ -680,6 +680,7 @@ fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
         let (provider, attempts, _cleanup) = account_routing_fixture(&[]);
         for label in ["claude-otter", "claude-fox", "claude-panda"] {
             auth::claude::upsert_account(auth::claude::AnthropicAccount {
+                record_id: None,
                 label: label.into(),
                 access: "access".into(),
                 refresh: "refresh".into(),
@@ -707,12 +708,14 @@ fn auto_initial_anthropic_account_skips_weekly_quota_without_cooldown() {
         *provider.anthropic.write().unwrap() = Some(original.clone());
         let _quota_cleanup = RemoteQuotaCleanup;
         crate::usage::set_remote_account_usage(
-            vec![serde_json::from_value(serde_json::json!({
-                "label": "claude-otter", "exhausted": false,
-                "five_hour_ratio": 0.1, "seven_day_ratio": 1.0,
-                "resets_at": "2999-01-01T00:00:00Z"
-            }))
-            .unwrap()],
+            vec![
+                serde_json::from_value(serde_json::json!({
+                    "label": "claude-otter", "exhausted": false,
+                    "five_hour_ratio": 0.1, "seven_day_ratio": 1.0,
+                    "resets_at": "2999-01-01T00:00:00Z"
+                }))
+                .unwrap(),
+            ],
             vec![],
         );
         provider
@@ -768,7 +771,8 @@ fn auto_initial_quota_routing_preserves_pins_disabled_failover_and_pool_boundari
                 pool.members.retain(|member| {
                     !matches!(member.as_str(), "openai:openai-fox" | "openai:openai-panda")
                 });
-                pool.excluded.extend(["openai:openai-fox".into(), "openai:openai-panda".into()]);
+                pool.excluded
+                    .extend(["openai:openai-fox".into(), "openai:openai-panda".into()]);
             }
             pool.save().unwrap();
             provider

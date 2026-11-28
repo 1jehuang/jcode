@@ -53,8 +53,7 @@ pub(super) fn fork(
     child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
-    child.provider_key = parent.provider_key.clone();
-    child.route_api_method = parent.route_api_method.clone();
+    child.inherit_provider_route(&parent);
     child.reasoning_effort = parent.reasoning_effort.clone();
     child.context_cap = parent.context_cap;
     child.status = session::SessionStatus::Closed;

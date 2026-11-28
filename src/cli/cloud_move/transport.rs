@@ -190,7 +190,7 @@ impl Target {
         // no longer has metadata.
         let metadata = exe.metadata().ok().map(|m| (m.len(), m.modified().ok()));
         Ok(format!(
-            "{host}\n{}\n{}\n{namespace}\n{:?}\n{:?}\n{}\n{:?}\n{}\n{}\n{}",
+            "{host}\n{}\n{};--expected-pin;status=0\n{namespace}\n{:?}\n{:?}\n{}\n{:?}\n{}\n{}\n{}",
             self.remote_binary(),
             REQUIRED_REMOTE_COMMANDS.join(","),
             std::env::var_os("JCODE_CLOUD_RELEASE"),
@@ -258,8 +258,11 @@ impl Target {
                 ));
                 for command in REQUIRED_REMOTE_COMMANDS {
                     script.push_str(&format!(
-                    "out=$({binary} --no-update --no-selfdev cloud {command} --help 2>&1 >/dev/null) || {{ printf '%s\\ncloud protocol probe failed: {command} (remote %s)\\n' \"$out\" \"$version\" >&2; exit 4; }}\n"
+                    "out=$({binary} --no-update --no-selfdev cloud {command} --help 2>&1) || {{ printf '%s\\ncloud protocol probe failed: {command} (remote %s)\\n' \"$out\" \"$version\" >&2; exit 4; }}\n"
                 ));
+                    if command == "credentials" {
+                        script.push_str("printf '%s\\n' \"$out\" | grep -F -- '--expected-pin' >/dev/null || { echo 'conditional credential export (--expected-pin) is required' >&2; exit 4; }\n");
+                    }
                 }
                 let output = timed_move_stage("host capability verification", || {
                     output_with_ssh_retry(
@@ -294,14 +297,24 @@ impl Target {
                 };
             }
             for command in REQUIRED_REMOTE_COMMANDS {
-                if let Err(error) = self.run_remote(host, &["cloud", command, "--help"], None) {
-                    let text = format!("{error:#}");
-                    if text.contains("unrecognized") {
-                        bail!(
-                            "jcode on `{host}` does not support the complete cloud handoff protocol (`{command}`). Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
-                        );
+                let output = match self.run_remote(host, &["cloud", command, "--help"], None) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let text = format!("{error:#}");
+                        if text.contains("unrecognized") {
+                            bail!(
+                                "jcode on `{host}` does not support the complete cloud handoff protocol (`{command}`). Update jcode on the cloud host (or pass --remote-binary / set JCODE_CLOUD_REMOTE_BINARY to a newer build)"
+                            );
+                        }
+                        return Err(error.context(format!("could not run jcode on `{host}`")));
                     }
-                    return Err(error.context(format!("could not run jcode on `{host}`")));
+                };
+                if command == "credentials"
+                    && !String::from_utf8_lossy(&output).contains("--expected-pin")
+                {
+                    bail!(
+                        "jcode on `{host}` lacks conditional credential export (--expected-pin). Update it or select a compatible --remote-binary before returning the session"
+                    );
                 }
             }
             Ok(())
@@ -564,6 +577,7 @@ impl Target {
         host: &str,
         account: &CloudAccount,
         payload: Option<&[u8]>,
+        expected_pin: Option<&str>,
     ) -> Result<Vec<u8>> {
         let mut args = vec![
             "cloud",
@@ -575,6 +589,9 @@ impl Target {
         ];
         if payload.is_none() {
             args.push("--export");
+        }
+        if let Some(pin) = expected_pin {
+            args.extend(["--expected-pin", pin]);
         }
         let mut command = self.remote_command(host, &args)?;
         command.stdin(if payload.is_some() {

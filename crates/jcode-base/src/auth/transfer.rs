@@ -18,6 +18,9 @@
 //! `exp` claim. This is an offline expiry check, not authentication validation.
 //! Opaque tokens without an explicit expiry remain supported.
 
+mod cloud_accounts;
+use cloud_accounts::{cloud_account, cloud_keys, cloud_record_lineage_proven, valid_cloud_label};
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::Read;
@@ -43,7 +46,7 @@ impl TransferProvider {
         }
     }
 
-    fn store_name(self) -> &'static str {
+    pub(super) fn store_name(self) -> &'static str {
         match self {
             Self::OpenAi => "openai-auth.json",
             Self::Claude => "auth.json",
@@ -427,6 +430,7 @@ pub fn import_at(
             )?;
             serde_json::to_vec(&super::codex::JcodeOpenAiAuthFile {
                 openai_accounts: vec![super::codex::OpenAiAccount {
+                    record_id: None,
                     label: "openai-otter".into(),
                     access_token: credential.access_token,
                     refresh_token: credential.refresh_token,
@@ -453,6 +457,7 @@ pub fn import_at(
             }
             serde_json::to_vec(&Store {
                 anthropic_accounts: vec![super::claude::AnthropicAccount {
+                    record_id: None,
                     label: "claude-otter".into(),
                     access: credential.access,
                     refresh: credential.refresh,
@@ -677,62 +682,6 @@ struct CloudEnvelope {
     provider: TransferProvider,
     label: String,
     credential: serde_json::Value,
-}
-
-fn cloud_keys(
-    provider: TransferProvider,
-) -> (&'static str, &'static str, &'static str, &'static str) {
-    match provider {
-        TransferProvider::OpenAi => (
-            "openai_accounts",
-            "active_openai_account",
-            "access_token",
-            "refresh_token",
-        ),
-        TransferProvider::Claude => (
-            "anthropic_accounts",
-            "active_anthropic_account",
-            "access",
-            "refresh",
-        ),
-    }
-}
-
-fn valid_cloud_label(label: &str) -> bool {
-    !label.trim().is_empty() && label.len() <= 256 && !label.chars().any(char::is_control)
-}
-
-// Normalize only known account fields, never copy arbitrary store contents.
-// Expired access tokens are intentional: the receiving runtime may refresh them.
-fn cloud_account(
-    provider: TransferProvider,
-    value: &serde_json::Value,
-) -> Result<serde_json::Value, TransferError> {
-    let normalized = match provider {
-        TransferProvider::OpenAi => {
-            let account: super::codex::OpenAiAccount =
-                serde_json::from_value(value.clone()).map_err(|_| TransferError::InvalidPayload)?;
-            serde_json::to_value(account)
-        }
-        TransferProvider::Claude => {
-            let account: super::claude::AnthropicAccount =
-                serde_json::from_value(value.clone()).map_err(|_| TransferError::InvalidPayload)?;
-            serde_json::to_value(account)
-        }
-    }
-    .map_err(|_| TransferError::InvalidPayload)?;
-    let (_, _, access, refresh) = cloud_keys(provider);
-    if !normalized["label"].as_str().is_some_and(valid_cloud_label)
-        || !normalized[access]
-            .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
-        || !normalized[refresh]
-            .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
-    {
-        return Err(TransferError::InvalidPayload);
-    }
-    Ok(normalized)
 }
 
 fn parse_cloud(
@@ -1102,10 +1051,19 @@ fn import_cloud_inner(
                     }
                 }
             }
+            let keep_record_id = cloud_record_lineage_proven(
+                provider,
+                &old,
+                &envelope.credential,
+                baseline.is_some(),
+            );
             // Preserve unknown per-account fields too, updating only known fields.
             let object = existing
                 .as_object_mut()
                 .ok_or(TransferError::InvalidStore)?;
+            if !keep_record_id {
+                object.remove("record_id");
+            }
             let optional_fields: &[&str] = match provider {
                 TransferProvider::OpenAi => &["id_token", "account_id", "email", "expires_at"],
                 TransferProvider::Claude => &["email", "scopes", "subscription_type"],
@@ -2182,4 +2140,5 @@ mod tests {
         );
         assert_eq!(fs::read_dir(home.as_path()).unwrap().count(), 1);
     }
+    include!("transfer/record_identity_tests.rs");
 }

@@ -11,14 +11,13 @@ pub(super) async fn run_stream_with_retries(
     mut request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
-    oauth_account_label: Option<String>,
+    oauth_account_label: Option<jcode_provider_core::AccountPin>,
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
     direct_transport: DirectTransportConfig,
     retry_settings: reasoning_request::RetrySettings,
 ) {
-    let usage_label = usage_recording::credential_label(is_oauth, &initial_token);
     let mut token = initial_token;
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -56,6 +55,19 @@ pub(super) async fn run_stream_with_retries(
                 retry_max
             ));
         }
+
+        if attempt > 0 && is_oauth {
+            match resolve_oauth_access_token(&credentials, &oauth_account_label).await {
+                Ok((current, _)) => token = current,
+                Err(error) => {
+                    if let Ok(permit) = tx.reserve().await {
+                        permit.send(Err(error));
+                    }
+                    return;
+                }
+            }
+        }
+        let usage_label = usage_recording::credential_label(is_oauth, &token);
 
         // Track whether this attempt streams replay-visible output so a
         // mid-stream transport fault can roll the partial output back on the
@@ -236,11 +248,13 @@ pub(super) async fn run_stream_with_retries(
                 if is_oauth
                     && !saw_output
                     && is_account_limit_error(&error_str)
-                    && oauth_account_label.as_deref().is_some_and(|label| {
-                        jcode_base::usage::account_known_exhausted(
-                            jcode_base::usage::MultiAccountProviderKind::Anthropic,
-                            label,
-                        )
+                    && oauth_account_label.as_ref().is_some_and(|pin| {
+                        auth::account_pins::resolve_claude(pin).is_ok_and(|label| {
+                            jcode_base::usage::account_known_exhausted(
+                                jcode_base::usage::MultiAccountProviderKind::Anthropic,
+                                &label,
+                            )
+                        })
                     })
                 {
                     // The API often uses the same generic 429 for exhausted plan

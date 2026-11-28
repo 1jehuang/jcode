@@ -16,7 +16,7 @@ async fn service_tier_header_changes_invalidate_persistent_socket() {
         let request = serde_json::json!({"model":"gpt-6-astra", "service_tier":after});
         let result = try_persistent_ws_continuation(
             &persistent,
-            &Arc::new(RwLock::new(creds)),
+            &Arc::new(RwLock::new(creds.into())),
             &request,
             &[],
             0,
@@ -46,7 +46,7 @@ async fn oauth_routing_header_changes_invalidate_persistent_socket() {
         let request = serde_json::json!({"model":model, "service_tier":after});
         let result = try_persistent_ws_continuation(
             &persistent,
-            &Arc::new(RwLock::new(creds)),
+            &Arc::new(RwLock::new(creds.into())),
             &request,
             &[],
             0,
@@ -115,7 +115,7 @@ async fn cache_affinity_changed_session_cannot_reuse_old_handshake() {
     let (tx, _rx) = mpsc::channel(10);
     let result = try_persistent_ws_continuation(
         &persistent,
-        &Arc::new(RwLock::new(prewarm_test_credentials())),
+        &Arc::new(RwLock::new(prewarm_test_credentials().into())),
         &serde_json::json!({"model":"gpt-5.6-sol", "prompt_cache_key":"new-session"}),
         &input,
         input.len(),

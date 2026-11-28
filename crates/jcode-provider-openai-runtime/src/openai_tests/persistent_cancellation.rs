@@ -55,7 +55,7 @@ async fn persistent_cancellation_completed_unseen_tool_forces_full_replay() {
     let (tx, _rx) = mpsc::channel(32);
     let result = try_persistent_ws_continuation(
         &persistent,
-        &Arc::new(RwLock::new(prewarm_test_credentials())),
+        &Arc::new(RwLock::new(prewarm_test_credentials().into())),
         &request,
         &input,
         input.len(),
@@ -153,7 +153,7 @@ async fn persistent_cancellation_waiting_lock_preserves_current_owner() {
     let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     jcode_base::provider::populate_account_models_for_scope(
@@ -245,7 +245,7 @@ async fn persistent_cancellation_drains_unseen_tools_and_replays_on_same_socket(
     });
     let (ws_stream, _) = connect_ws(format!("ws://{addr}")).await.unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     jcode_base::provider::populate_account_models_for_scope(
@@ -377,7 +377,7 @@ async fn persistent_cancellation_public_drop_releases_chain_and_reconnects() {
         .await
         .unwrap();
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     jcode_base::provider::populate_account_models_for_scope(
@@ -493,7 +493,7 @@ async fn persistent_cancellation_aborted_future_invalidates_before_handoff() {
     let task = tokio::spawn(async move {
         try_persistent_ws_continuation(
             &socket,
-            &Arc::new(RwLock::new(prewarm_test_credentials())),
+            &Arc::new(RwLock::new(prewarm_test_credentials().into())),
             &serde_json::json!({"model":"gpt-5.6-sol"}),
             &input,
             input.len(),

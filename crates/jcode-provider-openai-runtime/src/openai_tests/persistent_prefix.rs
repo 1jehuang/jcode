@@ -57,7 +57,7 @@ async fn prefix_test_complete(provider: &OpenAIProvider, messages: &[ChatMessage
 
 async fn prefix_test_provider() -> OpenAIProvider {
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_transport("websocket").unwrap();
     provider
