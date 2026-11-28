@@ -425,6 +425,21 @@ impl McpManager {
         names
     }
 
+    /// Operational guidance from a connected server; never starts a connection.
+    pub async fn server_instructions(&self, server: &str) -> Option<String> {
+        if let Some(handle) = self.pool_handles.read().await.get(server)
+            && !handle.is_closed()
+        {
+            return handle.instructions();
+        }
+        self.owned_clients
+            .read()
+            .await
+            .get(server)
+            .filter(|client| !client.handle().is_closed())
+            .and_then(|client| client.handle().instructions())
+    }
+
     /// Tool definitions for one connected server, or `None` when it is not
     /// connected. Cheaper than [`Self::all_tools`] when reacting to a single
     /// server's connection.
@@ -710,6 +725,59 @@ mod tests {
 
     fn empty_config() -> McpConfig {
         McpConfig::default()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_servers_do_not_supply_instructions() {
+        let server: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "/bin/sh",
+            "args": ["-c", r#"
+while IFS= read -r line; do
+  case "$line" in
+    *'"initialize"'*)
+      echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"instructions":"Use workspace A"}}'
+      ;;
+    *'"tools/list"'*)
+      echo '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}'
+      ;;
+    *'"fixture/exit"'*) exit 0 ;;
+  esac
+done
+"#],
+            "timeout_secs": 5
+        }))
+        .unwrap();
+        for shared in [false, true] {
+            let mut manager = McpManager::with_config(empty_config());
+            if shared {
+                manager.pool = Some(Arc::new(SharedMcpPool::new(empty_config())));
+            }
+            let config = McpServerConfig {
+                shared,
+                ..server.clone()
+            };
+            manager.connect("guidance", &config).await.unwrap();
+            assert_eq!(
+                manager.server_instructions("guidance").await.as_deref(),
+                Some("Use workspace A")
+            );
+            assert!(manager.server_tools("guidance").await.is_some());
+            let handle = if shared {
+                manager.pool_handles.read().await["guidance"].clone()
+            } else {
+                manager.owned_clients.read().await["guidance"].handle()
+            };
+            handle.request("fixture/exit", None).await.unwrap_err();
+            assert!(handle.is_closed());
+            // The manager still holds the closed connection and its last guidance.
+            assert_eq!(handle.instructions().as_deref(), Some("Use workspace A"));
+            assert!(manager.server_tools("guidance").await.is_none());
+            assert!(
+                manager.server_instructions("guidance").await.is_none(),
+                "closed server guidance must be absent (shared={shared})"
+            );
+        }
     }
 
     #[test]

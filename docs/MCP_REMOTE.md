@@ -76,6 +76,20 @@ The MCP management tool accepts ad-hoc remote connections through `url`,
 `transport`, and `headers`, or connects a named configured server without those
 fields. `command`, `args`, and `env` remain the local stdio connection fields.
 
+## Exact tool discovery
+
+The MCP tool's search action accepts `select:<name>[,<name>...]` to load exact
+callable names returned by an earlier search:
+
+```json
+{"action":"search","query":"select:mcp__docs__read,mcp__docs__search"}
+```
+
+Use the advertised canonical names, including any collision suffix. Ambiguous
+legacy names do not broaden selection. Server filters, session tool policies
+and schema/reference budgets still apply. Duplicate names load once; unknown,
+disabled or disallowed names add no schemas. An empty selection returns none.
+
 ## Startup, connection waits, and prompt caching
 
 Session tool registration does not await remote network traffic. Management,
@@ -85,6 +99,13 @@ publishes its tools independently, so a slow server cannot hide a fast peer's
 tools or block management and calls to that peer.
 An empty live catalog also replaces obsolete cached schemas instead of
 advertising removed tools on the next startup.
+
+Search results include `server_instructions` once per matched connected server.
+Guidance stays in tool results, sharing the existing adaptive output budget.
+It is shortened or omitted before it can reduce the number of loaded schemas.
+Retained guidance is capped at 16,384 Unicode characters, with an ellipsis for
+truncated text. Cached schemas remain available before connection; guidance
+appears after initialization without making search start or await a connection.
 
 The entire remote handshake has a 30-second deadline, including credential
 refresh, initialization, legacy fallback, and tool listing. Individual tool

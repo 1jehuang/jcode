@@ -23,6 +23,7 @@ pub struct McpHandle {
     closed: Arc<AtomicBool>,
     writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
+    instructions: Arc<std::sync::RwLock<Option<String>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
     /// Reply timeout applied to every request on this server.
@@ -137,6 +138,14 @@ impl McpHandle {
     /// Get server info
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.server_info
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Operational guidance from initialize, bounded independently of tool schemas.
+    pub fn instructions(&self) -> Option<String> {
+        self.instructions
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -337,6 +346,7 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
@@ -381,6 +391,7 @@ impl McpClient {
             closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
+            instructions: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
             request_timeout: request_timeout_for(config),
@@ -534,6 +545,24 @@ impl McpClient {
                 .server_info
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = init_result.server_info;
+            let instructions = init_result
+                .instructions
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| {
+                    const MAX_INSTRUCTION_CHARS: usize = 16_384;
+                    if let Some((end, _)) = text.char_indices().nth(MAX_INSTRUCTION_CHARS) {
+                        let mut bounded = text[..end].to_owned();
+                        bounded.push('…');
+                        bounded
+                    } else {
+                        text
+                    }
+                });
+            *self
+                .handle
+                .instructions
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = instructions;
             *self
                 .handle
                 .capabilities
