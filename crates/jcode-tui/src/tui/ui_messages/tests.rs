@@ -1904,7 +1904,11 @@ fn render_todos_message_shows_delivery_state_under_intent() {
     );
     assert!(!text_lines.iter().any(|line| line.contains("Verification")));
     let pinned = render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
-    let pinned = pinned.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
+    let pinned = pinned
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(pinned.contains("Delivery partially_delivered"), "{pinned}");
     assert!(!pinned.contains("Verification"), "{pinned}");
     for narrow in [16u16, 20, 28] {
@@ -1988,8 +1992,13 @@ fn pinned_completed_todos_color_delivery_independently_of_verification() {
             "goals": [{"delivery_state": delivery, "verification_state": "checked_end_to_end"}],
         }).to_string());
         let lines = render_pinned_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
-        let color = |value: &str| lines.iter().flat_map(|l| &l.spans)
-            .find(|s| s.content.as_ref() == value).and_then(|s| s.style.fg);
+        let color = |value: &str| {
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .find(|s| s.content.as_ref() == value)
+                .and_then(|s| s.style.fg)
+        };
         assert_eq!(color(delivery), Some(expected));
         assert_eq!(color("checked_end_to_end"), None);
     }
@@ -2710,7 +2719,10 @@ fn render_background_task_messages_prefer_display_name() {
 
 #[test]
 fn render_system_message_uses_scheduled_task_card() {
-    let _guard = system_glyph_env_lock();
+    // The title glyph depends on TERM/TERM_PROGRAM, and the kitty-variant
+    // test below flips both. Hold the shared glyph-env lock so the render
+    // and the assertion cannot observe different glyph modes.
+    let _glyph_guard = system_glyph_env_lock();
     let msg = DisplayMessage::system(
         "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: Follow up on the scheduler test\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nBranch: master\n\nBackground: Verify the scheduled task card styling\nSuccess criteria: The due task renders clearly\nScheduled by session: session_test",
     );
@@ -2735,7 +2747,9 @@ fn render_system_message_uses_scheduled_task_card() {
 
 #[test]
 fn render_tool_message_uses_scheduled_card() {
-    let _guard = system_glyph_env_lock();
+    // Same glyph-env race as the system scheduled-task card test; hold the
+    // shared lock.
+    let _glyph_guard = system_glyph_env_lock();
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),

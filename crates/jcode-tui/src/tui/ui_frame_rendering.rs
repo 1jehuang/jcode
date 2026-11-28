@@ -81,6 +81,18 @@ impl BodyCacheState {
 }
 
 pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
+    // In test builds every draw mutates the same process-global render state
+    // (LAST_MAX_SCROLL, layout snapshots, idle-animation area, flicker history)
+    // that other tests assert on. Tests that render are supposed to hold the
+    // shared render-state lock, but `ui::draw` is reachable from unlocked
+    // helpers too, and one unlocked draw interleaving with a locked test is
+    // exactly how the parallel suite produced load-dependent flakes: a wheel-up
+    // read a sibling's scroll extent, and a frame comparison picked up a
+    // sibling's flicker notice. Serialize here so no call site can forget.
+    // Reentrant per thread, so tests that already hold the lock pay nothing.
+    #[cfg(test)]
+    let _render_guard = render_state_test_lock();
+
     if !secondary_render_active() {
         record_idle_animation_area(None);
     }

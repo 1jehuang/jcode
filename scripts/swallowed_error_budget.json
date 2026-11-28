@@ -1,9 +1,9 @@
 {
-  "total": 3885,
+  "total": 3888,
   "totals_by_pattern": {
     "dot_ok": 1544,
-    "let_underscore": 1403,
-    "unwrap_or_default": 938
+    "let_underscore": 1405,
+    "unwrap_or_default": 939
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -203,7 +203,7 @@
     },
     "crates/jcode-app-core/src/server/client_lifecycle.rs": {
       "dot_ok": 0,
-      "let_underscore": 34,
+      "let_underscore": 35,
       "unwrap_or_default": 0
     },
     "crates/jcode-app-core/src/server/client_lifecycle_logging.rs": {
@@ -849,7 +849,7 @@
     "crates/jcode-base/src/background.rs": {
       "dot_ok": 16,
       "let_underscore": 16,
-      "unwrap_or_default": 12
+      "unwrap_or_default": 14
     },
     "crates/jcode-base/src/background/stall_watchdog.rs": {
       "dot_ok": 2,
@@ -2278,7 +2278,7 @@
     },
     "crates/jcode-tui/src/tui/app/commands_cloud.rs": {
       "dot_ok": 1,
-      "let_underscore": 4,
+      "let_underscore": 5,
       "unwrap_or_default": 1
     },
     "crates/jcode-tui/src/tui/app/commands_cloud_completion.rs": {
@@ -2979,7 +2979,7 @@
     "src/cli/dispatch.rs": {
       "dot_ok": 3,
       "let_underscore": 4,
-      "unwrap_or_default": 1
+      "unwrap_or_default": 0
     },
     "src/cli/hibernate_wait.rs": {
       "dot_ok": 0,

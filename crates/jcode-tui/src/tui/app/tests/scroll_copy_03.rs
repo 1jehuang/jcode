@@ -966,6 +966,12 @@ fn first_visible_content_line(text: &str) -> String {
 /// report is size/timing dependent ("only sometimes").
 #[test]
 fn repro_wheel_up_from_bottom_always_moves_viewport() {
+    // The renderer reads process-global config (re-checked every call under
+    // cfg(test)), so a sibling test swapping JCODE_HOME between this test's two
+    // renders can reload config.toml from another home and change wrap
+    // geometry mid-test. Serialize against env swappers first, then take the
+    // render-state lock for draw-state isolation.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let mut failures: Vec<String> = Vec::new();
@@ -1004,8 +1010,14 @@ fn repro_wheel_up_from_bottom_always_moves_viewport() {
                     failures.push(format!(
                         "h={height} pad={padding} streaming={streaming}: \
                          wheel-up did not move the viewport (max_scroll={max_scroll}, \
-                         offset={}, paused={})",
-                        app.scroll_offset, app.auto_scroll_paused
+                         offset={}, paused={}, resolved={}, vh={}, total={}, \
+                         notify={})",
+                        app.scroll_offset,
+                        app.auto_scroll_paused,
+                        crate::tui::ui::last_resolved_chat_scroll(),
+                        crate::tui::ui::last_chat_viewport_height(),
+                        crate::tui::ui::last_total_wrapped_lines(),
+                        crate::tui::TuiState::has_notification(&app)
                     ));
                 }
             }
@@ -1023,6 +1035,9 @@ fn repro_wheel_up_from_bottom_always_moves_viewport() {
 /// view back down. Repro for momentum/queue state leaving the view stuck.
 #[test]
 fn repro_wheel_down_after_up_burst_moves_viewport() {
+    // Same global-config protection as the wheel-up repro above: serialize
+    // against env swappers before taking the render-state lock.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let mut failures: Vec<String> = Vec::new();
@@ -1088,6 +1103,9 @@ fn repro_wheel_down_after_up_burst_moves_viewport() {
 /// first notch from the bottom, across sizes and streaming state.
 #[test]
 fn repro_key_scroll_up_first_notch_moves_viewport() {
+    // Same global-config protection as the wheel-up repro above: serialize
+    // against env swappers before taking the render-state lock.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let mut failures: Vec<String> = Vec::new();
@@ -1140,6 +1158,9 @@ fn repro_key_scroll_up_first_notch_moves_viewport() {
 /// bottom). This is the "I can't scroll while it's thinking" scenario.
 #[test]
 fn repro_scroll_up_holds_while_reasoning_streams() {
+    // Same global-config protection as the wheel-up repro above: serialize
+    // against env swappers before taking the render-state lock.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1235,6 +1256,9 @@ fn repro_scroll_up_holds_while_reasoning_streams() {
 /// reasoning deltas.
 #[test]
 fn repro_mouse_wheel_during_token_by_token_reasoning() {
+    // Same global-config protection as the wheel-up repro above: serialize
+    // against env swappers before taking the render-state lock.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1346,6 +1370,9 @@ fn repro_mouse_wheel_during_token_by_token_reasoning() {
 /// likely "I scrolled up while it was thinking and then it jumped / froze" path.
 #[test]
 fn repro_scroll_held_across_reasoning_close_and_answer() {
+    // Same global-config protection as the wheel-up repro above: serialize
+    // against env swappers before taking the render-state lock.
+    let _env_lock = crate::storage::lock_test_env();
     let _render_lock = scroll_render_test_lock();
 
     let rt = tokio::runtime::Runtime::new().unwrap();

@@ -15,8 +15,13 @@ mod copy_pane_drag;
 pub(crate) use copy_pane_drag::*;
 #[path = "ui_frame_rendering.rs"]
 mod frame_rendering;
+#[cfg(test)]
+#[path = "ui_render_state_lock.rs"]
+mod render_state_lock;
 pub use frame_rendering::draw;
 pub(crate) use frame_rendering::link_target_from_screen_with_state;
+#[cfg(test)]
+pub(crate) use render_state_lock::{RenderStateTestGuard, render_state_test_lock};
 
 use super::info_widget;
 use super::markdown;
@@ -1732,45 +1737,6 @@ pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
     }
 }
 
-/// The one lock guarding process-global render state in tests.
-///
-/// Render snapshots, scroll metrics, flicker history, and prompt positions all
-/// live in process globals, so *every* test that renders must serialize on the
-/// same mutex. Two separate helpers previously each defined their own private
-/// lock, which serialized nothing between them and produced failures that
-/// appeared only under parallelism (same root cause as issue #593). Both now
-/// delegate here.
-///
-/// Lock hierarchy: tests needing both `storage::lock_test_env` and this lock
-/// must acquire the environment lock first. App construction resets render
-/// state while an environment-scoping helper may already hold that lock.
-/// Taking environment after render would deadlock against that reset.
-#[cfg(test)]
-pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let guard = LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    RENDER_STATE_LOCK_HELD.with(|held| held.set(true));
-    RenderStateTestGuard { _guard: guard }
-}
-
-/// Guard for [`render_state_test_lock`] that also records ownership on this
-/// thread, so a nested `clear_test_render_state_for_tests` can tell it is
-/// already inside the lock instead of deadlocking on it.
-#[cfg(test)]
-pub(crate) struct RenderStateTestGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for RenderStateTestGuard {
-    fn drop(&mut self) {
-        RENDER_STATE_LOCK_HELD.with(|held| held.set(false));
-    }
-}
-
 /// Take the render-state lock unless this thread already holds it.
 ///
 /// `clear_test_render_state_for_tests` mutates the same globals the lock
@@ -1784,24 +1750,12 @@ impl Drop for RenderStateTestGuard {
 /// holder owns the guard, and nested calls become no-ops.
 #[cfg(test)]
 fn with_render_state_lock<T>(body: impl FnOnce() -> T) -> T {
-    if render_state_lock_held() {
+    if render_state_lock::render_state_lock_held() {
         return body();
     }
 
-    let _guard = render_state_test_lock();
+    let _guard = render_state_lock::render_state_test_lock();
     body()
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Whether this thread currently holds the render-state lock. Set by
-    /// [`render_state_test_lock`]'s guard so nested clears can detect it.
-    static RENDER_STATE_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-fn render_state_lock_held() -> bool {
-    RENDER_STATE_LOCK_HELD.with(|held| held.get())
 }
 
 #[cfg(test)]

@@ -893,7 +893,7 @@ mod catalog_ownership_tests {
     struct CatalogTestHome {
         previous: Option<std::ffi::OsString>,
         _temp: tempfile::TempDir,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: crate::storage::TestEnvGuard,
     }
 
     impl CatalogTestHome {
