@@ -2791,6 +2791,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let secondary = secondary_render_active();
     if !secondary {
         panel_image_preview::clear_regions();
+        viewport::clear_pinned_todo_hit_areas();
     }
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -3474,11 +3475,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         if side_panel_fullscreen {
             clear_area(frame, messages_area);
         }
-        // Collapsed terminal-style clear: the messages chunk is zero-height, so
-        // there is nothing to draw. Deliberately skip `draw_messages` so it does
-        // not publish a zero-height viewport/max-scroll geometry that the scroll
-        // handlers would then resolve against; the last real geometry stays
-        // authoritative until the first scroll-up restores the full layout.
+        // Preserve scroll geometry until scroll-up restores the transcript.
+        // The draw entry already cleared hit targets for the hidden card.
         info_widget::Margins {
             right_widths: Vec::new(),
             left_widths: Vec::new(),

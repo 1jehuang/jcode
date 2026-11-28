@@ -897,6 +897,7 @@ fn clicking_pinned_todo_more_row_expands_the_band() {
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
     app.pinned_todos_expanded = false;
+    crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(Some(ratatui::layout::Rect {
         x: 2,
         y: 4,
@@ -1157,13 +1158,15 @@ fn expanded_pinned_todo_band_scrolls_when_taller_than_budget() {
         "expanded band is bounded: {}",
         lines.len()
     );
-    assert!(lines[0].to_string().contains("scroll"));
+    assert!(lines.last().unwrap().to_string().contains("scroll"));
     crate::tui::ui::viewport::publish_pinned_todo_scroll_for_test();
     assert!(crate::tui::ui::viewport::scroll_pinned_todos(3));
     let (scrolled, _) = crate::tui::ui::viewport::pinned_todo_band_lines(&app, 80, 30);
-    assert_ne!(lines[1].to_string(), scrolled[1].to_string());
+    assert_ne!(lines[0].to_string(), scrolled[0].to_string());
     crate::tui::ui::viewport::reset_pinned_todo_scroll();
 }
 
 #[path = "todo_card_additional_tests.rs"]
 mod additional_resumed_local_snapshot_keeps_polling_so_card_does_not_go_stale;
+
+include!("todo_card_toggle.rs");

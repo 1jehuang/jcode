@@ -83,10 +83,13 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
         more_line = Some(lines.len());
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
-            Style::default().fg(dim_color()),
-        )));
+        lines.push(super::super::truncate_line_with_ellipsis_to_width(
+            &Line::from(Span::styled(
+                format!("  … +{} more (todo)", hidden),
+                Style::default().fg(dim_color()),
+            )),
+            usize::from(width),
+        ));
     } else {
         if expanded {
             // Expanded bands get a larger budget but stay bounded so a long plan
@@ -97,7 +100,6 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             let max_offset = total.saturating_sub(window);
             let offset = pinned_todo_scroll().min(max_offset);
             PINNED_TODO_LAST_MAX.store(max_offset, std::sync::atomic::Ordering::Relaxed);
-            more_line = Some(lines.len());
             let label = if max_offset > 0 {
                 format!(
                     "  ▴ Collapse todos ({}-{} of {}, scroll)",
@@ -108,11 +110,12 @@ pub(crate) fn pinned_todo_band_lines_for_payload(
             } else {
                 "  ▴ Collapse todos".to_string()
             };
-            lines.push(Line::from(Span::styled(
-                label,
-                Style::default().fg(dim_color()),
-            )));
             lines.extend(card_lines.into_iter().skip(offset).take(window));
+            more_line = Some(lines.len());
+            lines.push(super::super::truncate_line_with_ellipsis_to_width(
+                &Line::from(Span::styled(label, Style::default().fg(dim_color()))),
+                usize::from(width),
+            ));
             return (lines, more_line);
         }
         lines.extend(card_lines);
@@ -291,6 +294,10 @@ mod pinned_todo_projection_tests {
                     for expanded in [false, true] {
                         let (lines, _) =
                             pinned_todo_band_lines_for_payload(payload, expanded, diff, width, 3);
+                        assert!(
+                            lines.iter().all(|line| line.width() <= usize::from(width)),
+                            "width={width}, expanded={expanded}: {lines:?}"
+                        );
                         assert_eq!(
                             visible,
                             !lines.is_empty(),
@@ -405,4 +412,52 @@ mod pinned_todo_projection_tests {
             }
         }
     }
+}
+
+pub(super) fn publish_pinned_todo_geometry(
+    text_area: Rect,
+    viewport: Rect,
+    preview_rows: u16,
+    band_rows: u16,
+    more_line: Option<usize>,
+) {
+    publish_pinned_todo_scroll((band_rows > 0).then(|| {
+        Rect {
+            x: text_area.x,
+            y: viewport.y.saturating_add(preview_rows),
+            width: text_area.width,
+            height: band_rows,
+        }
+        .intersection(text_area)
+    }));
+    set_pinned_todo_more_area(more_line.map(|line| {
+        Rect {
+            x: text_area.x,
+            y: viewport
+                .y
+                .saturating_add(preview_rows)
+                .saturating_add(line as u16),
+            width: text_area.width,
+            height: 1,
+        }
+    }));
+}
+
+/// The footer bounds the todo body before any appended live-status row.
+pub(crate) fn pinned_todo_card_area() -> Option<Rect> {
+    let more = pinned_todo_more_area()?;
+    let band = pinned_todo_band_area().unwrap_or(more);
+    let area = Rect {
+        x: more.x,
+        y: band.y,
+        width: more.width,
+        height: more.bottom().saturating_sub(band.y),
+    }
+    .intersection(band);
+    (!area.is_empty()).then_some(area)
+}
+
+pub(crate) fn clear_pinned_todo_hit_areas() {
+    set_pinned_todo_band_area(None);
+    set_pinned_todo_more_area(None);
 }
