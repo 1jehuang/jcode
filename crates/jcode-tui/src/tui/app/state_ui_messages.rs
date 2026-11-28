@@ -162,6 +162,9 @@ impl App {
         // proves earlier assistant messages belong to completed work.
         // Provider-native tool rows (hosted web search) are emitted mid-stream
         // by the same attempt, so they count as attempt output, not a fence.
+        if message.role == "assistant" {
+            self.last_response_at = Some(std::time::SystemTime::now());
+        }
         if message.role == "assistant" || is_attempt_provider_native_row(&message) {
             self.attempt_committed_assistant_messages += 1;
         } else {
@@ -698,6 +701,7 @@ impl App {
         // block started so a stale offset can't slice the new stream.
         self.reasoning_block_start = None;
         self.turn_reasoning_traces.clear();
+        self.last_response_at = None;
         if !self.display_messages.is_empty() {
             self.display_messages.clear();
             self.bump_display_messages_version();

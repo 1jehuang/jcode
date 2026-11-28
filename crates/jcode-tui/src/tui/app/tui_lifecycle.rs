@@ -277,6 +277,11 @@ impl App {
             false,
         );
 
+        let initial_last_response_at = session
+            .messages
+            .iter()
+            .any(|m| m.role == crate::message::Role::Assistant)
+            .then(|| std::time::SystemTime::from(session.updated_at));
         let mut app = Self {
             provider,
             registry,
@@ -324,6 +329,7 @@ impl App {
             context_info: crate::prompt::ContextInfo::default(),
             context_revision: 0,
             last_stream_activity: None,
+            last_response_at: initial_last_response_at,
             last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,
@@ -803,6 +809,11 @@ impl App {
             false,
         );
 
+        let initial_last_response_at = session
+            .messages
+            .iter()
+            .any(|m| m.role == crate::message::Role::Assistant)
+            .then(|| std::time::SystemTime::from(session.updated_at));
         let mut app = Self {
             provider,
             registry,
@@ -850,6 +861,7 @@ impl App {
             context_info,
             context_revision: 0,
             last_stream_activity: None,
+            last_response_at: initial_last_response_at,
             last_user_interaction: None,
             stream_message_ended: false,
             deferred_stream_done_id: None,

@@ -951,3 +951,36 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
         "expected swarm effort label to remain visible, got: {swarm_rendered}"
     );
 }
+
+#[test]
+fn format_last_response_age_only_shows_at_least_one_minute() {
+    use super::status_rendering::format_last_response_age;
+    use std::time::Duration;
+
+    assert_eq!(format_last_response_age(Duration::from_secs(0)), None);
+    assert_eq!(format_last_response_age(Duration::from_secs(59)), None);
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(60)).as_deref(),
+        Some("last response 1m ago")
+    );
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(35 * 60 + 42)).as_deref(),
+        Some("last response 35m ago")
+    );
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(3600)).as_deref(),
+        Some("last response 1h ago")
+    );
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(3600 + 15 * 60)).as_deref(),
+        Some("last response 1h 15m ago")
+    );
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(86_400)).as_deref(),
+        Some("last response 1d ago")
+    );
+    assert_eq!(
+        format_last_response_age(Duration::from_secs(2 * 86_400 + 3 * 3600)).as_deref(),
+        Some("last response 2d 3h ago")
+    );
+}

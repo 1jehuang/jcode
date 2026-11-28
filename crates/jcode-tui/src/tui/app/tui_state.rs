@@ -946,6 +946,11 @@ impl crate::tui::TuiState for App {
         Some(self.app_started.elapsed())
     }
 
+    fn time_since_last_response(&self) -> Option<std::time::Duration> {
+        self.last_response_at
+            .and_then(|ts| std::time::SystemTime::now().duration_since(ts).ok())
+    }
+
     fn client_focused(&self) -> bool {
         App::client_focused(self)
     }

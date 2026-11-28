@@ -905,6 +905,10 @@ pub trait TuiState {
     /// Progress of a currently-running batch tool call.
     fn batch_progress(&self) -> Option<crate::bus::BatchProgress>;
     fn time_since_activity(&self) -> Option<Duration>;
+    /// Time elapsed since the last assistant response was completed, if any.
+    fn time_since_last_response(&self) -> Option<Duration> {
+        None
+    }
     /// Whether the client terminal currently has focus. Decorative animations and
     /// periodic idle redraws pause while unfocused so backgrounded windows/tabs do
     /// not burn CPU. Defaults to true for state impls that do not track focus.

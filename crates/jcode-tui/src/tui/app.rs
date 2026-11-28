@@ -1039,6 +1039,8 @@ pub struct App {
     context_revision: u64,
     // Track last streaming activity for "stale" detection
     last_stream_activity: Option<Instant>,
+    // Wall-clock time when the last assistant response was completed/pushed
+    last_response_at: Option<std::time::SystemTime>,
     // When the user last pressed a key, mouse-scrolled, or pasted.
     //
     // Distinct from `last_stream_activity`, which tracks *provider* output: a
