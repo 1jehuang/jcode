@@ -150,7 +150,7 @@ fn malformed_image_tags_remain_plain_text() {
     assert!(
         lines[0].spans[2..]
             .iter()
-            .all(|span| span.style == Style::default())
+            .all(|span| span.style == jcode_tui_style::theme::input_text_style())
     );
 }
 
@@ -935,7 +935,10 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
 
     facts.effort = Some("medium".to_string());
     let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
-    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    let mismatched_rendered: String = mismatched_spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
     assert!(
         mismatched_rendered.contains("Gemini 4 Neon Low")
             && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),
