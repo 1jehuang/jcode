@@ -251,6 +251,24 @@ pub async fn create_mcp_tools(manager: Arc<RwLock<McpManager>>) -> Vec<(String, 
     tools
 }
 
+/// Create tools from one MCP server only.
+pub async fn create_mcp_tools_for_server(
+    manager: Arc<RwLock<McpManager>>,
+    target_server: &str,
+) -> Vec<(String, Arc<dyn Tool>)> {
+    let mgr = manager.read().await;
+    let server_tools = mgr.tools_for_server(target_server).await;
+    drop(mgr);
+
+    let mut tools = Vec::new();
+    for tool_def in server_tools {
+        let prefixed_name = dispatch_name(target_server, &tool_def.name);
+        let mcp_tool = McpTool::new(target_server.to_string(), tool_def, Arc::clone(&manager));
+        tools.push((prefixed_name, Arc::new(mcp_tool) as Arc<dyn Tool>));
+    }
+    tools
+}
+
 /// Build proxy tools for a single server from cached schemas, without requiring
 /// a live connection. Used to advertise a server's tools immediately at spawn
 /// (the proxy connects on first call). The returned tools are functionally

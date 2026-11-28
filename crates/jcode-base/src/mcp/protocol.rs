@@ -432,13 +432,30 @@ impl McpConfig {
         Ok(serde_json::from_str(&content)?)
     }
 
-    /// Save config to a JSON file
+    /// Save config to a JSON file.
+    ///
+    /// Writes a sibling temp file and atomically replaces the target so a
+    /// concurrent reader never sees a truncated file. The temp name is unique
+    /// per writer (process id + in-process counter) because this save runs
+    /// from both the toggle path, which holds [`McpConfigLock`], and the
+    /// first-run Codex import, which does not; a shared `.tmp-save` name let
+    /// an unlocked import interleave with a locked toggle write.
     pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut temp_path = path.as_os_str().to_owned();
+        temp_path.push(format!(
+            ".tmp-save-{}-{}",
+            std::process::id(),
+            seq
+        ));
+        let temp_path = std::path::PathBuf::from(temp_path);
+        std::fs::write(&temp_path, json)?;
+        std::fs::rename(&temp_path, path)?;
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 {
-  "total": 158,
+  "total": 159,
   "tracked_files": {
     "crates/jcode-app-core/examples/tool_projection_probe.rs": 1,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -11,6 +11,7 @@
     "crates/jcode-app-core/src/tool/browser_jev.rs": 1,
     "crates/jcode-app-core/src/tool/calendar.rs": 1,
     "crates/jcode-app-core/src/tool/discover.rs": 1,
+    "crates/jcode-app-core/src/tool/mcp.rs": 1,
     "crates/jcode-app-core/src/tool/mod.rs": 1,
     "crates/jcode-app-core/src/tool/sdk.rs": 1,
     "crates/jcode-app-core/src/tool/session_search/searchable_text.rs": 2,
