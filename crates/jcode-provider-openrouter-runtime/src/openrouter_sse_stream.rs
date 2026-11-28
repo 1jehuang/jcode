@@ -1,5 +1,6 @@
 use super::*;
 use futures::Stream;
+use jcode_provider_core::is_provider_overload_message;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 use std::pin::Pin;
 
@@ -21,6 +22,20 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+/// Hint for an error response. Some providers send 429 for an outage of
+/// their own upstream ("The model provider is temporarily unavailable"),
+/// which is not the caller's rate limit: name the outage instead. A local
+/// proxy relaying that outage gets the same hint, since the proxy is up.
+fn response_hint(status: u16, body: &str, api_base: &str, model: &str) -> &'static str {
+    let lower = body.to_lowercase();
+    if status == 429 && is_provider_overload_message(&lower) && !lower.contains("rate limit") {
+        return PROVIDER_OUTAGE_HINT;
+    }
+    http_status_hint(status, api_base, model)
+}
+
+const PROVIDER_OUTAGE_HINT: &str = "Hint: the provider is overloaded or having a temporary server problem. jcode retries automatically, or switch to another provider with /model.";
+
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
 /// point at the key, the account balance, or the model instead.
@@ -32,18 +47,20 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
             "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
         }
         402 => {
-            "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
+            "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model. If the key's allowance is resettable, it may recover after its reset time."
         }
+        // A 429 means the server answered: the request reached the provider
+        // and was rejected for quota, not connectivity. Point at the limit.
+        429 => RATE_LIMIT_HINT,
         // Local servers (Ollama, LM Studio) answer 404 for a model that is
         // not installed or loaded, which their own hint already explains.
         404 if !is_local => {
             "Hint: the endpoint or model was not found. Check that the base URL includes the API version (usually /v1) and that the model exists on the provider."
         }
-        // The provider answered, so this is server-side overload or failure,
-        // not connectivity (#1596). These are retried before surfacing.
-        500..=599 if !is_local => {
-            "Hint: the provider is overloaded or having a temporary server problem, not a network problem. jcode already retried; try again shortly or switch to another provider with /model."
-        }
+        // The server answered but is overloaded or failing on its side. The
+        // request is retried automatically, so point at the provider, not the
+        // network.
+        500..=599 if !is_local => PROVIDER_OUTAGE_HINT,
         _ => endpoint_hint,
     }
 }
@@ -77,14 +94,21 @@ pub(super) async fn run_stream_with_retries(
         std::time::Duration::from_secs(config.provider.retry_backoff_cap_secs.max(1));
 
     for attempt in 0..max_retries {
+        // The consumer drops its receiver to cancel the turn (e.g. on Esc or
+        // /model switch). Retrying against a closed channel would burn the
+        // remaining attempts, backoff waits included, for output nobody
+        // will ever read, so stop as soon as cancellation is observed.
+        if tx.is_closed() {
+            return;
+        }
         if attempt > 0 {
-            let delay = jcode_provider_core::retry_after::retry_delay(
-                attempt,
-                RETRY_BASE_DELAY_MS,
-                next_retry_delay.take(),
-            )
-            .min(retry_backoff_cap);
-            tokio::time::sleep(delay).await;
+            let delay = retry_wait(attempt, next_retry_delay.take(), retry_backoff_cap);
+            // Also wake mid-wait: a cancelled turn must not sit out a long
+            // rate-limit or exponential backoff before noticing.
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                _ = tx.closed() => return,
+            }
             jcode_base::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
                 auth.label(),
@@ -271,8 +295,13 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        // Some providers (e.g. Openference) send the requested delay only in
+        // the JSON body (`retry_after_seconds`) with no `Retry-After` header,
+        // so the header hint is preferred and the body is the fallback.
+        let header_retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        let retry_after = header_retry_after
+            .or_else(|| jcode_provider_core::retry_after::retry_after_body(&body));
         let hint = if azure_responses {
             match status.as_u16() {
                 401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
@@ -284,7 +313,7 @@ async fn stream_response(
                 }
             }
         } else {
-            http_status_hint(status.as_u16(), &api_base, &model)
+            response_hint(status.as_u16(), &body, &api_base, &model)
         };
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
@@ -332,6 +361,31 @@ async fn stream_response(
     let mut saw_message_end = false;
     loop {
         let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
+            // An error event inside a 200 stream (a proxy relaying the
+            // upstream's 503, or a provider's "deploying" notice) ends the
+            // turn if forwarded. When it is transient, fail this attempt
+            // instead so the retry loop resends it. Azure Responses errors are
+            // classified by `azure_response_failure` below instead.
+            Ok(Some(Ok(StreamEvent::Error {
+                message,
+                retry_after_secs,
+            }))) if !azure_responses && is_retryable_error(&message.to_lowercase()) => {
+                let wait = retry_after_secs
+                    .map(std::time::Duration::from_secs)
+                    .or_else(|| {
+                        is_deploy_message(&message.to_lowercase()).then_some(deploy_retry_wait())
+                    });
+                return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                    format!(
+                        "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
+                        url,
+                        model,
+                        auth.label(),
+                        message
+                    ),
+                    wait.map(jcode_provider_core::retry_after::RetryAfter::after),
+                ));
+            }
             Ok(Some(Ok(event))) => event,
             Ok(Some(Err(e))) => anyhow::bail!(
                 "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
@@ -476,17 +530,28 @@ mod azure_retry_tests;
 /// (e.g. `status: 402 Payment Required`). The input may be lowercased before
 /// it reaches here, so matching is case-insensitive.
 fn parsed_http_status(error_str: &str) -> Option<u16> {
-    let lower = error_str.to_ascii_lowercase();
-    let idx = lower.find("status:")?;
-    let rest = lower[idx + "status:".len()..].trim_start();
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.len() == 3 {
-        digits.parse().ok()
-    } else {
-        None
+    jcode_provider_core::parse_http_status_message(error_str)
+}
+
+/// Wait before retry `attempt`. A provider-requested delay (Retry-After) is
+/// honored as sent, up to [`jcode_provider_core::retry_after::MAX_RETRY_AFTER`]
+/// (already applied when it was parsed): resending sooner only draws another
+/// rate limit. The configured backoff cap limits jcode's own exponential
+/// backoff, not the provider's request.
+fn retry_wait(
+    attempt: u32,
+    server_hint: Option<std::time::Duration>,
+    backoff_cap: std::time::Duration,
+) -> std::time::Duration {
+    match server_hint {
+        Some(hint) => hint.min(jcode_provider_core::retry_after::MAX_RETRY_AFTER),
+        None => jcode_provider_core::retry_after::retry_delay(attempt, RETRY_BASE_DELAY_MS, None)
+            .min(backoff_cap),
     }
 }
 
+/// Hint for a 429. Kept next to [`retry_wait`] so the promise matches it.
+const RATE_LIMIT_HINT: &str = "Hint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode waits as long as the provider asks (up to 60s per retry) and backs off within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model.";
 /// Whether a (lowercased) 429 body says the account's allowance is used up,
 /// as opposed to asking the client to slow down.
 fn is_exhausted_quota_error(error_str: &str) -> bool {
@@ -508,7 +573,18 @@ fn is_retryable_error(error_str: &str) -> bool {
     // (auth, billing, malformed request) where retrying is futile and just
     // burns time/credits. 429 (rate limit) is classified explicitly so it does
     // not depend on provider-specific body wording.
-    match parsed_http_status(error_str) {
+    let status = parsed_http_status(error_str);
+    let payload = error_str
+        .lines()
+        .filter(|line| {
+            !["endpoint:", "model:", "auth:"]
+                .iter()
+                .any(|prefix| line.trim_start().starts_with(prefix))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let error_str = payload.as_str();
+    match status {
         Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422) => return false,
         // 429 rate limit, and every 5xx: the server answered but is overloaded
         // or failing on its side. This includes non-standard codes such as the
@@ -521,152 +597,76 @@ fn is_retryable_error(error_str: &str) -> bool {
         _ => {}
     }
 
+    if jcode_provider_core::is_definitive_usage_exhaustion(error_str)
+        || [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "invalid_api_key",
+            "model_not_found",
+            "content_filter",
+        ]
+        .iter()
+        .any(|marker| error_str.contains(marker))
+    {
+        return false;
+    }
     jcode_provider_core::is_transient_transport_error(error_str)
+        || error_str.contains("rate limit")
+        || error_str.contains("rate_limit")
         || error_str.contains("stream error")
         || error_str.contains("eof")
-        || error_str.contains("5")
-            && (error_str.contains("50")
-                || error_str.contains("502")
-                || error_str.contains("503")
-                || error_str.contains("504")
-                || error_str.contains("internal server error"))
-        || error_str.contains("overloaded")
+        || is_provider_overload_message(error_str)
+        || is_deploy_message(error_str)
+        || is_interrupted_stream_message(error_str)
+}
+
+/// Wait between retries while a provider says it is deploying. Deploys take
+/// minutes, so the default exponential backoff would spend the whole retry
+/// budget in under a minute. With 8 attempts this covers about 3.5 minutes.
+const DEPLOY_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(not(test))]
+fn deploy_retry_wait() -> std::time::Duration {
+    DEPLOY_RETRY_WAIT
+}
+
+/// Tests exercise the real retry loop against a local server; a 30s wait
+/// would only slow them down.
+#[cfg(test)]
+fn deploy_retry_wait() -> std::time::Duration {
+    std::time::Duration::from_millis(50)
+}
+
+/// Wording for a provider that is mid-deploy and asks to retry shortly
+/// ("We're deploying an update right now ... Please try again shortly.",
+/// `"code":"DEPLOYING"`). `error_str` is already lowercased by the caller.
+fn is_deploy_message(error_str: &str) -> bool {
+    [
+        "deploying",
+        "try again shortly",
+        "under maintenance",
+        "maintenance mode",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
+
+/// Wording for a provider that dropped its own upstream mid-response and
+/// reports it as an error event inside the 200 stream (Openference: "The
+/// model provider's stream was interrupted. Please retry."). The request was
+/// fine, so resending it works. `error_str` is already lowercased.
+fn is_interrupted_stream_message(error_str: &str) -> bool {
+    [
+        "stream was interrupted",
+        "stream interrupted",
+        "response was interrupted",
+        "connection was interrupted",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn local_endpoint_hint_mentions_ollama_actions() {
-        let hint = local_endpoint_troubleshooting_hint("http://localhost:11434/v1", "llama3.2");
-        assert!(hint.contains("ollama serve"));
-        assert!(hint.contains("ollama pull"));
-        assert!(hint.contains("--provider ollama"));
-    }
-
-    #[test]
-    fn local_endpoint_hint_mentions_lm_studio_server() {
-        let hint = local_endpoint_troubleshooting_hint("http://127.0.0.1:1234/v1", "local-model");
-        assert!(hint.contains("LM Studio"));
-        assert!(hint.contains("Local Server"));
-        assert!(hint.contains("/v1/models"));
-    }
-
-    /// #1596: an OpenAI-compatible provider answering 529 "heavy usage" (or
-    /// any other 5xx) must be retried, not fail the turn on the first try.
-    #[test]
-    fn every_5xx_status_including_529_is_retryable() {
-        let body = r#"data: {"error":{"message":"We're experiencing heavy usage right now, please try again in a moment.","type":"server_error"}}"#;
-        for status in [
-            "500 internal server error",
-            "502 bad gateway",
-            "503 service unavailable",
-            "520 <unknown status code>",
-            "529 <unknown status code>",
-        ] {
-            let err = format!(
-                "openai-compatible chat request failed\n  endpoint: https://compat.example.test/v1/chat/completions\n  model: glm-5.3\n  auth: compat_api_key\n  status: {status}\n  response: {body}"
-            )
-            .to_lowercase();
-            assert!(is_retryable_error(&err), "{status} must be retried");
-        }
-    }
-
-    #[test]
-    fn server_error_hint_points_at_provider_not_network() {
-        let hint = http_status_hint(529, "https://compat.example.test/v1", "glm-5.3");
-        assert!(hint.contains("overloaded"), "{hint}");
-        assert!(!hint.contains("check network"), "{hint}");
-    }
-
-    #[test]
-    fn parsed_http_status_extracts_code() {
-        assert_eq!(
-            parsed_http_status("status: 402 payment required"),
-            Some(402)
-        );
-        assert_eq!(parsed_http_status("  status:404 not found"), Some(404));
-        assert_eq!(parsed_http_status("no status here"), None);
-        // Embedded numbers elsewhere must not be misread as a status.
-        assert_eq!(parsed_http_status("you requested 65536 tokens"), None);
-    }
-
-    #[test]
-    fn payment_required_is_not_retryable() {
-        let err = "openai-compatible chat request failed\n  endpoint: \
-            https://openrouter.ai/api/v1/chat/completions\n  model: openai/gpt-5.4\n  \
-            auth: openrouter_api_key\n  status: 402 payment required\n  response: \
-            {\"error\":{\"message\":\"this request requires more credits, or fewer \
-            max_tokens. you requested up to 65536 tokens, but can only afford 34424\"}}";
-        assert!(!is_retryable_error(err));
-    }
-
-    /// Field report: OpenCode Zen free models answer 429 FreeUsageLimitError.
-    /// That was retried 8 times with backoff, so `jcode run` printed nothing.
-    #[test]
-    fn exhausted_quota_429_fails_fast_but_rate_limit_429_retries() {
-        let quota = "openai-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"type\":\"error\",\"error\":{\"type\":\"FreeUsageLimitError\",\"message\":\"Free usage limit reached.\"}}"
-            .to_lowercase();
-        assert!(!is_retryable_error(&quota));
-        let openai = "status: 429 too many requests\n  response: {\"error\":{\"code\":\"insufficient_quota\"}}";
-        assert!(!is_retryable_error(openai));
-        let rate = "status: 429 too many requests\n  response: {\"error\":{\"message\":\"rate limit exceeded, retry in 2s\"}}";
-        assert!(is_retryable_error(rate));
-    }
-
-    #[test]
-    fn client_errors_are_not_retryable() {
-        for status in [400u16, 401, 402, 403, 404, 405, 406, 422] {
-            let err = format!("chat request failed\n  status: {status} client error");
-            assert!(
-                !is_retryable_error(&err),
-                "status {status} should not be retryable"
-            );
-        }
-    }
-
-    #[test]
-    fn server_errors_remain_retryable() {
-        assert!(is_retryable_error(
-            "chat request failed\n  status: 503 service unavailable"
-        ));
-        assert!(is_retryable_error(
-            "chat request failed\n  status: 500 internal server error"
-        ));
-        // Provider overload messages should still be retried.
-        assert!(is_retryable_error("overloaded"));
-    }
-
-    #[test]
-    fn http_429_is_retryable_without_rate_limit_words_in_body() {
-        assert!(is_retryable_error(
-            "chat request failed\n  status: 429 unknown\n  response: {}"
-        ));
-    }
-
-    /// A 402 means the server answered: the hint must name the billing limit,
-    /// not send the user to check their network.
-    #[test]
-    fn status_hint_names_billing_for_402_not_network() {
-        let hint = http_status_hint(402, "https://apiduck.servepics.com/v1", "glm-5.3");
-        assert!(hint.contains("billing limit"), "{hint}");
-        assert!(hint.contains("/model"), "{hint}");
-        assert!(!hint.contains("network connectivity"), "{hint}");
-
-        for status in [401u16, 403] {
-            let hint = http_status_hint(status, "https://api.example.com/v1", "m");
-            assert!(hint.contains("API key"), "{status}: {hint}");
-            assert!(!hint.contains("network connectivity"), "{status}: {hint}");
-        }
-        assert!(http_status_hint(404, "https://api.example.com/v1", "m").contains("/v1"));
-        // Local servers keep their own advice (e.g. `ollama pull` for a 404).
-        assert!(
-            http_status_hint(404, "http://localhost:11434/v1", "llama3.2").contains("ollama pull")
-        );
-        // Server errors keep the endpoint-specific advice.
-        assert!(
-            http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
-        );
-    }
-}
+#[path = "compatible_retry_tests.rs"]
+mod tests;

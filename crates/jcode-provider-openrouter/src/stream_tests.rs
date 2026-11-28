@@ -805,3 +805,75 @@ fn positional_fallback_tool_call_ids_are_unique_across_responses() {
 
     assert_ne!(first_turn_id, second_turn_id);
 }
+
+#[test]
+fn stream_error_retains_status_type_code_and_bounded_retry_hint() {
+    for (error, expected_status, expected_hint) in [
+        (
+            serde_json::json!({"message":"Rate limit exceeded","type":"rate_limit_error","code":"rate_limit_exceeded","retry_after_seconds":9999999}),
+            None,
+            Some(60),
+        ),
+        (
+            serde_json::json!({"message":"Internal server error","code":503,"retry_after_seconds":1.2}),
+            Some(503),
+            Some(2),
+        ),
+        (
+            serde_json::json!({"message":"busy","status_code":"401","type":"authentication_error"}),
+            Some(401),
+            None,
+        ),
+        (
+            serde_json::json!({"status":u64::MAX,"status_code":"429"}),
+            Some(429),
+            None,
+        ),
+        (
+            serde_json::json!({"status":"18446744073709551616","status_code":503}),
+            Some(503),
+            None,
+        ),
+        (
+            serde_json::json!({"status":99,"status_code":"600","code":100}),
+            Some(100),
+            None,
+        ),
+        (serde_json::json!({"status":599}), Some(599), None),
+        (
+            serde_json::json!({"status":"-1","status_code":"invalid","code":600}),
+            None,
+            None,
+        ),
+        (serde_json::json!("Rate limit exceeded"), None, None),
+        (
+            serde_json::json!({"message":"bad request","type":[],"code":9999,"retry_after_seconds":"3"}),
+            None,
+            None,
+        ),
+    ] {
+        let mut stream = test_stream();
+        stream.buffer = format!("data: {}\n\n", serde_json::json!({"error":error}));
+        let Some(StreamEvent::Error {
+            message,
+            retry_after_secs,
+        }) = stream.parse_next_event()
+        else {
+            panic!("missing error event");
+        };
+        assert_eq!(
+            jcode_provider_core::parse_http_status_message(&message),
+            expected_status
+        );
+        assert_eq!(retry_after_secs, expected_hint);
+        if let Some(kind) = error.get("type").and_then(serde_json::Value::as_str) {
+            assert!(message.contains(kind));
+        }
+        if let Some(code) = error
+            .get("code")
+            .filter(|code| code.is_string() || code.is_number())
+        {
+            assert!(message.contains(&code.to_string()));
+        }
+    }
+}

@@ -374,10 +374,7 @@ impl Agent {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
                 self.session.reasoning_effort = current.clone();
-                crate::session_effort::record_session_effort(
-                    &self.session.id,
-                    current.as_deref(),
-                );
+                crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
             }

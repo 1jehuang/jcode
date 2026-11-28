@@ -393,14 +393,40 @@ impl OpenRouterStream {
 
             // Check for error
             if let Some(error) = parsed.get("error") {
-                let message = error
+                let mut message = error
                     .get("message")
-                    .and_then(|v| v.as_str())
+                    .and_then(Value::as_str)
+                    .or_else(|| error.as_str())
                     .unwrap_or("OpenRouter error")
                     .to_string();
+                for field in ["type", "code"] {
+                    if let Some(value) = error
+                        .get(field)
+                        .filter(|value| value.is_string() || value.is_number())
+                    {
+                        message.push_str(&format!("\n{field}: {value}"));
+                    }
+                }
+                if let Some(status) = ["status", "status_code", "code"].iter().find_map(|field| {
+                    let value = error.get(field)?;
+                    let status = if let Some(value) = value.as_u64() {
+                        value
+                    } else {
+                        let Ok(value) = value.as_str()?.parse::<u64>() else {
+                            return None;
+                        };
+                        value
+                    };
+                    (100..600).contains(&status).then_some(status)
+                }) {
+                    message = format!("HTTP {status}: {message}");
+                }
                 return Some(StreamEvent::Error {
                     message,
-                    retry_after_secs: None,
+                    retry_after_secs: jcode_provider_core::retry_after::retry_after_body_delay(
+                        data,
+                    )
+                    .map(|delay| delay.as_secs()),
                 });
             }
 
