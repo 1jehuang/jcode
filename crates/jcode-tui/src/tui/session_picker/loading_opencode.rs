@@ -51,7 +51,9 @@ pub(super) fn load_opencode_session_info(
     let mut search = SourceBuckets::default();
     let mut user_message_count = 0usize;
     let mut assistant_message_count = 0usize;
-    let mut provider_key: Option<String> = Some("opencode".to_string());
+    // Extracted `providerID` must win over the "opencode" fallback, so the
+    // seed is applied only after the scan.
+    let mut provider_key: Option<String> = None;
     let mut model: Option<String> = None;
 
     if messages_root.exists() {
@@ -130,6 +132,7 @@ pub(super) fn load_opencode_session_info(
         .iter()
         .find(|msg| msg.role == "user" && !msg.content.trim().is_empty())
         .map(|msg| msg.content.clone());
+    let provider_key = provider_key.or_else(|| Some("opencode".to_string()));
 
     let session = SessionInfo {
         id: format!("opencode:{session_id}"),
