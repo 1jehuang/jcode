@@ -1465,27 +1465,4 @@ impl App {
             load_start.elapsed().as_millis()
         ));
     }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
-    }
-
-    /// Mark that a server was just spawned - run_remote will retry initial connection
-    /// instead of failing fatally, allowing the TUI to show while the server starts.
-    pub fn set_server_spawning(&mut self) {
-        self.server_spawning = true;
-        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
-        self.remote_startup_phase_started = Some(Instant::now());
-    }
-
-    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
-    /// after connecting to an already-running shared server.
-    pub fn set_initial_model_spec(&mut self, model_spec: String) {
-        self.pending_initial_model_spec = Some(model_spec);
-    }
-
-    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
-        self.pending_initial_model_spec.take()
-    }
 }
