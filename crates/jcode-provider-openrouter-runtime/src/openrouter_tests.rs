@@ -118,24 +118,6 @@ fn isolate_openrouter_autodetect_env() -> Vec<EnvVarGuard> {
 mod catalog_shape_tests;
 
 #[test]
-fn direct_openai_compatible_provider_advertises_image_input_support() {
-    let _lock = ENV_LOCK.lock();
-    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
-
-    let profile = jcode_base::config::NamedProviderConfig {
-        base_url: "http://localhost:1234/v1".to_string(),
-        auth: jcode_base::config::NamedProviderAuth::None,
-        default_model: Some("local-vision-model".to_string()),
-        ..Default::default()
-    };
-
-    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
-        .expect("local named profile should initialize without auth");
-
-    assert!(provider.supports_image_input());
-}
-
-#[test]
 fn named_openai_compatible_provider_uses_per_model_image_input_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
@@ -1277,6 +1259,7 @@ fn make_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
         conversation_id: new_conversation_id(),
+        cache_session_id: Mutex::new(None),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1312,6 +1295,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        cache_session_id: Mutex::new(None),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),

@@ -1,6 +1,8 @@
 //! Per-host request headers for OpenAI-compatible coding endpoints (Kimi
 //! coding agents, OpenCode Go/Zen session ids).
 
+use super::ProviderAuth;
+
 pub(crate) const KIMI_CODING_USER_AGENT: &str = "claude-cli/1.0.0";
 pub(crate) const KIMI_CODING_X_APP: &str = "cli";
 
@@ -60,6 +62,18 @@ pub(crate) fn new_conversation_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+pub(crate) fn is_a6api_api_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    ["a6api.com", "a6api.vip", "a6api.net"]
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
+
 /// OpenCode Go/Zen require a stable per-conversation `x-opencode-session`
 /// header on inference requests (rejected from 2026-09-05 without it).
 pub(crate) fn apply_opencode_session_header(
@@ -75,3 +89,23 @@ pub(crate) fn apply_opencode_session_header(
 }
 
 pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+
+/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
+pub(super) fn apply_grok_cli_turn_headers(
+    mut req: reqwest::RequestBuilder,
+    auth: &ProviderAuth,
+    model: &str,
+    conversation_id: &str,
+) -> reqwest::RequestBuilder {
+    if matches!(auth, ProviderAuth::GrokCli { .. }) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
+            model,
+            conversation_id,
+            &request_id,
+        ) {
+            req = req.header(name, value);
+        }
+    }
+    req
+}
