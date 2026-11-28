@@ -73,6 +73,7 @@ pub mod mobile_runner;
 pub mod mobile_sync;
 pub mod model_pricing;
 pub mod model_usage;
+pub mod opencode_db;
 pub mod output_style;
 pub mod plan;
 pub mod platform;
