@@ -303,10 +303,7 @@ pub fn undelivered_goal_message(todos: &[TodoItem], goals: &[TodoGoal]) -> Optio
         let Some(state) = goal.delivery_state else {
             continue;
         };
-        if state == DeliveryState::OutcomeDelivered
-            || goal_cannot_complete(goal).is_some()
-            || goal_has_documented_stop(goal)
-        {
+        if state == DeliveryState::OutcomeDelivered || goal_cannot_complete(goal).is_some() {
             continue;
         }
         let group = normalized_group(goal.group.as_deref());
