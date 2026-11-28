@@ -420,8 +420,10 @@ fn pre_rename_hill_climbability_keys_still_load() {
         ]
     );
 
+    assert_eq!(goal.delivery_state, None);
+
     let goals = parse(json!({
-        "goals": [{"group": "optimize grep", "hill_climbability": "strong", "feedback_loop": "bench"}]
+        "goals": [{"delivery_state": "not_started", "group": "optimize grep", "hill_climbability": "strong", "feedback_loop": "bench"}]
     }))
     .expect("a pre-rename tool call must still parse")
     .goals

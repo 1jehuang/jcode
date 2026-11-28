@@ -532,7 +532,16 @@ fn parse_todo_input(input: Value) -> Result<TodoInput> {
     names::normalize_public_input(&mut input, &[])?;
     flatten_phases(&mut input)?;
     normalize_item_pauses(&mut input)?;
-    let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    let input = normalize_todo_input(input);
+    // Validate submissions here, not on TodoGoal, which also reads legacy storage.
+    if let Some(goals) = input.get("goals").and_then(Value::as_array) {
+        for (index, goal) in goals.iter().enumerate() {
+            if goal.get("delivery_state").is_none_or(Value::is_null) {
+                bail!("goals[{index}].delivery_state is required and must not be null");
+            }
+        }
+    }
+    let params: TodoInput = serde_json::from_value(input)?;
     if let Some(todos) = &params.todos {
         let mut ids = std::collections::HashSet::new();
         for todo in todos {
@@ -1303,7 +1312,7 @@ impl Tool for TodoTool {
                     "description": "Assess honestly by group; omitted groups are retained.",
                     "items": {
                         "type": "object",
-                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
+                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability", "delivery_state"],
                         "properties": {
                             "group": {
                                 "type": "string",
@@ -1334,7 +1343,7 @@ impl Tool for TodoTool {
                             },
                             "delivery_state": {
                                 "type": "string",
-                                "enum": ["change_made", "integrated", "workflow_validated", "outcome_delivered"]
+                                "enum": ["not_started", "change_made", "integrated", "workflow_validated", "outcome_delivered"]
                             },
                             "difficulty": {
                                 "type": "string",

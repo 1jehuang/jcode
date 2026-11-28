@@ -224,7 +224,7 @@ async fn goal_cannot_complete_is_recorded_reported_and_cleared_by_empty_string()
         .unwrap();
     let group = load_todos(SESSION).unwrap()[0].group.clone();
     let write = |cannot_complete: Value| {
-        let mut goal = json!({"closed_feedback_loop":"usable"});
+        let mut goal = json!({"closed_feedback_loop":"usable", "delivery_state":"not_started"});
         if let Some(group) = &group {
             goal["group"] = json!(group);
         }

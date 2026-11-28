@@ -13,6 +13,8 @@ Set `todo_gate_digest = false` to disable automatic quality reviews again. Auto-
 
 ## Daemon ownership
 
+Every entry submitted in the todo tool's `goals` array must explicitly report `delivery_state`. Use `not_started` when no change toward delivery has been made, even if investigation has begun. Reporting a state does not itself mean the goal is complete. Reads and task-only updates do not require resubmitting goals, and older saved assessments remain readable.
+
 For daemon-backed sessions, the daemon owns the follow-up policy for every client, including local TUI, SSH/cloud, mobile and SDK connections. Clients display progress and send `/poke` controls, not their own continuation messages. A stopped model response is an internal turn boundary, not yet a completed harness request. The daemon checks continuation before publishing `Done`, ready status or a finished mobile push. Continuation runs under the same execution lease and terminal identity as the original request.
 
 The host's configuration supplies the initial default. Per-session `/poke on` and `/poke off` controls are persisted, and attaching another client does not override them. `/poke off` can be sent while the agent is busy and stops subsequent continuation, without cancelling the current model response. Explicit cancellation still stops the current request.

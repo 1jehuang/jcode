@@ -389,6 +389,7 @@ semantic_state! {
 semantic_state! {
     /// How far a goal's result actually traveled toward the user's outcome.
     DeliveryState {
+        NotStarted = "not_started", score: 0,
         ChangeMade = "change_made", score: 25,
         Integrated = "integrated", score: 65,
         WorkflowValidated = "workflow_validated", score: 88,
@@ -662,9 +663,8 @@ pub struct TodoGoal {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback_loop_traceability_history: Vec<FeedbackLoopTraceability>,
     /// How far the goal's result actually traveled toward the user's outcome:
-    /// from a bare change through integration and workflow validation to a
-    /// delivered outcome. Replaces the legacy 0-100 `end_to_end_ownership`
-    /// score, which maps onto the closest state on load.
+    /// required on incoming goal assessments. Historical goals may omit it;
+    /// missing data is distinct from an explicit assessment of `not_started`.
     #[serde(
         default,
         alias = "end_to_end_ownership",
@@ -890,6 +890,7 @@ mod semantic_state_tests {
         assert!(IntentUnderstanding::Uncertain < IntentUnderstanding::Partial);
         assert!(IntentUnderstanding::Partial < IntentUnderstanding::Clear);
         assert!(ConfidenceState::Speculative < ConfidenceState::Verified);
+        assert!(DeliveryState::NotStarted < DeliveryState::ChangeMade);
         assert!(DeliveryState::ChangeMade < DeliveryState::WorkflowValidated);
         assert!(FeedbackLoopRelevance::Indirect < FeedbackLoopRelevance::Synthetic);
         assert!(FeedbackLoopRelevance::Synthetic < FeedbackLoopRelevance::Representative);

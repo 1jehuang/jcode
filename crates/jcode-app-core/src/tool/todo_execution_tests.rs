@@ -223,7 +223,7 @@ async fn invalid_background_dependencies_do_not_write_state() {
         let result = TodoTool::new().execute(json!({
             "todos":[{"id":"a", "content":"A", "status":"pending", "priority":"high", "waiting_on":[id]}],
             "plan":{"user_intention":"must not be saved"},
-            "goals":[{"feedback_loop":"must not be saved"}]
+            "goals":[{"feedback_loop":"must not be saved", "delivery_state":"not_started"}]
         }), test_ctx(&session)).await;
         assert!(result.is_err());
         if id.contains(['/', '\\', '.']) {
@@ -454,7 +454,7 @@ async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
                 "priority": "high", "id": "t1", "confidence": "plausible",
             }],
             "plan": {"user_intention": "do task one", "understands_user_intent": "clear"},
-            "goals": [{"closed_feedback_loop": "closed", "feedback_loop": "ran the checks"}],
+            "goals": [{"closed_feedback_loop": "closed", "feedback_loop": "ran the checks", "delivery_state": "change_made"}],
         }),
         test_ctx(session),
     )
@@ -475,7 +475,7 @@ async fn an_ungrouped_goal_does_not_survive_into_a_grouped_next_task() {
                 "id": "t2", "group": "second task", "confidence": "plausible",
             }],
             "goals": [{"group": "second task", "closed_feedback_loop": "strong",
-                       "feedback_loop": "run the new checks"}],
+                       "delivery_state": "not_started", "feedback_loop": "run the new checks"}],
         }),
         test_ctx(session),
     )
@@ -526,7 +526,7 @@ async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
             "goals": [{
                 "group": "first task",
                 "closed_feedback_loop": "closed",
-                "end_to_end_ownership": "outcome_delivered",
+                "delivery_state": "outcome_delivered",
                 "feedback_loop": "ran the checks",
             }],
         }),
@@ -550,7 +550,7 @@ async fn moving_to_a_new_task_replaces_what_the_todos_panel_shows() {
             "goals": [{
                 "group": "second task",
                 "closed_feedback_loop": "strong",
-                "feedback_loop": "run the new checks",
+                "delivery_state": "not_started", "feedback_loop": "run the new checks",
             }],
         }),
         test_ctx(session),
@@ -606,6 +606,7 @@ async fn a_moderate_first_write_returns_no_continuation_and_records_instead() {
                 },
                 "goals": [{
                     "group": "speed",
+                    "delivery_state": "change_made",
                     "closed_feedback_loop": "strong",
                     "feedback_loop": "run ./grade and read the score",
                     "feedback_loop_relevance": "indirect",
@@ -738,7 +739,7 @@ async fn low_ownership_completion_is_saved_without_mid_write_rejection() {
                     "feedback_loop": "run the end-to-end release check",
                     "feedback_loop_relevance": "indirect",
                     "feedback_loop_coverage": "narrow",
-                    "end_to_end_ownership": "workflow_validated",
+                    "delivery_state": "workflow_validated",
                 }],
             }),
             test_ctx(session),

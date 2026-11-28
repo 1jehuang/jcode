@@ -1802,7 +1802,9 @@ fn push_todo_plan_details(
     }
     if let Some(state) = goals.iter().filter_map(|goal| goal.delivery_state).min() {
         let state_color = match state {
-            crate::todo::DeliveryState::ChangeMade => todo_meta_color(),
+            crate::todo::DeliveryState::NotStarted | crate::todo::DeliveryState::ChangeMade => {
+                todo_meta_color()
+            }
             crate::todo::DeliveryState::Integrated => todo_warning_color(),
             crate::todo::DeliveryState::WorkflowValidated
             | crate::todo::DeliveryState::OutcomeDelivered => todo_score_color(),

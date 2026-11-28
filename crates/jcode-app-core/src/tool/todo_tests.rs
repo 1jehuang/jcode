@@ -524,6 +524,14 @@ fn schema_advertises_intent_and_todos() {
             .any(|value| value == "closed_feedback_loop")
     );
     assert!(goal_required.iter().any(|value| value == "feedback_loop"));
+    assert!(goal_required.iter().any(|value| value == "delivery_state"));
+    assert_eq!(goal_props["delivery_state"]["type"], "string");
+    assert!(
+        goal_props["delivery_state"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("not_started"))
+    );
     assert!(
         goal_required
             .iter()
@@ -738,12 +746,44 @@ fn native_input_still_parses() {
 }
 
 #[test]
+fn submitted_goals_require_an_explicit_delivery_state_after_normalization() {
+    let valid = json!({"delivery_state": "not_started"});
+    for invalid in [
+        json!({}),
+        json!({"delivery_state": null}),
+        json!({"delivery_state": "  "}),
+        json!({"end_to_end_ownership": "change_made"}),
+    ] {
+        let goals = json!([valid, invalid]);
+        for input in [
+            goals.clone(),
+            json!(goals.to_string()),
+            json!([valid, invalid.to_string()]),
+        ] {
+            let error = parse(json!({"goals": input}))
+                .err()
+                .expect("missing delivery state accepted");
+            assert!(error.to_string().contains("goals[1].delivery_state"));
+        }
+    }
+    let goals = json!([valid.to_string()]);
+    assert!(parse(json!({"goals": goals.to_string()})).is_ok());
+    for input in [
+        json!({"plan": {}}),
+        json!({"goals": null}),
+        json!({"goals": []}),
+    ] {
+        assert!(parse(input).is_ok());
+    }
+}
+
+#[test]
 fn accepts_goals_and_plan_including_string_coercion() {
     let input = json!({
         "plan": {"user_intention": "make repository search feel instant", "understands_user_intent": "clear"},
         "goals": [
-            {"group": "optimize grep", "closed_feedback_loop": "strong", "feedback_loop": "run the grep benchmark and compare p50"},
-            {"closed_feedback_loop": "weak"}
+            {"delivery_state": "change_made", "group": "optimize grep", "closed_feedback_loop": "strong", "feedback_loop": "run the grep benchmark and compare p50"},
+            {"delivery_state": "not_started", "closed_feedback_loop": "weak"}
         ]
     });
     let parsed = parse(input).expect("goals and plan should parse");
