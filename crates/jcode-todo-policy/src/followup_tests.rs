@@ -508,6 +508,44 @@ fn default_delivery_poke_respects_stops_cancellation_and_opt_out() {
 }
 
 #[test]
+fn delivery_poke_continues_after_new_completed_todos_even_when_still_partially_delivered() {
+    let mut policy = FollowUpPolicy::new(true);
+    let mut s = snapshot(vec![done("phase 1", ConfidenceState::Verified)]);
+    s.todos[0].group = Some("graph integration".into());
+    s.goals.push(TodoGoal {
+        group: Some("graph integration".into()),
+        delivery_state: Some(DeliveryState::PartiallyDelivered),
+        verification_state: Some(crate::VerificationState::CheckedEndToEnd),
+        ..Default::default()
+    });
+
+    // Each turn adds and completes new todo work while the goal honestly stays
+    // partially_delivered. This is forward progress, not a stall, even beyond
+    // MAX_GATE_ATTEMPTS milestones.
+    for step in 2..=(MAX_GATE_ATTEMPTS + 3) {
+        let poke = policy.decide_after_turn(&s, true).follow_up.unwrap();
+        assert_eq!(poke.kind, FollowUpKind::Ownership);
+        assert!(poke.message.contains("partially_delivered"));
+
+        // Repeating or merely reordering the same completed todos must stop.
+        assert!(policy.decide_after_turn(&s, true).follow_up.is_none());
+        let mut reordered = s.clone();
+        reordered.todos.reverse();
+        assert!(policy.decide_after_turn(&reordered, true).follow_up.is_none());
+
+        let mut next = done(&format!("phase {step}"), ConfidenceState::Verified);
+        next.group = Some("graph integration".into());
+        s.todos.push(next);
+    }
+
+    // Final milestone still pokes after new completed todo work.
+    assert_eq!(
+        kind(&policy.decide_after_turn(&s, true)),
+        Some(FollowUpKind::Ownership)
+    );
+}
+
+#[test]
 fn delivered_goal_only_cycles_do_not_consume_future_retry_budgets() {
     let mut policy = FollowUpPolicy::new(true);
     let mut s = snapshot(vec![]);

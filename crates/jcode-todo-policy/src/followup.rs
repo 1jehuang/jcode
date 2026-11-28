@@ -200,6 +200,8 @@ pub struct FollowUpPolicy {
     gate_attempts: u8,
     spike_challenged: bool,
     last_ownership_fingerprint: Option<String>,
+    #[serde(default)]
+    last_ownership_work: Option<Vec<(String, String, Option<String>, String)>>,
     incomplete_budget: IncompleteTodoBudget,
     gate_digest_enabled: bool,
     gate_digest_delivered: bool,
@@ -207,6 +209,22 @@ pub struct FollowUpPolicy {
 
 pub fn is_incomplete_todo(todo: &TodoItem) -> bool {
     !todo_status_is_completed(&todo.status) && !todo_status_is_cancelled(&todo.status)
+}
+
+fn canonical_todo_work(todos: &[TodoItem]) -> Vec<(String, String, Option<String>, String)> {
+    let mut items: Vec<_> = todos
+        .iter()
+        .map(|todo| {
+            (
+                todo.id.clone(),
+                todo.content.clone(),
+                crate::normalized_group(todo.group.as_deref()),
+                todo.status.clone(),
+            )
+        })
+        .collect();
+    items.sort();
+    items
 }
 
 impl FollowUpPolicy {
@@ -294,6 +312,7 @@ impl FollowUpPolicy {
             self.spike_challenged = false;
             self.gate_digest_delivered = false;
             self.last_ownership_fingerprint = None;
+            self.last_ownership_work = None;
         }
 
         let incomplete: Vec<&TodoItem> = todos.iter().filter(|t| is_incomplete_todo(t)).collect();
@@ -351,6 +370,7 @@ impl FollowUpPolicy {
             self.final_response_requested = false;
             self.gate_attempts = 0;
             self.last_ownership_fingerprint = None;
+            self.last_ownership_work = None;
             self.gate_digest_delivered = false;
             return Decision::default();
         }
@@ -378,6 +398,17 @@ impl FollowUpPolicy {
         let ownership_needs_followup = delivery_message.is_some()
             || (self.gate_digest_enabled
                 && !completed_groups_have_sufficient_delivery(todos, goals));
+        let ownership_work = canonical_todo_work(todos);
+        let todo_work_progressed = self
+            .last_ownership_work
+            .as_ref()
+            .is_some_and(|previous| previous != &ownership_work);
+        if ownership_needs_followup && todo_work_progressed {
+            // New todo work was completed since the last ownership poke; treat
+            // this as forward progress rather than a stall on the same gap.
+            self.last_ownership_fingerprint = None;
+            self.gate_attempts = 0;
+        }
         let gate_budget_left = self.gate_attempts < MAX_GATE_ATTEMPTS;
         let ownership_message = delivery_message
             .unwrap_or_else(|| build_todo_ownership_continuation_message(todos, goals));
@@ -389,6 +420,7 @@ impl FollowUpPolicy {
         }
         if ownership_needs_followup && gate_budget_left {
             self.last_ownership_fingerprint = ownership_fingerprint;
+            self.last_ownership_work = Some(ownership_work);
             self.gate_attempts = self.gate_attempts.saturating_add(1);
             return Decision::send(
                 FollowUpKind::Ownership,
@@ -469,6 +501,7 @@ impl FollowUpPolicy {
         self.gate_digest_delivered = false;
         self.spike_challenged = false;
         self.last_ownership_fingerprint = None;
+        self.last_ownership_work = None;
         let todos: Vec<_> = incomplete.iter().map(|todo| (*todo).clone()).collect();
         let message = build_actionable_poke_message(&todos);
         if !self.incomplete_budget.allow_follow_up(&todos) {
