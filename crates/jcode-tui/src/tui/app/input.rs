@@ -311,6 +311,25 @@ use paste_guard::load_dropped_image;
 pub(crate) use paste_guard::tiny_png_bytes_for_test;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    // While the blocking ask_user chooser is visible, the main input box is
+    // disabled and the chooser owns all typed input. Paste events bypass the
+    // key gates entirely, so route them into the chooser's "Your answer"
+    // draft instead of injecting text (or attaching files/images) into the
+    // disabled composer.
+    if let Some(decision) = app.pending_decision.as_mut() {
+        // Keep explicit newlines like the composer does: pasted multiline
+        // text renders as multiple answer rows, and Shift/Alt+Enter can
+        // produce them too. Only line-ending pairs (`\r\n`) and stray
+        // carriage returns collapse to a single newline.
+        let sanitized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if !decision.selected_is_answer_row() {
+            // Paste onto an option row selects the answer row and inserts
+            // there, so a paste never silently lands nowhere.
+            decision.selected = crate::tui::app::PendingDecision::ANSWER_ROW;
+        }
+        decision.answer_draft.push_str(&sanitized);
+        return;
+    }
     if app.append_ssh_login_input(&text) {
         return;
     }

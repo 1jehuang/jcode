@@ -43,6 +43,18 @@ impl App {
             return Ok(());
         }
 
+        // The blocking ask_user chooser owns the keyboard while visible:
+        // the main input box is disabled (rendered locked) and free-form
+        // answers are typed into the chooser's "Your answer" row. Keys the
+        // chooser does not consume are discarded, never routed to the
+        // composer. Ctrl+C still interrupts the running turn, which also
+        // ends the blocked ask_user call.
+        if self.pending_decision.is_some()
+            && !(modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')))
+        {
+            return Ok(());
+        }
+
         // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
         // show "you just pressed X → does Y". Placed after the modal/overlay
         // handlers so overlay-local keys stay silent. Unknown chords are

@@ -198,7 +198,8 @@ impl RemoteConnection {
             | Request::ResumeSession { id, .. }
             | Request::GetModelCatalog { id, .. }
             | Request::AccountUsage { id }
-            | Request::GetState { id } => Some(*id),
+            | Request::GetState { id }
+            | Request::DecisionResponse { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = control_id {

@@ -168,12 +168,11 @@ pub(super) async fn poll_muse_subscription_until_decided_by_code(
 
 #[cfg(test)]
 type TestPollFn = Box<dyn Fn(&str, u64) -> Result<auth::muse::PollOutcome> + Send + Sync>;
+#[cfg(test)]
+type TestSleepFn = Box<dyn Fn(std::time::Duration) + Send + Sync>;
 
 #[cfg(test)]
 static TEST_POLL_OVERRIDE: std::sync::Mutex<Option<TestPollFn>> = std::sync::Mutex::new(None);
-
-#[cfg(test)]
-type TestSleepFn = Box<dyn Fn(std::time::Duration) + Send + Sync>;
 
 #[cfg(test)]
 static TEST_SLEEP_OVERRIDE: std::sync::Mutex<Option<TestSleepFn>> = std::sync::Mutex::new(None);

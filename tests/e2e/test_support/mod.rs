@@ -371,6 +371,9 @@ impl WsTestClient {
             supports_user_response: false,
             supports_server_failover: false,
             supports_turn_identity: false,
+            // This test client has no chooser: ask_user must degrade to
+            // plain-text asking, never block.
+            supports_decisions: false,
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             id,
