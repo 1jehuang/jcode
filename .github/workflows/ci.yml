@@ -17,6 +17,8 @@ concurrency:
 
 env:
   JCODE_CI: "1"
+  # Actions does not allow the secrets context in step conditions.
+  JCODE_CI_HAS_JUSTRUST: ${{ secrets.JUSTRUST_API_KEY != '' }}
   # CI builds without the local parallel-frontend rustc wrapper from
   # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
   CARGO_BUILD_RUSTC_WRAPPER: ""
@@ -43,7 +45,7 @@ jobs:
           cache-all-crates: "true"
 
       - name: Install hosted justrust client
-        if: ${{ secrets.JUSTRUST_API_KEY != '' }}
+        if: ${{ env.JCODE_CI_HAS_JUSTRUST == 'true' }}
         run: bash scripts/install_justrust_hosted_ci.sh
 
       - name: Check module declarations resolve
@@ -223,18 +225,18 @@ jobs:
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
-        if: ${{ secrets.JUSTRUST_API_KEY == '' }}
+        if: ${{ env.JCODE_CI_HAS_JUSTRUST != 'true' }}
         with:
           # Suffix bumped to evict caches that held 1.83.0 / <unknown rustc>
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
       - name: Install hosted justrust client
-        if: ${{ secrets.JUSTRUST_API_KEY != '' }}
+        if: ${{ env.JCODE_CI_HAS_JUSTRUST == 'true' }}
         run: bash scripts/install_justrust_hosted_ci.sh
 
       - name: Install mold linker (Linux)
-        if: runner.os == 'Linux' && secrets.JUSTRUST_API_KEY == ''
+        if: runner.os == 'Linux' && env.JCODE_CI_HAS_JUSTRUST != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold

@@ -81,6 +81,14 @@ class WorkflowGuardTests(unittest.TestCase):
         self.assertIn('jcode_release_tag=$JCODE_BUILD_SEMVER', publish)
         self.assertNotIn('uses: ./.github/workflows/publish-typescript-sdk.yml', publish)
 
+    def test_hosted_justrust_step_conditions_use_a_boolean_env_flag(self):
+        workflow = (ROOT / '.github/workflows/ci.yml').read_text()
+        self.assertNotRegex(workflow, r'(?m)^\s+if: .*secrets\.')
+        self.assertIn("JCODE_CI_HAS_JUSTRUST: ${{ secrets.JUSTRUST_API_KEY != '' }}", workflow)
+        self.assertEqual(workflow.count("if: ${{ env.JCODE_CI_HAS_JUSTRUST == 'true' }}"), 2)
+        self.assertIn("if: ${{ env.JCODE_CI_HAS_JUSTRUST != 'true' }}", workflow)
+        self.assertIn("if: runner.os == 'Linux' && env.JCODE_CI_HAS_JUSTRUST != 'true'", workflow)
+
     def test_exact_source_ci_can_be_manually_retried_after_bot_push(self):
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]
