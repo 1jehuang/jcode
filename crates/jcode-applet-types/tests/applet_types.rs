@@ -209,6 +209,57 @@ fn enforces_limits_and_references() {
 }
 
 #[test]
+fn displayed_labels_count_toward_max_text() {
+    let tiny = Limits {
+        max_text: 16,
+        ..Limits::default()
+    };
+    let cases = [
+        json!({"type": "tabs", "bind": "t", "tabs": [
+            {"id": "a", "label": "0123456789ABCDEF-over"}
+        ]}),
+        json!({"type": "select", "bind": "s", "options": [
+            {"value": "v", "label": "0123456789ABCDEF-over"}
+        ]}),
+        json!({"type": "key_value", "rows": [
+            {"key": "0123456789ABCDEF", "value": "-over"}
+        ]}),
+        json!({"type": "card", "title": "0123456789ABCDEF-over", "children": []}),
+        json!({"type": "button", "label": "0123456789ABCDEF-over", "on_press": {"action": "host.close"}}),
+    ];
+    for case in cases {
+        let doc = document(case);
+        assert!(
+            matches!(
+                validate_document(&doc, &manifest(&[]), &tiny),
+                Err(ValidationError::TooMuchText(_))
+            ),
+            "label text must count toward max_text"
+        );
+    }
+}
+
+#[test]
+fn internal_state_identifiers_do_not_consume_max_text() {
+    let tiny = Limits {
+        max_text: 16,
+        ..Limits::default()
+    };
+    // Long internal identifiers (option values, tab ids) with short
+    // displayed labels must validate under a small text budget: only what
+    // the user sees counts.
+    let doc = document(json!({"type": "stack", "children": [
+        {"type": "tabs", "bind": "t", "tabs": [
+            {"id": "tab-state-identifier-way-over-budget", "label": "ok"}
+        ]},
+        {"type": "select", "bind": "s", "options": [
+            {"value": "option-state-identifier-way-over-budget", "label": "fine"}
+        ]}
+    ]}));
+    validate_document(&doc, &manifest(&[]), &tiny).unwrap();
+}
+
+#[test]
 fn patches_are_revisioned_atomic_and_path_restricted() {
     let doc = document(json!({"type": "stack", "children": [
         {"type": "text", "text": "a"}
@@ -308,4 +359,28 @@ fn manifest_schema_and_tool_card_claims() {
     let mut future = m.clone();
     future.schema = "jcode.applet/2".into();
     assert!(validate::validate_manifest(&future).is_err());
+}
+
+#[test]
+fn progress_values_outside_unit_interval_are_rejected() {
+    let valid = document(json!({"type": "progress", "value": 0.5, "label": "Half"}));
+    validate_document(&valid, &manifest(&[]), &Limits::default()).unwrap();
+
+    let too_large = document(json!({"type": "progress", "value": 2.0, "label": "Over"}));
+    assert!(
+        validate_document(&too_large, &manifest(&[]), &Limits::default()).is_err(),
+        "progress value 2.0 must be rejected"
+    );
+
+    let negative = document(json!({"type": "progress", "value": -0.1, "label": "Under"}));
+    assert!(
+        validate_document(&negative, &manifest(&[]), &Limits::default()).is_err(),
+        "negative progress value must be rejected"
+    );
+
+    let unlabelled = document(json!({"type": "progress", "value": 1.5}));
+    assert!(
+        validate_document(&unlabelled, &manifest(&[]), &Limits::default()).is_err(),
+        "out-of-range progress value must be rejected even without a label"
+    );
 }
