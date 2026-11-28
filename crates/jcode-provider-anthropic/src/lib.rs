@@ -198,12 +198,11 @@ pub fn format_messages_with_native(
         ));
     }
 
-    // Anthropic requires every tool_result answering the previous assistant
-    // turn to lead the user message. Merging separate tool-result messages can
-    // interleave sibling text (for example text moved out of a tool_result by
-    // `apply_tool_references` for parallel tool_search calls), which makes the
-    // API report later tool_use ids as missing their tool_result. Stable
-    // partition so tool_results come first and other blocks keep their order.
+    // Recover orphans before partitioning so their output keeps its original context.
+    rewrite_orphaned_tool_results(&mut merged);
+
+    // Paired tool_results must lead each user turn. Merging separate results
+    // can interleave text from apply_tool_references; keep the other blocks' order.
     for msg in merged.iter_mut().filter(|m| m.role == "user") {
         let first_non_result = msg
             .content
@@ -223,7 +222,6 @@ pub fn format_messages_with_native(
         }
     }
 
-    rewrite_orphaned_tool_results(&mut merged);
     answer_unpaired_tool_uses(&mut merged);
 
     // Anthropic rejects a request whose final message is an assistant turn on

@@ -6,6 +6,10 @@
 use super::*;
 
 #[cfg(test)]
+#[path = "orphan_replay_order_tests.rs"]
+mod orphan_replay_order_tests;
+
+#[cfg(test)]
 #[path = "repair_efficiency_tests.rs"]
 mod repair_efficiency_tests;
 
