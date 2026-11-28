@@ -1036,7 +1036,8 @@ async fn sync_pass(client: &reqwest::Client, reconcile: bool) -> Result<SyncRepo
             continue;
         }
         let (messages, fingerprint) = incremental_messages(&session, &progress);
-        let title = session.custom_title.as_deref().or(session.title.as_deref());
+        let todo_title = crate::todo::load_session_title(&session.id);
+        let title = synced_session_title(&session, todo_title.as_deref());
         let mut ok = true;
         // Always send at least one request so metadata (title, updated_at) refreshes.
         let chunks: Vec<&[WireMessage]> = if messages.is_empty() {
@@ -1156,6 +1157,27 @@ pub async fn wipe_remote(client: &reqwest::Client) -> Result<()> {
 }
 
 /// Background loop used by the jcode server daemon.
+/// Match `RecentSessionMetadata::display_title` precedence:
+/// custom_title -> saved save_label -> todo plan title -> generated/prompt title.
+fn synced_session_title<'a>(session: &'a Session, todo_title: Option<&'a str>) -> Option<&'a str> {
+    let non_empty = |value: &'a str| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    session
+        .custom_title
+        .as_deref()
+        .and_then(non_empty)
+        .or_else(|| {
+            session
+                .saved
+                .then(|| session.save_label.as_deref().and_then(non_empty))
+                .flatten()
+        })
+        .or_else(|| todo_title.and_then(non_empty))
+        .or_else(|| session.title.as_deref().and_then(non_empty))
+}
+
 pub fn spawn_background_sync() {
     tokio::spawn(background_sync());
 }
