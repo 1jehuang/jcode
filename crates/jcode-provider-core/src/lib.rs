@@ -1,3 +1,6 @@
+mod model_route;
+pub use model_route::ModelRoute;
+
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
@@ -509,6 +512,12 @@ pub trait Provider: Send + Sync {
             .unwrap_or(DEFAULT_CONTEXT_LIMIT)
     }
 
+    /// Maximum prompt tokens accepted by the active model. Providers with a
+    /// separate input budget override this; otherwise retain the context limit.
+    fn input_token_limit(&self) -> usize {
+        self.context_window()
+    }
+
     /// Create a new provider instance with independent mutable state.
     fn fork(&self) -> Arc<dyn Provider>;
 
@@ -886,20 +895,6 @@ pub struct NativeCompactionResult {
     pub openai_encrypted_content: Option<String>,
     /// Provider counters for this separately billed compaction request.
     pub usage: Option<SimpleCompletionUsage>,
-}
-
-/// A single route to access a model: model + provider + API method
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ModelRoute {
-    pub model: String,
-    pub provider: String,
-    pub api_method: String,
-    pub available: bool,
-    pub detail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cheapness: Option<RouteCheapnessEstimate>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<jcode_usage_types::ModelUsage>,
 }
 
 /// Exact runtime identity for a selected model route.

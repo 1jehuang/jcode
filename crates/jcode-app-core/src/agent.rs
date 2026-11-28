@@ -697,46 +697,6 @@ impl Agent {
         agent
     }
 
-    fn seed_compaction_from_session(&mut self) {
-        logging::info(&format!(
-            "seed_compaction_from_session: session has {} messages",
-            self.session.messages.len()
-        ));
-        let compaction = self.registry.compaction();
-        let mut manager = match compaction.try_write() {
-            Ok(manager) => manager,
-            Err(_) => {
-                logging::warn(
-                    "seed_compaction_from_session: compaction lock unavailable, skipping restore",
-                );
-                return;
-            }
-        };
-        manager.reset();
-        manager.set_context_cap_override(self.session.context_cap);
-        let budget = self.provider.context_window();
-        manager.set_budget_for_provider(budget, self.provider.name());
-        if let Some(state) = self.session.compaction.as_ref() {
-            manager.restore_persisted_stored_state_with(state, &self.session.messages);
-        } else {
-            manager.seed_restored_stored_messages_with(&self.session.messages);
-        }
-        let sanitized_state = if manager.discard_oversized_openai_native_compaction() {
-            Some(manager.persisted_state())
-        } else {
-            None
-        };
-        logging::info(&format!(
-            "seed_compaction_from_session: seeded compaction with {} messages",
-            self.session.messages.len()
-        ));
-        drop(manager);
-        if let Some(state) = sanitized_state {
-            self.session.compaction = state.map(Arc::new);
-            self.persist_session_best_effort("sanitized oversized OpenAI native compaction");
-        }
-    }
-
     fn sync_memory_dedup_state_from_session(&self) {
         crate::memory::sync_injected_memories(
             &self.session.id,
@@ -925,7 +885,8 @@ impl Agent {
         self.session.compaction = Some(Arc::new(state.clone()));
         let mut post_tokens = None;
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
+            manager
+                .set_budget_for_provider(self.provider.input_token_limit(), self.provider.name());
             manager.restore_persisted_stored_state_with(&state, &self.session.messages);
             post_tokens =
                 Some(manager.token_estimate_with(self.session.provider_messages()) as u64);
@@ -954,6 +915,10 @@ impl Agent {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
+                    manager.set_budget_for_provider(
+                        self.provider.input_token_limit(),
+                        self.provider.name(),
+                    );
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {
@@ -1181,17 +1146,6 @@ impl Agent {
 
     pub fn session_id(&self) -> &str {
         &self.session.id
-    }
-
-    /// Desktop self-development is selected by the session checkout, including
-    /// restored sessions. It must not set the CLI canary/reload flags.
-    pub fn is_desktop_selfdev(&self) -> bool {
-        self.session
-            .working_dir
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(jcode_selfdev_types::desktop_repo_root)
-            .is_some()
     }
 
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {

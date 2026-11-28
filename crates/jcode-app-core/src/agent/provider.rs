@@ -187,7 +187,7 @@ impl Agent {
     pub async fn effective_context_budget(&self) -> usize {
         let compaction = self.registry.compaction();
         let mut manager = compaction.write().await;
-        manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
+        manager.set_budget_for_provider(self.provider.input_token_limit(), self.provider.name());
         manager.token_budget()
     }
 
@@ -203,7 +203,7 @@ impl Agent {
             return Err(error);
         }
         manager.set_context_cap_override(cap);
-        manager.set_budget_for_provider(self.provider.context_window(), self.provider.name());
+        manager.set_budget_for_provider(self.provider.input_token_limit(), self.provider.name());
         Ok(manager.token_budget())
     }
 
@@ -211,7 +211,7 @@ impl Agent {
         let compaction = self.registry.compaction();
         match compaction.try_write() {
             Ok(mut manager) => manager
-                .set_budget_for_provider(self.provider.context_window(), self.provider.name()),
+                .set_budget_for_provider(self.provider.input_token_limit(), self.provider.name()),
             Err(_) => crate::logging::warn(
                 "Could not refresh compaction token budget after provider change: compaction manager is busy",
             ),
@@ -374,10 +374,7 @@ impl Agent {
             Ok(()) => {
                 let current = self.provider.reasoning_effort();
                 self.session.reasoning_effort = current.clone();
-                crate::session_effort::record_session_effort(
-                    &self.session.id,
-                    current.as_deref(),
-                );
+                crate::session_effort::record_session_effort(&self.session.id, current.as_deref());
                 self.log_env_snapshot("jarvis_default_reasoning_effort");
                 Some(current)
             }

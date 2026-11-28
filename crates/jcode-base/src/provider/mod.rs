@@ -8,6 +8,7 @@ pub mod bedrock;
 mod catalog_memo;
 mod catalog_refresh;
 mod catalog_routes;
+mod context_budget;
 pub use catalog_memo::bump_catalog_generation;
 use catalog_memo::{RoutesMemoEntry, catalog_generation, next_catalog_scope};
 pub mod catalog_scheduler;
@@ -2754,43 +2755,19 @@ impl Provider for MultiProvider {
     }
 
     fn context_window(&self) -> usize {
-        match self.active_provider() {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    anthropic.context_window()
-                } else {
-                    DEFAULT_CONTEXT_LIMIT
+        self.context_budget_provider()
+            .map_or(DEFAULT_CONTEXT_LIMIT, |provider| provider.context_window())
+    }
+
+    fn input_token_limit(&self) -> usize {
+        self.context_budget_provider()
+            .map_or(DEFAULT_CONTEXT_LIMIT, |provider| {
+                let context = provider.context_window();
+                match provider.input_token_limit() {
+                    0 => context,
+                    input => input.min(context),
                 }
-            }
-            ActiveProvider::OpenAI => self
-                .openai_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::Copilot => self
-                .copilot_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::Antigravity => self
-                .antigravity_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::Gemini => self
-                .gemini_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::Cursor => self
-                .cursor_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::Bedrock => self
-                .bedrock_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-            ActiveProvider::OpenRouter => self
-                .active_openrouter_execution_provider()
-                .map(|o| o.context_window())
-                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
-        }
+            })
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
