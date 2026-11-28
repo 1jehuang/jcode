@@ -23,35 +23,37 @@ pub(super) fn rearm() {
 }
 
 pub(super) fn ensure_started() {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    #[cfg(all(target_os = "linux", not(test)))]
-    {
-        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(path) = crate::build::current_binary_path()
-            && let Some(dir) = path.parent()
+    // The Linux watcher setup below is the function tail on every target; an
+    // early `return;` here would become a needless_return lint where the cfg
+    // block compiles away, so invert the guard instead.
+    if !STARTED.swap(true, Ordering::AcqRel) {
+        #[cfg(all(target_os = "linux", not(test)))]
         {
-            dirs.push(dir.to_path_buf());
-        }
-        if let Ok(path) = crate::build::launcher_binary_path()
-            && let Some(dir) = path.parent()
-        {
-            dirs.push(dir.to_path_buf());
-        }
-        if let Some(repo) = crate::build::get_repo_dir()
-            && let Some(dir) = crate::build::selfdev_binary_path(&repo).parent()
-        {
-            dirs.push(dir.to_path_buf());
-        }
-        dirs.sort();
-        dirs.dedup();
-        if let Err(error) = std::thread::Builder::new()
-            .name("jcode-bin-watch".to_string())
-            .spawn(move || imp::run(dirs))
-        {
-            STARTED.store(false, Ordering::Release);
-            crate::logging::warn(&format!("Failed to start binary watcher: {error}"));
+            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+            if let Ok(path) = crate::build::current_binary_path()
+                && let Some(dir) = path.parent()
+            {
+                dirs.push(dir.to_path_buf());
+            }
+            if let Ok(path) = crate::build::launcher_binary_path()
+                && let Some(dir) = path.parent()
+            {
+                dirs.push(dir.to_path_buf());
+            }
+            if let Some(repo) = crate::build::get_repo_dir()
+                && let Some(dir) = crate::build::selfdev_binary_path(&repo).parent()
+            {
+                dirs.push(dir.to_path_buf());
+            }
+            dirs.sort();
+            dirs.dedup();
+            if let Err(error) = std::thread::Builder::new()
+                .name("jcode-bin-watch".to_string())
+                .spawn(move || imp::run(dirs))
+            {
+                STARTED.store(false, Ordering::Release);
+                crate::logging::warn(&format!("Failed to start binary watcher: {error}"));
+            }
         }
     }
 }

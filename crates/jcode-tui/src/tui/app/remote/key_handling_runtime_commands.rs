@@ -13,7 +13,20 @@ pub(super) async fn apply_remote_effort_direction(
     // spawn and reflects discovered sibling models (e.g. Antigravity).
     let efforts = app.remote_available_efforts();
     if efforts.is_empty() {
-        app.set_status_notice("Reasoning effort not available for this provider");
+        // Switching is unavailable, but the server may still run a fixed
+        // effort (e.g. injected via OpenAI-compatible `extra_body`). Show it
+        // read-only instead of hiding it.
+        match app.remote_reasoning_effort_hint() {
+            Some(effort) => {
+                app.set_status_notice(format!(
+                    "Reasoning effort not switchable for this provider. Effort: {} (fixed)",
+                    app_mod::effort_display_label(&effort)
+                ));
+            }
+            None => {
+                app.set_status_notice("Reasoning effort not available for this provider");
+            }
+        }
         return Ok(());
     }
     let current = app.remote_reasoning_effort_hint();
@@ -33,22 +46,22 @@ pub(super) async fn apply_remote_effort_direction(
     } else {
         current_index - 1
     };
-    let next_effort = efforts[next_index];
-    if Some(next_effort) == current {
-        let label = app_mod::effort_display_label(next_effort);
+    let next_effort = efforts[next_index].clone();
+    if current == Some(next_effort.as_str()) {
+        let label = app_mod::effort_display_label(&next_effort);
         app.set_status_notice(format!(
             "Effort: {} (already at {})",
             label,
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
-        app.remote_reasoning_effort = Some(next_effort.to_string());
+        app.remote_reasoning_effort = Some(next_effort.clone());
         app.invalidate_model_picker_cache();
         app.set_status_notice(format!(
             "Effort: {} (will apply to next request)",
-            app_mod::effort_display_label(next_effort)
+            app_mod::effort_display_label(&next_effort)
         ));
-        remote.set_reasoning_effort(next_effort).await?;
+        remote.set_reasoning_effort(&next_effort).await?;
     }
     Ok(())
 }

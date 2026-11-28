@@ -17,6 +17,8 @@ fn canonical_input_parts(request: &Value) -> (&[Value], Option<&Value>, Option<&
     (items, system, tools, count)
 }
 
+use display_routes_impl::append_swarm_sentinels;
+
 #[async_trait]
 impl Provider for OpenRouterProvider {
     fn runtime_display_name(&self) -> String {
@@ -67,6 +69,7 @@ impl Provider for OpenRouterProvider {
         let model = self.model.read().await.clone();
         let responses_api =
             model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
+        let model_key = Self::normalized_model_key(&self.model.read().await);
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -92,7 +95,7 @@ impl Provider for OpenRouterProvider {
         // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
         // not synthesize the field when the prior turn did not return one.
         let direct_deepseek_model =
-            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
+            !self.supports_provider_features && Self::model_key_is_deepseek_family(&model_key);
         let allow_reasoning =
             (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
                 && thinking_enabled != Some(false);
@@ -159,14 +162,16 @@ impl Provider for OpenRouterProvider {
             });
         }
 
-        if let Some(max_tokens) = self.max_tokens {
+        // Per-model `max_output_tokens` from named-provider config overrides the
+        // runtime default (opencode `limit.output` parity).
+        let effective_max_tokens = self.max_output_tokens_for_key(&model_key);
+        if let Some(max_tokens) = effective_max_tokens {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
         let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
-            let resolved =
-                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
-            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+            let resolved = self.resolve_swarm_root_effort_for_request(effort);
+            self.apply_resolved_reasoning_effort(&mut request, &resolved, strict_openai_schema)
         });
 
         if !api_tools.is_empty() {
@@ -247,13 +252,23 @@ impl Provider for OpenRouterProvider {
         // provider-only fields cannot leak into `/responses`; configured extra
         // body fields remain an intentional escape hatch and are merged last.
         if responses_api {
+            // Responses requests must carry the same per-model settings the
+            // chat request does: the swarm sentinel resolved through the
+            // configured root effort and the map-aware wire value, plus the
+            // per-model `max_output_tokens` override. Passing the stored rung
+            // and the runtime default here dropped both for Responses models
+            // (per-model reasoning maps and limits silently stopped applying).
+            let resolved_effort = reasoning_effort
+                .as_deref()
+                .and_then(|effort| self.resolve_request_reasoning_effort(effort));
+            let responses_max_tokens = self.max_output_tokens_for_key(&model_key);
             request = super::opencode_go_responses::build_request(
                 &effective_messages,
                 tools,
                 system,
                 &model,
-                reasoning_effort.as_deref(),
-                self.max_tokens,
+                resolved_effort.as_deref(),
+                responses_max_tokens,
                 jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
             );
             if let Some(extra) = self.extra_body.as_ref()
@@ -414,8 +429,13 @@ impl Provider for OpenRouterProvider {
         // untouched so cross-provider switches from a saved session still work.
         let trimmed = self.strip_session_profile_prefix(trimmed);
 
+        // The picker sends the display-name alias (from `models[].display_name`)
+        // back through `set_model`. Resolve it to the raw upstream id so the
+        // API request uses the identifier the endpoint actually expects.
+        let trimmed = self.resolve_display_name_to_id(trimmed);
+
         let (model_id, provider) = if self.supports_provider_features {
-            let (model_id, provider) = parse_model_spec(trimmed);
+            let (model_id, provider) = parse_model_spec(&trimmed);
             let model_id = if provider.is_some() {
                 jcode_base::provider::openrouter_catalog_model_id(&model_id).unwrap_or(model_id)
             } else {
@@ -438,13 +458,12 @@ impl Provider for OpenRouterProvider {
                 model_id
             );
         }
-        if let Ok(mut current) = self.model.try_write() {
-            *current = model_id.clone();
-        } else {
-            return Err(anyhow::anyhow!(
-                "Cannot change model while a request is in progress"
-            ));
-        }
+        let mut current = self
+            .model
+            .try_write()
+            .map_err(|_| anyhow::anyhow!("Cannot change model while a request is in progress"))?;
+        *current = model_id.clone();
+        drop(current);
 
         if self.supports_provider_features {
             if let Some(provider) = provider {
@@ -461,6 +480,16 @@ impl Provider for OpenRouterProvider {
             || self
                 .model_reasoning_config()
                 .and_then(|config| config.1.as_ref())
+                .is_some()
+            || self.model_reasoning_map().is_some()
+            // A per-model `reasoning = true` also enables the effort ladder
+            // (see `supports_openai_reasoning_effort`), so a switch to this
+            // model must re-resolve the configured effort too. Without this
+            // arm, a model configured with `reasoning = true` but no explicit
+            // `reasoning_effort` keeps whatever the previous model left in
+            // `reasoning_effort` instead of the configured default.
+            || self
+                .model_reasoning_override_for_key(&self.model_key_snapshot())
                 .is_some()
         {
             let configured = self.configured_effort_for_model();
@@ -495,6 +524,11 @@ impl Provider for OpenRouterProvider {
             .and_then(|effort| effort.clone())
     }
 
+    fn effective_reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort()
+            .or_else(|| self.extra_body_reasoning_effort())
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         if !self.supports_any_reasoning_effort() {
             anyhow::bail!(
@@ -525,15 +559,39 @@ impl Provider for OpenRouterProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
+        // `reasoning = false` force-disables effort switching even when a map
+        // is present: the runtime rejects every rung, so advertising a ladder
+        // would offer choices that always fail (greptile F11).
+        if self.model_reasoning_override_for_key(&self.model_key_snapshot()) == Some(false) {
+            return vec![];
+        }
+        // A configured per-model reasoning map defines the ladder exactly:
+        // only enabled rungs are selectable (opencode per-level mapping). The
+        // swarm sentinels stay appended since they are Jcode UI modes resolved
+        // to the root effort before any map lookup.
+        if let Some(map) = self.model_reasoning_map() {
+            let mut efforts: Vec<&'static str> = jcode_base::config::REASONING_EFFORT_MAP_KEYS
+                .iter()
+                .copied()
+                .filter(|rung| map.rung(rung).is_some_and(|config| !config.disabled))
+                .collect();
+            efforts.extend(jcode_provider_core::reasoning::SWARM_EFFORTS);
+            return efforts;
+        }
+        // No-map ladders come from the shared constants, which predate the
+        // `swarm-deep` sentinel. The client ladder (`configured_reasoning_
+        // efforts_in`) appends both sentinels, so the runtime must accept
+        // them too; otherwise selecting the advertised rung bails with
+        // "not supported" (same append pattern as the map branch above).
         if self.supports_deepseek_reasoning_effort() {
-            jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec())
         } else if self.supports_openai_reasoning_effort() {
-            jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec())
         } else if Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
             self.send_openrouter_headers,
         ) {
-            jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec()
+            append_swarm_sentinels(jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec())
         } else {
             vec![]
         }
@@ -544,9 +602,24 @@ impl Provider for OpenRouterProvider {
         // Static list is empty; use available_models_display for cached list.
         vec![]
     }
-
     fn available_models_display(&self) -> Vec<String> {
         let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
+        // Replace raw model ids with their configured display name aliases so
+        // the picker shows the user-friendly name (opencode `name` parity).
+        let apply_display_names = |mut models: Vec<String>| {
+            if self.static_model_display_names.is_empty() {
+                return models;
+            }
+            for model in &mut models {
+                if let Some(display) = self
+                    .static_model_display_names
+                    .get(&model.to_ascii_lowercase())
+                {
+                    *model = display.clone();
+                }
+            }
+            models
+        };
         let with_current_model = |mut models: Vec<String>| {
             let current = self.model();
             if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
@@ -570,6 +643,100 @@ impl Provider for OpenRouterProvider {
 
         if !self.supports_model_catalog {
             if !self.static_models.is_empty() {
+                return finalize(apply_display_names(with_current_model(
+                    self.static_models.clone(),
+                )));
+            }
+            let model = self.model();
+            return finalize(apply_display_names(if model.trim().is_empty() {
+                Vec::new()
+            } else {
+                vec![model]
+            }));
+        }
+
+        if let Ok(cache) = self.models_cache.try_read()
+            && cache.fetched
+            && !cache.models.is_empty()
+        {
+            if let Some(cache_age) = cache
+                .cached_at
+                .and_then(|cached_at| current_unix_secs().map(|now| now.saturating_sub(cached_at)))
+            {
+                self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
+            }
+            return finalize(apply_display_names(merge_static_models(
+                cache.models.iter().map(|m| m.id.clone()).collect(),
+            )));
+        }
+
+        if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
+            let cache_age = current_unix_secs()
+                .map(|now| now.saturating_sub(cache_entry.cached_at))
+                .unwrap_or(0);
+            if let Ok(mut cache) = self.models_cache.try_write() {
+                cache.models = cache_entry.models.clone();
+                cache.fetched = true;
+                cache.cached_at = Some(cache_entry.cached_at);
+            }
+            self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
+            return finalize(apply_display_names(merge_static_models(
+                cache_entry.models.into_iter().map(|m| m.id).collect(),
+            )));
+        }
+
+        // No memory or disk catalog yet. This commonly happens immediately after
+        // adding a new OpenAI-compatible endpoint from `/login`: the provider is
+        // hot-initialized, but the picker may render before the post-auth
+        // prefetch has completed. Make the picker path self-healing by starting
+        // the first `/models` fetch here, then return the best immediate
+        // fallback. The background refresh publishes ModelsUpdated, which
+        // invalidates/reopens the picker with the newly discovered models.
+        self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
+
+        if !self.static_models.is_empty() {
+            return finalize(apply_display_names(with_current_model(
+                self.static_models.clone(),
+            )));
+        }
+
+        let model = self.model();
+        finalize(apply_display_names(if model.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![model]
+        }))
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        // The cycle handler compares entries against the raw current model
+        // id, so this list must stay raw: applying display-name aliases here
+        // would make every comparison miss and reset the cycle to index 0,
+        // reporting successful switches while staying on the same model.
+        let finalize = |models: Vec<String>| self.filter_profile_chat_supported_models(models);
+        let with_current_model = |mut models: Vec<String>| {
+            let current = self.model();
+            if !current.trim().is_empty() && !models.iter().any(|model| model == &current) {
+                models.insert(0, current);
+            }
+            models
+        };
+        // Same merge rule as `available_models_display`: configured static
+        // models stay switchable next to the live/disk catalog.
+        let should_merge_static_models = self.should_merge_static_models_with_live_catalog();
+        let merge_static_models = |mut models: Vec<String>| {
+            if !should_merge_static_models {
+                return with_current_model(models);
+            }
+            for model in &self.static_models {
+                if !model.trim().is_empty() && !models.iter().any(|existing| existing == model) {
+                    models.push(model.clone());
+                }
+            }
+            with_current_model(models)
+        };
+        if !self.supports_model_catalog {
+            if !self.static_models.is_empty() {
                 return finalize(with_current_model(self.static_models.clone()));
             }
             let model = self.model();
@@ -584,55 +751,29 @@ impl Provider for OpenRouterProvider {
             && cache.fetched
             && !cache.models.is_empty()
         {
-            if let Some(cache_age) = cache
-                .cached_at
-                .and_then(|cached_at| current_unix_secs().map(|now| now.saturating_sub(cached_at)))
-            {
-                self.maybe_schedule_model_catalog_refresh(cache_age, "display memory cache");
-            }
-            return finalize(merge_static_models(
-                cache.models.iter().map(|m| m.id.clone()).collect(),
-            ));
+            let ids: Vec<String> = cache.models.iter().map(|m| m.id.clone()).collect();
+            return finalize(merge_static_models(ids));
         }
 
+        // No live memory catalog. Mirror `available_models_display`: fall
+        // back to the saved on-disk catalog first (a named provider /models
+        // fetch may have populated it), so configured models do not disappear
+        // from the switching list after a restart.
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
-            let cache_age = current_unix_secs()
-                .map(|now| now.saturating_sub(cache_entry.cached_at))
-                .unwrap_or(0);
-            if let Ok(mut cache) = self.models_cache.try_write() {
-                cache.models = cache_entry.models.clone();
-                cache.fetched = true;
-                cache.cached_at = Some(cache_entry.cached_at);
-            }
-            self.maybe_schedule_model_catalog_refresh(cache_age, "display disk cache");
             return finalize(merge_static_models(
                 cache_entry.models.into_iter().map(|m| m.id).collect(),
             ));
         }
 
-        // No memory or disk catalog yet. This commonly happens immediately after
-        // adding a new OpenAI-compatible endpoint from `/login`: the provider is
-        // hot-initialized, but the picker may render before the post-auth
-        // prefetch has completed. Make the picker path self-healing by starting
-        // the first `/models` fetch here, then return the best immediate
-        // fallback. The background refresh publishes ModelsUpdated, which
-        // invalidates/reopens the picker with the newly discovered models.
-        self.maybe_schedule_model_catalog_refresh(u64::MAX, "display cache miss");
-
         if !self.static_models.is_empty() {
             return finalize(with_current_model(self.static_models.clone()));
         }
-
         let model = self.model();
         finalize(if model.trim().is_empty() {
             Vec::new()
         } else {
             vec![model]
         })
-    }
-
-    fn available_models_for_switching(&self) -> Vec<String> {
-        self.available_models_display()
     }
 
     fn model_routes(&self) -> Vec<jcode_provider_core::ModelRoute> {
@@ -667,6 +808,18 @@ impl Provider for OpenRouterProvider {
                 } else {
                     detail.clone()
                 };
+                let raw_model_id = self.resolve_display_name_to_id(&model);
+                let raw_model_key = Self::normalized_model_key(&raw_model_id);
+                let route_detail =
+                    if let Some(max_tokens) = self.max_output_tokens_for_key(&raw_model_key) {
+                        if route_detail.trim().is_empty() {
+                            format!("max output {}", max_tokens)
+                        } else {
+                            format!("{}; max output {}", route_detail, max_tokens)
+                        }
+                    } else {
+                        route_detail
+                    };
                 jcode_provider_core::ModelRoute {
                     model,
                     provider: provider_label.clone(),
@@ -853,6 +1006,12 @@ impl Provider for OpenRouterProvider {
             static_models: self.static_models.clone(),
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
+            static_model_display_names: self.static_model_display_names.clone(),
+            static_display_name_to_id: self.static_display_name_to_id.clone(),
+            static_model_reasoning: self.static_model_reasoning.clone(),
+            static_model_reasoning_maps: self.static_model_reasoning_maps.clone(),
+            static_model_max_output_tokens: self.static_model_max_output_tokens.clone(),
+            display_name: self.display_name.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
             // A fork is a new conversation (new session or subagent), so it
             // gets its own stable id.
@@ -877,219 +1036,5 @@ impl Provider for OpenRouterProvider {
     }
 }
 
-impl OpenRouterProvider {
-    async fn complete_azure_responses(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system: &str,
-    ) -> Result<EventStream> {
-        use jcode_provider_openai::request::{
-            build_responses_input, build_tools, downgrade_web_search_calls, insert_additional_tools,
-        };
-
-        let model = self.model.read().await.clone();
-        let mut input = build_responses_input(messages);
-        insert_additional_tools(&mut input, messages, tools);
-        downgrade_web_search_calls(&mut input);
-        let api_tools = build_tools(tools);
-        let mut request = serde_json::json!({
-            "model": model,
-            "instructions": system,
-            "input": input,
-            "tools": api_tools,
-            "stream": true,
-            "store": false,
-            "include": ["reasoning.encrypted_content"],
-        });
-        if !api_tools.is_empty() {
-            request["tool_choice"] = serde_json::json!("auto");
-        }
-        if let Some(max_tokens) = self.max_tokens {
-            request["max_output_tokens"] = serde_json::json!(max_tokens);
-        }
-        if let Some(effort) = self.reasoning_effort() {
-            let effort =
-                jcode_base::prompt::swarm_root_reasoning_effort(&effort).unwrap_or(effort.as_str());
-            request["reasoning"] = serde_json::json!({"effort": effort});
-        }
-        if let Some(extra) = self.extra_body.as_ref()
-            && let Some(request_obj) = request.as_object_mut()
-        {
-            for (key, value) in extra {
-                request_obj.insert(key.clone(), value.clone());
-            }
-        }
-
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
-            "azure-openai",
-            &model,
-            "openai_responses_full",
-            &request,
-            &input,
-            request.get("instructions"),
-            request.get("tools"),
-            Some(api_tools.len()),
-            &[],
-        );
-        let auth = (self.auth)()?;
-        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
-        let client = self.client.clone();
-        let api_base = self.api_base.clone();
-        let conversation_id = self.conversation_id.clone();
-        let provider_pin = Arc::clone(&self.provider_pin);
-        tokio::spawn(async move {
-            if tx
-                .send(Ok(StreamEvent::ConnectionType {
-                    connection: "https/sse".to_string(),
-                }))
-                .await
-                .is_err()
-            {
-                return;
-            }
-            run_stream_with_retries(
-                client,
-                api_base,
-                auth,
-                false,
-                conversation_id,
-                request,
-                true,
-                tx,
-                provider_pin,
-                model,
-                false,
-            )
-            .await;
-        });
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    /// The disk-cache namespace this provider's *foreground* catalog reads and
-    /// writes should use.
-    ///
-    /// Every `new_named_openai_compatible()` constructor sets the process-global
-    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
-    /// profiles in one process the last one constructed wins and all profiles
-    /// collide on a single `<last-profile>_models.json`. The background refresh
-    /// path already passes an explicit namespace; the foreground paths did not.
-    /// See issue #607.
-    ///
-    /// Standard/direct OpenRouter and built-in profiles keep the existing
-    /// env-var-driven `cache_path()` semantics.
-    pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
-        (self.is_user_named_profile() || self.profile_id.as_deref() == Some("grok-build"))
-            .then(|| self.profile_id.clone())
-            .flatten()
-    }
-
-    /// The disk cache entry usable for this provider, i.e. its own namespace
-    /// (#607) and a `source_api_base` that matches this endpoint.
-    pub(crate) fn load_usable_model_disk_cache_entry(
-        &self,
-    ) -> Option<jcode_provider_openrouter::DiskCache> {
-        self.load_disk_cache_entry_for_this_profile()
-            .filter(|entry| self.model_disk_cache_source_matches(entry))
-    }
-
-    /// Load this provider's own model disk cache, ignoring the process-global
-    /// namespace env var for user-named profiles (#607).
-    pub(crate) fn load_disk_cache_entry_for_this_profile(
-        &self,
-    ) -> Option<jcode_provider_openrouter::DiskCache> {
-        match self.foreground_cache_namespace() {
-            Some(namespace) => {
-                jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&namespace)
-            }
-            None => jcode_provider_openrouter::load_disk_cache_entry(),
-        }
-    }
-
-    /// True when this instance was built from a user-declared
-    /// `[providers.<name>]` profile in config.toml rather than a built-in
-    /// OpenAI-compatible profile (Cerebras, NVIDIA NIM, ...).
-    pub(crate) fn is_user_named_profile(&self) -> bool {
-        let Some(id) = self.profile_id.as_deref() else {
-            return false;
-        };
-        if self.builtin_azure {
-            return false;
-        }
-        match jcode_base::provider_catalog::openai_compatible_profile_by_id(id) {
-            // A `[providers.<name>]` block that shadows a built-in profile name
-            // but points somewhere else is still a user-declared endpoint, so
-            // its explicit model list must be preserved.
-            Some(builtin) => normalize_api_base(builtin.api_base)
-                .is_some_and(|builtin_base| builtin_base != self.api_base),
-            None => true,
-        }
-    }
-
-    pub(crate) fn should_merge_static_models_with_live_catalog(&self) -> bool {
-        // Built-in OpenAI-compatible provider profiles use `static_models` as a
-        // startup/pre-catalog fallback so `/model` is useful immediately after
-        // login. Once a live `/models` catalog has been fetched, the live catalog
-        // is more authoritative for access control. Keeping built-in fallback
-        // entries after a successful fetch can advertise preview/stale models that
-        // the provider rejects at chat time, which is especially confusing for
-        // direct providers such as Cerebras.
-        //
-        // Preserve static models for OpenRouter itself and for custom/named
-        // profiles, where the user supplied the list explicitly and there may be
-        // no provider-side catalog contract. A profile id that is not in the
-        // built-in OpenAI-compatible catalog comes from a user-declared
-        // `[providers.<name>]` block in config.toml, so its
-        // `[[providers.<name>.models]]` entries must survive background
-        // `/models` catalog refreshes (issue #579).
-        self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
-    }
-
-    /// Whether the model catalog declares `image` as an accepted input modality
-    /// for this model.
-    ///
-    /// Memory decides whenever it holds an opinion about the model, so a freshly
-    /// fetched catalog is never overruled by a stale copy on disk. Only when
-    /// memory is silent does the persisted catalog answer, and that fallback is
-    /// what makes the first request after startup behave: the in-memory cache is
-    /// initialised empty while the catalog is normally already on disk from the
-    /// previous run, so memory alone would keep clamping images until the first
-    /// refresh completed.
-    ///
-    /// `supports_image_input` is a sync trait method, so the in-memory read uses
-    /// `try_read` rather than awaiting the tokio lock; a busy lock defers to the
-    /// disk copy instead of blocking.
-    pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
-        if !self.supports_model_catalog {
-            return false;
-        }
-        if let Ok(cache) = self.models_cache.try_read()
-            && let Some(model) = cache
-                .models
-                .iter()
-                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
-        {
-            return declares_image_input(model);
-        }
-        self.load_usable_model_disk_cache_entry()
-            .is_some_and(|entry| {
-                entry
-                    .models
-                    .iter()
-                    .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
-                    .is_some_and(declares_image_input)
-            })
-    }
-}
-
-/// Whether one catalog entry declares `image` as an accepted input modality.
-fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
-    model
-        .input
-        .iter()
-        .any(|modality| modality.eq_ignore_ascii_case("image"))
-}
-
-#[cfg(test)]
-#[path = "openrouter_canonical_input_tests.rs"]
-mod canonical_input_tests;
+#[path = "openrouter_provider_impl_display.rs"]
+mod display_routes_impl;

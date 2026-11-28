@@ -7,6 +7,57 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 
 #[test]
+fn switching_to_reasoning_model_without_explicit_effort_resolves_configured_effort() {
+    let profile: jcode_base::config::NamedProviderConfig = toml::from_str(
+        r#"
+type = "openai-compatible"
+base_url = "https://api.example.invalid/v1"
+auth = "Bearer"
+api_key = "test"
+disable_reasoning_heuristics = true
+
+[[models]]
+id = "plain-model"
+
+[[models]]
+id = "reasoning-model"
+reasoning = true
+"#,
+    )
+    .expect("profile with reasoning=true and no reasoning_effort parses");
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("example", &profile)
+        .expect("provider constructs");
+    provider.set_model("reasoning-model").unwrap();
+    // The switch re-resolves the configured effort for the reasoning model
+    // (global `openai_reasoning_effort` default when the model sets none).
+    // Pin it to a known rung first so the assertion does not depend on the
+    // machine's ambient config.
+    provider.set_reasoning_effort("high").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+
+    // Switch away to the plain model (effort is unsupported there) and back:
+    // the reasoning model must re-resolve the configured effort (its own
+    // `reasoning_effort` override, else the global `openai_reasoning_effort`
+    // default) instead of inheriting the rung the plain model left behind.
+    provider.set_model("plain-model").unwrap();
+    assert_eq!(provider.reasoning_effort(), None);
+    provider.set_model("reasoning-model").unwrap();
+    let resolved = provider.reasoning_effort();
+    assert_ne!(
+        resolved, None,
+        "switching back to a reasoning=true model must re-resolve the configured effort"
+    );
+    // Whatever it resolved to must survive a store round-trip and be one of
+    // the selectable rungs, not the stale None from the plain model.
+    let rung = resolved.expect("effort resolved above");
+    assert!(
+        provider.available_efforts().contains(&rung.as_str()),
+        "resolved effort {rung} must be a selectable rung"
+    );
+}
+
+#[test]
 fn mistral_models_use_their_configured_reasoning_defaults() {
     let profile: jcode_base::config::NamedProviderConfig = toml::from_str(
         r#"
