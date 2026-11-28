@@ -417,11 +417,14 @@ fn ensure_test_jcode_home_if_unset() {
     // several tests hold it while calling `create_test_app` (e.g. the
     // pinned-todo-band test), so a blocking `lock_test_env()` here would
     // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
-    // `try_lock` keeps the serialization when the lock is free and degrades
-    // to the caller's own exclusion when this thread already holds it: if
-    // try_lock fails because *we* hold the lock, no other thread can race
-    // this read-modify-write anyway.
+    // `try_lock` keeps the serialization when the lock is free. When it fails
+    // because *another* test holds the lock, that test owns JCODE_HOME right
+    // now: skip setting the shared home so this fixture reads that test's
+    // config instead of clobbering it mid-flight.
     let _env_lock = crate::storage::test_env_lock().try_lock();
+    if _env_lock.is_err() && !crate::storage::test_env_lock_held_by_current_thread() {
+        return;
+    }
 
     if std::env::var_os("JCODE_HOME").is_some() {
         return;

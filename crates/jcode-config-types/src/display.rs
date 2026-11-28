@@ -146,6 +146,10 @@ pub struct DisplayConfig {
     pub resume_open_elsewhere: ResumeOpenElsewhere,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show the streaming tokens/sec row in the info panel and status line
+    /// (default: true). Set false to hide live throughput everywhere.
+    #[serde(default = "default_true")]
+    pub show_tps: bool,
 }
 
 /// Resume behavior for a session another local client window already shows.
@@ -249,6 +253,7 @@ impl Default for DisplayConfig {
             resume_time: ResumeTimeMode::default(),
             resume_open_elsewhere: ResumeOpenElsewhere::default(),
             usage_display: "left".to_string(),
+            show_tps: true,
         }
     }
 }

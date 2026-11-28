@@ -271,7 +271,7 @@ fn resume_invocation_args_omits_blank_socket() {
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
 fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
+    crate::storage::TestEnvGuard,
     tempfile::TempDir,
     EnvVarGuard,
 ) {

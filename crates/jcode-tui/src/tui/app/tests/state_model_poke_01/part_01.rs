@@ -284,6 +284,7 @@ fn test_accumulate_streaming_output_tokens_ignores_hidden_output_phase() {
 
 #[test]
 fn test_compute_streaming_tps_uses_latest_observed_snapshot_instead_of_current_repaint_time() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     app.streaming.streaming_tps_start = Some(Instant::now() - Duration::from_secs(20));
     app.streaming.streaming_tps_observed_output_tokens = 40;
@@ -295,6 +296,7 @@ fn test_compute_streaming_tps_uses_latest_observed_snapshot_instead_of_current_r
 
 #[test]
 fn test_compute_streaming_tps_does_not_decay_on_redundant_usage_snapshots() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     let mut seen = 0;
 
@@ -319,6 +321,7 @@ fn test_compute_streaming_tps_does_not_decay_on_redundant_usage_snapshots() {
 
 #[test]
 fn test_compute_streaming_tps_bursty_stream_simulation_stays_constant_between_real_updates() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     let mut seen = 0;
 
@@ -397,6 +400,7 @@ fn test_streaming_tps_timer_resume_pause_reset_lifecycle() {
 
 #[test]
 fn test_compute_streaming_tps_requires_tokens_and_minimum_elapsed() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
 
     app.streaming.streaming_tps_observed_elapsed = Duration::from_secs(10);
@@ -431,6 +435,7 @@ fn test_accumulate_streaming_output_tokens_counts_provider_usage_reset_once() {
 
 #[test]
 fn test_streaming_tps_late_final_usage_after_pause_uses_paused_elapsed() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     let mut seen = 0;
 
@@ -479,6 +484,7 @@ fn test_begin_kv_cache_request_stops_tps_collection_until_output_resumes() {
 
 #[test]
 fn test_streaming_tps_accumulates_multiple_generation_segments_excluding_paused_gap() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     let mut seen = 0;
 
