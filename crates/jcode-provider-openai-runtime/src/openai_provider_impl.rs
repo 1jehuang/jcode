@@ -68,7 +68,7 @@ impl Provider for OpenAIProvider {
             .write()
             .unwrap_or_else(|p| p.into_inner()) = label.map(str::to_owned);
         if let Some(selected) = selected {
-            *credentials = selected;
+            openai_credentials::adopt_stored(&mut credentials, selected);
             self.browser_only.store(false, AtomicOrdering::Release);
         }
         drop(credentials);
@@ -159,9 +159,7 @@ impl Provider for OpenAIProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        if let Some(label) = self.oauth_account_label() {
-            jcode_base::auth::codex::load_credentials_for_account(&label)?;
-        }
+        openai_credentials::sync(self.oauth_account_label().as_deref(), &self.credentials).await?;
         let selected_model = self.model();
         if is_chatgpt_web_model(&selected_model) {
             return Arc::clone(&self.chatgpt_web)
@@ -996,32 +994,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        let model = jcode_provider_core::model_id::canonical(&self.model());
-        // Platform-API-only GPT Pro models never appear in the Codex catalog,
-        // so their ladders are pinned from live Responses API behavior:
-        // gpt-5-pro accepts only `high`; newer pro generations accept
-        // medium/high/xhigh.
-        if jcode_provider_core::is_openai_api_only_pro_model(&model) {
-            return if model.starts_with("gpt-5-pro") {
-                vec!["high", "swarm"]
-            } else {
-                vec!["medium", "high", "xhigh", "swarm"]
-            };
-        }
-        let advertised = self
-            .model_reasoning_efforts
-            .read()
-            .map(|efforts| efforts.get(&model).cloned())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().get(&model).cloned());
-        if let Some(advertised) = advertised {
-            let mut efforts: Vec<&'static str> = advertised
-                .iter()
-                .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
-                .collect();
-            efforts.push("swarm");
-            return efforts;
-        }
-        jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()
+        openai_credentials::available_efforts(&self.model(), &self.model_reasoning_efforts)
     }
 
     fn service_tier(&self) -> Option<String> {
@@ -1162,7 +1135,7 @@ impl Provider for OpenAIProvider {
             Err(error) => {
                 jcode_base::logging::debug(&format!("OpenAI fork loading credentials from account storage: {error}"));
                 match self.load_selected_credentials(mode) {
-                    Ok(credentials) => Some(credentials),
+                    Ok(credentials) => Some(credentials.into()),
                     Err(error) => {
                         jcode_base::logging::warn(&format!("OpenAI fork cannot load credentials, authentication will be required: {error:#}"));
                         None
@@ -1176,12 +1149,12 @@ impl Provider for OpenAIProvider {
                 id_token: None,
                 account_id: None,
                 expires_at: None,
-            });
+            }.into());
         Arc::new(OpenAIProvider {
             client: self.client.clone(),
             credentials: Arc::new(RwLock::new(credentials)),
             credential_mode: Arc::new(RwLock::new(mode)),
-            oauth_account: StdRwLock::new(self.oauth_account_label()),
+            oauth_account: Arc::new(StdRwLock::new(self.oauth_account_label())),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
             cache_session_id: StdRwLock::new(
@@ -1235,7 +1208,7 @@ impl Provider for OpenAIProvider {
         let mode = *self.credential_mode.read().await;
         if let Ok(credentials) = self.load_selected_credentials(mode) {
             let mut guard = self.credentials.write().await;
-            *guard = credentials;
+            openai_credentials::adopt_stored(&mut guard, credentials);
             self.browser_only.store(false, AtomicOrdering::Release);
             drop(guard);
             self.reload_cached_reasoning_efforts();

@@ -165,7 +165,7 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
     });
 
     let provider = OpenAIProvider::new(prewarm_test_credentials());
-    *provider.credentials.write().await = prewarm_test_credentials();
+    *provider.credentials.write().await = prewarm_test_credentials().into();
     provider
         .set_transport("websocket")
         .expect("force local websocket transport");
@@ -244,7 +244,7 @@ async fn unfinished_or_incompatible_prewarm_is_cancelled_without_foreground_wait
             Ok(None) | Ok(Some(Ok(WsMessage::Close(_)))) | Ok(Some(Err(_)))
         ));
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone().into())), &request);
     accepted.notified().await;
 
     let incompatible = serde_json::json!({
@@ -286,7 +286,7 @@ async fn ready_prewarm_with_different_settings_is_invalidated() {
         )).await.unwrap();
         let _ = socket.next().await;
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone().into())), &request);
     wait_for_prewarm(&slot).await;
     let changed = serde_json::json!({
         "model": "gpt-5.6-sol", "instructions": "changed", "tools": [], "input": []
@@ -319,7 +319,7 @@ async fn rejected_warmup_is_not_adopted() {
             r#"{"type":"response.completed","response":{"id":"resp_rejected","status":"failed","output":[]}}"#.into(),
         )).await.unwrap();
     });
-    slot.start(Arc::new(RwLock::new(credentials.clone())), &request);
+    slot.start(Arc::new(RwLock::new(credentials.clone().into())), &request);
     server.await.expect("rejection server");
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(slot.take_ready(&request, &credentials).is_none());

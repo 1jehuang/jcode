@@ -5,6 +5,7 @@ impl OpenAIProvider {
         if self.is_browser_only() {
             return Ok(());
         }
+        self.sync_credentials().await?;
         // The loaded credential's *shape* is authoritative for which catalog
         // endpoint to hit, not the requested credential mode. In Auto mode a
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential

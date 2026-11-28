@@ -2,7 +2,7 @@ use super::*;
 
 pub(crate) async fn stream_response(
     client: Client,
-    credentials: Arc<RwLock<CodexCredentials>>,
+    credentials: Arc<RwLock<CachedCredentials>>,
     account_label: Option<String>,
     request: &Value,
     initial_status_detail: String,
