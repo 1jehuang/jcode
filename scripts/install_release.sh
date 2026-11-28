@@ -83,7 +83,10 @@ if [[ -n "$git_hash" ]]; then
 fi
 
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
-builds_dir="$HOME/.jcode/builds"
+builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
+mkdir -p "$builds_dir"
+builds_dir="$(CDPATH= cd -P -- "$builds_dir" && printf '%s/' "$PWD")"
+builds_dir=${builds_dir%/}
 version_dir="$builds_dir/versions/$hash"
 mkdir -p "$version_dir"
 install -m 755 "$bin" "$version_dir/jcode"

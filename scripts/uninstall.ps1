@@ -279,7 +279,11 @@ if (-not $InstallDir) { $InstallDir = Get-DefaultJcodeInstallDir }
 
 $localJcodeRoot = Join-Path (Get-JcodeLocalAppDataDir) "jcode"
 $launcherPath = Join-Path $InstallDir "jcode.exe"
-$buildsDir = Join-Path $localJcodeRoot "builds"
+$buildsDir = if ($env:JCODE_HOME) {
+    Join-Path $env:JCODE_HOME "builds"
+} else {
+    Join-Path $localJcodeRoot "builds"
+}
 $userDataDir = if ($env:JCODE_HOME) {
     $env:JCODE_HOME
 } elseif ($env:USERPROFILE) {
