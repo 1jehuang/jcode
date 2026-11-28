@@ -85,6 +85,7 @@ include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
+include!("tests/auto_retry_config.rs");
 
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {

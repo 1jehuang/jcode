@@ -21,6 +21,8 @@ mod openers;
 mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
+#[path = "inline_interactive/sidecar_hotkey.rs"]
+mod sidecar_hotkey;
 use helpers::{
     agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
     catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
@@ -2176,36 +2178,6 @@ impl App {
         )
     }
 
-    /// When a runtime model-picker preview is visible, route its favorite/default
-    /// hotkeys to the focused picker handler. Returns true if the key was consumed.
-    pub(super) fn model_picker_preview_hotkey(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<bool> {
-        let active = self
-            .inline_interactive_state
-            .as_ref()
-            .map(|picker| picker.preview && picker_is_runtime_model_picker(picker))
-            .unwrap_or(false);
-        if !active {
-            return Ok(false);
-        }
-        // Use Ctrl+O (set default) and Ctrl+N (toggle favorite) so the picker
-        // preview no longer steals Ctrl+B / Ctrl+F / Alt+F, which are the tmux
-        // prefix and readline word-navigation keys users rely on while editing
-        // the `/model` command line. Cycling favorites stays on Shift+Tab.
-        let is_default =
-            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
-        let is_favorite =
-            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
-        if is_default || is_favorite {
-            self.handle_inline_interactive_key(code, modifiers)?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
     pub(super) fn handle_inline_interactive_preview_key(
         &mut self,
         code: &KeyCode,
@@ -3547,6 +3519,11 @@ impl App {
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
             {
                 self.toggle_selected_model_favorite();
+            }
+            code if modifiers.contains(KeyModifiers::ALT)
+                && key_char_eq_ignore_ascii_case(code, 's') =>
+            {
+                self.set_selected_model_as_sidecar();
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {

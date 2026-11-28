@@ -180,6 +180,17 @@ impl App {
         reason: &str,
         max_attempts: u8,
     ) -> bool {
+        if !self.effective_auto_retry_enabled() {
+            return false;
+        }
+        // A caller may ask for a short budget (the auto-poke "one more"
+        // retry), but no retry budget may exceed the configured
+        // `effective_auto_retry_max_attempts` cap. Otherwise a low
+        // per-provider/global limit would be silently blown through by the
+        // hard-coded short budgets and their "attempt N/2" notices would
+        // misreport the real budget.
+        let max_attempts = max_attempts.min(self.effective_auto_retry_max_attempts());
+        let base_delay_secs = self.effective_auto_retry_base_delay_secs();
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             self.log_recovery_event(
                 crate::logging::LogLevel::Warn,
@@ -203,7 +214,9 @@ impl App {
             } else {
                 pending.retry_attempts += 1;
                 let retry_attempts = pending.retry_attempts;
-                let backoff_secs = Self::AUTO_RETRY_BASE_DELAY_SECS * u64::from(retry_attempts);
+                let backoff_secs = base_delay_secs
+                    .saturating_mul(u64::from(retry_attempts))
+                    .min(jcode_config_types::MAX_AUTO_RETRY_BACKOFF_SECS);
                 let retry_at = Instant::now() + Duration::from_secs(backoff_secs);
                 pending.retry_at = Some(retry_at);
                 Ok((retry_attempts, backoff_secs, retry_at))
