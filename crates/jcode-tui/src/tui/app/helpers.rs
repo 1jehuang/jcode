@@ -324,19 +324,7 @@ pub(super) fn is_context_limit_error(error: &str) -> bool {
     if crate::provider::openai_request::is_openai_encrypted_content_too_large_error(error) {
         return true;
     }
-    let lower = error.to_lowercase();
-    lower.contains("context length")
-        || lower.contains("context window")
-        || lower.contains("maximum context")
-        || lower.contains("max context")
-        || lower.contains("token limit")
-        || lower.contains("too many tokens")
-        || lower.contains("prompt is too long")
-        || lower.contains("input is too long")
-        || lower.contains("request too large")
-        || lower.contains("length limit")
-        || lower.contains("maximum tokens")
-        || (lower.contains("exceeded") && lower.contains("tokens"))
+    crate::compaction::is_context_limit_error(error)
 }
 
 /// Whether `error` is a provider HTTP 413 "request too large" / payload-size
