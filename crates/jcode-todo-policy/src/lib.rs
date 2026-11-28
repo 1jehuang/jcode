@@ -341,7 +341,8 @@ const PRE_COMPACT_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated
 /// Final synthetic turn after no more automatic checks are needed. Gate
 /// continuations tell the model not to reply, so without this handoff a cycle
 /// can end on a bare tool call or an internal-looking validation response.
-pub const TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[auto] Give the user a concise final response now, including any remaining limitations or blockers. Do not call the todo tool or do more work.";
+pub const TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[auto] Clean up only your task's disposable artifacts, preserving KEEP-marked evidence, user data and other agents' work. Then give a concise final response with any limitations or blockers. Do not call the todo tool or do other work.";
+const PRE_CLEANUP_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[auto] Give the user a concise final response now, including any remaining limitations or blockers. Do not call the todo tool or do more work.";
 const PRE_NARROWED_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[auto] Quality checks passed. Give the user a concise final response now. Do not call the todo tool or do more work.";
 const PRE_COMPACT_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Quality checks passed. Give the user a concise final response now. Do not call the todo tool or do more work.";
 const PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] All work and quality checks are complete. Give the user the final response now. Default to fewer than 5 lines unless the user's request requires more detail. Summarize the outcome clearly; do not call the todo tool or perform more work.";
@@ -839,6 +840,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_CLEANUP_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_NARROWED_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
@@ -876,6 +878,7 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
         return Some("🔍 Double-checking confidence jumps...");
     }
     if trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_CLEANUP_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_NARROWED_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_COMPACT_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)

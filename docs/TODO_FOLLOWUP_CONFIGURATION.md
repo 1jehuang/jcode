@@ -35,3 +35,5 @@ policy.set_gate_digest_enabled(config.features.todo_gate_digest);
 ```
 
 The shared policy also defaults to no digest. `reset_cycle()`, `enable()`, and `disable()` preserve its explicitly configured digest toggle. Apply the returned observation-clearing effects through the client's normal acknowledgment path.
+
+The final-response handoff asks the agent to clean up its own disposable task artifacts before replying. The default system prompt also directs cleanup after deployment and validation, including turns that need no final-response follow-up. Cleanup preserves user/session data, active resources, other agents' work and `KEEP`-marked evidence; retained evidence gets a `KEEP` note with its reason and retention date. These are model instructions, not an automatic disk sweep.
