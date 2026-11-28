@@ -252,6 +252,22 @@ pub fn load_anthropic_oauth_tokens() -> Option<ExternalOAuthTokens> {
     load_oauth_tokens_for_candidates(&["anthropic", "claude"])
 }
 
+pub(in crate::auth) fn has_approved_anthropic_refresh_token(refresh_token: &str) -> bool {
+    SOURCES.into_iter().any(|source| {
+        if !source_allowed(source) {
+            return false;
+        }
+        let Ok(auth) = load_auth_map(source) else {
+            return false;
+        };
+        ["anthropic", "claude"].iter().any(|key| {
+            auth.get(*key)
+                .and_then(|entry| extract_oauth_tokens(source, entry))
+                .is_some_and(|tokens| tokens.refresh_token == refresh_token)
+        })
+    })
+}
+
 pub fn source_has_anthropic_oauth(source: ExternalAuthSource) -> bool {
     source_contains_oauth_provider(source, &["anthropic", "claude"]).unwrap_or(false)
 }
