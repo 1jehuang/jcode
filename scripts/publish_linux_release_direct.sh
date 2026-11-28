@@ -45,7 +45,7 @@ git fetch --tags origin --quiet || true
 
 tag=$(git tag --points-at "$sha" --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
 if [ -z "$tag" ]; then
-  tag=$(gh api "repos/$repo/releases?per_page=100" --jq \
+  tag=$(gh api "repos/$repo/releases?per_page=100" | jq -r \
     --arg sha "$sha" '
       [.[] | select(.draft and (.prerelease | not) and .target_commitish == $sha and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))]
       | first | .tag_name // empty
