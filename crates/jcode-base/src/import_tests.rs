@@ -836,8 +836,7 @@ fn test_import_opencode_session_creates_jcode_snapshot() {
             "{",
             "\"id\":\"msg-user\",",
             "\"role\":\"user\",",
-            "\"time\":{\"created\":1775415601000},",
-            "\"model\":{\"providerID\":\"opencode\",\"modelID\":\"big-pickle\"}",
+            "\"time\":{\"created\":1775415601000}",
             "}"
         ),
     )
@@ -849,11 +848,16 @@ fn test_import_opencode_session_creates_jcode_snapshot() {
             "{",
             "\"id\":\"msg-assistant\",",
             "\"role\":\"assistant\",",
-            "\"time\":{\"created\":1775415602000},",
-            "\"providerID\":\"opencode\",",
-            "\"modelID\":\"big-pickle\"",
+            "\"time\":{\"created\":1775415602000}",
             "}"
         ),
+    )
+    .unwrap();
+
+    // This sorted-last message has metadata but no usable body or part files.
+    std::fs::write(
+        message_dir.join("zzz-metadata-only.json"),
+        r#"{"id":"metadata-only","role":"assistant","providerID":"metadata-provider","modelID":"metadata-model","time":{"created":1775415609000}}"#,
     )
     .unwrap();
 
@@ -889,10 +893,16 @@ fn test_import_opencode_session_creates_jcode_snapshot() {
         imported.id,
         imported_opencode_session_id("ses_test_opencode")
     );
-    assert_eq!(imported.provider_key.as_deref(), Some("opencode"));
-    assert_eq!(imported.model.as_deref(), Some("big-pickle"));
+    assert_eq!(imported.provider_key.as_deref(), Some("metadata-provider"));
+    assert_eq!(imported.model.as_deref(), Some("metadata-model"));
     assert_eq!(imported.working_dir.as_deref(), Some("/tmp/opencode-demo"));
     assert_eq!(imported.messages.len(), 2);
+    assert_eq!(imported.messages[0].role, Role::User);
+    assert_eq!(imported.messages[1].role, Role::Assistant);
+    assert_eq!(
+        imported.last_active_at.map(|time| time.timestamp_millis()),
+        Some(1775415609000)
+    );
     let all_text: String = imported
         .messages
         .iter()

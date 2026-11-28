@@ -392,7 +392,7 @@ impl Tool for SessionSearchTool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_MAX_SCAN_SESSIONS,
-                    "description": "Recent sessions scanned per source."
+                    "description": "Max sessions per source. OpenCode legacy metadata is fully ranked before this cap."
                 },
                 "exhaustive": {
                     "type": "boolean",
@@ -947,7 +947,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         options,
         load_pi_external_session,
     );
-    collect_opencode_external_sessions(&mut records, &mut report, options);
+    collect_opencode_external_sessions(&mut records, &mut report, query, options);
     collect_external_jsonl_source(
         &mut records,
         &mut report,
@@ -958,11 +958,9 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         load_cursor_external_session,
     );
 
-    if records.len() > options.max_scan_sessions.saturating_mul(5) {
-        records.truncate(options.max_scan_sessions.saturating_mul(5));
-        report.truncated = true;
-    }
-
+    // Every source already caps its own scan at `max_scan_sessions`, and the
+    // records are loaded by now, so a global cap here would only hide the
+    // sources collected last (e.g. Cursor) without saving any IO.
     report.scanned_external_sessions = records.len();
     for record in records {
         append_external_session_results(&mut report.results, &record, query, options);
@@ -1264,43 +1262,11 @@ fn external_text_matches_query(text: &str, query: &QueryProfile) -> bool {
     jcode_session_types::normalized_session_search_text_matches(&text.to_lowercase(), query)
 }
 
-fn collect_opencode_external_sessions(
-    records: &mut Vec<ExternalSessionRecord>,
-    report: &mut SearchReport,
-    options: &SearchOptions,
-) {
-    if !source_matches_filter("opencode", options) {
-        return;
-    }
-    let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
-        return;
-    };
-    if !root.exists() {
-        return;
-    }
-    report.external_sources.push("opencode");
-    let Ok(messages_base) = crate::storage::user_home_path(".local/share/opencode/storage/message")
-    else {
-        return;
-    };
-    let Ok(parts_base) = crate::storage::user_home_path(".local/share/opencode/storage/part")
-    else {
-        return;
-    };
-    for path in collect_recent_files_recursive(&root, "json", options.max_scan_sessions) {
-        match load_opencode_external_session(
-            &path,
-            &messages_base,
-            &parts_base,
-            options.include_tools,
-            options.max_scan_sessions,
-        ) {
-            Ok(Some(record)) => records.push(record),
-            Ok(None) => {}
-            Err(_) => report.parse_errors += 1,
-        }
-    }
-}
+#[path = "session_search_opencode.rs"]
+mod opencode;
+#[cfg(test)]
+use opencode::OPENCODE_DB_LOADS;
+use opencode::collect_opencode_external_sessions;
 
 fn append_external_session_results(
     results: &mut Vec<SearchResult>,
@@ -1798,3 +1764,7 @@ fn no_results_message(query: &str, options: &SearchOptions) -> String {
 #[cfg(test)]
 #[path = "session_search_tests.rs"]
 mod session_search_tests;
+
+#[cfg(test)]
+#[path = "session_search_opencode_tests.rs"]
+mod opencode_tests;

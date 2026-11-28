@@ -109,6 +109,42 @@ fn real<'a>(value: &'a str) { real.unwrap(); real.ok(); }
                 self.assertIn("production.rs", files)
                 self.assertIn("shared.rs", files)
 
+    def test_downstream_test_support_fixtures_are_not_production(self):
+        source = '''#[cfg(any(test, feature = "test-support"))]
+pub mod fixture {
+    fn create() { fixture_only.expect("fixture"); fixture_only.ok(); }
+}
+#[cfg(any(
+    test,
+    feature = "test-support",
+))]
+async fn helper() { downstream_only.unwrap(); downstream_only.ok(); }
+#[cfg(any(test, feature = "real-feature"))]
+mod production_feature { fn run() { real_feature.unwrap(); real_feature.ok(); } }
+#[cfg(any(test, all(feature = "real-feature", unix)))]
+mod nested_feature { fn run() { real_nested.unwrap(); real_nested.ok(); } }
+#[cfg(any(test, feature = "test-support", feature = "real-feature"))]
+mod mixed_feature { fn run() { real_mixed.unwrap(); real_mixed.ok(); } }
+#[cfg(any(test, any(feature = "test-support", feature = "real-feature")))]
+mod nested_mixed_feature { fn run() { real_nested_mixed.unwrap(); real_nested_mixed.ok(); } }
+// #[cfg(any(test, feature = "test-support"))]
+fn after_comment() { real_comment.unwrap(); real_comment.ok(); }
+const DOC: &str = r##"#[cfg(any(test, feature = "test-support"))]"##;
+fn after_literal() { real_literal.unwrap(); real_literal.ok(); }
+'''
+        for name in ("check_panic_budget", "check_swallowed_error_budget"):
+            module = load(name)
+            with self.subTest(scanner=name), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "source.rs"
+                path.write_text(source)
+                text = "\n".join(module.production_lines(path))
+                self.assertNotIn("fixture_only", text)
+                self.assertNotIn("downstream_only", text)
+                for marker in ("real_feature", "real_nested", "real_mixed",
+                               "real_nested_mixed", "real_comment", "real_literal"):
+                    self.assertIn(marker + ".unwrap()", text)
+                    self.assertIn(marker + ".ok()", text)
+
     def test_non_test_cfg_and_unconditional_async_remain_counted(self):
         for name in ("check_panic_budget", "check_swallowed_error_budget"):
             module = load(name)

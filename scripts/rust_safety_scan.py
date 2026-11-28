@@ -86,6 +86,11 @@ def test_module_files(files: list[Path], production_lines) -> set[Path]:
     return test_only
 
 CFG_TEST = re.compile(r'#\s*\[\s*cfg\s*\(\s*(?:all\s*\(\s*)?test\s*[,)]')
+# test-support exposes fixtures to downstream crates' dev-dependencies.
+CFG_TEST_SUPPORT = re.compile(
+    r'#\s*\[\s*cfg\s*\(\s*any\s*\(\s*test\s*,\s*'
+    r'feature\s*=\s*"test-support"\s*,?\s*\)\s*\)\s*\]'
+)
 ITEM = re.compile(r'(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const)\s+)*(?:mod|fn)\b')
 
 
@@ -93,12 +98,20 @@ def production_lines(path: Path) -> list[str]:
     """Mask test items, including multiline signatures and external modules.
 
     This is deliberately conservative: only recognized test-only cfg forms and
-    function/module items are omitted. Other cfg expressions remain counted.
+    function/module items are omitted. The established test-support feature
+    exposes fixtures to downstream test targets. Other cfg expressions remain
+    counted.
     """
-    text = code_only(path.read_text(encoding='utf-8', errors='ignore'))
+    source = path.read_text(encoding='utf-8', errors='ignore')
+    text = code_only(source)
     output = list(text)
-    for match in CFG_TEST.finditer(text):
-        end = text.find(']', match.end())
+    starts = [match.start() for match in CFG_TEST.finditer(text)]
+    starts.extend(
+        match.start() for match in CFG_TEST_SUPPORT.finditer(source)
+        if text[match.start()] == '#'
+    )
+    for start in starts:
+        end = text.find(']', start)
         if end < 0:
             continue
         cursor = end + 1
@@ -126,7 +139,7 @@ def production_lines(path: Path) -> list[str]:
                 end += 1
             if depth:
                 continue  # Malformed input must not suppress later production.
-        for index in range(match.start(), end):
+        for index in range(start, end):
             if text[index] != '\n':
                 output[index] = ' '
     return ''.join(output).splitlines()
