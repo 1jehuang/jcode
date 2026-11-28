@@ -2,6 +2,58 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
+pub(super) fn describe_config_reload(
+    forced: bool,
+    previous: &ConfigCacheFingerprint,
+    next: &ConfigCacheFingerprint,
+) -> String {
+    let mut parts = Vec::new();
+    if forced {
+        parts.push("forced=true".to_string());
+    }
+    if previous.path != next.path {
+        parts.push(format!(
+            "path={:?}->{:?}",
+            previous.path.as_ref().map(|p| p.display().to_string()),
+            next.path.as_ref().map(|p| p.display().to_string())
+        ));
+    }
+    if previous.modified != next.modified {
+        parts.push("modified_changed=true".to_string());
+    }
+    if previous.len != next.len {
+        parts.push(format!("len={:?}->{:?}", previous.len, next.len));
+    }
+    if previous.global_path != next.global_path {
+        parts.push(format!(
+            "global_path={:?}->{:?}",
+            previous
+                .global_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            next.global_path.as_ref().map(|p| p.display().to_string())
+        ));
+    }
+    if previous.global_modified != next.global_modified {
+        parts.push("global_modified_changed=true".to_string());
+    }
+    if previous.global_len != next.global_len {
+        parts.push(format!(
+            "global_len={:?}->{:?}",
+            previous.global_len, next.global_len
+        ));
+    }
+    let env_changes = describe_env_changes(&previous.env, &next.env);
+    if !env_changes.is_empty() {
+        parts.push(format!("env=[{}]", env_changes.join(", ")));
+    }
+    if parts.is_empty() {
+        "unchanged".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 type TrustedExternalAuthKey = (
     Option<PathBuf>,
     Option<std::time::SystemTime>,
@@ -29,6 +81,7 @@ impl Config {
     /// Load config from file, with environment variable overrides
     pub fn load() -> Self {
         let mut config = Self::load_from_file().unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         config
     }
@@ -39,6 +92,7 @@ impl Config {
     /// to distinguish a malformed config from an absent config.
     pub fn load_strict() -> anyhow::Result<Self> {
         let mut config = Self::load_from_file_strict()?.unwrap_or_default();
+        Self::apply_global_agent_defaults(&mut config);
         config.apply_env_overrides();
         Ok(config)
     }
@@ -50,7 +104,14 @@ impl Config {
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
     fn load_for_update() -> anyhow::Result<Self> {
-        Ok(Self::load_from_file_strict()?.unwrap_or_default())
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+        Self::load_for_update_at_path(&path)
+    }
+
+    fn load_for_update_at_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        Ok(Self::load_from_path(path)?.unwrap_or_default())
     }
 
     /// Load config from file only (no env overrides)
@@ -69,11 +130,15 @@ impl Config {
         let Some(path) = Self::path() else {
             return Ok(None);
         };
+        Self::load_from_path(&path)
+    }
+
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
 
-        let content = std::fs::read_to_string(&path)
+        let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
         let mut config = toml::from_str::<Self>(&content).map_err(|e| {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
@@ -115,7 +180,45 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let mut cfg = Self::load_for_update()?;
+        let path = Self::global_path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        // Preserve managed config links and serialize writers through the same target.
+        let path = match path.canonicalize() {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.is_symlink() => {
+                path
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        // Lock a stable sibling, not config.toml's inode, which replacement changes.
+        // Never unlink this file: concurrent processes must all lock the same inode.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join("config.toml.lock"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    role_transaction_tests::contended();
+                    if started.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("Timed out waiting for config update lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        let mut cfg = Self::load_for_update_at_path(&path)?;
+        #[cfg(test)]
+        role_transaction_tests::loaded();
         match target {
             "swarm" => cfg.agents.swarm_model = value,
             "review" => cfg.autoreview.model = value,
@@ -124,7 +227,52 @@ impl Config {
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
-        cfg.save()
+        use std::io::Write;
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        match std::fs::metadata(&path) {
+            Ok(metadata) => replacement
+                .as_file()
+                .set_permissions(metadata.permissions())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        replacement.write_all(toml::to_string_pretty(&cfg)?.as_bytes())?;
+        replacement.as_file().sync_all()?;
+        replacement.persist(&path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Self::invalidate_cache();
+        Ok(())
+    }
+
+    /// The config file that owns global agent defaults.
+    ///
+    /// Private SDK instances keep an isolated config for ordinary settings but
+    /// point agent defaults at the user's home so `/agents global` is shared by
+    /// every instance. Normal processes have no override and use their local
+    /// config as before.
+    pub(crate) fn global_path() -> Option<PathBuf> {
+        std::env::var_os("JCODE_GLOBAL_HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("config.toml"))
+            .or_else(Self::path)
+    }
+
+    fn apply_global_agent_defaults(config: &mut Self) {
+        let Some(global_home) = std::env::var_os("JCODE_GLOBAL_HOME") else {
+            return;
+        };
+        let path = PathBuf::from(global_home).join("config.toml");
+        let global = match Self::load_from_path(&path) {
+            Ok(Some(config)) => config,
+            Ok(None) => Self::default(),
+            Err(_) => return,
+        };
+        config.agents.swarm_model = global.agents.swarm_model;
+        config.agents.memory_model = global.agents.memory_model;
+        config.autoreview.model = global.autoreview.model;
+        config.autojudge.model = global.autojudge.model;
+        config.ambient.model = global.ambient.model;
     }
 
     /// Persist the Anthropic cache duration for clients and the shared daemon.
@@ -815,6 +963,10 @@ impl Config {
 }
 
 #[cfg(test)]
+#[path = "role_transaction_tests.rs"]
+mod role_transaction_tests;
+
+#[cfg(test)]
 mod issue_1056_tests {
     use super::Config;
 
@@ -920,5 +1072,51 @@ reasoning_effort = "max"
 
         assert!(error.to_string().contains("Failed to parse config file"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn global_agent_defaults_override_private_instance_config() {
+        let _lock = crate::storage::lock_test_env();
+        let instance = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            instance.path().join("config.toml"),
+            "[agents]\nswarm_model = \"private\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global.path().join("config.toml"),
+            "[agents]\nswarm_model = \"shared\"\n",
+        )
+        .unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", instance.path());
+        let _global_home = EnvGuard::set("JCODE_GLOBAL_HOME", global.path());
+
+        assert_eq!(Config::load().agents.swarm_model.as_deref(), Some("shared"));
+        let mut local = Config::load();
+        local.display.centered = true;
+        local.save().unwrap();
+        let saved_local: Config =
+            toml::from_str(&std::fs::read_to_string(instance.path().join("config.toml")).unwrap())
+                .unwrap();
+        assert!(saved_local.display.centered);
+        assert_eq!(
+            std::fs::read_to_string(global.path().join("config.toml")).unwrap(),
+            "[agents]\nswarm_model = \"shared\"\n"
+        );
+        Config::set_agent_model_default("swarm", Some("updated")).unwrap();
+        let saved = std::fs::read_to_string(global.path().join("config.toml")).unwrap();
+        assert_eq!(
+            toml::from_str::<Config>(&saved)
+                .unwrap()
+                .agents
+                .swarm_model
+                .as_deref(),
+            Some("updated")
+        );
+        std::fs::remove_file(global.path().join("config.toml")).unwrap();
+        assert!(Config::load().agents.swarm_model.is_none());
+        assert!(Config::load_strict().unwrap().agents.swarm_model.is_none());
+        assert!(Config::load().display.centered);
     }
 }

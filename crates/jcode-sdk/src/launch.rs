@@ -173,6 +173,7 @@ impl Drop for LaunchedInstance {
 /// Start an isolated daemon and API bridge and return once its socket accepts.
 /// The instance runs the launching binary and never auto-updates, so it stays on that jcode version.
 pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
+    let user_home = std::path::absolute(user_jcode_home()).map_err(launch_io)?;
     let ephemeral = options.jcode_home.is_none();
     let jcode_home = match &options.jcode_home {
         Some(path) => {
@@ -206,7 +207,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         }
     };
     if options.inherit_logins
-        && let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home)
+        && let Err(error) = inherit_credentials(&user_home, &jcode_home)
     {
         cleanup_on_error();
         return Err(error);
@@ -248,6 +249,9 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         // auto-installer off in those too. The shared runtime still updates.
         .env("JCODE_NO_AUTO_UPDATE", "1")
         .envs(options.env.iter())
+        // Global agent defaults belong to the user's home even when callers
+        // provide other per-instance environment overrides.
+        .env("JCODE_GLOBAL_HOME", &user_home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(if options.inherit_stderr {
@@ -812,6 +816,64 @@ mod executable_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn relative_global_home_uses_launcher_working_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        const ROOT: &str = "JCODE_SDK_RELATIVE_HOME_TEST_ROOT";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = fs::canonicalize(root).unwrap();
+            let binary = root.join("capture-home");
+            let captured = root.join("captured-home");
+            fs::create_dir(root.join("state")).unwrap();
+            fs::create_dir(root.join("elsewhere")).unwrap();
+            fs::write(root.join("state/config.toml"), "shared settings").unwrap();
+            fs::write(
+                &binary,
+                "#!/bin/sh\nprintf '%s\\n' \"$JCODE_GLOBAL_HOME\" > \"$CAPTURE_PATH\"\ncat \"$JCODE_GLOBAL_HOME/config.toml\" >> \"$CAPTURE_PATH\"\nexit 1\n",
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+            let mut options = LaunchOptions {
+                jcode_home: Some(root.join("instance")),
+                working_dir: Some(root.join("elsewhere")),
+                inherit_logins: false,
+                binary: Some(binary),
+                startup_timeout: Duration::from_secs(2),
+                ..LaunchOptions::default()
+            };
+            options.env.insert(
+                OsString::from("CAPTURE_PATH"),
+                captured.as_os_str().to_owned(),
+            );
+            assert!(launch_instance(&options).is_err());
+            assert_eq!(
+                fs::read_to_string(captured).unwrap(),
+                format!("{}\nshared settings", root.join("state").display())
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launch::tests::relative_global_home_uses_launcher_working_directory",
+                "--nocapture",
+            ])
+            .current_dir(root.path())
+            .env(ROOT, root.path())
+            .env("JCODE_HOME", "./state")
+            .env_remove("JCODE_GLOBAL_HOME")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(root.path().join("captured-home").is_file());
+    }
+
     #[cfg(unix)]
     #[test]
     fn swarm_model_reaches_runtime_and_overrides_generic_environment() {
@@ -822,7 +884,7 @@ mod tests {
         let captured = sandbox.path().join("swarm-model.txt");
         fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+            "#!/bin/sh\nprintf '%s|%s' \"$JCODE_SWARM_MODEL\" \"$JCODE_GLOBAL_HOME\" > \"$CAPTURE_PATH\"\nexit 1\n",
         )
         .expect("write fake runtime");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
@@ -844,6 +906,10 @@ mod tests {
             OsString::from("JCODE_SWARM_MODEL"),
             OsString::from("unwanted-model"),
         );
+        options.env.insert(
+            OsString::from("JCODE_GLOBAL_HOME"),
+            OsString::from("unwanted-home"),
+        );
 
         assert!(
             launch_instance(&options).is_err(),
@@ -851,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(captured).expect("captured model"),
-            "inherit"
+            format!("inherit|{}", user_jcode_home().display())
         );
     }
 
