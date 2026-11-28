@@ -152,7 +152,13 @@ fi
 gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,targetCommitish | \
   jq -e --arg sha "$sha" '.isDraft and (.isPrerelease | not) and .targetCommitish == $sha' >/dev/null
 gh release upload "$tag" "$work/$archive" "$work/SHA256SUMS" --repo "$repo" --clobber
-gh release edit "$tag" --repo "$repo" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest
+# This path publishes only linux-x86_64. Never mark it as GitHub's "latest":
+# clients older than v1.0.3 resolve updates through `releases/latest` alone
+# and report "Already up to date" when it has no asset for their platform,
+# and `releases/latest/download/<asset>` 404s for every other platform.
+# The full release workflow promotes a release to latest once every platform
+# is uploaded and verified.
+gh release edit "$tag" --repo "$repo" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest=false
 
 # Announce on Discord via lightweight workflow dispatch.
 gh workflow run discord-release.yml --repo "$repo" --ref master -f "tag=$tag" || true

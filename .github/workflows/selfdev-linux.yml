@@ -174,7 +174,11 @@ jobs:
           gh release view "$tag" --json isDraft,isPrerelease,targetCommitish | \
             jq -e --arg sha "$SHA" '.isDraft and (.isPrerelease | not) and .targetCommitish == $sha'
           gh release upload "$tag" "$ARCHIVE" SHA256SUMS --clobber
-          gh release edit "$tag" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest
+          # Linux-only release: never mark it GitHub "latest". Clients older
+          # than v1.0.3 trust releases/latest alone and report "up to date"
+          # when it lacks their platform asset. release.yml promotes to latest
+          # after every platform is uploaded and verified.
+          gh release edit "$tag" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest=false
 
   announce:
     needs: [verify, publish]
