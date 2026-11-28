@@ -1,6 +1,7 @@
 #[path = "ui_input/command_suggestions.rs"]
 mod command_suggestions;
 use command_suggestions::*;
+include!("ui_input/cursor.rs");
 #[path = "ui_input_status_rendering.rs"]
 mod status_rendering;
 pub(super) use status_rendering::build_notification_spans;
@@ -32,6 +33,7 @@ fn shell_mode_color() -> Color {
 enum ComposerMode {
     Chat,
     SlashCommand,
+    FileMention,
     ShellLocal,
     ShellRemote,
 }
@@ -42,18 +44,133 @@ impl ComposerMode {
     }
 }
 
-fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
+fn file_chip_style() -> Style {
+    Style::default()
+        .fg(rgb(20, 60, 80))
+        .bg(rgb(90, 210, 210))
+        .add_modifier(Modifier::BOLD)
+}
+
+fn composer_mode(input: &str, cursor: usize, is_remote_mode: bool) -> ComposerMode {
+    let cursor = bounded_cursor(input, cursor);
     if app::extract_input_shell_command(input).is_some() {
         if is_remote_mode {
             ComposerMode::ShellRemote
         } else {
             ComposerMode::ShellLocal
         }
-    } else if app::has_safe_slash_command_token(input) {
+    } else if app::has_safe_slash_command_token(input)
+        || input[..cursor].trim_start().starts_with('/')
+    {
         ComposerMode::SlashCommand
+    } else if has_active_at_mention_at(input, cursor) {
+        ComposerMode::FileMention
     } else {
         ComposerMode::Chat
     }
+}
+
+/// Convenience predicate for callers that only need to branch on FileMention.
+pub(crate) fn is_at_file_mode(input: &str, cursor: usize, is_remote_mode: bool) -> bool {
+    matches!(
+        composer_mode(input, cursor, is_remote_mode),
+        ComposerMode::FileMention
+    )
+}
+
+/// Check whether the input contains an active @ mention.
+///
+/// @file mention parsing rules:
+///   1. Find `@` from right to left
+///   2. Left of `@` must be: SOL, whitespace, or `(` `[` `{`
+///   3. No whitespace immediately after `@`
+pub(crate) fn has_active_at_mention_at(input: &str, cursor: usize) -> bool {
+    extract_at_query_for_cursor(input, cursor).is_some()
+}
+
+/// Extract the active @ mention for the text before `cursor`.
+///
+/// Examples (cursor at end of input):
+///   "help me look at @main.rs"     → Some((12, "main.rs"))
+///   "help me look at @"           → Some((12, ""))
+///   "help me look at @ main.rs"   → None  (whitespace after @)
+///   "test@main.rs"                → None  (@ not at boundary)
+///
+/// The mention is only *active* while the query token runs to the cursor:
+/// once the user types a space (e.g. "@main then continue"), the old
+/// mention must no longer drive suggestions or intercept Enter, otherwise
+/// accepting a suggestion would rewrite text the user already moved past.
+/// The cursor, not the end of the input, ends the token, so an @ typed in
+/// the middle of existing text still opens the picker.
+fn extract_at_query_at(input: &str, cursor: usize) -> Option<(usize, String)> {
+    let cursor = cursor.min(input.len());
+    if !input.is_char_boundary(cursor) {
+        return None;
+    }
+    let before_cursor = &input[..cursor];
+    let last_at = before_cursor.rmatch_indices('@').find(|(idx, _)| {
+        // No whitespace immediately after @.
+        // Note: idx+1 may equal cursor — the slice is empty and
+        // starts_with() returns false, which is correct.
+        if before_cursor[*idx + 1..].starts_with(|c: char| c.is_whitespace()) {
+            return false;
+        }
+        // Left of @ must be SOL, whitespace, or opening bracket
+        if *idx > 0 {
+            let prev = before_cursor[..*idx].chars().last().unwrap();
+            prev.is_whitespace() || matches!(prev, '(' | '[' | '{')
+        } else {
+            true
+        }
+    })?;
+    let (pos, _) = last_at;
+
+    let after_at = &before_cursor[pos + 1..];
+    // Single word only: any whitespace inside the token means the caret has
+    // moved past the mention (the user typed on), so the mention is inactive.
+    if after_at.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    Some((pos, after_at.to_string()))
+}
+
+pub(crate) fn extract_at_query_for_cursor(input: &str, cursor: usize) -> Option<(usize, String)> {
+    extract_at_query_at(input, cursor)
+}
+
+/// Accept a completion: replace the `@query` with the selected path and drop
+/// the `@` sign. Used when the user accepts a file-mention suggestion.
+/// The word after the `@` is replaced up to its end (next whitespace), so
+/// completing mid-line leaves the text after the cursor untouched.
+pub(crate) fn accept_completion_at(
+    input: &str,
+    cursor: usize,
+    new_path: &str,
+) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query_for_cursor(input, cursor)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}{}{}", before, new_path, rest);
+    Some((new_input, before.len() + new_path.len()))
+}
+
+/// Tab-complete the `@query` with the selected path while keeping the `@` sign,
+/// so the user can keep cycling suggestions. Used while the mention popover is
+/// still open.
+pub(crate) fn tab_complete_at(
+    input: &str,
+    cursor: usize,
+    new_path: &str,
+) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query_for_cursor(input, cursor)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}@{}{}", before, new_path, rest);
+    Some((new_input, before.len() + 1 + new_path.len()))
 }
 
 fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
@@ -66,6 +183,35 @@ fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
 
 fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
+}
+
+/// Resolve the row Enter would actually accept, for highlight purposes.
+///
+/// In file-mention mode the selection may rest on a section-header sentinel
+/// (empty cmd), e.g. right after the popover opens. The accept path skips
+/// headers downward, so the renderer must highlight the row it accepts;
+/// otherwise nothing is highlighted while Enter silently accepts a file.
+fn effective_selected_row(
+    selected: usize,
+    suggestions: &[(String, &'static str)],
+    is_file_mention: bool,
+) -> usize {
+    let len = suggestions.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut idx = selected.min(len - 1);
+    if !is_file_mention {
+        return idx;
+    }
+    let initial = idx;
+    while suggestions[idx].0.is_empty() {
+        idx = (idx + 1) % len;
+        if idx == initial {
+            break; // all-header list: nothing to highlight differently
+        }
+    }
+    idx
 }
 
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
@@ -128,9 +274,12 @@ fn command_suggestions_overlay_rect(
 
 /// Whether the command palette is active for the current composer state.
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
-    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let mode = composer_mode(app.input(), app.cursor_pos(), app.is_remote_mode());
     !suggestions.is_empty()
-        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
+        && matches!(
+            mode,
+            ComposerMode::SlashCommand | ComposerMode::Chat | ComposerMode::FileMention
+        )
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
 
@@ -296,13 +445,13 @@ pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
     if app.login_input_hint().is_some() || app.voice_composer_preview().is_some() {
         return 1;
     }
-    // Command suggestions render as an overlay (see
+    // Command suggestions and file mentions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
     if command_suggestions_active(app, &app.command_suggestions()) {
         return 0;
     }
-    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let mode = composer_mode(app.input(), app.cursor_pos(), app.is_remote_mode());
 
     u16::from(
         shell_mode_hint(mode).is_some()
@@ -320,7 +469,7 @@ pub(super) fn input_prompt(app: &dyn TuiState) -> (&'static str, Color) {
     if app.login_input_hint().is_some() {
         return (" login> ", accent_color());
     }
-    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let mode = composer_mode(app.input(), app.cursor_pos(), app.is_remote_mode());
     if mode.is_shell() {
         ("$ ", shell_mode_color())
     } else if app.is_processing() {
@@ -762,8 +911,7 @@ pub(super) fn live_processing_status_line(
             if let Some(tps) = status.output_tps_milli {
                 label.push_str(&format!(" · {:.1} tps", tps as f64 / 1000.0));
             }
-            let has_warning =
-                !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
+            let has_warning = !status.stream_message_ended && stale_secs.is_some_and(|s| s > 2.0);
             streaming_status_spans(spinner, label, status.stream_message_ended, has_warning, "")
         }
         "sending" | "thinking" | "connecting" => {
@@ -948,6 +1096,10 @@ fn streaming_status_spans(
 #[cfg(test)]
 #[path = "ui_input/status_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ui_input/mention_tests.rs"]
+mod mention_tests;
 
 pub(crate) fn openai_reset_status_hint(
     auth_method: super::info_widget::AuthMethod,
@@ -2160,7 +2312,7 @@ mod voice_preview;
 use voice_preview::{truncate_cells, voice_ghost, voice_waveform_line};
 
 fn send_mode_indicator(app: &dyn TuiState) -> (&'static str, Color) {
-    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let mode = composer_mode(app.input(), app.cursor_pos(), app.is_remote_mode());
     if mode.is_shell() {
         ("$", shell_mode_color())
     } else if app.next_prompt_new_session_armed() {

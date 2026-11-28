@@ -61,6 +61,7 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod cache_diagnostics;
 mod catchup;
+mod char_bag;
 mod commands;
 mod commit_log;
 pub(crate) use commit_log::CommitLogOverlay;
@@ -79,6 +80,8 @@ mod copy_selection;
 mod debug;
 mod dictation;
 mod event_wrappers;
+mod file_mention;
+mod file_mention_input;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
 mod hotkey_feedback;
@@ -454,6 +457,10 @@ struct FallbackResendPayload {
     /// The raw prompt the user typed, when known. Used to de-duplicate the
     /// input box (the error path restores the prompt there) on accept.
     raw_input: Option<String>,
+    /// File chips attached to the prompt being restored. Restored chips are
+    /// filtered against the restored text, so chips displaced from another
+    /// draft can never ride along onto this prompt (PR 1889 review).
+    file_chips: Vec<std::path::PathBuf>,
 }
 
 /// An interactive "let a jcode agent merge the diverged update for you" offer.
@@ -769,6 +776,10 @@ struct CommandCandidatesCache {
 struct CommandSuggestionsCache {
     /// Exact (untrimmed) input buffer the suggestions were computed from.
     input: String,
+    /// Cursor offset the suggestions were computed from. The @-mention query
+    /// extends from the last `@` to the cursor, not to the end of the buffer,
+    /// so cursor movement alone changes the active query.
+    cursor: usize,
     /// Guard state that changes the answer independently of `input`, so a
     /// stale entry can never outlive a prompt/picker transition.
     signature: CommandSuggestionsSignature,
@@ -1000,6 +1011,10 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
+    /// @file search cache and index
+    file_mention_cache: RefCell<crate::tui::app::file_mention::FileMentionCache>,
+    /// Confirmed @file references (absolute paths); loaded on send
+    file_chips: Vec<PathBuf>,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,
@@ -1745,14 +1760,17 @@ pub struct App {
     typing_scroll_lock: bool,
     // Scroll bookmark: stashed scroll position for quick teleport back
     scroll_bookmark: Option<usize>,
-    // Stashed input: saved via Ctrl+S for later retrieval
-    stashed_input: Option<(String, usize)>,
-    // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    // Stashed input: saved via Ctrl+S for later retrieval. Chips ride
+    // along so restoring does not silently drop attached files (A3).
+    stashed_input: Option<InputUndoEntry>,
+    // Undo history for in-progress input editing (Ctrl+Z). File chips are
+    // snapshot alongside the text so undo restores attachments too.
+    input_undo_stack: Vec<InputUndoEntry>,
     input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
-    // restored when Down walks back past the newest entry
-    history_draft: Option<(String, usize)>,
+    // restored when Down walks back past the newest entry. Chips ride
+    // along like the stash above (A3).
+    history_draft: Option<InputUndoEntry>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1829,9 +1847,12 @@ pub struct App {
     // After an interrupt, wait one redraw before auto-dispatching queued followups so
     // the queued preview can render in the interrupted state first.
     pending_queued_dispatch: bool,
-    // Tab completion state: (base_input, suggestion_index)
-    // base_input is the original input before cycling, suggestion_index is current position
-    tab_completion_state: Option<(String, usize)>,
+    // Tab completion state: (base_query, suggestion_index, mention_at_pos)
+    // base_query is the raw @ token the cycle started from, suggestion_index is
+    // the current cycle position, mention_at_pos is the byte offset of the '@'
+    // that anchors the cycle. The state is only reused while the cursor stays
+    // inside that same mention; moving the caret elsewhere drops the cycle.
+    tab_completion_state: Option<(String, usize, usize)>,
     // Selected row in the visible command suggestion list.
     command_suggestion_selected: usize,
     // Time when app started (for startup animations)
@@ -1868,6 +1889,10 @@ pub struct App {
     // input box if the turn fails (e.g. "token refresh needed") so the user does not
     // lose what they typed and can resend after recovering.
     last_submitted_input: Option<String>,
+    // File chips that accompanied `last_submitted_input`. Restored alongside
+    // the prompt on failover/retry recovery, filtered against the restored
+    // text so another draft's chips can never ride along (PR 1889 review).
+    last_submitted_file_chips: Option<Vec<std::path::PathBuf>>,
     // Store reload info to pass to agent after reconnection (remote mode)
     reload_info: Vec<String>,
     // Debug trace for scripted testing
@@ -1944,6 +1969,14 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+}
+
+/// One Ctrl+Z snapshot of the composer state.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct InputUndoEntry {
+    pub(crate) input: String,
+    pub(crate) cursor_pos: usize,
+    pub(crate) file_chips: Vec<PathBuf>,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

@@ -20,6 +20,7 @@ fn recovered_images_keep_stable_markers_with_existing_attachments() {
             auto_retry: true,
             retry_attempts: 1,
             raw_input: None,
+            file_chips: Vec::new(),
         };
         app.restore_failover_payload(payload.clone());
         app.sync_model_picker_preview_from_input();

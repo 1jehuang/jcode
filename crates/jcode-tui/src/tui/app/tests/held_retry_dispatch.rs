@@ -164,6 +164,7 @@ fn remote_disconnect_releases_unconfirmed_switch_and_restores_waiting_prompt() {
             app.pending_prompt_after_model_switch = Some(input::PreparedInput {
                 raw_input: "use the selected model [image 1]".to_string(),
                 expanded: "expanded prompt for selected model".to_string(),
+                file_chips: Vec::new(),
                 images: vec![image.clone()],
             });
             let mut state = remote::RemoteRunState::default();

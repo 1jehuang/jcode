@@ -77,6 +77,7 @@ fn failover_test_payload(raw_input: Option<&str>) -> FallbackResendPayload {
         is_system: false,
         auto_retry: false,
         system_reminder: None,
+        file_chips: Vec::new(),
     }
 }
 

@@ -1258,6 +1258,7 @@ fn handle_server_event_inner(
                     retry_attempts: pending.retry_attempts,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: app.last_submitted_input.clone(),
+                    file_chips: app.last_submitted_file_chips.clone().unwrap_or_default(),
                 }
             });
             if !is_failover_prompt {

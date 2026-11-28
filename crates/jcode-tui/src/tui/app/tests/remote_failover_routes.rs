@@ -1127,6 +1127,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
         auto_retry: false,
         system_reminder: None,
         raw_input: Some("hi".to_string()),
+        file_chips: Vec::new(),
     });
     app.remote_model_switch_in_flight = true;
 
