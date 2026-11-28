@@ -315,6 +315,16 @@ jobs:
           cargo test --locked --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
           cargo test --locked --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
 
+      - name: Run cloud lock concurrent-creation regression (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        # The openat ENOENT retry is macOS-specific behavior (concurrent
+        # create racing with flock), but the test is `#[cfg(unix)]` and
+        # compiles everywhere: running it on every Unix runner keeps the
+        # Linux job from staying green while the macOS path breaks.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 "$(rustup which cargo)" test --locked --target ${{ matrix.target }} -p jcode-base --lib concurrent_first_time_lock_creation_survives_openat_enoent
+
       - name: Run automatic model discovery regressions (Linux only)
         if: runner.os == 'Linux'
         shell: bash
