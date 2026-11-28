@@ -79,17 +79,17 @@ include!("tests/held_retry_dispatch.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
+include!("tests/file_mention_popover.rs");
+include!("tests/file_mention_tab_cycle.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
-
 #[test]
 fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
     use crate::message::{ContentBlock, Message, Role};
-
     // A boundary assistant message that has already been sent upstream. The
     // provider only ever receives its `Text` block; the struct-level timestamp
     // and tool_duration_ms, plus any history-only ReasoningTrace block, are
@@ -107,7 +107,6 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
             tool_duration_ms: None,
         },
     ];
-
     // Next request: the same boundary message but with volatile/harness-only
     // fields backfilled in memory, then two appended messages. This mirrors the
     // real production sequence where PROVIDER_CANONICAL_INPUT stayed append-only
@@ -1908,7 +1907,6 @@ include!("tests/clear_runtime_state.rs");
 include!("tests/kv_cache_provider_identity.rs");
 
 include!("tests/cache_retention_routes.rs");
-
 include!("tests/cache_prompt_accounting.rs");
 
 #[path = "tests_additional_tests.rs"]

@@ -155,3 +155,29 @@ fn parser_handles_unicode_and_fenced_code_boundaries() {
         }]
     );
 }
+
+/// Indented @ mentions must keep their file suggestions: leading whitespace
+/// is trimmed before the mention check, so the cursor offset must shift by
+/// the same number of trimmed bytes (PR 1889 review, indented mentions).
+#[test]
+fn indented_at_mention_still_suggests_files() {
+    let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+    app.is_remote = false;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = crate::tui::app::file_mention::FileMentionCache::with_cwd_and_test_index(
+        dir.path(),
+        &["main.rs", "other.txt"],
+    );
+    *app.file_mention_cache.borrow_mut() = cache;
+    app.session.working_dir = Some(dir.path().to_string_lossy().to_string());
+    app.input = "  @main.rs later".to_string();
+    app.cursor_pos = "  @main.rs".len();
+
+    let suggestions = app.get_suggestions_for(&app.input);
+    assert!(
+        suggestions.iter().any(|(s, _)| s.contains("main.rs")),
+        "indented mention must still produce file suggestions, got {suggestions:?}"
+    );
+}

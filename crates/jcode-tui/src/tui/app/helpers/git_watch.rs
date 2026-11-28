@@ -29,17 +29,18 @@ pub(super) fn is_healthy() -> bool {
     )
 )]
 pub(super) fn ensure_started(repo_root: &Path, on_change: fn()) {
-    if STARTED.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let root = repo_root.to_path_buf();
-        let spawned = std::thread::Builder::new()
-            .name("jcode-git-watch".to_string())
-            .spawn(move || imp::run(&root, on_change));
-        if spawned.is_err() {
-            HEALTHY.store(false, Ordering::Release);
+    // Same shape as binary_watch::ensure_started: keep the cfg block as the
+    // function tail on every target so no target sees a needless return.
+    if !STARTED.swap(true, Ordering::AcqRel) {
+        #[cfg(target_os = "linux")]
+        {
+            let root = repo_root.to_path_buf();
+            let spawned = std::thread::Builder::new()
+                .name("jcode-git-watch".to_string())
+                .spawn(move || imp::run(&root, on_change));
+            if spawned.is_err() {
+                HEALTHY.store(false, Ordering::Release);
+            }
         }
     }
 }

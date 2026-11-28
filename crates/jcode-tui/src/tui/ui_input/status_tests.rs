@@ -807,15 +807,18 @@ fn collect_transport_context_labels_dedupes_overlapping_transport_text() {
 #[test]
 fn composer_mode_detects_shell_input_before_commands() {
     assert_eq!(
-        composer_mode(" ! cargo test ", false),
+        composer_mode(" ! cargo test ", 14, false),
         ComposerMode::ShellLocal
     );
     assert_eq!(
-        composer_mode("! cargo test", true),
+        composer_mode("! cargo test", 12, true),
         ComposerMode::ShellRemote
     );
-    assert_eq!(composer_mode(" /help", false), ComposerMode::SlashCommand);
-    assert_eq!(composer_mode("hello", false), ComposerMode::Chat);
+    assert_eq!(
+        composer_mode(" /help", 6, false),
+        ComposerMode::SlashCommand
+    );
+    assert_eq!(composer_mode("hello", 5, false), ComposerMode::Chat);
 }
 
 #[test]
@@ -935,7 +938,10 @@ fn overscroll_omits_duplicate_trailing_effort_suffix_but_keeps_swarm() {
 
     facts.effort = Some("medium".to_string());
     let (mismatched_spans, _) = overscroll_fit_facts(&facts, 80);
-    let mismatched_rendered: String = mismatched_spans.iter().map(|s| s.content.as_ref()).collect();
+    let mismatched_rendered: String = mismatched_spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
     assert!(
         mismatched_rendered.contains("Gemini 4 Neon Low")
             && !mismatched_rendered.contains("Gemini 4 Neon Low medium"),

@@ -11,12 +11,9 @@ use crate::provider::Provider;
 use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
 use std::sync::Arc;
-
 #[path = "remote_tests/korean_input.rs"]
 mod korean_input;
-
 struct MockProvider;
-
 #[async_trait::async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -263,6 +260,7 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
         raw_input: "hi".to_string(),
         expanded: "hi".to_string(),
         images: vec![],
+        file_chips: Vec::new(),
     };
     rt.block_on(crate::tui::app::remote::submit_prepared_remote_input(
         &mut app,
@@ -332,6 +330,7 @@ fn remote_skill_invocation_with_prompt_sends_remote_turn() {
             raw_input: "/remote-skill explain the change".to_string(),
             expanded: "/remote-skill explain the change".to_string(),
             images: vec![],
+            file_chips: Vec::new(),
         },
     ))
     .expect("remote skill prompt should send");
@@ -1240,6 +1239,7 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
             raw_input: dropped.clone(),
             expanded: dropped.clone(),
             images: vec![],
+            file_chips: Vec::new(),
         },
     ))
     .expect("dropped path should send as a normal remote turn");
@@ -1277,6 +1277,7 @@ fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
             raw_input: prompt.to_string(),
             expanded: prompt.to_string(),
             images: vec![],
+            file_chips: vec![],
         },
     ))
     .expect("embedded command-looking text should use the remote prompt path");
@@ -1313,6 +1314,7 @@ fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
             raw_input: "/help compact /test help".to_string(),
             expanded: "/help compact /test help".to_string(),
             images: vec![],
+            file_chips: vec![],
         },
     ))
     .expect("known built-in slash commands should stay local");
@@ -1355,3 +1357,6 @@ include!("remote_tests/recall_cancellation.rs");
 
 #[path = "remote_tests_additional_tests.rs"]
 mod additional_reload_handoff_active_when_server_flag_is_set;
+
+#[path = "remote_tests/file_chips.rs"]
+mod file_chips;

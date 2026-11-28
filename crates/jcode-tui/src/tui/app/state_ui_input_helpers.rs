@@ -1,6 +1,7 @@
 use super::*;
 #[path = "state_ui_input_helpers_onboarding.rs"]
 mod onboarding;
+use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
@@ -223,7 +224,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",
-        "Move this session and swarm to cloud, or /cloud replace to copy local code",
+        "Move this session to a cloud machine and keep working",
     ),
     RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public(
@@ -488,6 +489,11 @@ impl App {
         };
         let input = super::slash_command_parser::active_token_before_cursor(input, cursor)
             .map_or(input, |(start, end)| &input[start..end]);
+        // The mention/slash checks below run on the trimmed input, so the
+        // cursor must shift by the same number of trimmed leading bytes or
+        // indented mentions lose their suggestions (PR 1889 review).
+        let trimmed_len = input.len() - input.trim_start().len();
+        let cursor = cursor.saturating_sub(trimmed_len);
         let input = input.trim_start();
 
         if crate::tui::is_ssh_remote() {
@@ -501,6 +507,15 @@ impl App {
             } else {
                 Vec::new()
             };
+        }
+
+        // @file completions (checked before /, but / takes priority). The
+        // cursor decides which @ token is active, so typing @ in the middle
+        // of a sentence still completes at the cursor.
+        if crate::tui::ui::input_ui::has_active_at_mention_at(input, cursor)
+            && !input.starts_with('/')
+        {
+            return self.file_mention_suggestions();
         }
 
         // Only show suggestions when input starts with /
@@ -1261,10 +1276,12 @@ impl App {
         // branches below consult, so any transition still recomputes.
         let signature = self.command_suggestions_signature();
         let epoch = self.command_suggestions_epoch.get();
+        let cursor = self.cursor_pos.min(self.input.len());
         if let Some(cache) = self.command_suggestions_cache.borrow().as_ref()
             && cache.epoch == epoch
             && cache.signature == signature
             && cache.input == self.input
+            && cache.cursor == cursor
         {
             return cache.suggestions.clone();
         }
@@ -1272,6 +1289,7 @@ impl App {
         let suggestions = self.command_suggestions_uncached(&signature);
         *self.command_suggestions_cache.borrow_mut() = Some(CommandSuggestionsCache {
             input: self.input.clone(),
+            cursor,
             signature,
             epoch,
             suggestions: suggestions.clone(),
@@ -1352,10 +1370,13 @@ impl App {
             self.command_suggestion_selected = self
                 .command_suggestion_selected
                 .min(suggestions.len().saturating_sub(1));
+            // Skip past section headers (empty cmd) in file-mention mode.
+            Self::skip_section_headers_down(&mut self.command_suggestion_selected, &suggestions);
         }
         suggestions
     }
 
+    /// Advance idx forward past any section-header entries (empty cmd).
     pub(super) fn move_command_suggestion_selection(&mut self, delta: i32) -> bool {
         let suggestions = self.clamp_command_suggestion_selection();
         if suggestions.is_empty() {
@@ -1365,9 +1386,22 @@ impl App {
         let len = suggestions.len() as i32;
         let selected = self.command_suggestion_selected as i32;
         self.command_suggestion_selected = (selected + delta).rem_euclid(len) as usize;
+
+        // File-mention mode: skip section headers.
+        if crate::tui::ui::input_ui::is_at_file_mode(&self.input, self.cursor_pos, self.is_remote) {
+            if delta > 0 {
+                Self::skip_section_headers_down(
+                    &mut self.command_suggestion_selected,
+                    &suggestions,
+                );
+            } else {
+                Self::skip_section_headers_up(&mut self.command_suggestion_selected, &suggestions);
+            }
+        }
         true
     }
 
+    /// Retreat idx backward past any section-header entries (empty cmd).
     fn arrow_modifiers_allow_command_suggestion_navigation(modifiers: KeyModifiers) -> bool {
         !modifiers.intersects(
             KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::HYPER,
@@ -1380,6 +1414,23 @@ impl App {
         modifiers: KeyModifiers,
     ) -> bool {
         if self.command_suggestions().is_empty() {
+            return false;
+        }
+
+        // A popover showing only sentinel rows (building-index hint,
+        // "⏳ No matching files") has nothing to navigate: every row is a
+        // message, not a completion. Up/Down must fall through to normal
+        // input handling so the empty state never traps editing keys
+        // (greptile "No matches block editing"). Ctrl+K text deletion is
+        // handled by the caller, so it also falls through here.
+        let only_sentinels = {
+            let suggestions = self.command_suggestions();
+            !suggestions.is_empty()
+                && suggestions
+                    .iter()
+                    .all(|(cmd, _)| cmd.is_empty() || cmd.starts_with('⏳'))
+        };
+        if only_sentinels {
             return false;
         }
 
@@ -1409,6 +1460,45 @@ impl App {
             return false;
         };
         if cmd == self.input.trim() {
+            return false;
+        }
+
+        // FileMention mode: replace @query with path + record chip.
+        if crate::tui::ui::input_ui::is_at_file_mode(&self.input, self.cursor_pos, self.is_remote) {
+            // Guard: skip section headers and the "building index" hint row.
+            // These are sentinels, not real file suggestions.
+            if cmd.is_empty() || cmd.starts_with("⏳") {
+                return false;
+            }
+            // File mentions must not attach over SSH remotes: the chips
+            // would expand from the client's local filesystem at send time
+            // (greptile A2).
+            if crate::tui::is_ssh_remote() {
+                self.set_status_notice("File mentions are unavailable over SSH remotes");
+                return false;
+            }
+            let rel_path = cmd.trim_end_matches('/').trim_end_matches(" >");
+            // Store the relative path in file_chips (matches the input text so
+            // prune_orphan_chips works correctly). Resolve to absolute at send time.
+            self.file_chips.push(PathBuf::from(rel_path));
+
+            // Record for recent-file ranking (store relative path for index lookup).
+            self.file_mention_cache
+                .borrow_mut()
+                .record_file_open(std::sync::Arc::from(rel_path));
+
+            if let Some((new_input, new_cursor)) = crate::tui::ui::input_ui::accept_completion_at(
+                &self.input,
+                self.cursor_pos,
+                rel_path,
+            ) {
+                self.remember_input_undo_state();
+                self.input = new_input;
+                self.cursor_pos = new_cursor;
+                self.tab_completion_state = None;
+                self.command_suggestion_selected = 0;
+                return true;
+            }
             return false;
         }
 
@@ -1493,6 +1583,11 @@ impl App {
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
     pub fn autocomplete(&mut self) -> bool {
+        // FileMention tab completion (two-step: common prefix → cycle).
+        if crate::tui::ui::input_ui::is_at_file_mode(&self.input, self.cursor_pos, self.is_remote) {
+            return self.autocomplete_file_mention();
+        }
+
         if let Some(range) =
             super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
         {
@@ -1504,7 +1599,7 @@ impl App {
         let current_suggestions = self.get_suggestions_for(&self.input);
 
         // Check if we're continuing a tab cycle from a previous base
-        if let Some((ref base, idx)) = self.tab_completion_state.clone() {
+        if let Some((ref base, idx, _)) = self.tab_completion_state.clone() {
             let base_suggestions = self.get_suggestions_for(base);
 
             // If current input is in base suggestions AND there are multiple options, continue cycling
@@ -1516,7 +1611,7 @@ impl App {
                 self.remember_input_undo_state();
                 self.input = cmd.clone();
                 self.cursor_pos = self.input.len();
-                self.tab_completion_state = Some((base.clone(), next_index));
+                self.tab_completion_state = Some((base.clone(), next_index, 0));
                 return true;
             }
             // Otherwise, fall through to start a new cycle with current input
@@ -1554,7 +1649,7 @@ impl App {
             self.input.push(' ');
         }
         self.cursor_pos = self.input.len();
-        self.tab_completion_state = Some((base, selected));
+        self.tab_completion_state = Some((base, selected, 0));
         self.command_suggestion_selected = 0;
         true
     }
@@ -1566,7 +1661,7 @@ impl App {
     ) -> bool {
         let current_token = self.input[range.0..range.1].to_string();
 
-        if let Some((ref base, idx)) = self.tab_completion_state.clone()
+        if let Some((ref base, idx, _)) = self.tab_completion_state.clone()
             && super::slash_command_parser::active_token_before_cursor(base, base.len()).is_some()
         {
             let base_suggestions = self.get_suggestions_for(base);
@@ -1580,7 +1675,7 @@ impl App {
                 self.remember_input_undo_state();
                 self.input.replace_range(range.0..range.1, command.as_str());
                 self.cursor_pos = range.0 + command.len();
-                self.tab_completion_state = Some((base.clone(), next_index));
+                self.tab_completion_state = Some((base.clone(), next_index, range.0));
                 return true;
             }
         }
@@ -1615,7 +1710,7 @@ impl App {
         self.input
             .replace_range(range.0..range.1, replacement.as_str());
         self.cursor_pos = range.0 + replacement.len();
-        self.tab_completion_state = Some((base, selected));
+        self.tab_completion_state = Some((base, selected, range.0));
         self.command_suggestion_selected = 0;
         true
     }
@@ -1624,11 +1719,22 @@ impl App {
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
+        self.prune_orphan_chips();
     }
 
+    /// Remove file chips whose paths no longer appear in the input text.
+    ///
+    /// Matching is path-boundary aware (shared with chip deletion and
+    /// highlight rendering via `input::file_chip_matches_input`): a chip only
+    /// survives while its path appears as a complete path token, so a chip
+    /// like `bag` is dropped once the text only contains `char_bag.rs`. The
     pub(super) fn remember_input_undo_state(&mut self) {
         self.input_typing_undo = None;
-        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
+        let snapshot = crate::tui::app::InputUndoEntry {
+            input: self.input.clone(),
+            cursor_pos: self.cursor_pos.min(self.input.len()),
+            file_chips: self.file_chips.clone(),
+        };
         if self.input_undo_stack.last() == Some(&snapshot) {
             return;
         }
@@ -1646,12 +1752,13 @@ impl App {
 
     pub(super) fn undo_input_change(&mut self) {
         self.input_typing_undo = None;
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+        if let Some(entry) = self.input_undo_stack.pop() {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
             self.history_draft = None;
-            self.input = input;
-            self.cursor_pos = cursor_pos.min(self.input.len());
+            self.input = entry.input;
+            self.cursor_pos = entry.cursor_pos.min(self.input.len());
+            self.file_chips = entry.file_chips;
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
             self.set_status_notice("↶ Input restored");
@@ -1722,6 +1829,8 @@ impl App {
         )
     }
 }
+
+// ── FileMention helpers ────────────────────────────────────────────
 
 #[cfg(test)]
 #[path = "command_registry_tests.rs"]

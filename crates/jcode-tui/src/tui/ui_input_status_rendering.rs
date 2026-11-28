@@ -390,7 +390,7 @@ pub(in super::super) fn draw_input(
     let input_text = app.input();
     let cursor_pos = app.cursor_pos();
 
-    let mode = composer_mode(input_text, app.is_remote_mode());
+    let mode = composer_mode(input_text, cursor_pos, app.is_remote_mode());
     // Command suggestions render later as an overlay pass
     // (`draw_command_suggestions_overlay`), never inline: they must not shift
     // the input rows or anything below them.
@@ -430,6 +430,81 @@ pub(in super::super) fn draw_input(
         &|number| app.input_image_attached(number),
         voice_ghost(voice_preview.as_ref()),
     );
+
+    // Highlight confirmed @file paths with a distinct chip style
+    // (background color + bold) to visually separate them from plain text.
+    // Matching is path-boundary aware, the same rule chip deletion and
+    // pruning use (`app::input::file_chip_matches_input`): a chip only
+    // highlights as a complete path token, so `bag` never highlights inside
+    // `char_bag.rs` mid-token. Line start/end count as boundaries, so a chip
+    // still highlights when wrapping puts it at the edge of a wrapped line.
+    let all_lines: Vec<Line> = {
+        let chips = app.file_chips();
+        if chips.is_empty() {
+            all_lines
+        } else {
+            let chip_style = file_chip_style();
+            let is_boundary = |ch: Option<char>| match ch {
+                // Opening brackets are a left boundary: accept_completion can
+                // leave a chip directly after one ("(@main" → "(main.rs").
+                // Closing brackets stay out so prose like "(see main.rs)"
+                // never highlights (greptile A10).
+                Some(c) => {
+                    c == '/' || c == '\\' || c.is_whitespace() || matches!(c, '(' | '[' | '{')
+                }
+                None => true,
+            };
+            all_lines
+                .into_iter()
+                .map(|line| {
+                    let mut new_spans = Vec::new();
+                    for span in line.spans {
+                        let text = span.content.to_string();
+                        let mut start = 0usize;
+                        while start < text.len() {
+                            let mut earliest: Option<(usize, usize)> = None;
+                            for chip in chips {
+                                let cs = chip.to_string_lossy();
+                                if let Some(pos) = text[start..].find(cs.as_ref()) {
+                                    let abs = start + pos;
+                                    let end = abs + cs.len();
+                                    // `text[..abs]` is safe for any abs in
+                                    // 0..=len, and `chars().next_back()` on an
+                                    // empty slice is None, so no unwrap needed.
+                                    let left_ok = is_boundary(text[..abs].chars().next_back());
+                                    let right_ok = is_boundary(text[end..].chars().next());
+                                    if left_ok && right_ok {
+                                        match earliest {
+                                            Some((e, _)) if abs < e => earliest = Some((abs, end)),
+                                            None => earliest = Some((abs, end)),
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some((e_start, e_end)) = earliest {
+                                if e_start > start {
+                                    new_spans.push(Span::styled(
+                                        text[start..e_start].to_string(),
+                                        span.style,
+                                    ));
+                                }
+                                new_spans.push(Span::styled(
+                                    text[e_start..e_end].to_string(),
+                                    chip_style,
+                                ));
+                                start = e_end;
+                            } else {
+                                new_spans.push(Span::styled(text[start..].to_string(), span.style));
+                                break;
+                            }
+                        }
+                    }
+                    Line::from(new_spans)
+                })
+                .collect()
+        }
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;

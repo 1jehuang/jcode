@@ -276,7 +276,14 @@ impl App {
             "RECOVERY_DRAFT_RESTORE",
             "held_payload",
         );
-        let restored = payload.raw_input.unwrap_or(payload.content);
+        let mut restored = payload.raw_input.unwrap_or(payload.content);
+        // Drop chips absent from the restored text: they belong to another
+        // draft and must not attach that draft's files to this retry.
+        let restored_chips: Vec<std::path::PathBuf> = payload
+            .file_chips
+            .into_iter()
+            .filter(|chip| super::input::file_chip_matches_input(&restored, chip))
+            .collect();
         let image_indices: Vec<Option<usize>> = payload
             .images
             .into_iter()
@@ -317,6 +324,8 @@ impl App {
                 restored.clone()
             };
             self.cursor_pos = self.input.len();
+            // Compare the own-draft check against remapped image markers.
+            restored = self.input.clone();
         } else if !restored.is_empty() && self.input != restored {
             // Do not turn a partially typed command or prompt into a different
             // request. Keep the held request recoverable in the transcript.
@@ -335,6 +344,24 @@ impl App {
                 }
                 self.input.push_str(&marker);
                 self.cursor_pos = self.input.len();
+            }
+        }
+
+        // Only the restored prompt's own chips come back. When the composer
+        // already holds a newer draft, its chips stay untouched: extending
+        // here is what let a displaced draft's files ride along on this
+        // retry (PR 1889 review, security).
+        if self.input == restored && !restored_chips.is_empty() {
+            let existing: std::collections::HashSet<_> = self
+                .file_chips
+                .iter()
+                .map(|chip| chip.to_string_lossy().to_string())
+                .collect();
+            for chip in restored_chips {
+                if existing.contains(&chip.to_string_lossy().to_string()) {
+                    continue;
+                }
+                self.file_chips.push(chip);
             }
         }
     }
@@ -570,6 +597,7 @@ impl App {
                     auto_retry: pending.auto_retry,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: self.last_submitted_input.clone(),
+                    file_chips: self.last_submitted_file_chips.clone().unwrap_or_default(),
                 })
         } else {
             None
@@ -707,6 +735,7 @@ impl App {
                     auto_retry: pending.auto_retry,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: self.last_submitted_input.clone(),
+                    file_chips: self.last_submitted_file_chips.clone().unwrap_or_default(),
                 })
         } else {
             None
@@ -805,6 +834,7 @@ impl App {
                     auto_retry: pending.auto_retry,
                     system_reminder: pending.system_reminder.clone(),
                     raw_input: self.last_submitted_input.clone(),
+                    file_chips: self.last_submitted_file_chips.clone().unwrap_or_default(),
                 })
         } else {
             None
@@ -1248,6 +1278,7 @@ impl App {
             .take_if(|pending| !pending.is_system)
         {
             let raw_input = self.last_submitted_input.take();
+            let file_chips = self.last_submitted_file_chips.take().unwrap_or_default();
             self.restore_failover_payload(super::FallbackResendPayload {
                 content: pending.content,
                 images: pending.images,
@@ -1256,6 +1287,7 @@ impl App {
                 auto_retry: pending.auto_retry,
                 retry_attempts: pending.retry_attempts,
                 raw_input,
+                file_chips,
             });
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();

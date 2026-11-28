@@ -431,6 +431,7 @@ fn compute_tier(
     }
 }
 
+#[allow(clippy::needless_bool)]
 fn detect_wsl() -> bool {
     if std::env::var("WSL_DISTRO_NAME").is_ok() || std::env::var("WSLENV").is_ok() {
         return true;
