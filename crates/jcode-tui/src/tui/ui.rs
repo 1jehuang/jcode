@@ -54,7 +54,7 @@ mod box_utils;
 #[path = "ui_changelog.rs"]
 mod changelog;
 #[path = "ui_debug_capture.rs"]
-mod debug_capture;
+pub(crate) mod debug_capture;
 #[path = "ui_diagram_pane.rs"]
 mod diagram_pane;
 #[path = "ui_file_diff.rs"]
