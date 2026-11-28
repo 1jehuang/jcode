@@ -286,7 +286,7 @@ if [ -z "$discord_webhook" ] && [ -f "${JCODE_HOME:-$HOME/.jcode}/discord-releas
 fi
 if [ -n "$discord_webhook" ] && [ -f scripts/post_discord_release.py ]; then
   gh_token="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}"
-  if ! GH_TOKEN="$gh_token" DISCORD_RELEASE_WEBHOOK="$discord_webhook" python3 scripts/post_discord_release.py --tag "$tag"; then
+  if ! GITHUB_REPOSITORY="$repo" GH_TOKEN="$gh_token" DISCORD_RELEASE_WEBHOOK="$discord_webhook" python3 scripts/post_discord_release.py --tag "$tag"; then
     echo "Failed to post Discord announcement directly for $tag"
     discord_status="failed"
     publish_state="failed"
