@@ -31,10 +31,43 @@ pub fn test_env_lock() -> &'static Mutex<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn lock_test_env() -> MutexGuard<'static, ()> {
-    test_env_lock()
+pub fn lock_test_env() -> TestEnvGuard {
+    let guard = test_env_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_test_env_lock_held(true);
+    TestEnvGuard { guard }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_ENV_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn set_test_env_lock_held(held: bool) {
+    TEST_ENV_LOCK_HELD.with(|cell| cell.set(held));
+}
+
+/// True only when the *current thread* holds `test_env_lock` (via
+/// `lock_test_env`). Distinguishes self-held from another-test-held when a
+/// `try_lock` fails, so helpers can skip env writes instead of clobbering a
+/// concurrently scoped `JCODE_HOME`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_env_lock_held_by_current_thread() -> bool {
+    TEST_ENV_LOCK_HELD.with(|cell| cell.get())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestEnvGuard {
+    guard: MutexGuard<'static, ()>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        set_test_env_lock_held(false);
+    }
 }
 
 #[cfg(test)]

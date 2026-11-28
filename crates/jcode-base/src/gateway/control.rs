@@ -442,7 +442,7 @@ mod tests {
     /// left them racing the config and provider suites: a test here would swap
     /// `JCODE_HOME` out from under a provider test mid-assertion, failing it
     /// intermittently whenever the two modules happened to interleave.
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    fn lock_env() -> crate::storage::TestEnvGuard {
         crate::storage::lock_test_env()
     }
 

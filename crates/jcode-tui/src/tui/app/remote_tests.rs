@@ -67,6 +67,21 @@ fn ensure_test_jcode_home_if_unset() {
         return;
     }
 
+    // Serialize the unset -> set transition against tests that scope their
+    // own JCODE_HOME under `lock_test_env`. try_lock keeps the serialization
+    // when the lock is free and degrades to the caller's own exclusion when
+    // this thread already holds it. If another test holds the lock, it owns
+    // JCODE_HOME right now: skip setting the shared home so this fixture
+    // reads that test's config instead of clobbering it mid-flight.
+    let _env_lock = crate::storage::test_env_lock().try_lock();
+    if _env_lock.is_err() {
+        return;
+    }
+
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
+
     let path = TEST_HOME.get_or_init(|| {
         let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&path);

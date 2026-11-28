@@ -134,6 +134,10 @@ mod turn_envelope_tests {
     }
 }
 
+// The nine flags below mirror the CLI surface for client startup; grouping
+// them into a struct is a wider refactor of every dispatch call site, so the
+// lint is allowed here (same precedent as auth_progress.rs).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tui_client(
     resume_session: Option<String>,
     startup_hints: Option<setup_hints::StartupHints>,

@@ -60,7 +60,7 @@ fn borrowed_registration_preserves_legacy_bytes_and_owns_serialized_body() {
 // These tests serve real HTTP on ephemeral 127.0.0.1 sockets. No mocked client,
 // copied OAuth implementation, external provider, browser executable or secrets.
 struct Sandbox {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::storage::TestEnvGuard,
     temp: tempfile::TempDir,
     saved: Option<std::ffi::OsString>,
 }
