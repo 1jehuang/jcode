@@ -6,6 +6,7 @@
 //! Also provides debug socket events for exposing full TUI state.
 
 mod debug_events;
+mod effort;
 #[path = "backend_screen.rs"]
 mod screen;
 mod ssh_sessions;
@@ -1055,17 +1056,6 @@ impl RemoteConnection {
         let request = Request::SetPremiumMode {
             id: self.next_request_id,
             mode,
-        };
-        self.next_request_id += 1;
-        self.send_request(request).await
-    }
-
-    /// Set reasoning effort on the server (for OpenAI models)
-    pub async fn set_reasoning_effort(&mut self, effort: &str) -> Result<()> {
-        let request = Request::SetReasoningEffort {
-            id: self.next_request_id,
-            effort: effort.to_string(),
-            target_session_id: None,
         };
         self.next_request_id += 1;
         self.send_request(request).await

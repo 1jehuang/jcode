@@ -514,3 +514,209 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
         "the newest cancel's deferred reset should eventually clear the flag"
     );
 }
+
+#[derive(Clone, Default)]
+struct EffortOrderProvider {
+    applied: Arc<std::sync::Mutex<Vec<String>>>,
+    model: Arc<std::sync::Mutex<String>>,
+    effort_models: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for EffortOrderProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("effort control must not invoke the provider")
+    }
+
+    fn name(&self) -> &str {
+        "effort-order"
+    }
+
+    fn model(&self) -> String {
+        let model = self.model.lock().unwrap();
+        if model.is_empty() {
+            "initial-model".into()
+        } else {
+            model.clone()
+        }
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.model.lock().unwrap() = model.into();
+        Ok(())
+    }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        self.applied.lock().unwrap().last().cloned()
+    }
+
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high"]
+    }
+
+    fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+        self.applied.lock().unwrap().push(effort.into());
+        self.effort_models.lock().unwrap().push(self.model());
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+async fn receive_effort_order_event(
+    reader: &mut BufReader<crate::transport::ReadHalf>,
+) -> ServerEvent {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut line = String::new();
+        assert!(reader.read_line(&mut line).await.unwrap() > 0);
+        serde_json::from_str(&line).unwrap()
+    })
+    .await
+    .expect("effort control socket stopped responding")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn busy_effort_socket_requests_apply_in_wire_order_and_keep_ping_responsive() {
+    use serde_json::json;
+    let _lock = crate::storage::lock_test_env();
+    let home = IsolatedReloadRecoveryEnv::new();
+    let provider = EffortOrderProvider::default();
+    let sessions: SessionAgents =
+        Arc::new(crate::server::SessionManager::from_agents(HashMap::new()));
+    let (server, client) = crate::transport::Stream::pair().unwrap();
+    let (global_events, _) = broadcast::channel(8);
+    let (debug_responses, _) = broadcast::channel(8);
+    let (swarm_events, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server,
+        sessions.clone(),
+        global_events,
+        Arc::new(provider.clone()),
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(0)),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_responses,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_events,
+        "effort-order-test".into(),
+        "test".into(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+    let (reader, mut writer) = client.into_split();
+    let mut reader = BufReader::new(reader);
+    writer
+        .write_all(
+            format!(
+                "{}\n",
+                json!({"type":"subscribe", "id":1, "working_dir":home._home.path()})
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    while !matches!(
+        receive_effort_order_event(&mut reader).await,
+        ServerEvent::Done { id: 1 }
+    ) {}
+    let agent = sessions.read().await.values().next().unwrap().clone();
+    let busy = agent.lock().await;
+    provider.applied.lock().unwrap().clear();
+    let expected: Vec<String> = (0..64)
+        .map(|index| ["low", "medium", "high"][index % 3].into())
+        .collect();
+    let mut requests = String::new();
+    let expected_models: Vec<String> = (0..expected.len())
+        .map(|index| format!("wire-model-{index}"))
+        .collect();
+    for (index, effort) in expected.iter().enumerate() {
+        let model = &expected_models[index];
+        let selection = crate::provider::RouteSelection {
+            model: model.clone(),
+            runtime_key: jcode_provider_core::RuntimeKey::Current,
+            provider_label: "effort-order".into(),
+            api_method: "effort-order".into(),
+            detail: String::new(),
+        };
+        let request = if index % 2 == 0 {
+            json!({"type":"set_model", "id":1000+index, "model":model})
+        } else {
+            json!({"type":"set_route", "id":1000+index, "selection":selection, "automatic_failover":false})
+        };
+        requests.push_str(&format!("{request}\n"));
+        requests.push_str(&format!(
+            "{}\n",
+            json!({"type":"set_reasoning_effort", "id":100+index, "effort":effort})
+        ));
+    }
+    requests.push_str(&format!("{}\n", json!({"type":"ping", "id":999})));
+    writer.write_all(requests.as_bytes()).await.unwrap();
+    loop {
+        let event = receive_effort_order_event(&mut reader).await;
+        if matches!(event, ServerEvent::Pong { id: 999, .. }) {
+            break;
+        }
+        assert!(
+            !matches!(event, ServerEvent::ReasoningEffortChanged { .. }),
+            "effort applied before the busy turn released its lock"
+        );
+    }
+    drop(busy);
+    let mut responses = Vec::new();
+    while responses.len() < expected.len() {
+        if let ServerEvent::ReasoningEffortChanged {
+            id, effort, error, ..
+        } = receive_effort_order_event(&mut reader).await
+        {
+            assert_eq!(error, None);
+            responses.push((id, effort.unwrap()));
+        }
+    }
+    assert_eq!(
+        responses,
+        expected
+            .iter()
+            .enumerate()
+            .map(|(index, effort)| (100 + index as u64, effort.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(*provider.applied.lock().unwrap(), expected);
+    assert_eq!(
+        *provider.effort_models.lock().unwrap(),
+        expected_models,
+        "each effort must apply to its immediately preceding model/route request"
+    );
+    assert_eq!(
+        agent.lock().await.provider_handle().reasoning_effort(),
+        expected.last().cloned()
+    );
+    drop(writer);
+    drop(reader);
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

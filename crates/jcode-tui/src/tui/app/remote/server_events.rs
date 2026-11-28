@@ -16,10 +16,6 @@ use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 use crate::tui::app::{KvCacheMissReason, KvCacheMissSample};
 
-fn allow_runtime_identity_mismatch() -> bool {
-    std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
-}
-
 const AUTO_RELOAD_LOOP_GUARD_ENV: &str = "JCODE_AUTO_RELOAD_LOOP_GUARD";
 const AUTO_RELOAD_LOOP_WINDOW_SECS: u64 = 30;
 const AUTO_RELOAD_LOOP_MAX_ATTEMPTS: u32 = 2;
@@ -144,7 +140,7 @@ fn should_defer_history_for_runtime_identity(
     should_defer_history_for_runtime_identity_with_allow(
         server_has_update,
         client_detected_stale,
-        allow_runtime_identity_mismatch(),
+        std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some(),
     )
 }
 
@@ -1463,6 +1459,13 @@ fn handle_server_event_inner(
             false
         }
         ServerEvent::SessionId { session_id } => {
+            if app
+                .remote_session_id
+                .as_deref()
+                .is_some_and(|old| old != session_id)
+            {
+                app.reset_remote_effort_for_session();
+            }
             app.jarvis_session_changed(&session_id);
             if app.remote_session_id.as_deref() != Some(session_id.as_str()) {
                 app.remote_available_service_tiers = None;
@@ -1773,6 +1776,9 @@ fn handle_server_event_inner(
             crate::set_current_session(&session_id);
             app.note_client_focus(true);
             let session_changed = prev_session_id.as_deref() != Some(session_id.as_str());
+            if session_changed && prev_session_id.is_some() {
+                app.reset_remote_effort_for_session();
+            }
             if session_changed {
                 // Drop the previous session's snapshot and polling deadlines.
                 // Otherwise attach can inherit a 1s local / 2s SSH todo delay.
@@ -1920,7 +1926,7 @@ fn handle_server_event_inner(
                 app.status_detail = status_detail;
             }
             if session_changed || reasoning_effort.is_some() {
-                app.remote_reasoning_effort = reasoning_effort;
+                app.observe_remote_effort(reasoning_effort, None);
             }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
@@ -2689,7 +2695,7 @@ fn handle_server_event_inner(
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the
                 // previous model's level.
-                app.remote_reasoning_effort = reasoning_effort;
+                app.observe_remote_effort(reasoning_effort, Some(id));
                 app.invalidate_model_picker_cache();
                 app.persist_remote_header_hint();
                 if model_actually_changed && !app.auth_catalog_refresh_pending {
@@ -2808,46 +2814,11 @@ fn handle_server_event_inner(
             true
         }
         ServerEvent::ReasoningEffortChanged {
+            id,
             effort,
             model,
             error,
-            ..
-        } => {
-            if let Some(err) = error {
-                app.push_display_message(DisplayMessage::error(format!(
-                    "Failed to set effort: {}",
-                    err
-                )));
-                false
-            } else {
-                app.remote_reasoning_effort = effort.clone();
-                let model_changed = if let Some(new_model) = model {
-                    let changed = app.remote_provider_model.as_deref() != Some(new_model.as_str());
-                    app.remote_provider_model = Some(new_model.clone());
-                    app.session.model = Some(new_model);
-                    changed
-                } else {
-                    false
-                };
-                app.invalidate_model_picker_cache();
-                app.persist_remote_header_hint();
-                if model_changed {
-                    crate::tui::ui::prepare::invalidate_header_prep_cache();
-                }
-                let label = effort
-                    .as_deref()
-                    .map(app_mod::effort_display_label)
-                    .unwrap_or("default");
-                if !std::mem::take(&mut app.suppress_next_reasoning_effort_message) {
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "✓ Reasoning effort → {}",
-                        label
-                    )));
-                }
-                app.set_status_notice(format!("Effort: {}", label));
-                true
-            }
-        }
+        } => super::effort::handle_effort_changed(app, id, effort, model, error),
         ServerEvent::ServiceTierChanged {
             service_tier,
             error,

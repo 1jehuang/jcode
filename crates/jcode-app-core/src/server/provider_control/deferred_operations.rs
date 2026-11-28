@@ -42,7 +42,7 @@ pub(super) fn log_provider_control_completed(operation: &'static str, id: u64, q
     );
 }
 
-pub(super) fn spawn_deferred_agent_mutation<F>(
+pub(super) async fn spawn_deferred_agent_mutation<F>(
     operation: &'static str,
     id: u64,
     agent: Arc<Mutex<Agent>>,
@@ -52,8 +52,14 @@ pub(super) fn spawn_deferred_agent_mutation<F>(
     F: FnOnce(&mut Agent, &mpsc::UnboundedSender<ServerEvent>) + Send + 'static,
 {
     let queued_at = log_provider_control_deferred(operation, id);
+    // Join the same FIFO queue as effort before the task can be rescheduled.
+    let mut agent_lock = Box::pin(tokio::task::unconstrained(agent.lock_owned()));
+    let admitted = futures::poll!(&mut agent_lock);
     crate::runtime_activity::spawn(async move {
-        let mut agent_guard = agent.lock().await;
+        let mut agent_guard = match admitted {
+            std::task::Poll::Ready(guard) => guard,
+            std::task::Poll::Pending => agent_lock.await,
+        };
         log_provider_control_lock_acquired(operation, id, queued_at);
         apply(&mut agent_guard, &client_event_tx);
         log_provider_control_completed(operation, id, queued_at);
@@ -253,4 +259,31 @@ pub(super) async fn apply_auth_route_to_agent(
             );
         }
     }
+}
+
+pub(super) fn spawn_deferred_reasoning_effort_change(
+    id: u64,
+    effort: String,
+    agent_lock: impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<Agent>> + Send + 'static,
+    client_event_tx: mpsc::UnboundedSender<ServerEvent>,
+) {
+    let queued_at = log_provider_control_deferred("set_reasoning_effort", id);
+    crate::runtime_activity::spawn(async move {
+        let mut agent_guard = agent_lock.await;
+        log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
+        let prev_model = agent_guard.provider_model();
+        let result = agent_guard.set_reasoning_effort(&effort);
+        let updated_model = result
+            .is_ok()
+            .then(|| agent_guard.provider_model())
+            .filter(|new_model| new_model != &prev_model);
+        crate::logging::info(&format!(
+            "Deferred reasoning effort change completed request_id={} requested={} success={}",
+            id,
+            effort,
+            result.is_ok()
+        ));
+        send_reasoning_effort_result(id, result, updated_model, &client_event_tx);
+        log_provider_control_completed("set_reasoning_effort", id, queued_at);
+    });
 }

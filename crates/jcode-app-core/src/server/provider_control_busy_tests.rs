@@ -37,6 +37,7 @@ impl Drop for IsolatedRuntimeDir {
 struct TestEffortProvider {
     model: StdMutex<Option<String>>,
     effort: StdMutex<Option<String>>,
+    effort_models: StdMutex<Vec<String>>,
     service_tier: StdMutex<Option<String>>,
     transport: StdMutex<Option<String>>,
 }
@@ -88,6 +89,7 @@ impl Provider for TestEffortProvider {
 
     fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
         *self.effort.lock().expect("effort lock") = Some(effort.to_string());
+        self.effort_models.lock().unwrap().push(self.model());
         Ok(())
     }
 
@@ -113,6 +115,7 @@ impl Provider for TestEffortProvider {
         Arc::new(Self {
             model: StdMutex::new(Some(self.model())),
             effort: StdMutex::new(self.reasoning_effort()),
+            effort_models: StdMutex::new(self.effort_models.lock().unwrap().clone()),
             service_tier: StdMutex::new(self.service_tier()),
             transport: StdMutex::new(self.transport()),
         })
@@ -634,4 +637,105 @@ async fn set_reasoning_effort_propagates_sibling_model_change() {
     assert_eq!(agent.lock().await.provider_model(), "gemini-4-neon-high");
     let saved = crate::session::Session::load("session_sibling_effort_change").unwrap();
     assert_eq!(saved.model.as_deref(), Some("gemini-4-neon-high"));
+}
+
+#[tokio::test]
+async fn queued_effort_precedes_new_request_even_before_its_task_runs() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("session_effort_admission_order").await;
+    let busy = agent.lock().await;
+    handle_set_reasoning_effort(10, "low".into(), &agent, &tx).await;
+    drop(busy);
+    // No scheduler yield: the queued task has not polled its lock yet.
+    handle_set_reasoning_effort(11, "high".into(), &agent, &tx).await;
+    for (expected_id, expected_effort) in [(10, "low"), (11, "high")] {
+        let event = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                event,
+                ServerEvent::ReasoningEffortChanged {
+                    id,
+                    effort: Some(ref effort),
+                    error: None,
+                    ..
+                } if id == expected_id && effort == expected_effort
+            ),
+            "out-of-order effort response: {event:?}"
+        );
+    }
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+}
+
+#[tokio::test]
+async fn busy_set_model_is_admitted_before_following_effort() {
+    check_busy_model_effort_admission(false).await;
+}
+
+#[tokio::test]
+async fn busy_set_route_is_admitted_before_following_effort() {
+    check_busy_model_effort_admission(true).await;
+}
+
+async fn check_busy_model_effort_admission(route: bool) {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let (provider, agent, tx, mut rx) = test_agent("model_effort_admission").await;
+    let busy = agent.lock().await;
+    if route {
+        handle_set_route(
+            20,
+            RouteSelection {
+                model: "test-model-b".into(),
+                runtime_key: jcode_provider_core::RuntimeKey::Current,
+                provider_label: "test-effort".into(),
+                api_method: "test-effort".into(),
+                detail: String::new(),
+            },
+            false,
+            &agent,
+            &tx,
+        )
+        .await;
+    } else {
+        handle_set_model(20, "test-model-b".into(), &agent, &tx).await;
+    }
+    handle_set_reasoning_effort(21, "high".into(), &agent, &tx).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "the active turn still holds the Agent"
+    );
+    drop(busy);
+    let first = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        *provider.effort_models.lock().unwrap(),
+        vec!["test-model-b"],
+        "effort applied to the old model; responses: {first:?}, {second:?}"
+    );
+    assert!(matches!(
+        first,
+        ServerEvent::ModelChanged {
+            id: 20,
+            error: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        second,
+        ServerEvent::ReasoningEffortChanged {
+            id: 21,
+            error: None,
+            ..
+        }
+    ));
 }
