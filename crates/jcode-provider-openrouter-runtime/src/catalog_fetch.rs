@@ -38,18 +38,42 @@ impl ProviderAuth {
     }
 }
 
+/// Fingerprint of the effective header overrides so the saved catalog is
+/// scoped to the exact header set that produced it. Redacting anything here
+/// would weaken the cache identity: the fingerprint is a SHA-256 digest, never
+/// logged, and never persisted itself.
+pub(crate) fn http_header_overrides_fingerprint(overrides: &HeaderMap) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    let mut names: Vec<&str> = overrides.keys().map(|name| name.as_str()).collect();
+    names.sort_unstable();
+    for name in names {
+        hasher.update(name.as_bytes());
+        hasher.update(&[0]);
+        for value in overrides.get_all(name) {
+            hasher.update(value.as_bytes());
+            hasher.update(&[0]);
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 pub(super) async fn fetch_models_from_api(
     client: Client,
     api_base: String,
     auth: ProviderAuth,
+    http_header_overrides: HeaderMap,
     models_cache: Arc<RwLock<ModelsCache>>,
     cache_namespace: Option<String>,
 ) -> Result<Vec<ModelInfo>> {
     let url = muse_catalog_url(&api_base, cache_namespace.as_deref());
     let request = auth.apply_catalog(client.get(&url), &api_base).await?;
     let response = apply_kimi_coding_agent_headers(request, &api_base, None)
-            .send()
-            .await
+        // Config-driven overrides apply last so they win over any same-named
+        // header jcode set earlier on the request.
+        .headers(http_header_overrides.clone())
+        .send()
+        .await
             .with_context(|| {
                 format!(
                     "Failed to send OpenAI-compatible model catalog request\n  endpoint: {}\n  auth: {}\nHint: check network connectivity, DNS/TLS, and that the base URL includes the API version (usually /v1).",
@@ -89,9 +113,18 @@ pub(super) async fn fetch_models_from_api(
         })?;
 
     let ns = cache_namespace.as_deref();
-    ollama_context::maybe_enrich(&client, &api_base, ns, &mut models).await;
+    ollama_context::maybe_enrich(&client, &api_base, ns, &http_header_overrides, &mut models).await;
+    // The saved catalog identity includes the header fingerprint so a changed
+    // Authorization or routing header cannot silently reuse the previous
+    // header set's model list.
+    let headers_fp = http_header_overrides_fingerprint(&http_header_overrides);
     if let Some(namespace) = ns {
-        save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
+        save_disk_cache_with_source_for_namespace_with_headers(
+            namespace,
+            &models,
+            Some(&api_base),
+            Some(&headers_fp),
+        );
     } else {
         save_disk_cache_with_source(&models, Some(&api_base));
     }
@@ -274,6 +307,7 @@ mod tests {
                 token: "loopback-token".into(),
                 label: "TEST".into(),
             },
+            reqwest::header::HeaderMap::new(),
             cache,
             Some("muse-subscription".into()),
         )

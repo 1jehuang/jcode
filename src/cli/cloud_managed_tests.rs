@@ -1,7 +1,6 @@
 //! Local-only execution of the exact generated shell, with downloaded artifacts
 //! supplied by a fake curl. No network, cloud host or user installation is used.
 use super::*;
-use std::path::Path;
 
 #[test]
 fn release_policy_is_exact_and_development_has_no_fallback() {
@@ -40,6 +39,7 @@ fn release_policy_is_exact_and_development_has_no_fallback() {
 mod shell {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
 
     struct Fixture {
         dir: tempfile::TempDir,

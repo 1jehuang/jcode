@@ -307,6 +307,7 @@ impl Provider for OpenRouterProvider {
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
+        let http_header_overrides = self.http_header_overrides.clone();
 
         tokio::spawn(async move {
             if tx
@@ -323,6 +324,7 @@ impl Provider for OpenRouterProvider {
                 api_base,
                 auth,
                 send_openrouter_headers,
+                http_header_overrides,
                 conversation_id,
                 request_for_retries,
                 false,
@@ -873,6 +875,7 @@ impl Provider for OpenRouterProvider {
             )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
+            http_header_overrides: self.http_header_overrides.clone(),
         })
     }
 }
@@ -938,6 +941,7 @@ impl OpenRouterProvider {
         let api_base = self.api_base.clone();
         let conversation_id = self.conversation_id.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
+        let http_header_overrides = self.http_header_overrides.clone();
         tokio::spawn(async move {
             if tx
                 .send(Ok(StreamEvent::ConnectionType {
@@ -953,6 +957,7 @@ impl OpenRouterProvider {
                 api_base,
                 auth,
                 false,
+                http_header_overrides,
                 conversation_id,
                 request,
                 true,
@@ -991,6 +996,21 @@ impl OpenRouterProvider {
     ) -> Option<jcode_provider_openrouter::DiskCache> {
         self.load_disk_cache_entry_for_this_profile()
             .filter(|entry| self.model_disk_cache_source_matches(entry))
+            // A catalog saved under a different effective header set (changed
+            // Authorization or routing header) must not be reused; the same
+            // endpoint can serve different models per header. Caches written
+            // before the fingerprint existed carry `None` and stay usable.
+            .filter(|entry| {
+                entry
+                    .source_headers_fingerprint
+                    .as_deref()
+                    .map_or(true, |stored| {
+                        stored
+                            == catalog_fetch::http_header_overrides_fingerprint(
+                                &self.http_header_overrides,
+                            )
+                    })
+            })
     }
 
     /// Load this provider's own model disk cache, ignoring the process-global
