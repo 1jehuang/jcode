@@ -664,7 +664,11 @@ impl Tool for BgTool {
                 let rendered = if let Some(ref info) = status
                     && info.status != crate::bus::BackgroundTaskStatus::Running
                 {
-                    let mut header = format!("[task {} · status: {}", task_id, info.status);
+                    let mut header = format!(
+                        "[task {} · status: {}",
+                        task_id,
+                        format!("{:?}", info.status).to_lowercase()
+                    );
                     if let Some(code) = info.exit_code {
                         header.push_str(&format!(" · exit: {}", code));
                     }

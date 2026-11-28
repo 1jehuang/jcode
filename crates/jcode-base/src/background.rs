@@ -1469,7 +1469,7 @@ impl BackgroundTaskManager {
                     status: BackgroundTaskStatus::Failed,
                     exit_code: None,
                     output_preview: error.clone(),
-                    output_file: task.output_path.clone(),
+                    output_file: self.output_dir.join(format!("{}.output", final_status.task_id)),
                     duration_secs: final_status.duration_secs.unwrap_or(0.0),
                     notify: notify_flag,
                     wake: wake_flag,
