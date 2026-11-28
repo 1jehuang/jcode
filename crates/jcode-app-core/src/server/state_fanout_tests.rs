@@ -13,7 +13,7 @@ fn thousand_snapshots_avoid_single_recipient_heap_storage() {
         let mut vec_heap_owners = 0;
         let mut snapshot_heap_owners = 0;
         for _ in 0..1000 {
-            let original = std::hint::black_box(senders.iter().cloned().collect::<Vec<_>>());
+            let original = std::hint::black_box(senders.to_vec());
             vec_heap_owners += usize::from(original.capacity() > 0);
             let snapshot =
                 std::hint::black_box(senders.iter().cloned().collect::<RecipientSnapshot>());

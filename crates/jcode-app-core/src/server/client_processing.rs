@@ -163,26 +163,6 @@ fn delivered_replay_is_reminder_only(content: &str, image_count: usize) -> bool 
     content.trim().is_empty() && image_count == 0
 }
 
-#[cfg(test)]
-mod delivered_replay_tests {
-    use super::delivered_replay_is_reminder_only;
-
-    #[test]
-    fn reminder_only_replay_is_suppressed() {
-        assert!(delivered_replay_is_reminder_only("", 0));
-        assert!(delivered_replay_is_reminder_only("  \n", 0));
-    }
-
-    #[test]
-    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
-        assert!(!delivered_replay_is_reminder_only(
-            "please also fix the tests",
-            0
-        ));
-        assert!(!delivered_replay_is_reminder_only("", 1));
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_processing_message(
     message: ProcessingMessage,
@@ -869,4 +849,24 @@ pub(super) fn move_tool_to_background(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued
     ));
+}
+
+#[cfg(test)]
+mod delivered_replay_tests {
+    use super::delivered_replay_is_reminder_only;
+
+    #[test]
+    fn reminder_only_replay_is_suppressed() {
+        assert!(delivered_replay_is_reminder_only("", 0));
+        assert!(delivered_replay_is_reminder_only("  \n", 0));
+    }
+
+    #[test]
+    fn queued_followup_with_delivered_reminder_is_not_suppressed() {
+        assert!(!delivered_replay_is_reminder_only(
+            "please also fix the tests",
+            0
+        ));
+        assert!(!delivered_replay_is_reminder_only("", 1));
+    }
 }

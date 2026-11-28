@@ -2,7 +2,10 @@
 //! Run: justrust run --release -p jcode-app-core --example tool_projection_probe
 use jcode_message_types::ContentBlock;
 use jcode_session_types::StoredMessage;
+// Only `message` is exercised here; the fixtures module is shared with
+// search_projection_probe, which uses `text` and `cases`.
 #[path = "../src/tool/session_search/searchable_text_fixtures.rs"]
+#[allow(dead_code)]
 mod fixtures;
 #[path = "../src/tool/session_search/searchable_text.rs"]
 mod projection;

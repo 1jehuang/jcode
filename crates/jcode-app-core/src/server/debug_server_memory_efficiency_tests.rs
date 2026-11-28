@@ -1,4 +1,5 @@
 //! No-LLM fixtures for the server memory diagnostic's session-only fast path.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
 fn diagnostic_event(id: u64, message: &str) -> SwarmEvent {

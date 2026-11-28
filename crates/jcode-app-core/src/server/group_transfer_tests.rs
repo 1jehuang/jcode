@@ -609,9 +609,15 @@ async fn scoped_admission_allows_unrelated_turn_but_rejects_any_selected_swarm_c
     // exclude both inspection and prepare of the entire selected swarm.
     let callback_gate = gate.clone();
     let callback = gate
-        .spawn_session("leader", async move {
-            callback_gate.spawn(std::future::pending::<()>()).unwrap()
-        })
+        .spawn_session(
+            "leader",
+            // Return the spawned task directly: the `async` block itself would
+            // yield a JoinHandle, which is itself awaitable (async_yields_async).
+            #[allow(clippy::async_yields_async)]
+            async move {
+                callback_gate.spawn(std::future::pending::<()>()).unwrap()
+            },
+        )
         .unwrap()
         .await
         .unwrap();
