@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset -f cargo 2>/dev/null || true
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-fixture="$tmp/repo"; fake_bin="$tmp/bin"
+fixture="$tmp/repo with spaces"; fake_bin="$tmp/bin"
 mkdir -p "$fixture/scripts/lib" "$fake_bin"
 cp "$repo_root/scripts/install_release.sh" "$fixture/scripts/"
 printf '%s\n' 'jcode_configure_path() { :; }' > "$fixture/scripts/lib/configure_path.sh"
