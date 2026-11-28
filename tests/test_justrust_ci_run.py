@@ -71,6 +71,22 @@ class JustrustCiRunTest(unittest.TestCase):
                 'cargo:test --locked -p jcode-sdk',
             )
 
+    def test_routes_macos_target_to_hosted_macos_platform(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / 'calls.log'
+            self._make_stub(root, 'justrust', out)
+            self._make_stub(root, 'cargo', out)
+            env = dict(os.environ, PATH=f'{root}:{os.environ["PATH"]}', JCODE_API_KEY='test-key')
+            subprocess.check_call(
+                ['bash', str(SCRIPT), 'build', '--locked', '--release', '--target', 'aarch64-apple-darwin'],
+                env=env,
+            )
+            self.assertEqual(
+                out.read_text().strip(),
+                'justrust:build --remote --platform=macos --locked --release --target aarch64-apple-darwin',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,7 +12,16 @@ subcmd="$1"
 shift
 
 if [[ "${JUSTRUST_CI_DISABLE:-0}" != "1" ]] && [[ -n "${JCODE_API_KEY:-}" ]] && command -v justrust >/dev/null 2>&1; then
-  exec justrust "$subcmd" --remote "$@"
+  extra=()
+  prev=""
+  for arg in "$@"; do
+    if [[ "$arg" == "--target=aarch64-apple-darwin" ]] || [[ "$prev" == "--target" && "$arg" == "aarch64-apple-darwin" ]]; then
+      extra+=(--platform=macos)
+      break
+    fi
+    prev="$arg"
+  done
+  exec justrust "$subcmd" --remote "${extra[@]}" "$@"
 fi
 
 exec cargo "$subcmd" "$@"

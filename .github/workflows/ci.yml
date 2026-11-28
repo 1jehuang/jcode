@@ -177,7 +177,7 @@ jobs:
 
   build:
     name: Build & Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'ubuntu-latest' || matrix.os }}
     # 35 minutes covers a normal push (~12 min with a warm Swatinem cache) but
     # not a *rerun*, where the cache is cold: three consecutive reruns of a
     # known-good commit were cancelled at the cap, each getting further through
@@ -223,22 +223,29 @@ jobs:
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
+        if: ${{ secrets.JUSTRUST_API_KEY == '' }}
         with:
           # Suffix bumped to evict caches that held 1.83.0 / <unknown rustc>
           # artifacts produced before RUSTUP_TOOLCHAIN=stable pinned the job.
           key: ${{ matrix.os }}-stablepin
 
+      - name: Install hosted justrust client
+        if: ${{ secrets.JUSTRUST_API_KEY != '' }}
+        run: bash scripts/install_justrust_hosted_ci.sh
+
       - name: Install mold linker (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && secrets.JUSTRUST_API_KEY == ''
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold
 
       - name: Build
         shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
         run: |
           mkdir -p .cargo
-          if [ "$RUNNER_OS" = "Linux" ]; then
+          if [ "$RUNNER_OS" = "Linux" ] && [ -z "${JCODE_API_KEY:-}" ]; then
             cat > .cargo/config.toml << 'EOF'
           [target.x86_64-unknown-linux-gnu]
           linker = "clang"
@@ -255,27 +262,37 @@ jobs:
           RUSTC="$(rustup which rustc)"
           export RUSTC
           CARGO_BIN="$(rustup which cargo)"
-          "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
+          if [ -n "${JCODE_API_KEY:-}" ] && command -v justrust >/dev/null 2>&1; then
+            bash scripts/justrust_ci_run.sh build --locked --release --target ${{ matrix.target }}
+          else
+            "$CARGO_BIN" build --locked --release --target ${{ matrix.target }}
+          fi
 
       - name: Compile library and binary tests
         shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
         run: |
           python3 .github/scripts/run_with_timeout.py 900 \
-            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} --lib --bins --no-run
+            bash scripts/justrust_ci_run.sh test --locked --target ${{ matrix.target }} --lib --bins --no-run
 
       - name: Run deterministic retention-readiness cohort
         shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
         run: |
           # A cold jcode-app-core test harness compiles heavy optional provider
           # dependencies and can exceed three minutes on hosted runners. The
           # cohort itself runs in under a second once the lib test is built.
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            bash scripts/justrust_ci_run.sh test --locked --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
       - name: Run secret-input pty cohort (all platforms with a pty)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          JCODE_API_KEY: ${{ secrets.JUSTRUST_API_KEY }}
         # `jcode-base --lib` is never executed on Linux CI: the only jcode-base
         # test invocation anywhere in this workflow is a Windows-only
         # `power_inhibit::tests::windows_` filter. So the masking fix for #660 had
@@ -289,7 +306,7 @@ jobs:
         # runner (run 30591536707) while the cohort itself runs in a second.
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
-            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            bash scripts/justrust_ci_run.sh test --locked --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
 
       - name: Run browser session liveness and reuse regressions
