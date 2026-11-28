@@ -28,6 +28,23 @@ test("ndjson decoder reassembles frames split across chunks", () => {
   ]);
 });
 
+test("ndjson decoder preserves UTF-8 across every byte split", () => {
+  const frame = { v: 1, ev: "text_delta", text: "你好🙂" };
+  const bytes = Buffer.from(JSON.stringify(frame) + "\n");
+  for (let split = 1; split < bytes.length; split++) {
+    const decoder = new NdjsonDecoder();
+    assert.deepEqual(decoder.push(bytes.subarray(0, split)), []);
+    assert.deepEqual(decoder.push(bytes.subarray(split)), [frame], `split at byte ${split}`);
+  }
+});
+
+test("ndjson decoder keeps byte and string chunks in order", () => {
+  const decoder = new NdjsonDecoder();
+  assert.deepEqual(decoder.push(Buffer.concat([Buffer.from('{"text":"'), Buffer.from([0xe4])])), []);
+  assert.deepEqual(decoder.push('!"}\n'), [{ text: "\uFFFD!" }]);
+  assert.deepEqual(decoder.push(Buffer.from('{"text":"好"}\n')), [{ text: "好" }]);
+});
+
 test("handshake records server identity and capabilities", async () => {
   const server = await startMockHarness();
   const client = await JcodeClient.connect({ socketPath: server.socketPath });

@@ -1,17 +1,21 @@
 /** NDJSON line framing over a byte stream. */
 
+import { StringDecoder } from "node:string_decoder";
+
 /**
  * Incremental newline-delimited JSON decoder.
  *
- * Sockets split frames anywhere, so decoding per chunk is wrong; this keeps a
- * remainder buffer and only emits complete lines. Blank lines are skipped,
- * matching the Rust reader.
+ * Sockets can split both UTF-8 characters and JSON lines across chunks. Keep
+ * incomplete characters and lines until more bytes arrive. Blank lines are
+ * skipped, matching the Rust reader.
  */
 export class NdjsonDecoder {
+  private readonly utf8 = new StringDecoder("utf8");
   private buffer = "";
 
   push(chunk: Buffer | string): unknown[] {
-    this.buffer += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    // A string is already decoded, so flush pending bytes before appending it.
+    this.buffer += typeof chunk === "string" ? this.utf8.end() + chunk : this.utf8.write(chunk);
     const out: unknown[] = [];
     let index = this.buffer.indexOf("\n");
     while (index !== -1) {
