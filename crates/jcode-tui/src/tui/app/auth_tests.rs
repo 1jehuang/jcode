@@ -7,20 +7,39 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let _provider_env = super::super::tests::ProviderEnvGuard::clear();
     let temp = tempfile::tempdir().expect("tempdir");
-    let saved_env = ["JCODE_HOME"].map(|key| (key, std::env::var_os(key)));
-
+    // The guard above clears the named-profile key; the profile lock vars and
+    // the no-auth flag are ambient runtime state it does not own.
+    // Restore-on-drop: a panicking test must still put the ambient values
+    // back, or the profile settings stay cleared for later tests.
+    let _restore = EnvRestoreGuard(
+        [
+            "JCODE_HOME",
+            "JCODE_PROVIDER_PROFILE_ACTIVE",
+            "JCODE_PROVIDER_PROFILE_NAME",
+            "JCODE_OPENROUTER_ALLOW_NO_AUTH",
+        ]
+        .map(|key| (key, std::env::var_os(key))),
+    );
     crate::env::set_var("JCODE_HOME", temp.path());
+    for (key, _) in _restore.0.iter().skip(1) {
+        crate::env::remove_var(key);
+    }
 
-    let result = f();
+    f()
+}
 
-    for (key, value) in saved_env {
-        if let Some(value) = value {
-            crate::env::set_var(key, value);
-        } else {
-            crate::env::remove_var(key);
+struct EnvRestoreGuard([(&'static str, Option<std::ffi::OsString>); 4]);
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.iter() {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
         }
     }
-    result
 }
 
 #[test]
