@@ -152,7 +152,9 @@ impl Config {
     ) -> anyhow::Result<T> {
         let mut cfg = Self::load_for_update()?;
         let result = f(&mut cfg.agents)?;
-        cfg.agents.validate_swarm_model_policy()?;
+        cfg.agents
+            .validate_swarm_model_policy()
+            .map_err(anyhow::Error::msg)?;
         cfg.save()?;
         crate::logging::info("Saved agents.swarm_model policy to config");
         Ok(result)
@@ -725,7 +727,8 @@ impl Config {
         if source_id.is_empty() {
             anyhow::bail!("External auth source id cannot be empty");
         }
-        let canonical = crate::storage::validate_external_auth_file(path)?;
+        let canonical = crate::storage::validate_external_auth_file(path)
+            .map_err(anyhow::Error::msg)?;
         Ok(format!(
             "{}|{}",
             source_id,

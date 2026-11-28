@@ -17,7 +17,11 @@
 # scripts/install.ps1). Set JCODE_PARALLEL_FRONTEND=0 to keep the wrapper but
 # skip the extra threads. An explicit RUSTC_WRAPPER (for example sccache)
 # replaces it.
-rustc-wrapper = "scripts/rustc-parallel-frontend"
+# rustc-wrapper disabled on Windows: scripts/rustc-parallel-frontend is a POSIX script, so Windows
+# rejects it with ERROR_BAD_EXE_FORMAT (cargo: "%1 is not a valid Win32 application", os error 193).
+# Cost of this workaround: parallel rustc frontend is lost on this host. Proper fixes are to ship a
+# real .exe/.cmd shim for the wrapper, or to pass it as an argument to a valid binary.
+# rustc-wrapper = "scripts/rustc-parallel-frontend"
 #
 # Linux CI overwrites this file, so it builds without the wrapper.
 # Local fast-linker selection is handled by scripts/dev_cargo.sh so we don't

@@ -175,7 +175,7 @@ pub fn runtime_dir_for_product(product: &str) -> PathBuf {
         }
     }
 
-    let dir = fallback_runtime_dir();
+    let dir = fallback_runtime_dir(product);
     ensure_private_runtime_dir(&dir);
     dir
 }
