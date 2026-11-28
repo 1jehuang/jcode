@@ -21,8 +21,10 @@ impl BackgroundTaskManager {
             removed_files: 0,
             skipped_running_files: 0,
         };
-        let cutoff =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(max_age_hours * 3600);
+        let now = std::time::SystemTime::now();
+        let cutoff = now - std::time::Duration::from_secs(max_age_hours * 3600);
+        // shortcut: temps younger than one hour may be active; use writer leases if writes can exceed it.
+        let temp_cutoff = now - std::time::Duration::from_secs(3600);
 
         if let Ok(mut entries) = fs::read_dir(&self.output_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -33,7 +35,11 @@ impl BackgroundTaskManager {
                 let Ok(modified) = metadata.modified() else {
                     continue;
                 };
-                if modified >= cutoff {
+                let is_temp = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext == "tmp" || ext.starts_with("tmp-"));
+                if modified >= cutoff || is_temp && modified >= temp_cutoff {
                     continue;
                 }
 
@@ -92,6 +98,79 @@ mod tests {
         std::fs::create_dir(&unremovable)?;
         assert!(manager.cleanup(0).await.is_err());
         assert!(unremovable.is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_fresh_replacements_but_reaps_orphans() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(dir.path().to_path_buf());
+        let fresh = ["task.status.json.1.0.tmp", "task.status.tmp-123-1"];
+        for name in fresh {
+            std::fs::write(dir.path().join(name), "{")?;
+        }
+        let orphan = dir.path().join("orphan.status.tmp-123-2");
+        std::fs::write(&orphan, "{")?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&orphan)?
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(3601),
+            ))?;
+        let finished = dir.path().join("old.output");
+        std::fs::write(&finished, "done")?;
+        assert_eq!(manager.cleanup(0).await?, 2);
+        for name in fresh {
+            assert!(dir.path().join(name).exists());
+        }
+        assert!(!orphan.exists());
+        assert!(!finished.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_keeps_a_writer_created_replacement_while_serializing() -> Result<()> {
+        struct CleanupDuringWrite<'a> {
+            manager: &'a BackgroundTaskManager,
+            runtime: &'a tokio::runtime::Runtime,
+        }
+        impl serde::Serialize for CleanupDuringWrite<'_> {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                // The stale orphan and the real writer's temporary file both exist now.
+                assert_eq!(
+                    std::fs::read_dir(&self.manager.output_dir).unwrap().count(),
+                    2
+                );
+                assert_eq!(self.runtime.block_on(self.manager.cleanup(0)).unwrap(), 1);
+                serde::Serialize::serialize("replacement status", serializer)
+            }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(dir.path().to_path_buf());
+        let stale = dir.path().join(".jcode-status-abandoned.tmp");
+        std::fs::write(&stale, "incomplete")?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&stale)?
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3601))?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let path = manager.status_path_for("cleanup-during-write");
+        BackgroundTaskManager::persist_status_file(
+            &path,
+            &CleanupDuringWrite {
+                manager: &manager,
+                runtime: &runtime,
+            },
+        )?;
+        assert_eq!(std::fs::read_to_string(path)?, "\"replacement status\"");
+        assert!(!stale.exists());
+        assert_eq!(std::fs::read_dir(dir.path())?.count(), 1);
         Ok(())
     }
 }
