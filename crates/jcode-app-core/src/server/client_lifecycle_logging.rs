@@ -16,7 +16,7 @@ pub(super) fn interrupt_request_log_fields(
     };
 
     match request {
-        Request::Cancel { id } => Some(base("cancel", *id)),
+        Request::Cancel { id, .. } => Some(base("cancel", *id)),
         Request::SoftInterrupt {
             id,
             content,

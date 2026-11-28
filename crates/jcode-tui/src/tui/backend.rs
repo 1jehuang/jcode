@@ -612,7 +612,7 @@ impl RemoteConnection {
         };
 
         match request {
-            Request::Cancel { id } => Some(base("cancel", *id)),
+            Request::Cancel { id, .. } => Some(base("cancel", *id)),
             Request::SoftInterrupt {
                 id,
                 content,
