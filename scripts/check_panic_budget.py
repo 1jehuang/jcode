@@ -64,7 +64,7 @@ def production_rust_files() -> list[Path]:
             if path.suffix == ".rs" and not is_test_rust_file(path):
                 files.append(path)
     test_only = test_module_files(files, production_lines)
-    return [path for path in files if path not in test_only]
+    return [path for path in files if path.resolve() not in test_only]
 
 
 def current_counts() -> dict[str, int]:

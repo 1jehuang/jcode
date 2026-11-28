@@ -9,9 +9,9 @@ pub(crate) mod model_names;
 use crate::todo::TodoItem;
 #[path = "helpers_environment.rs"]
 mod environment;
-pub(super) use environment::clipboard_image;
 use environment::gather_ambient_info_inner;
 pub(crate) use environment::gather_git_info_in;
+pub(super) use environment::{clipboard_image, clipboard_image_native, download_image_url};
 
 use crate::tui::info_widget::{AmbientWidgetData, GitInfo};
 use crate::tui::session_picker::ResumeTarget;
@@ -1278,38 +1278,6 @@ pub(super) fn extract_image_url(text: &str) -> Option<String> {
     }
 
     None
-}
-
-/// Download an image from a URL and return (media_type, base64_data).
-/// Uses curl for simplicity (available on all platforms).
-pub(super) fn download_image_url(url: &str) -> Option<(String, String)> {
-    use base64::Engine;
-
-    let output = std::process::Command::new("curl")
-        .args(["-sL", "--max-time", "10", "--max-filesize", "10000000", url])
-        .output()
-        .ok()?;
-
-    if !output.status.success() || output.stdout.is_empty() {
-        return None;
-    }
-
-    // Detect image type from magic bytes
-    let data = &output.stdout;
-    let media_type = if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
-    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
-    } else if data.starts_with(b"GIF8") {
-        "image/gif"
-    } else if data.starts_with(b"RIFF") && data.len() > 12 && &data[8..12] == b"WEBP" {
-        "image/webp"
-    } else {
-        return None;
-    };
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(data);
-    Some((media_type.to_string(), b64))
 }
 
 /// Encode raw RGBA pixel data as PNG bytes.

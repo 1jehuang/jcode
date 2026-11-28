@@ -10,6 +10,7 @@ fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
         || None,
         || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
         |_| panic!("clipboard image bytes must not fetch a URL"),
+        Vec::new,
     );
     assert!(matches!(
         content,
@@ -21,6 +22,7 @@ fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
         || Some("http://127.0.0.1/secret.png".to_string()),
         || panic!("text must stay text"),
         super::download_image_url_content,
+        Vec::new,
     );
     assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
 }
@@ -114,8 +116,9 @@ fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
     let content = read_clipboard_for_paste_with(
         &ClipboardPasteKind::Smart,
         || Some("plain text".to_string()),
-        || Some(("image/png".to_string(), "base64".to_string())),
-        |_| None,
+        || panic!("ordinary text must not probe images"),
+        |_| panic!("ordinary text must not fetch images"),
+        || panic!("ordinary text must not inspect copied files"),
     );
 
     match content {
@@ -131,6 +134,7 @@ fn smart_paste_uses_image_only_when_no_text_is_available() {
         || None,
         || Some(("image/png".to_string(), "base64".to_string())),
         |_| None,
+        Vec::new,
     );
 
     match content {
@@ -147,8 +151,13 @@ fn smart_paste_uses_image_only_when_no_text_is_available() {
 
 #[test]
 fn smart_paste_empty_clipboard_stays_empty_not_dictation() {
-    let content =
-        read_clipboard_for_paste_with(&ClipboardPasteKind::Smart, || None, || None, |_| None);
+    let content = read_clipboard_for_paste_with(
+        &ClipboardPasteKind::Smart,
+        || None,
+        || None,
+        |_| None,
+        Vec::new,
+    );
 
     assert!(
         matches!(content, ClipboardPasteContent::Empty),
@@ -165,6 +174,7 @@ fn smart_paste_uses_image_when_text_target_is_blank() {
         || Some("   ".to_string()),
         || Some(("image/png".to_string(), "base64".to_string())),
         |_| None,
+        Vec::new,
     );
 
     match content {
@@ -273,5 +283,132 @@ fn text_input_for_control_shortcut_letters_stays_non_text() {
     assert_eq!(
         text_input_for_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
         None
+    );
+}
+
+#[test]
+fn smart_paste_prefers_image_when_text_is_its_file_name() {
+    for name in [
+        "screenshot.png",
+        "/Users/me/Desktop/photo.JPG",
+        "file:///tmp/diagram.webp",
+        "FILE:///tmp/Diagram.PNG",
+        "'/tmp/with space.gif'",
+    ] {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some(name.to_string()),
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+            Vec::new,
+        );
+        assert!(
+            matches!(content, ClipboardPasteContent::Image { .. }),
+            "{name}: {content:?}"
+        );
+    }
+}
+#[test]
+fn smart_paste_file_names_without_native_image_remain_text() {
+    for name in [
+        "screenshot.png",
+        "file:///tmp/missing.jpg",
+        "/remote/image.webp",
+    ] {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some(name.into()),
+            || None,
+            |_| panic!("local image references must not download"),
+            Vec::new,
+        );
+        assert!(matches!(content, ClipboardPasteContent::Text(text) if text == name));
+    }
+}
+
+#[test]
+fn smart_paste_ambiguous_spaced_name_needs_a_file_reference() {
+    let name = "Take a screenshot.png";
+    let content = read_clipboard_for_paste_with(
+        &ClipboardPasteKind::Smart,
+        || Some(name.into()),
+        || panic!("ordinary text must not probe images"),
+        |_| None,
+        Vec::new,
+    );
+    assert!(matches!(content, ClipboardPasteContent::Text(text) if text == name));
+    let content = read_clipboard_for_paste_with(
+        &ClipboardPasteKind::Smart,
+        || Some(name.into()),
+        || Some(("image/png".into(), "base64".into())),
+        |_| None,
+        || vec![std::path::PathBuf::from("/copied").join(name)],
+    );
+    assert!(matches!(content, ClipboardPasteContent::Image { .. }));
+}
+
+#[test]
+fn smart_paste_existing_spaced_file_uses_injected_home_and_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let cwd = dir.path().join("work");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(home.join("home image.png"), b"fixture").unwrap();
+    std::fs::write(cwd.join("work image.png"), b"fixture").unwrap();
+    let exists =
+        |name: &str| super::names_existing_file(name, Some(home.clone()), Some(cwd.clone()));
+    assert!(exists("~/home image.png"));
+    assert!(exists("work image.png"));
+    assert!(exists(home.join("home image.png").to_str().unwrap()));
+    assert!(!exists("missing image.png"));
+    assert!(!exists("~/missing image.png"));
+    std::fs::create_dir(cwd.join("directory image.png")).unwrap();
+    assert!(!exists("directory image.png"));
+    assert!(!super::names_existing_file(
+        "relative image.png",
+        None,
+        None
+    ));
+}
+
+#[test]
+fn smart_paste_image_references_exclude_urls_and_prose() {
+    for text in [
+        "https://example.invalid/image.png",
+        "HTTP://example.invalid/image.jpg",
+        "line one\nimage.png",
+        "not an image.txt",
+    ] {
+        assert!(!super::text_names_an_image(text, || panic!(
+            "not a local image reference"
+        )));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_image_download_guard_prevents_starting_curl() {
+    if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+        "ssh_image_download_guard_prevents_starting_curl",
+    ) {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let curl = dir.path().join("curl");
+    let marker = dir.path().join("called");
+    std::fs::write(
+        &curl,
+        b"#!/bin/sh\nprintf called > \"$JCODE_TEST_CURL_MARKER\"\nprintf '\\211PNG'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::env::set_var("PATH", dir.path());
+    crate::env::set_var("JCODE_TEST_CURL_MARKER", &marker);
+    assert!(super::super::download_image_url("http://127.0.0.1/private.png").is_none());
+    assert!(
+        !marker.exists(),
+        "SSH image reads must not start a local fetch"
     );
 }
