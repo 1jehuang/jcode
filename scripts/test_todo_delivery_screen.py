@@ -141,9 +141,8 @@ def main():
                                 ),
                                 None,
                             )
-                            if match and any(
-                                "verification" in row.lower() for row in rows
-                            ):
+                            if match:
+                                assert not any("checked_end_to_end" in row for row in rows)
                                 actual = client.screen.buffer[match[0]][match[1]].fg
                                 assert actual == color, (state, actual, color)
                                 print(f"{state}: #{actual}", flush=True)

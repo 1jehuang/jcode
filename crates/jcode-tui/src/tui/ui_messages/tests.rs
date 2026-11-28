@@ -1902,11 +1902,11 @@ fn render_todos_message_shows_delivery_state_under_intent() {
             .is_some_and(|line| line.contains("Delivery partially_delivered")),
         "delivery state should render immediately under intent (using lowest goal state): {text_lines:?}"
     );
-    assert!(text_lines[intent_idx + 2].contains("Verification checked_in_isolation"));
+    assert!(!text_lines.iter().any(|line| line.contains("Verification")));
     let pinned = render_pinned_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
     let pinned = pinned.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
     assert!(pinned.contains("Delivery partially_delivered"), "{pinned}");
-    assert!(pinned.contains("Verification checked_in_isolation"), "{pinned}");
+    assert!(!pinned.contains("Verification"), "{pinned}");
     for narrow in [16u16, 20, 28] {
         let narrow_lines = render_todos_message(&msg, narrow, crate::config::DiffDisplayMode::Off);
         for line in &narrow_lines {
@@ -1991,7 +1991,7 @@ fn pinned_completed_todos_color_delivery_independently_of_verification() {
         let color = |value: &str| lines.iter().flat_map(|l| &l.spans)
             .find(|s| s.content.as_ref() == value).and_then(|s| s.style.fg);
         assert_eq!(color(delivery), Some(expected));
-        assert_eq!(color("checked_end_to_end"), Some(todo_score_color()));
+        assert_eq!(color("checked_end_to_end"), None);
     }
 }
 

@@ -1769,14 +1769,6 @@ fn delivery_color(state: crate::todo::DeliveryState) -> Color {
     }
 }
 
-fn verification_color(state: crate::todo::VerificationState) -> Color {
-    match state {
-        crate::todo::VerificationState::Unchecked => todo_meta_color(),
-        crate::todo::VerificationState::CheckedInIsolation => todo_warning_color(),
-        crate::todo::VerificationState::CheckedEndToEnd => todo_score_color(),
-    }
-}
-
 /// Plan-level assessment lines shown once above the todo groups.
 fn push_todo_plan_details(
     lines: &mut Vec<Line<'static>>,
@@ -1834,17 +1826,6 @@ fn push_todo_outcome_states(
             vec![
                 Span::styled("Delivery ", Style::default().fg(todo_label_color())),
                 Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            ],
-            base_indent,
-            inner_width,
-        ));
-    }
-    if let Some(state) = goals.iter().filter_map(|goal| goal.verification_state).min() {
-        let color = verification_color(state);
-        lines.push(todo_card_line(
-            vec![
-                Span::styled("Verification ", Style::default().fg(todo_label_color())),
-                Span::styled(state.as_str().to_string(), Style::default().fg(color)),
             ],
             base_indent,
             inner_width,
@@ -2167,15 +2148,7 @@ fn render_todo_goal_updates(
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::VerificationState => push_colored_todo_score_update(
-                    &mut lines,
-                    update.after.as_ref().and_then(|goal| goal.verification_state).map(verification_color).unwrap_or_else(todo_meta_color),
-                    "Verification",
-                    update.before.as_ref().and_then(|g| g.verification_state).map(|s| s.as_str().to_string()),
-                    update.after.as_ref().and_then(|g| g.verification_state).map(|s| s.as_str().to_string()),
-                    base_indent,
-                    inner_width,
-                ),
+                crate::todo::TodoGoalField::VerificationState => continue,
                 crate::todo::TodoGoalField::Autonomy => push_todo_score_update(
                     &mut lines,
                     "Autonomy",

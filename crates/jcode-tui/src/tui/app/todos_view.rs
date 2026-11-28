@@ -760,9 +760,6 @@ fn build_todos_view_markdown(
         if let Some(state) = goal.delivery_state {
             states.push(format!("Delivery {}", state.as_str()));
         }
-        if let Some(state) = goal.verification_state {
-            states.push(format!("Verification {}", state.as_str()));
-        }
         if !states.is_empty() {
             let group = goal.group.as_deref().unwrap_or("Goal");
             markdown.push_str(&format!("\n{group}: {}\n", states.join(" · ")));
@@ -1154,7 +1151,7 @@ mod tests {
         );
 
         assert!(markdown.contains("_(optimize rendering)_"), "{markdown}");
-        assert!(markdown.contains("Delivery partially_delivered · Verification checked_end_to_end"), "{markdown}");
+        assert!(markdown.contains("Delivery partially_delivered") && !markdown.contains("checked_end_to_end"), "{markdown}");
         assert!(!markdown.contains("Feedback loop:"), "{markdown}");
         assert!(markdown.contains("_… and 4 more._"), "{markdown}");
         assert_eq!(markdown.matches("- [").count(), 8, "{markdown}");
