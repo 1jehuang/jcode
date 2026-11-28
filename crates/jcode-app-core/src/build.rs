@@ -26,4 +26,7 @@ pub use jcode_build_support::{
     version_matches_installed_channel, worktree_scope_key, write_build_progress,
     write_current_dev_binary_source_metadata, write_dev_binary_source_metadata,
 };
-pub use jcode_build_support::{dispatch_linux_prerelease, linux_prerelease_candidate};
+pub use jcode_build_support::{
+    LinuxReleaseStatus, dispatch_linux_prerelease, linux_prerelease_candidate,
+    linux_release_status_path, read_linux_release_status,
+};

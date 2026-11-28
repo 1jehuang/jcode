@@ -95,6 +95,37 @@ pub fn selfdev_status_output() -> Result<ToolOutput> {
         server::debug_socket_path().display()
     ));
 
+    if let Some(release_status) = build::read_linux_release_status() {
+        status.push_str("\n## Linux Release Publish\n\n");
+        let failed = release_status.state == "failed"
+            || release_status.discord_status.as_deref() == Some("failed");
+        if failed {
+            status.push_str("**WARNING:** Last Linux release publish or Discord announcement failed!\n");
+        }
+        status.push_str(&format!(
+            "**State:** {} (step: `{}`)\n",
+            release_status.state, release_status.step
+        ));
+        let short_sha = &release_status.sha[..release_status.sha.len().min(9)];
+        if let Some(tag) = release_status.tag.as_deref() {
+            status.push_str(&format!("**Target:** {} (`{}`)\n", tag, short_sha));
+        } else {
+            status.push_str(&format!("**Commit:** `{}`\n", short_sha));
+        }
+        if let Some(discord) = release_status.discord_status.as_deref() {
+            status.push_str(&format!("**Discord:** {}\n", discord));
+        }
+        if let Some(detail) = release_status.detail.as_deref() {
+            status.push_str(&format!("**Detail:** {}\n", detail));
+        }
+        if let Some(updated_at) = release_status.updated_at.as_deref() {
+            status.push_str(&format!("**Updated:** {}\n", updated_at));
+        }
+        if let Some(log_file) = release_status.log_file.as_deref() {
+            status.push_str(&format!("**Log:** `{}`\n", log_file));
+        }
+    }
+
     if let Some(reload_state) = server::ReloadState::load() {
         status.push_str("\n## Reload State\n\n");
         status.push_str(&format!(

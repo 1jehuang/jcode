@@ -1,6 +1,40 @@
 use super::SourceState;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinuxReleaseStatus {
+    pub sha: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    pub state: String,
+    pub step: String,
+    #[serde(default)]
+    pub discord_status: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub log_file: Option<String>,
+}
+
+pub fn linux_release_status_path() -> Option<PathBuf> {
+    jcode_storage::jcode_dir()
+        .ok()
+        .map(|dir| dir.join("logs").join("linux-release-status.json"))
+}
+
+pub fn read_linux_release_status() -> Option<LinuxReleaseStatus> {
+    let path = linux_release_status_path()?;
+    read_linux_release_status_from(&path)
+}
+
+pub fn read_linux_release_status_from(path: &Path) -> Option<LinuxReleaseStatus> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
 
 /// Snapshot eligibility before compiling. A feature branch pointing to master is not master.
 pub fn linux_prerelease_candidate(repo: &Path, source: &SourceState) -> bool {

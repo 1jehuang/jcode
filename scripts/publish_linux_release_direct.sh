@@ -12,15 +12,66 @@ cd "$repo_root"
 log_dir="${JCODE_HOME:-$HOME/.jcode}/logs"
 mkdir -p "$log_dir"
 log_file="$log_dir/linux-release.log"
+status_file="$log_dir/linux-release-status.json"
 exec >>"$log_file" 2>&1
 
 echo "=== $(date -Iseconds) linux-release start sha=$sha ==="
+
+current_step="init"
+publish_state="running"
+publish_detail=""
+discord_status="pending"
+tag=""
+work=""
+
+write_status() {
+  local tmp="${status_file}.tmp.$$"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n \
+      --arg sha "$sha" \
+      --arg tag "$tag" \
+      --arg state "$publish_state" \
+      --arg step "$current_step" \
+      --arg discord_status "$discord_status" \
+      --arg detail "$publish_detail" \
+      --arg updated_at "$(date -Iseconds)" \
+      --arg log_file "$log_file" \
+      '{
+        sha: $sha,
+        tag: (if $tag == "" then null else $tag end),
+        state: $state,
+        step: $step,
+        discord_status: $discord_status,
+        detail: (if $detail == "" then null else $detail end),
+        updated_at: $updated_at,
+        log_file: $log_file
+      }' >"$tmp" 2>/dev/null && mv -f "$tmp" "$status_file" || rm -f "$tmp"
+  fi
+}
+
+on_exit() {
+  local rc=$?
+  if [ -n "$work" ]; then
+    rm -rf -- "$work"
+  fi
+  if [ "$rc" -ne 0 ] && [ "$publish_state" = "running" ]; then
+    publish_state="failed"
+    if [ -z "$publish_detail" ] && [ -f "$log_file" ]; then
+      publish_detail=$(tail -n 5 "$log_file" | grep -v '^=== ' | tail -n 1 || true)
+    fi
+    write_status
+  fi
+}
+trap on_exit EXIT
+
+write_status
 
 lock_dir="${JCODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}"
 mkdir -p "$lock_dir"
 exec 9>"$lock_dir/jcode-linux-release.lock"
 flock 9
 
+current_step="check_eligibility"
 eligible() {
   [ "$(git config --bool jcode.linuxPrerelease || echo false)" = true ] &&
   [ "$(git symbolic-ref -q HEAD)" = refs/heads/master ] &&
@@ -28,19 +79,32 @@ eligible() {
   [ -z "$(git status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ]
 }
 
-eligible || { echo "Skipping: repo not clean on master at $sha"; exit 0; }
+if ! eligible; then
+  echo "Skipping: repo not clean on master at $sha"
+  publish_state="skipped"
+  discord_status="skipped"
+  publish_detail="repo not clean on master at $sha"
+  write_status
+  exit 0
+fi
 
 export GH_HOST=github.com
 export GH_PROMPT_DISABLED=1
 repo="1jehuang/jcode"
 archive="jcode-linux-x86_64.tar.gz"
 
+current_step="check_remote_master"
 remote_sha=$(gh api --hostname github.com "repos/$repo/git/ref/heads/master" --jq .object.sha)
 if [ "$remote_sha" != "$sha" ]; then
   echo "Skipping: remote master ($remote_sha) != $sha"
+  publish_state="skipped"
+  discord_status="skipped"
+  publish_detail="remote master ($remote_sha) != $sha"
+  write_status
   exit 0
 fi
 
+current_step="resolve_tag"
 git fetch --tags origin --quiet || true
 
 tag=$(git tag --points-at "$sha" --list 'v[0-9]*.[0-9]*.[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
@@ -62,25 +126,40 @@ if [ -z "$tag" ]; then
 fi
 
 echo "Resolved tag=$tag for sha=$sha"
+write_status
 
 work=$(mktemp -d "${JCODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}/jcode-linux-release.XXXXXX")
-trap 'rm -rf -- "$work"' EXIT
 
+current_step="check_existing_release"
 existing=false
 if gh release view "$tag" --repo "$repo" --json isDraft,isPrerelease,targetCommitish,assets,body > "$work/release.json" 2>/dev/null; then
   existing=true
   if jq -e --arg archive "$archive" '(.isDraft | not) and (.isPrerelease | not) and ([.assets[] | select(.size > 0) | .name] | index($archive) != null and index("SHA256SUMS") != null)' "$work/release.json" >/dev/null; then
     echo "Release $tag is already published with $archive and SHA256SUMS; skipping."
+    publish_state="skipped"
+    discord_status="skipped"
+    publish_detail="release $tag already published"
+    write_status
     exit 0
   fi
   jq -e --arg sha "$sha" '.isDraft and (.isPrerelease | not) and .targetCommitish == $sha' "$work/release.json" >/dev/null
 fi
 
-eligible || { echo "Skipping before build: repo state changed"; exit 0; }
+if ! eligible; then
+  echo "Skipping before build: repo state changed"
+  publish_state="skipped"
+  discord_status="skipped"
+  publish_detail="repo state changed before build"
+  write_status
+  exit 0
+fi
 
 # Build portable glibc 2.17 Linux binary on our hosted justrust service.
+current_step="build_hosted_binary"
+write_status
 JCODE_BUILD_SEMVER="$tag" bash scripts/build_preview_linux_hosted.sh x86_64-unknown-linux-gnu
 
+current_step="verify_binary"
 binary="$repo_root/target/x86_64-unknown-linux-gnu/release/jcode"
 [ -x "$binary" ] || { echo "Missing hosted binary: $binary"; exit 1; }
 
@@ -89,6 +168,7 @@ short_sha=$(git rev-parse --short "$sha")
 "$binary" --no-update --no-selfdev --version | grep -F -- "$tag ($short_sha)"
 
 # Optional manylinux2014 glibc 2.17 runtime smoke test when Docker is available.
+current_step="docker_smoke_test"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   image='quay.io/pypa/manylinux2014_x86_64@sha256:2bd80fa8fca6b775a913b7e42fa410c5f2246fb6f7f8f3280b5d562e5ca5d63f'
   docker run --rm --read-only --network none --cap-drop ALL \
@@ -102,6 +182,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 fi
 
 # Package into temp dir so we never dirty the repo working tree.
+current_step="package_archive"
 artifact=jcode-linux-x86_64
 stage="$work/stage"
 mkdir -p "$stage"
@@ -132,6 +213,7 @@ chmod 755 "$stage/$artifact"
 tar czf "$work/$archive" -C "$stage" "$artifact" "$artifact.bin"
 (cd "$work" && sha256sum "$archive" > SHA256SUMS && sha256sum --check SHA256SUMS)
 
+current_step="generate_notes"
 title="jcode $tag · Linux"
 notes="$work/highlights.md"
 tags="$work/releases.txt"
@@ -145,6 +227,8 @@ if [ "$existing" = false ] || ! grep -Fxq '## Highlights' "$notes"; then
   SHA="$sha" RELEASE_NOTES="$release_notes" python3 scripts/selfdev_release_highlights.py "$tags" > "$notes"
 fi
 
+current_step="publish_github_release"
+write_status
 if [ "$existing" = false ]; then
   gh release create "$tag" --repo "$repo" --target "$sha" --draft --prerelease=false --latest=false \
     --title "$title" --notes-file "$notes"
@@ -155,6 +239,20 @@ gh release upload "$tag" "$work/$archive" "$work/SHA256SUMS" --repo "$repo" --cl
 gh release edit "$tag" --repo "$repo" --title "$title" --notes-file "$notes" --draft=false --prerelease=false --latest
 
 # Announce on Discord via lightweight workflow dispatch.
-gh workflow run discord-release.yml --repo "$repo" --ref master -f "tag=$tag" || true
+current_step="dispatch_discord"
+write_status
+if ! gh workflow run discord-release.yml --repo "$repo" --ref master -f "tag=$tag"; then
+  echo "Failed to dispatch discord-release.yml for $tag"
+  discord_status="failed"
+  publish_state="failed"
+  publish_detail="gh workflow run discord-release.yml failed for $tag"
+  write_status
+  exit 1
+fi
+
+discord_status="dispatched"
+publish_state="published"
+publish_detail="published $tag ($short_sha) and dispatched Discord announcement"
+write_status
 
 echo "=== $(date -Iseconds) linux-release published $tag ($short_sha) ==="
