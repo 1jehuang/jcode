@@ -1691,11 +1691,8 @@ impl crate::tui::TuiState for App {
             read_tokens: history_read.saturating_add(self.token_accounting.total_cache_read_tokens),
             creation_tokens: history_write
                 .saturating_add(self.token_accounting.total_cache_creation_tokens),
-            optimal_input_tokens: if history_read == 0 {
-                self.token_accounting.total_cache_optimal_input_tokens
-            } else {
-                0
-            },
+            optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
+            optimal_read_tokens: Some(self.token_accounting.total_cache_optimal_read_tokens),
             last_reported_input_tokens: self.token_accounting.last_cache_reported_input_tokens,
             last_read_tokens: self.token_accounting.last_cache_read_tokens,
             last_creation_tokens: self.token_accounting.last_cache_creation_tokens,

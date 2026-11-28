@@ -422,31 +422,8 @@ pub struct UsageInfo {
     pub account_hint: Option<String>,
 }
 
-/// Session-level KV cache telemetry for providers that report cache usage.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CacheHitInfo {
-    /// Sum of per-request full prompt sizes, never inferred from aggregate counters.
-    pub prompt_tokens: Option<u64>,
-    pub last_prompt_tokens: Option<u64>,
-    /// Input tokens from completed API requests that included explicit cache telemetry.
-    pub reported_input_tokens: u64,
-    /// Tokens read from provider KV/prefix cache across this session.
-    pub read_tokens: u64,
-    /// Tokens written/created in provider cache across this session, when reported.
-    pub creation_tokens: u64,
-    /// Approximate reusable prefix tokens expected to be cache-readable.
-    pub optimal_input_tokens: u64,
-    /// Input tokens from the latest completed request with cache telemetry.
-    pub last_reported_input_tokens: Option<u64>,
-    /// Cached input tokens read on the latest completed request with cache telemetry.
-    pub last_read_tokens: Option<u64>,
-    /// Tokens written/created in provider cache on the latest completed request.
-    pub last_creation_tokens: Option<u64>,
-    /// Approximate reusable prefix tokens expected on the latest completed request.
-    pub last_optimal_input_tokens: Option<u64>,
-    /// Recent attributed misses with estimated cacheable tokens not read.
-    pub miss_attributions: Vec<CacheMissAttribution>,
-}
+mod cache_info;
+pub use cache_info::CacheHitInfo;
 
 /// Effective prompt size to use as the denominator for cache-hit ratios.
 ///
@@ -473,46 +450,6 @@ pub struct CacheMissAttribution {
     pub call_index: u16,
     pub missed_tokens: u64,
     pub reason: String,
-}
-
-impl CacheHitInfo {
-    /// Fraction of the session's prompt tokens that were served from cache.
-    pub fn hit_ratio(&self) -> Option<f32> {
-        let denominator = self.prompt_tokens?;
-        if denominator == 0 {
-            None
-        } else {
-            Some((self.read_tokens as f32 / denominator as f32).clamp(0.0, 1.0))
-        }
-    }
-
-    /// Fraction of the previously-cacheable prompt that was actually reused
-    /// (read_tokens vs. the prior request's full prompt).
-    pub fn optimal_ratio(&self) -> Option<f32> {
-        if self.optimal_input_tokens == 0 {
-            None
-        } else {
-            Some((self.read_tokens as f32 / self.optimal_input_tokens as f32).clamp(0.0, 1.0))
-        }
-    }
-
-    pub fn last_ratio(&self) -> Option<f32> {
-        let denominator = self.last_prompt_tokens?;
-        if denominator == 0 {
-            None
-        } else {
-            Some((self.last_read_tokens? as f32 / denominator as f32).clamp(0.0, 1.0))
-        }
-    }
-
-    pub fn last_optimal_ratio(&self) -> Option<f32> {
-        let optimal = self.last_optimal_input_tokens?;
-        if optimal == 0 {
-            None
-        } else {
-            Some((self.last_read_tokens? as f32 / optimal as f32).clamp(0.0, 1.0))
-        }
-    }
 }
 
 impl UsageInfo {
@@ -1852,7 +1789,7 @@ fn render_compaction_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
 #[path = "info_widget_cache.rs"]
 mod cache_render;
 #[cfg(test)]
-use cache_render::render_kv_cache_summary_line;
+pub(super) use cache_render::render_kv_cache_summary_line;
 use cache_render::render_kv_cache_widget;
 
 /// Render ambient mode status widget

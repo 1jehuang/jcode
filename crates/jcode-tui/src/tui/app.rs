@@ -1,3 +1,5 @@
+mod token_accounting;
+use token_accounting::TokenAccounting;
 #[path = "app/cache_fingerprints.rs"]
 mod cache_fingerprints;
 mod cache_request;
@@ -791,30 +793,6 @@ struct CommandSuggestionsSignature {
     /// `Some(kind)` while an inline picker preview is open, which suppresses
     /// the textual suggestion list for the matching command.
     inline_preview_kind: Option<crate::tui::PickerKind>,
-}
-
-/// Session-wide token and cache accounting accumulated across all turns.
-///
-/// Grouped out of [`App`] to keep the cohesive token/cache totals together. The
-/// `total_*` fields accumulate over the whole session; the `last_*` fields hold
-/// the most recently reported per-turn values used for cache TTL display.
-#[derive(Clone, Debug, Default)]
-struct TokenAccounting {
-    // Total session token usage (accumulated across all turns)
-    total_input_tokens: u64,
-    total_output_tokens: u64,
-    // Total session KV cache usage for turns where the provider reported cache telemetry.
-    total_cache_reported_input_tokens: u64,
-    total_cache_prompt_tokens: u64,
-    total_cache_read_tokens: u64,
-    total_cache_creation_tokens: u64,
-    total_cache_optimal_input_tokens: u64,
-    last_cache_reported_input_tokens: Option<u64>,
-    last_cache_prompt_tokens: Option<u64>,
-    last_cache_read_tokens: Option<u64>,
-    last_cache_creation_tokens: Option<u64>,
-    last_cache_optimal_input_tokens: Option<u64>,
-    cache_next_optimal_input_tokens: Option<u64>,
 }
 
 /// KV cache baseline tracking and per-turn cache-miss attribution.
@@ -2079,37 +2057,6 @@ impl App {
         });
     }
 
-    /// Session id the next KV-cache baseline should be tagged with.
-    ///
-    /// A single `App` can stream several sessions over its lifetime (remote
-    /// session switches, local handoffs). The baseline must only be compared
-    /// against requests from the same session, so we capture the active id here.
-    fn kv_cache_session_id(&self) -> Option<String> {
-        if self.is_remote {
-            self.remote_session_id.clone()
-        } else {
-            Some(self.session.id.clone())
-        }
-    }
-
-    /// Return the stored baseline only when it belongs to the active session.
-    ///
-    /// Diffing a request against a baseline captured for a different (often
-    /// larger) session makes the new history look like a broken prefix and
-    /// emits a spurious `harness:_prefix_changed` miss. Treat a foreign baseline
-    /// as absent (warmup) instead.
-    fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
-        let baseline = self.kv_cache.kv_cache_baseline.clone()?;
-        let current = self.kv_cache_session_id();
-        if baseline.session_id == current
-            && baseline.cache_generation == self.kv_cache.cache_generation
-        {
-            Some(baseline)
-        } else {
-            None
-        }
-    }
-
     fn maybe_push_cold_cache_warning(
         &mut self,
         turn_number: usize,
@@ -2247,6 +2194,7 @@ impl App {
         }
 
         let optimal_input_tokens = self.token_accounting.cache_next_optimal_input_tokens;
+        self.token_accounting.current_request_has_optimal = false;
         // Context size includes the uncached tail, but the next cache-read
         // expectation must stop at the boundary actually read or written.
         let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
@@ -2305,11 +2253,16 @@ impl App {
             .token_accounting
             .total_cache_reported_input_tokens
             .saturating_add(self.streaming.streaming_input_tokens);
-        if let Some(optimal) = optimal_input_tokens {
+        if let Some(optimal) = optimal_input_tokens.filter(|optimal| *optimal > 0) {
             self.token_accounting.total_cache_optimal_input_tokens = self
                 .token_accounting
                 .total_cache_optimal_input_tokens
                 .saturating_add(optimal);
+            self.token_accounting.total_cache_optimal_read_tokens = self
+                .token_accounting
+                .total_cache_optimal_read_tokens
+                .saturating_add(self.streaming.streaming_cache_read_tokens.unwrap_or(0));
+            self.token_accounting.current_request_has_optimal = true;
         }
         self.token_accounting.total_cache_read_tokens = self
             .token_accounting
