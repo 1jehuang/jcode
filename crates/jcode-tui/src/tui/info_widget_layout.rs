@@ -64,6 +64,8 @@ pub struct Margins {
     /// placement engine translate a content-anchored widget by the scroll delta so
     /// it rides the transcript instead of holding a fixed screen row.
     pub scroll_top: usize,
+    /// Synthetic chrome rows above the usable transcript viewport.
+    pub content_start_row: usize,
     /// The transcript under the widgets is still changing this frame (a turn is
     /// streaming or a scroll animation is in flight). A resident widget whose
     /// slot got covered waits that churn out in place; once content has settled

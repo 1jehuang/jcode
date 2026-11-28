@@ -1085,7 +1085,7 @@ impl App {
     /// scroll position one content line at a time, captures the resulting widget
     /// placements, and runs the shared stability analyzer.
     pub(in crate::tui::app) fn run_widget_stability(&mut self, raw: Option<&str>) -> String {
-        use crate::tui::info_widget_stability::{PlacedRect, intern_kind};
+        use crate::tui::info_widget_stability::PlacedRect;
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1145,6 +1145,7 @@ impl App {
         // the analyzer can subtract the scroll-ride and report content-relative
         // travel (how much widgets move *relative to the text* they sit beside).
         let mut scroll_tops_abs: Vec<i64> = Vec::new();
+        let mut viewport_rows: Vec<std::ops::Range<u16>> = Vec::new();
         let mut frame_payloads: Vec<serde_json::Value> = Vec::new();
         self.auto_scroll_paused = true;
 
@@ -1157,25 +1158,9 @@ impl App {
                 break;
             }
             scroll_tops_abs.push(crate::tui::ui::last_resolved_chat_scroll() as i64);
-            let placed: Vec<PlacedRect> = match crate::tui::visual_debug::latest_frame() {
-                Some(frame) => frame
-                    .info_widgets
-                    .as_ref()
-                    .map(|info| {
-                        info.placements
-                            .iter()
-                            .map(|p| PlacedRect {
-                                kind: intern_kind(&p.kind),
-                                x: p.rect.x,
-                                y: p.rect.y,
-                                width: p.rect.width,
-                                height: p.rect.height,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
+            let (rows, placed) =
+                crate::tui::ui::debug_capture::capture_widget_stability_frame(height);
+            viewport_rows.push(rows);
             if include_frames {
                 frame_payloads.push(serde_json::json!({
                     "scroll_top": scroll_top,
@@ -1196,9 +1181,10 @@ impl App {
             scroll_top = (scroll_top + step).min(max_scroll);
         }
 
-        let report = crate::tui::info_widget_stability::analyze_frames_with_scroll(
+        let report = crate::tui::info_widget_stability::analyze_frames_with_viewport_rows(
             &frames,
             &scroll_tops_abs,
+            Some(&viewport_rows),
         );
 
         saved_state.restore(self);
