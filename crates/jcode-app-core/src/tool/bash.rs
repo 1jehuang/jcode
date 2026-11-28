@@ -671,13 +671,13 @@ fn configure_tool_scratch(command: &mut TokioCommand) {
 }
 
 #[cfg(unix)]
-struct ProcessGroupKillGuard {
+pub(super) struct ProcessGroupKillGuard {
     pid: Option<u32>,
 }
 
 #[cfg(unix)]
 impl ProcessGroupKillGuard {
-    fn new(pid: Option<u32>) -> Self {
+    pub(super) fn new(pid: Option<u32>) -> Self {
         Self { pid }
     }
 

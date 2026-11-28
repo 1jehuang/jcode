@@ -8,29 +8,15 @@ mod cloud_ephemeral;
 mod cloud_runtime;
 mod google;
 mod mcp;
+pub(crate) mod plugin;
 pub(crate) use cloud_ephemeral::CloudEphemeralCommand;
 pub(crate) use cloud_runtime::CloudRuntimeCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 pub(crate) use mcp::McpCommand;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum TranscriptModeArg {
-    Insert,
-    Append,
-    Replace,
-    Send,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum ProviderAuthArg {
-    /// Send the API key as Authorization: Bearer <key> (OpenAI-compatible default)
-    Bearer,
-    /// Send the API key in an API-key header (defaults to api-key)
-    ApiKey,
-    /// Do not send authentication, useful for localhost model servers
-    None,
-}
+mod values;
+pub(crate) use values::{ProviderAuthArg, TranscriptModeArg};
 
 #[derive(Parser, Debug)]
 #[command(name = "jcode")]
@@ -168,6 +154,9 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Install and manage Claude plugin catalogs and scoped installations.
+    Plugin(plugin::PluginArgs),
+
     /// List configured MCP servers or manage remote-server OAuth credentials
     Mcp {
         #[command(subcommand)]
