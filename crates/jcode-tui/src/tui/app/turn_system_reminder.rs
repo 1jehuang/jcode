@@ -44,10 +44,12 @@ pub(in crate::tui::app) fn late_mcp_announcement_summary(body: &str) -> Option<S
         }
     }
     let noun = if count == 1 { "tool" } else { "tools" };
+    let tokens = crate::util::format_approx_token_count(crate::util::estimate_tokens(body));
     let mut summary = format!("{count} new MCP {noun} available via mcp");
     if !servers.is_empty() {
         summary.push_str(&format!(" ({})", servers.join(", ")));
     }
+    summary.push_str(&format!(" · ~{tokens}"));
     Some(summary)
 }
 
@@ -62,9 +64,13 @@ mod late_mcp_summary_tests {
             - mcp__gh__prs: server: gh  tool: prs  (List PRs)\n  input_schema: {}\n\
             - mcp__fs__read: server: fs  tool: read  (Read)\n  input_schema: {}\n\
             ... and 4 more; use mcp action=search to find them.";
+        let expected = format!(
+            "7 new MCP tools available via mcp (gh, fs) · ~{}",
+            crate::util::format_approx_token_count(crate::util::estimate_tokens(body))
+        );
         assert_eq!(
             late_mcp_announcement_summary(body).as_deref(),
-            Some("7 new MCP tools available via mcp (gh, fs)")
+            Some(expected.as_str())
         );
         assert_eq!(late_mcp_announcement_summary("Something else"), None);
     }
