@@ -7,7 +7,7 @@ pub use jcode_tui_core::keybind::{
 };
 use jcode_tui_core::keybind::{
     format_binding, is_disabled, macos_option_char_to_ascii_key, parse_bindings_or_default,
-    parse_keybinding, parse_optional, parse_or_default,
+    parse_keybinding, parse_keybinding_list, parse_optional, parse_or_default,
 };
 
 // Re-export the per-platform keybinding registry + provenance + validation API
@@ -15,7 +15,7 @@ use jcode_tui_core::keybind::{
 #[allow(unused_imports)]
 pub use jcode_config_types::keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
-    KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding,
+    KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding, default_binding_or,
     keybinding_defaults_report, validate_keybinding_defaults,
 };
 
@@ -202,6 +202,15 @@ pub fn load_scroll_keys() -> ScrollKeys {
     let (bookmark, _) =
         parse_or_default(&cfg.keybindings.scroll_bookmark, default_bookmark, "Ctrl+G");
 
+    let raw = cfg.keybindings.scroll_to_bottom.trim();
+    let to_bottom = if raw.is_empty() || is_disabled(raw) {
+        Vec::new()
+    } else {
+        let defaults =
+            parse_keybinding_list(&default_binding_or("scroll_to_bottom", "ctrl+end, alt+q"));
+        parse_bindings_or_default(raw, defaults, "Ctrl+End").0
+    };
+
     ScrollKeys {
         up,
         down,
@@ -212,6 +221,7 @@ pub fn load_scroll_keys() -> ScrollKeys {
         prompt_up,
         prompt_down,
         bookmark,
+        to_bottom,
     }
 }
 

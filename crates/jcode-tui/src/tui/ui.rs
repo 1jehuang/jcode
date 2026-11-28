@@ -54,7 +54,7 @@ mod box_utils;
 #[path = "ui_changelog.rs"]
 mod changelog;
 #[path = "ui_debug_capture.rs"]
-mod debug_capture;
+pub(crate) mod debug_capture;
 #[path = "ui_diagram_pane.rs"]
 mod diagram_pane;
 #[path = "ui_file_diff.rs"]
@@ -2791,6 +2791,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let secondary = secondary_render_active();
     if !secondary {
         panel_image_preview::clear_regions();
+        viewport::set_jump_to_bottom_area(None);
     }
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
@@ -2804,12 +2805,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         clear_copy_viewport_snapshot();
     }
 
-    // Clear full frame to prevent stale cells from prior layouts.
-    // This is critical on macOS terminals where ratatui's diff-based updates
-    // can leave outdated content when layout dimensions change between frames
-    // (e.g., diagram pane toggling, streaming text clearing, tool calls finishing).
-    // Uses Color::Reset (terminal default bg) so text selection highlighting works
-    // natively in all terminal emulators.
+    // macOS diff updates can leave stale cells after layout changes; clear first.
+    // Reset background preserves native terminal selection.
     clear_area(frame, area);
 
     if let Some(hash) = app.panel_image_preview() {

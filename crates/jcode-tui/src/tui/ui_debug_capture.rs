@@ -1,3 +1,6 @@
+#[path = "ui_interactive_state.rs"]
+pub(crate) mod interactive_state;
+
 use super::info_widget;
 use super::visual_debug::{InfoWidgetSummary, WidgetPlacementCapture};
 use ratatui::prelude::Rect;

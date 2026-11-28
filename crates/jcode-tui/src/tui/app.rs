@@ -41,8 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -1896,6 +1895,7 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
+    jump_to_bottom_mouse_down: bool,
     /// Absolute paths edited by the agent's edit-style tool calls, derived
     /// from `display_messages` and cached by `display_messages_version`.
     agent_edited_cache: std::cell::RefCell<
@@ -2077,37 +2077,6 @@ impl App {
             baseline,
             cache_generation: self.kv_cache.cache_generation,
         });
-    }
-
-    /// Session id the next KV-cache baseline should be tagged with.
-    ///
-    /// A single `App` can stream several sessions over its lifetime (remote
-    /// session switches, local handoffs). The baseline must only be compared
-    /// against requests from the same session, so we capture the active id here.
-    fn kv_cache_session_id(&self) -> Option<String> {
-        if self.is_remote {
-            self.remote_session_id.clone()
-        } else {
-            Some(self.session.id.clone())
-        }
-    }
-
-    /// Return the stored baseline only when it belongs to the active session.
-    ///
-    /// Diffing a request against a baseline captured for a different (often
-    /// larger) session makes the new history look like a broken prefix and
-    /// emits a spurious `harness:_prefix_changed` miss. Treat a foreign baseline
-    /// as absent (warmup) instead.
-    fn kv_cache_baseline_for_current_session(&self) -> Option<KvCacheBaseline> {
-        let baseline = self.kv_cache.kv_cache_baseline.clone()?;
-        let current = self.kv_cache_session_id();
-        if baseline.session_id == current
-            && baseline.cache_generation == self.kv_cache.cache_generation
-        {
-            Some(baseline)
-        } else {
-            None
-        }
     }
 
     fn maybe_push_cold_cache_warning(

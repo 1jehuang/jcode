@@ -25,10 +25,6 @@ impl App {
         remote::begin_remote_send(self, remote, content, images, is_system, None, false, 0).await
     }
 
-    pub(super) fn schedule_pending_remote_retry(&mut self, reason: &str) -> bool {
-        self.schedule_pending_remote_retry_with_limit(reason, Self::AUTO_RETRY_MAX_ATTEMPTS)
-    }
-
     pub(super) fn schedule_pending_remote_network_wait(&mut self, reason: &str) -> bool {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
@@ -692,6 +688,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            jump_to_bottom_mouse_down: false,
             agent_edited_cache: std::cell::RefCell::new(None),
             changelog_scroll: None,
             help_scroll: None,
@@ -1217,6 +1214,7 @@ impl App {
             last_mouse_scroll: None,
             mouse_scroll_target: None,
             mouse_scroll_queue: 0,
+            jump_to_bottom_mouse_down: false,
             agent_edited_cache: std::cell::RefCell::new(None),
             changelog_scroll: None,
             help_scroll: None,
@@ -1464,28 +1462,5 @@ impl App {
             image_ms,
             load_start.elapsed().as_millis()
         ));
-    }
-
-    /// Create an App instance for remote mode (connecting to server)
-    pub fn new_for_remote(resume_session: Option<String>) -> Self {
-        Self::new_for_remote_with_options(resume_session, false)
-    }
-
-    /// Mark that a server was just spawned - run_remote will retry initial connection
-    /// instead of failing fatally, allowing the TUI to show while the server starts.
-    pub fn set_server_spawning(&mut self) {
-        self.server_spawning = true;
-        self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
-        self.remote_startup_phase_started = Some(Instant::now());
-    }
-
-    /// Stage a CLI-requested model spec (`--provider`/`--model`) to apply once
-    /// after connecting to an already-running shared server.
-    pub fn set_initial_model_spec(&mut self, model_spec: String) {
-        self.pending_initial_model_spec = Some(model_spec);
-    }
-
-    pub(in crate::tui::app) fn take_pending_initial_model_spec(&mut self) -> Option<String> {
-        self.pending_initial_model_spec.take()
     }
 }

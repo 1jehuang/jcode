@@ -1136,15 +1136,7 @@ impl crate::tui::TuiState for App {
     }
 
     fn hotkey_feedback(&self) -> Option<String> {
-        self.hotkey_feedback.as_ref().and_then(|(text, at)| {
-            // Long enough to read the chord and its action, short enough to
-            // stay out of the way during rapid keying.
-            if at.elapsed() <= Duration::from_secs(5) {
-                Some(text.clone())
-            } else {
-                None
-            }
-        })
+        self.hotkey_feedback_text()
     }
 
     fn active_experimental_feature_notice(&self) -> Option<String> {
@@ -1157,6 +1149,10 @@ impl crate::tui::TuiState for App {
 
     fn dictation_key_label(&self) -> Option<String> {
         self.dictation_key_label().map(|s| s.to_string())
+    }
+
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        self.scroll_keys.to_bottom_label()
     }
 
     fn animation_elapsed(&self) -> f32 {

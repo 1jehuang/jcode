@@ -1,8 +1,13 @@
 use super::*;
 #[path = "ui_viewport_todo_margins.rs"]
-mod todo_margins;
+pub(super) mod todo_margins;
 pub(crate) use todo_margins::compute_visible_margins;
 pub(crate) use todo_margins::pinned_todo_band_lines_for_payload;
+
+#[path = "ui_viewport/jump_to_bottom.rs"]
+mod jump_to_bottom;
+use jump_to_bottom::resolve_tail_follow_scroll;
+pub(crate) use jump_to_bottom::{jump_to_bottom_area, set_jump_to_bottom_area};
 
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
@@ -130,41 +135,6 @@ const TAIL_CATCHUP_MAX_STEP: usize = 3;
 /// in a single frame - the "big pop". Instead, advance from the previous
 /// frame's resolved position by a bounded step so the new content slides into
 /// view. Disabled on tiers without decorative animations.
-fn resolve_tail_follow_scroll(max_scroll: usize, viewport_height: usize) -> usize {
-    if super::take_tail_follow_snap_request() {
-        super::set_tail_catchup_active(false);
-        return max_scroll;
-    }
-    if !crate::perf::tui_policy().enable_decorative_animations {
-        super::set_tail_catchup_active(false);
-        return max_scroll;
-    }
-    let prev = super::last_resolved_chat_scroll();
-    // Only animate forward catch-up from an established position. Backward
-    // motion (content shrank) and first frames snap directly.
-    if prev == 0 || max_scroll <= prev {
-        super::set_tail_catchup_active(false);
-        return max_scroll;
-    }
-    let jump = max_scroll - prev;
-    // Never let the live tail drift more than a viewport behind (e.g. a huge
-    // paste); cap the lag so the catch-up is at most one screen.
-    let max_lag = viewport_height.max(TAIL_CATCHUP_MIN_JUMP);
-    if jump <= TAIL_CATCHUP_MIN_JUMP {
-        super::set_tail_catchup_active(false);
-        return max_scroll;
-    }
-    let floor = max_scroll.saturating_sub(max_lag);
-    let next = prev.max(floor).saturating_add(TAIL_CATCHUP_MAX_STEP);
-    if next >= max_scroll {
-        super::set_tail_catchup_active(false);
-        max_scroll
-    } else {
-        super::set_tail_catchup_active(true);
-        next
-    }
-}
-
 use super::selection_highlight::highlight_line_selection;
 
 #[path = "ui_viewport_text.rs"]
@@ -1245,7 +1215,16 @@ pub(super) fn draw_messages(
         }
     }
 
-    if !show_native_scrollbar && app.auto_scroll_paused() && scroll < max_scroll {
+    let jump_pill = jump_to_bottom::draw(
+        frame,
+        app,
+        text_render_area,
+        top_band_lines,
+        scroll,
+        max_scroll,
+        &mut margins,
+    );
+    if !jump_pill && !show_native_scrollbar && app.auto_scroll_paused() && scroll < max_scroll {
         let indicator = format!("↓{}", max_scroll - scroll);
         let indicator_area = Rect {
             x: render_area.x + render_area.width.saturating_sub(indicator.len() as u16 + 2),
