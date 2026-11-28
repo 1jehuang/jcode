@@ -45,6 +45,7 @@ async fn callback_paths_honor_custom_and_disabled_budgets() {
             tool_call_id: "configured-probe".into(),
             working_dir: None,
             stdin_request_tx: None,
+            decision_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: ToolExecutionMode::Direct,
         };
@@ -108,6 +109,7 @@ async fn ask_user_waits_past_budget_and_returns_its_answer() {
         tool_call_id: "ask-user-probe".into(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };
@@ -177,6 +179,7 @@ async fn nonstreaming_background_wait_returns_original_result_after_budget() {
         tool_call_id: "wait-probe".into(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: ToolExecutionMode::Direct,
     };

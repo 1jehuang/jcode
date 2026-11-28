@@ -88,11 +88,7 @@ pub(crate) fn record_visible_age_deadline(next_update_at_ms: Option<u64>) {
 /// Whether a visible todo completion report's relative age has crossed its next
 /// display boundary and needs a redraw.
 pub(crate) fn age_update_due(now_ms: u64) -> bool {
-    with_state(|state| {
-        state
-            .next_age_update_at_ms
-            .is_some_and(|due| now_ms >= due)
-    })
+    with_state(|state| state.next_age_update_at_ms.is_some_and(|due| now_ms >= due))
 }
 
 /// Time remaining until the next visible todo completion age boundary, if any.

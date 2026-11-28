@@ -122,6 +122,7 @@ fn context(session: &str) -> crate::tool::ToolContext {
         tool_call_id: "proxy-test".into(),
         working_dir: None,
         stdin_request_tx: None,
+        decision_request_tx: None,
         graceful_shutdown_signal: None,
         execution_mode: jcode_tool_core::ToolExecutionMode::Direct,
     }
